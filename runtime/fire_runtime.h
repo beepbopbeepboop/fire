@@ -722,6 +722,13 @@ char *mojo_list_repr_elem(MojoList *l, int64_t v);
 #define MOJO_KIND_STR     'p'
 #define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
 #define MOJO_KIND_NONE    'n'
+#define MOJO_KIND_OBJ     'o'   /* an OBJECT word: a local that may hold None
+                                 * or any handle (`default = None`, later maybe
+                                 * a node). The value model spells that None
+                                 * as the NULL word, so the NULL word renders
+                                 * as None; any other word is read exactly as
+                                 * an 'i' slot is (the int accessor, the
+                                 * caller's own dispatch for a handle). */
 #define MOJO_KIND_BOOL    'b'   /* a Python bool, 0/1 — the SAME
                                  * int64_t as MOJO_KIND_INT, so only the byte
                                  * separates them. Neither `TypeLattice.

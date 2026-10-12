@@ -971,7 +971,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
      * not just 'd' — because for each of them the raw word is ambiguous: a
      * double has no int64_t spelling, and a `char *` slot's word is a bare
      * pointer a consumer cannot tell from an int. */
-    if (_k == 'i')
+    if (_k == 'i' || _k == MOJO_KIND_OBJ)
         return l->data[i];
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
@@ -6559,7 +6559,7 @@ static int _kind_to_eq(char k)
     if (k == 'p') return MOJO_EQ_STR;
     if (k == 's') return MOJO_EQ_BYTES;
     if (k == 'l') return MOJO_EQ_GENERIC;
-    return MOJO_EQ_INT;                    /* 'i' and 'n' (None) */
+    return MOJO_EQ_INT;                    /* 'i', 'n' (None) and 'o' */
 }
 
 /* The Python type name an MOJO_EQ_* code stands for, for the TypeError text
@@ -7827,6 +7827,11 @@ char *mojo_repr_slot_kind(char kind, int64_t v)
     switch (kind) {
     case MOJO_KIND_NONE:
         return strdup("None");
+    case MOJO_KIND_OBJ:
+        /* NULL is this word's None; anything else is declined exactly as a
+         * non-zero MOJO_KIND_INT word is, for the same reason (it may be a
+         * handle only the caller's dispatch can render). */
+        return v ? NULL : strdup("None");
     case MOJO_KIND_BOOL:
         return strdup(v ? "True" : "False");
     case MOJO_KIND_DOUBLE: {

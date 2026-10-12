@@ -30,6 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
     _signed_int64, _signed_int64_c_literal, _as_intlit_node,
+    _as_ident_node, _as_vardecl_node,
 )
 import regex_compile
 import mlir
@@ -5598,10 +5599,47 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 # same one the sorters and the per-slot readers use.
 
 
+def _is_none_literal(e) -> bool:
+    return isinstance(e, gimple_ctypes.NoneLiteral) or (
+        isinstance(e, gimple_ctypes.IdentExpr) and e.name == 'None')
+
+
+def none_bound_locals(gen) -> set:
+    """The locals some binding in the function being lowered sets to the
+    literal `None` (`default = None`, then maybe `default = parse()`).
+
+    Such a local is an object word in which `None` is the NULL word -- the
+    value model has no other spelling for it -- so a container slot built from
+    it has to SAY so (`_list_literal_slot_kind`'s 'o'), or the slot reads back
+    as the integer 0. Cached per function (`_reset_func` clears it)."""
+    cached = gen._none_bound_names
+    if cached is not None:
+        return cached
+    out: set = set()
+    for n in gimple_exprtypes._walk_ast(gen._cur_func_body):
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            if (isinstance(n.target, gimple_ctypes.IdentExpr)
+                    and _is_none_literal(n.value)):
+                out.add(_as_str(_as_ident_node(n.target).name))
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            _vd = _as_vardecl_node(n)
+            if _vd.value is not None and _is_none_literal(_vd.value):
+                out.add(_as_str(_vd.name))
+    gen._none_bound_names = out
+    return out
+
+
 def _list_literal_slot_kind(gen, el, et) -> str:
-    if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
-            isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
+    if _is_none_literal(el):
         return 'n'
+    # An object-word local that may hold None (`params.append((pname,
+    # default))` in the parser, `default` None or a node): MOJO_KIND_OBJ, whose
+    # NULL word renders as None. As 'i' it rendered as `0`, so the self-hosted
+    # compiler's `.ast` dump printed `('x', 0)` for every defaultless lambda
+    # parameter where CPython prints `('x', None)`.
+    if (et == 'int64_t' and isinstance(el, gimple_ctypes.IdentExpr)
+            and _as_str(_as_ident_node(el).name) in none_bound_locals(gen)):
+        return 'o'
     return gimple_ctypes.TypeLattice.slot_kind_byte(et)
 
 

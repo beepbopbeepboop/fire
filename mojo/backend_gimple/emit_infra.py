@@ -693,6 +693,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # rather than once per local. Reset per function for the same reason as
     # every map above: local names recycle.
     gen._mixed_container_locals = None
+    # Lazily filled by `emit_exprs.none_bound_locals`: the locals some binding
+    # in this function sets to the literal `None`. Per function, because local
+    # names recycle.
+    gen._none_bound_names = None
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -830,6 +834,7 @@ class FuncState:
         self.fs_builtin_method_values: dict = {}
         self.fs_bm_tainted_locals: set = set()
         self.fs_mixed_container_locals: object = None
+        self.fs_none_bound_names: object = None
         self.fs_dict_val_types: dict = {}
         self.fs_dict_nested_val_types: dict = {}
         self.fs_struct_layout: dict = {}
@@ -916,6 +921,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_builtin_method_values = gen._builtin_method_values
     st.fs_bm_tainted_locals = gen._bm_tainted_locals
     st.fs_mixed_container_locals = gen._mixed_container_locals
+    st.fs_none_bound_names = gen._none_bound_names
     st.fs_dict_val_types = gen._dict_val_types
     st.fs_dict_nested_val_types = gen._dict_nested_val_types
     st.fs_struct_layout = gen._struct_layout
@@ -1010,6 +1016,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._builtin_method_values = st.fs_builtin_method_values
     gen._bm_tainted_locals = st.fs_bm_tainted_locals
     gen._mixed_container_locals = st.fs_mixed_container_locals
+    gen._none_bound_names = st.fs_none_bound_names
     gen._dict_val_types = st.fs_dict_val_types
     gen._dict_nested_val_types = st.fs_dict_nested_val_types
     gen._struct_layout = st.fs_struct_layout
