@@ -71,3 +71,33 @@ that the unifier can rewrite with without unfolding. Do NOT revert the model
 change: the shift is a real correctness fix and its own tests (Peephole's
 `sh = 0` side conditions, `test_formal_call_proof_gen.py`'s trap rows) depend
 on it.
+
+## Status, 2026-10-12 (`work/formal289-docs`): the ONE non-Lean red is
+## generator-side, so the Lean term above cannot be its cause
+
+Measured on this tree with no `lib/ProofLib.olean`, so four of the five reds
+SKIP rather than run: `TestExternCallTheRunDoesNotReach.test_the_corpus_example_
+that_was_false_is_proved`, `TestSameImageCallLean.test_the_followed_call_proves_
+with_no_admission` and the `TestTheZeroDivisorGuardAgainstLean` rows are all
+gated on `find_lean` + the built library, and
+`TestANarrowTypedParameterGetsItsRange.test_lean_accepts_the_three_examples`
+with them. **The one red that runs is `TestNestedConditionFactSharing.test_the_
+fact_count_grows_with_the_paths_and_not_with_the_branches`**, 9 -> 21 facts,
+ratio 2.33, bound 2.2 — and it is pre-existing (re-measured with this session's
+changes reverted: identical failure).
+
+**That fact count cannot be the `arm64_ext_imm12` term's doing, and this is the
+correction §"most likely cause" needs.** The count is `proof.count("have
+hprior_")` over text `formal/arm64_proof_gen.py` EMITS, and the walk that emits
+it (the `_prior_blocks`/`_vars`/`hprior_memo` block, ~line 8240) reads the
+source conditions, `_var_regs` and `flow_blocks` — none of which reads
+`_step_rhs`, the generated step lemma, or `arm64_ext_imm12`. The growth is the
+per-path `s_{pb}` rebinding the walk's own comment already names (`hsid_{pb}` is
+emitted 1/2/4/8/16 times for blocks 0/2/4/6/8 of a three-condition program), so
+the fix this red wants is a walk-level sharing/rebinding change and NOT the
+`@[simp]` lemma. Re-check this measurement first: if the `@[simp]` lemma is
+added for the Lean reds, this test's ratio will not move.
+
+**The Lean reds are unverified here** — no `lib/ProofLib.olean` on this tree,
+so the `work_step_add_imm64` experiment `formal/lean.py::run_lean` would run is
+the next worker's single Lean run, not this session's.
