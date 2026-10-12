@@ -6388,6 +6388,57 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A trailing `*rest` for-target.  Measured before this existed, on BOTH
+    # backends, and this is why the row is on the shared group rather than the
+    # host's: the two emitters broke it in two different ways.  arm64 had a rest
+    # arm but read `count - 6` (`sub x3, x3, #6` — the IMMEDIATE six instead of
+    # the n_fixed register) and branched on `i >= rest_count` with a `cbz`, so a
+    # non-empty tail ran past the blob into the OOB arm; x86-64 had no rest arm
+    # at all and refused the spelling `'*rest' has no home` because the target's
+    # star was stripped before the unpacker saw it.  The value 122 is
+    # `a*100 + rest[0]*10 + len(rest)` = 1*100 + 2*10 + 2, so a backend that
+    # bound the wrong tail — or the whole element as its own first element —
+    # answers a different number rather than merely failing to build.
+    ("both_arch_a_starred_for_target_binds_the_fixed_names_and_the_tail",
+     "def main():\n"
+     "    for a, *rest in [(1, 2, 3)]:\n"
+     "        printf(\"%d\", a * 100 + rest[0] * 10 + len(rest))\n"
+     "    return 0\n", 0, "122"),
+    # The same construct one group deeper (the tail of a nested tuple) and with
+    # the minimum arity, where the tail is EMPTY.  122 is again
+    # `a*100 + b*10 + len(rest)` and the length is what says the rest blob is
+    # the two-element tail `(3, 4)` and not the whole element.
+    ("both_arch_a_starred_for_target_nests_and_allows_an_empty_tail",
+     "def main():\n"
+     "    for a, (b, *rest) in [(1, (2, 3, 4))]:\n"
+     "        printf(\"%d\", a * 100 + b * 10 + len(rest))\n"
+     "    for x, *none in [(9,)]:\n"
+     "        printf(\" %d\", x * 10 + len(none))\n"
+     "    return 0\n", 0, "122 90"),
+    # Every element of a two-element walk, so the rest blob is rebuilt on the
+    # second iteration: `(1,2,3)` gives `1*10 + 2`, `(4,5,6)` gives `4*10 + 2`,
+    # total 54.  A tail blob materialised once and left holding the first
+    # element's count would answer 32.
+    ("both_arch_a_starred_for_target_rebuilds_the_tail_every_iteration",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2, 3), (4, 5, 6)]:\n"
+     "        s = s + a * 10 + len(rest)\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "54"),
+    # A TUPLE target with no star, which the star fix's kind narrowing also
+    # repaired: before it, every leaf of a tuple for-target was classified as
+    # the element's CONTAINER kind, so `printf("%d", a)` refused with the
+    # `%d`-reads-a-CONTAINER sentence about an integer.  Nested on purpose — the
+    # group's leaves are elements one level further down.
+    ("both_arch_a_tuple_for_target_binds_each_leaf_one_level_down",
+     "def main():\n"
+     "    for a, b in [(1, 2)]:\n"
+     "        printf(\"%d %d\", a, b)\n"
+     "    for c, (d, e) in [(3, (4, 5))]:\n"
+     "        printf(\" %d %d %d\", c, d, e)\n"
+     "    return 0\n", 0, "1 2 3 4 5"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.

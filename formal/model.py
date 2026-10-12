@@ -23976,6 +23976,50 @@ class ValueKinds:
             return INT_KIND
         return kind
 
+    def _bind_for_target(self, target, kind, own=None) -> None:
+        """Bind a `for` target's names, one level DOWN from the element.
+
+        `kind`/`own` are the kind and own shape of ONE ELEMENT of the iterable —
+        what `_iterable_kind`/`_iterable_own_shape` answer — and that element is
+        what a SMALL target (`for x in …`) binds directly.  A TUPLE target
+        UNPACKS that element, so each of its fixed names holds one element of
+        it: `subscript_element_kind(kind)` and not `kind` itself, which is the
+        narrowing the assignment path already applies
+        (`_unpacked_element_kind`) and this path was missing.  Measured, both
+        architectures, before this method: `for a, b in [(1, 2)]: printf("%d",
+        a)` refused with the `%d`-reads-a-CONTAINER sentence, because `a` was
+        classified as `list:int` — the kind of the whole TUPLE the loop binds —
+        where the source plainly says it holds an integer.  A trailing `*rest`
+        is the one target that IS a container: it holds the tail as a blob, so
+        it keeps `kind`, and its names are bound with the same rule the small
+        target uses.
+
+        A NESTED group recurses with the SAME `kind`, for the reason above it:
+        a group is an element of the element, and the only kind the model has
+        for it is the one the whole element carries (a homogeneous nesting such
+        as `for a, (b, c) in [(1, (2, 3))]` states it either way).  That is the
+        conservative direction — a group whose element kind the model cannot
+        state keeps the container claim the flat reader gave every leaf, so no
+        program that read a group's tail as a blob stops doing so."""
+        tree = for_target_tree(target) if isinstance(target, str) else target
+        if isinstance(tree, str):
+            name = tree[1:].strip() if tree.startswith("*") else tree
+            self._bind(name, kind, own=own)
+            return
+        if isinstance(tree, list):
+            for child in tree:
+                if isinstance(child, list):
+                    self._bind_for_target(child, kind, own=own)
+                    continue
+                if isinstance(child, str) and child.startswith("*"):
+                    self._bind(child[1:].strip(), kind, own=own)
+                    continue
+                self._bind(child,
+                           subscript_element_kind(kind) if kind else None,
+                           own=subscript_element_kind(own) if own else None)
+            return
+        self._bind_target(tree, kind, own=own)
+
     def _bind_target(self, target, kind, own=None) -> None:
         """Bind whatever names an assignment target introduces."""
         if isinstance(target, F.IdentExpr):
@@ -24334,8 +24378,8 @@ class ValueKinds:
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.ForStmt):
-                self._bind_target(s.target, self._iterable_kind(s.iterable),
-                                  own=self._iterable_own_shape(s.iterable))
+                self._bind_for_target(s.target, self._iterable_kind(s.iterable),
+                                      own=self._iterable_own_shape(s.iterable))
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.WithStmt):
