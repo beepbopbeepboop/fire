@@ -189,8 +189,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    # `… and 0 or 1` is ALWAYS 1 (`(X and 0) or 1`), so this file used to exit
+    # non-zero whether or not the census was clean — the exit status could not
+    # be read as a verdict at all, and a caller could not tell a red from a
+    # green.  The census IS the thing this file checks, so a clean run has to
+    # exit 0.
+    return 0 if unittest.main(
+        argv=[__file__, "-v"] if args.verbose else [__file__],
+        exit=False).result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":

@@ -1,12 +1,57 @@
 # FORMAL_x86_64_instruction_coverage_backlog: the x86-64 half of the ISA census, form by form
 
+**Status 2026-10-12 (`work/formal271-docs`): the COVERAGE BACKLOG IS CLOSED —
+`tools/formal_isa_census.BACKLOG` has no x86-64 row, one stale test is green
+again, and what is left in this file is the two INSTRUMENT defects below and
+nothing about the backend.**
+
+Three rows moved, and the census is the measurement (not this prose):
+
+| row | census now | what closed it |
+|---|---|---|
+| `encode_and_r8_r8`, `encode_or_r8_r8` | `yes yes yes` | the pool draws both (`_byte_rex_required` was this tree's own encoder bug, not a hardware anomaly). **They were still `BACKLOG` entries, so `test_formal_isa_census.py::test_every_backlog_entry_still_describes_a_gap` was RED on both** — a fixed gap that kept its exemption. Removed. |
+| `encode_call_r64` | `yes NO yes` | moved to `HARNESS_LIMITS`: the target is a REGISTER's contents, so no harness case can give it a target inside the one `MAP_FIXED` region — a permanent property of the harness, exactly as arm64's `encode_blr_xn` is. |
+| the nine SSE2 shape-1 rows | `yes yes yes` | already covered on 2026-10-06 (`work/x86-coverage-endtoend`); they had been out of `BACKLOG` since then. |
+
+The census line now reads
+
+    -- 0 form(s) with no LEAN/FUZZ/AS and no exemption; 6 exempt (6 harness, 0 backlog)
+
+so the x86-64 backend, like arm64, has **no `BACKLOG` row at all**. A second,
+independent bug was found while making that green: **`test_formal_isa_census.py`
+exited non-zero whether or not the census was clean** — its `main` ended
+`wasSuccessful() and 0 or 1`, which is `(X and 0) or 1`, i.e. always 1 — so the
+exit status could not be read as a verdict. It is now `0 if … else 1`, and a
+clean run exits 0.
+
+**What is left in this file is two INSTRUMENT defects, neither of them a gap in
+what the backend emits**, and both are recorded here because there is nowhere
+else they are written down:
+
+1. **The EX column matches a form against an image by DISASSEMBLY MNEMONIC**, so
+   two encodings of one instruction are indistinguishable — `encode_imul_r64_r64_imm`
+   emits `6B /r ib` and an image that contains only `0F AF` (`imulq %rax, %r11`)
+   is counted as containing it. The fix is to key the column on
+   `(mnemonic, operand shape)` and report `ambiguous` where that does not
+   separate two encodings; it needs the `--examples` cache re-measured for both
+   architectures (104 compiles, ~5 s). NOT done here.
+2. **A fuzz `WRONG` caused by an `and` or `or` whose OPERAND is itself an
+   anomalous `setcc` destination** is not explained by the flag-exemption path,
+   so it reports `WRONG` where the model is not at fault. NOT fixed here.
+
+**Everything below is the earlier survey and is left as written.** Its
+"SHAPE 1 IS DONE" and "SHAPE 2 is three of four done" sections are the work that
+closed the rows; the "what is left" paragraphs in them are superseded by this
+Status.
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census, which prints the matrix for BOTH backends. arm64 is closed: every one
 of its 77 emitted forms has a model arm, a fuzz case and an `as` differential,
 with the exceptions named in `formal_isa_census.HARNESS_LIMITS` (eight, each a
 property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
-file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
-have no fuzz case, no model sample, or no decoder arm.
+file is the x86-64 answer, and at the time it was written it was **not** closed:
+18 of the 85 emitted forms had no fuzz case, no model sample, or no decoder arm.
+**That is closed now — see the Status above.**
 
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
