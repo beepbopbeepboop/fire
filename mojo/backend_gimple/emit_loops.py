@@ -2950,6 +2950,62 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     # types it `ClosureInfo *` exactly as it already does for
     # `_lower_outer_closure_call` / `_emit_closure_recursive`.
     """Generate a top-level C function for a nested (closure) function."""
+    # The per-FUNCTION ownership state (emit_infra's Phase-3 candidates and
+    # the block-scope tables) belongs to whatever function was being lowered
+    # when this closure is lifted: the PARENT for a lambda (lifted in the
+    # middle of it, `_lower_LambdaExpr`), or the previously lowered, unrelated
+    # function for a nested `def` (lifted ahead of its owner). Neither is
+    # this body's. Saved here, replaced with a clean slate for the closure,
+    # and restored on the way out, so:
+    #   * a `return` in the closure frees nothing of another function's
+    #     (`_emit_owned_local_frees` would otherwise emit `free (_env_x)` for
+    #     a parent's nested-def env, a name the closure does not even have);
+    #   * the closure's OWN registrations -- the env of a `def` nested inside
+    #     it (`register_nested_env_free`) -- are freed at its fallthrough exit
+    #     too, not only at an explicit `return`. Before, a void closure that
+    #     fell off its end pushed a cleanup thunk per call and never cancelled
+    #     it: the self-hosted compiler's own `scan_nodes` (infra_infer) filled
+    #     the 8192-entry cleanup stack while compiling itself and then leaked
+    #     every env after it (bootstrap-stage2-transitive);
+    #   * the parent's state survives the lift intact.
+    _sv_cands = gen._owned_free_candidates
+    _sv_pushed = gen._owned_free_pushed
+    _sv_stack = gen._owned_stack_allocated
+    _sv_intkeyed = gen._int_keyed_dicts
+    _sv_lit = gen._literal_storage
+    _sv_lit_ct = gen._literal_storage_ctype
+    _sv_scoped = gen._scoped_free_candidates
+    _sv_armed = gen._scope_armed
+    _sv_live = gen._scope_live
+    _sv_live_depth = gen._scope_live_depth
+    _sv_live_fn = gen._scope_live_fn
+    _sv_strelem_names = gen._owned_str_elem_names
+    _sv_strelem_vals = gen._owned_str_elem_vals
+    _sv_closure_names = gen._owned_closure_names
+    _sv_env_names = gen._owned_env_names
+    gen._reset_no_candidates()
+    _code = _gen_lifted_closure_body(gen, ci, outer_name)
+    gen._owned_free_candidates = _sv_cands
+    gen._owned_free_pushed = _sv_pushed
+    gen._owned_stack_allocated = _sv_stack
+    gen._int_keyed_dicts = _sv_intkeyed
+    gen._literal_storage = _sv_lit
+    gen._literal_storage_ctype = _sv_lit_ct
+    gen._scoped_free_candidates = _sv_scoped
+    gen._scope_armed = _sv_armed
+    gen._scope_live = _sv_live
+    gen._scope_live_depth = _sv_live_depth
+    gen._scope_live_fn = _sv_live_fn
+    gen._owned_str_elem_names = _sv_strelem_names
+    gen._owned_str_elem_vals = _sv_strelem_vals
+    gen._owned_closure_names = _sv_closure_names
+    gen._owned_env_names = _sv_env_names
+    return _code
+
+
+def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
+    """`_gen_lifted_closure` without the ownership-state save/restore around
+    it (see there). `ci` unannotated for the same reason as there."""
     gen._reset_func(ci.inner_def.body, ci.inner_def.params)
     # Set module context for global field access -- same fix, same reason
     # as _gen_struct_method's identical line just above: a lifted closure
@@ -3187,6 +3243,9 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
             gen._gimple_mut_ptr[_mn] = _ptr_var
     for stmt in node.body:
         gen.gen_stmt(stmt)
+    # The fallthrough half of the ownership wiring every other function body
+    # gets (gen_func / _gen_struct_method): see `_gen_lifted_closure`.
+    gen._emit_fallthrough_frees(node)
 
     # See _reset_func's own comment on `_func_used_setjmp` /
     # _gen_struct_method's identical handling just above -- a lifted
