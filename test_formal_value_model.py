@@ -794,6 +794,38 @@ MODEL_RULES = [
      "def g(n):\n"
      "    if n:\n"
      "        return 1\n", "g", True),
+    # A FUNCTION THAT RETURNS A RETURN-LESS CALL'S RESULT PRODUCES NOTHING
+    # EITHER, and this is the transitive half of the rule. `h` has a `return`
+    # with an expression, so the source-only reader answers True; the expression
+    # is `g(…)` and `g` produces no value, so the `return` hands back the very
+    # word this path cannot carry. CPython's `h(1, 2)` is `None`, so
+    # `print(h(1, 2))` has to be the same refusal `print(g(1, 2))` is, and the
+    # resolver is what carries it — see `function_returns_a_value`'s
+    # `callee_returns_value`.
+    ("a_functions_only_return_a_return_less_call_yields_nothing",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def h(a, b):\n"
+     "    return g(a, b)\n", "h", False),
+    # …and the direction that keeps the transitive half from becoming a licence:
+    # the same shape over a callee that DOES return a value is a function whose
+    # result is a value, so a call to it stays printable.
+    ("a_functions_return_of_a_value_returning_call_still_yields",
+     "def g(a, b):\n"
+     "    return a + b\n"
+     "\n"
+     "def h(a, b):\n"
+     "    return g(a, b)\n", "h", True),
+    # A cycle answers True, which is the safe direction: nothing here can decide
+    # what two mutually-recursive functions produce, and a wrong "no value" would
+    # refuse a program CPython runs.
+    ("a_cycle_of_returns_still_reads_as_returning",
+     "def g(n):\n"
+     "    return h(n)\n"
+     "\n"
+     "def h(n):\n"
+     "    return g(n)\n", "g", True),
 ]
 
 
@@ -2160,6 +2192,25 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "print() is asked to render the value of g(…)"),
+    # …THROUGH AN INTERMEDIATE FUNCTION, which is the third spelling of the same
+    # position and the one the direct reader cannot see. `h` HAS a `return` with
+    # an expression, so a rule that only looked at `h`'s own body called it a
+    # function with a value; the expression is `g(…)`, and `g` produces none, so
+    # CPython's `h(1, 2)` is `None` where this path printed `0` (measured on BOTH
+    # architectures before the fix). `model.function_returns_a_value` carries the
+    # answer through the `return` when the emitter supplies a resolver, and the
+    # message names `h` — the callee the reader has to change.
+    ("a_printed_return_of_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def h(a, b):\n"
+     "    return g(a, b)\n"
+     "\n"
+     "def main():\n"
+     "    print(h(1, 2))\n"
+     "    return 0\n",
+     "print() is asked to render the value of h(…)"),
     # THE SAME POSITION AT THE OTHER SPELLING OF "RENDER THIS WORD", and it was
     # unguarded: `print` builds its format from its operands and asks
     # `_print_call` about each, while a `printf` the SOURCE wrote was only
@@ -2448,9 +2499,16 @@ def run_model_rule(name, source, fn_name, want, verbose):
 
     The reader is what both emitters' `_callee_returns_value` and the return-less
     census call, so a row here is a row about the DECISION rather than about an
-    image — which is the only way three of these six rules can be pinned at all.
+    image — which is the only way several of these rules can be pinned at all.
     The function is looked up BY NAME rather than taken as the first definition,
     so a source may carry a helper above the one under test.
+
+    **The resolver the emitters pass is built here too**, by the SAME
+    `model.function_returns_a_value_resolver` they call, over the module's own
+    definitions rather than over `self._functions`: the transitive half of the
+    rule (`def h(): return g()` with a return-less `g`) is a fact about the
+    DEFINITION SET, and a row that asked without it could not pin the rule the
+    emitters actually run.
     """
     import formal.model as M
     from formal.build import parse_module
@@ -2460,7 +2518,7 @@ def run_model_rule(name, source, fn_name, want, verbose):
     fn = fns.get(fn_name)
     if fn is None:
         return False, f"no `def {fn_name}` in the case's own source"
-    got = M.function_returns_a_value(fn)
+    got = M.function_returns_a_value(fn, M.function_returns_a_value_resolver(fns))
     if got is not want:
         return False, (f"function_returns_a_value({fn_name}) answered {got} "
                        f"where the row says {want}")

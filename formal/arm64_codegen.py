@@ -4883,7 +4883,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         return M.signature_return_type(
             entry.get("signature") or "").strip() == "void"
 
-    def _callee_returns_value(self, name):
+    def _callee_returns_value(self, name, _seen=frozenset()):
         """Whether a call to the local function `name` produces a value at all.
 
         The seventh question `ValueKinds` asks about a callee, and the only one
@@ -4895,16 +4895,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         same question and two readings of "does this function return" is how the
         two machines come to disagree about a construct.
 
-        NO STACK, unlike `_callee_kind` above, and the difference is the point:
-        this walks one body and stops at the first value-returning `return`, so
-        it cannot recurse into the callee — a cycle is not a thing here. The
-        default for a name that is not a function of this unit is True, which is
-        the safe direction: it leaves the caller with the answer it had, so a
-        linked module's export (whose sources are not here to be read) changes
-        nothing.
+        **The answer is carried through `return f(…)`, and the recursion lives in
+        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
+        return-less `g` is a function whose result is `None` in CPython too, so
+        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
+        deeper, and the shape `v = g(); print(v)` already covers one binding up.
+        The resolver is built over `self._functions` (the emitter's own table)
+        and the cycle stop and the not-of-this-unit default are the shared
+        resolver's, so the two backends cannot answer this one differently.
         """
-        fn = self._functions.get(name)
-        return True if fn is None else M.function_returns_a_value(fn)
+        return M.function_returns_a_value_resolver(self._functions)(name)
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
