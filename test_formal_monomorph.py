@@ -2205,6 +2205,51 @@ def test_a_function_templates_body_is_still_compiled(_tmpdir):
           "one reader of that question is gone")
 
 
+def test_a_struct_template_that_reads_no_parameter_is_kept(_tmpdir):
+    """The filter drops a struct template that reads a parameter and KEEPS one
+    that reads none of them.
+
+    Keeping the parameter-independent one is the fix for an
+    inferred-type-argument construction (`Marker(b.a)`, no brackets): such a
+    template has the layout and every method of an ordinary struct, so it has
+    to reach `structs_by_name` for the construction to classify at all. Before
+    this, every struct template was dropped, so the construction was silently
+    not a construction and the field access through its binding was refused
+    ("a Bag receiver is stored in a container", about an escape the program does
+    not have).
+
+    The two halves that PIN the criterion against over-reach are the third and
+    fourth declarations: `Counter` reads no parameter but has a class-body
+    `comptime` member, and `Pair` reads a VARIADIC parameter through
+    `Self.values`. Both must still be dropped, and for the same reason in
+    different clothing -- the instantiation machinery owns them, so a kept base
+    name loses the instantiation each needs (`_struct_template_is_concrete`'s
+    docstring has both measured failures). The assertion is over the NAME SET,
+    through the entry point both paths use, so a change to the criterion shows
+    up here rather than only in a build.
+    """
+    import fire_compiler as FC
+    from formal import monomorph as MM
+    src = ("struct Marker[T: AnyType]:\n"
+           "    var v: Int\n"
+           "struct Wrapper[T: AnyType]:\n"
+           "    var v: T\n"
+           "struct Counter[T: AnyType, keys: List[T]]:\n"
+           "    comptime length = 3\n"
+           "struct Pair[T: AnyType, *values: T]:\n"
+           "    comptime length = len(Self.values)\n"
+           "def plain(x: Int) -> Int:\n"
+           "    return x\n")
+    stmts = FC.Parser(FC.py_tokenize(src)).parse_module()
+    kept = {getattr(s, "name", None)
+            for s in MM.without_template_bodies(stmts, src)}
+    check(kept == {"Marker", "plain"},
+          f"the filter kept {sorted(n for n in kept if n)}; it must keep the "
+          f"param-independent `Marker` and the ordinary `plain`, and drop "
+          f"`Wrapper` (reads its `T`), `Counter` (a `comptime` member) and "
+          f"`Pair` (a variadic parameter read through `Self.values`)")
+
+
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -3050,6 +3095,8 @@ TESTS = [
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",
      test_a_function_templates_body_is_still_compiled),
+    ("a struct template that reads no parameter is kept",
+     test_a_struct_template_that_reads_no_parameter_is_kept),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",

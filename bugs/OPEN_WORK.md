@@ -107,7 +107,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_build_cost_2026-10-03.md` | **unclaimed** | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
 | `FORMAL_env_family_next_terminal.md` | **unclaimed** | where the 55-file family stands, and what the next reader needs |
 | `FORMAL_eq_dispatch_on_a_frame_receiver.md` | **unclaimed** | what `==` still does not reach |
-| `FORMAL_generic_local_binding_has_no_home.md` | **unclaimed** | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | **unclaimed** | what a pointer IS on the formal path, and why the 54-file group was never about that |
 | `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | **unclaimed** | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
