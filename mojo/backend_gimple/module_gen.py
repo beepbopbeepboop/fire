@@ -14370,31 +14370,6 @@ def gen_module_impl(self, stmts):
             self._regex_progs_defined.add(pattern)
         parts.append('')
     parts.extend(func_parts)
-    if hasattr(self, '_str_pool') and self._str_pool and self.emit_str_pool:
-        # Register every literal the sound `mojo_boxed_is_str` predicate must
-        # tell apart from a bare int64_t. Emitted AFTER the function bodies
-        # (not in the string-pool block above) so this constructor's closing
-        # `}` is never the first `}` after a forward declaration: a generated-C
-        # consumer that walks from a prototype to the next `}` would otherwise
-        # stop at this constructor and miss the real definition. A __rodata
-        # literal is `static char * _slit_N = "...";`, so `malloc_size` is 0
-        # and a shape test cannot separate it from an integer in [2^31, 2^47);
-        # the only sound answer is a positive membership, fed here at startup.
-        # Without this, `lambda k: d[k]` called with "a" would key by the
-        # decimal of the literal's own address. See `_reg_str` in
-        # fire_runtime.c. `static` keeps each link-mode TU's copy local, so
-        # every module registers its own pool at process start.
-        parts.append(
-            '/* Register the string-literal pool with the runtime '
-            '(mojo_boxed_is_str); runs at startup, before main. */')
-        parts.append(
-            'static void __attribute__((constructor)) '
-            '_mojo_register_str_pool(void) {')
-        for _escaped, _sname in sorted(self._str_pool.items(),
-                                      key=lambda kv: kv[1]):
-            parts.append(f'    mojo_str_register({_sname});')
-        parts.append('}')
-        parts.append('')
 
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
