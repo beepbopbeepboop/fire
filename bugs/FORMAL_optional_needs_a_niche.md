@@ -1,5 +1,13 @@
 # `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left
 
+**Status 2026-10-12 (`work/formal281-docs`): the representation and the two open
+items are unchanged; two suite figures the Status entries below quote have moved.**
+`test_formal_optional.py` is **25 cases, 0 failures** (the `formal25-4` entry's
+"35/34" is `test_formal_module_attr.py`, which is **36/36** now — the `§5b` ALIAS
+case was the 36th). The remainder is exactly what the head says: **§2**
+(`Optional[Int]`'s tagged two-word value) and **§3** (an unstated payload still
+folds to `== 0`). Nothing else here moved.
+
 **Status 2026-10-05 (`formal25-4`): §4 is FIXED, and it was a WRONG ANSWER on
 both architectures rather than the limitation §4 called it — the gap was
 writable the moment the link line existed, and what it wrote was `Some(0)`
