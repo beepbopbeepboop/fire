@@ -4765,6 +4765,65 @@ class TestTheArm64StackFloorReadIsInTheStartupStub(unittest.TestCase):
             "program makes")
 
 
+class TestTheFrameSizeAddSubImmediateIsShifted(unittest.TestCase):
+    """`sub sp, sp, #32, lsl #12` is 131072 bytes, not 32.
+
+    The generator's SP trackers read `imm12` (bits 21-10) and ignored `sh`
+    (bit 22), so the 128 KiB frame the codegen takes for a function with a call
+    -- `sub sp, sp, #32, lsl #12`, the only way A64 can encode 131072, since
+    `imm12` alone tops out at 4095 -- was tracked as 32 bytes. Every spill-read
+    address a condition block computed was then 131040 bytes too low, the
+    `mem_read_two_writes_adj_uint` rewrite matched no store, and the
+    `runs-cbz-condition` leaf admitted over a goal that was TRUE. Measured on
+    this tree: `fact`, `sum`, `sqsum`, `count` and `pow2` all failed on exactly
+    this before the fix and generate a proof whose spill rewrite names the frame
+    after it.
+
+    Two rows, and the second is why the first is not enough: the decoder itself,
+    and the generated text of a recursive program, because a decoder is only
+    worth anything where it is CALLED. The `sh` bit is `0` for every frame that
+    is 4095 bytes or smaller, which is every frame in the corpus except this one
+    -- so a regression that dropped the shift again would be invisible to every
+    example that is not recursive.
+
+    No Lean.
+    """
+
+    def test_the_decoder_applies_the_shift(self):
+        from formal.arm64_proof_gen import _addsub_imm_bytes
+        # `sub sp, sp, #32, lsl #12` — the 128 KiB frame, imm12 = 32, sh = 1.
+        self.assertEqual(_addsub_imm_bytes(0xd14083ff), 131072)
+        # `sub sp, sp, #16` — sh clear, so imm12 IS the answer (16).
+        self.assertEqual(_addsub_imm_bytes(0xd10043ff), 16)
+        # `add sp, sp, #16` and `add sp, sp, #0`.
+        self.assertEqual(_addsub_imm_bytes(0x910043ff), 16)
+        self.assertEqual(_addsub_imm_bytes(0x910003ff), 0)
+
+    def test_a_recursive_programs_spill_rewrite_names_the_frame(self):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-frame-sh-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(HERE, "formal", "examples", "fact.mojo")
+        r = fb.compile_formal(src, arch="arm64",
+                              output=os.path.join(tmp, "fact.aout"),
+                              prove=True, check=False)
+        with open(r["proof_path"], encoding="utf-8") as f:
+            text = f.read()
+        rws = re.findall(r"mem_read_two_writes_adj_uint _ (\(.*\)) _ _", text)
+        self.assertTrue(rws, "`fact` emitted no spill-pair rewrite at all, so "
+                             "this row is not looking at the code it pins")
+        for addr in rws:
+            self.assertIn(
+                "131072", addr,
+                f"a spill read is addressed at {addr!r}, which does not name "
+                f"the 128 KiB frame the codegen took; the `sh` bit of the "
+                f"`sub sp, sp, #32, lsl #12` is being ignored again")
+            self.assertNotIn(
+                "UInt64.ofNat 32) - UInt64.ofNat 16", addr,
+                f"a spill read is addressed at {addr!r}, the value the "
+                f"UNSHIFTED imm12 produced: the bug this row exists for")
+
+
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
@@ -5257,9 +5316,8 @@ class TestCfgLeafCensus(unittest.TestCase):
     Nothing here runs Lean.  These are invariants of the generator and of the
     census it feeds; the Lean half -- "which leaf does the corpus actually
     admit at" -- is `no_admission_fallback` plus a Lean run, which is what
-    `test_formal.py`'s census reports and what
-    `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`
-    records.
+    `test_formal.py`'s census reports.  `TestTheFrameSizeAddSubImmediateIsShifted`
+    is the leaf admission that census found and its fix.
     """
 
     def test_the_registry_is_exactly_the_pinned_fifteen(self):
@@ -5376,8 +5434,9 @@ class TestCfgLeafCensus(unittest.TestCase):
         The residual it leaves is `mem_read_u64 (four frame stores) A = 0`,
         which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
         place that says memory is zero, and the universal theorem's `st` is a
-        free state. So this test pins the REDUCTION and not a pass, and the doc
-        that says so is `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`.
+        free state. So this test pins the REDUCTION and not a pass: the
+        `st.mem`-free residual is what `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`
+        carries, and it is a premise question rather than a tactic one.
         """
         import formal.arm64_proof_gen as G
         corpus = os.path.join(HERE, "formal", "examples")
