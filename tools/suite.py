@@ -359,8 +359,16 @@ GIMPLE_SOURCES = (
 #
 # Override with MEMLIMIT_GB (absolute, all classes) or MEMLIMIT_GB=0 (no cap at
 # all, loudly).
+# `mid` (6 GB) is the rung the `check` bucket's PEAK job sits on: `selfhost`
+# measures 4.4 GB, the 1.5x standard asks for 6.6, and the ladder covers that
+# with `small` (8). The owner asked for the check peak to carry 6 rather than
+# 8 (2026-10-11), so the rung sits one step below the standard and the
+# deviation is registered in `CLASS_ABOVE_PEAK`, where every other deliberate
+# class-vs-peak decision lives. `small` stays 8 for the 57 jobs that take the
+# default and for everything else that names it.
 MEMCLASS = {
     'tiny': 4,
+    'mid': 6,
     'small': 8,
     'module': 24,
     'program': 55,
@@ -1110,6 +1118,16 @@ CLASS_ABOVE_PEAK = {
               'HIGH (see procrun.tree_usage); `program` (55 GB) covers the '
               'measurement at 1.19x, where `stage` (96 GB) would reserve the '
               'whole ledger and make the job unadmittable on a 64 GB budget',
+    # Not an over-count like the two above, and not an upper bound like
+    # `formal-sweep-truth`'s: the measurement is stable (4.4 on the 2026-10-07
+    # gate, 4.3 on the 2026-10-11 check) and `mid` covers it at 1.36x, one
+    # step below the 1.5x standard that would assign `small` (8). This is the
+    # owner's decision for the check bucket's peak job, recorded where every
+    # other deliberate class-vs-peak deviation is, so it reads as a decision
+    # rather than as drift.
+    'selfhost': 'the owner asked for the check peak to carry 6 GB: `mid` '
+                '(6) covers the stable 4.4 GB measurement at 1.36x, one step '
+                'below the 1.5x standard that would assign `small` (8)',
 }
 
 
@@ -1780,26 +1798,33 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'formal/model.py', 'bugs/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
-# `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
+# `mem='mid'` (6 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
 # whole-closure self-compile plus `gcc -O2 -fgimple` plus a link, so this job
 # used to take the class documented on the 55.8 GB self-compile and reserve 96
 # of the machine's 96 GB: the everyday `check` bucket serialised behind a job
 # measured at 3.7 GB (4.4 GB today), twelve times a second, on every other worker's runs too.
-# Measured peak 3.7 GB then (4.4 GB in the 2026-10-07 gate), so the ratchet
-# assigns 5.55 (now 6.6) and the smallest class that covers it is `small`. What replaced the 55.8 GB figure is
+# Measured peak 3.7 GB then (4.4 GB in the 2026-10-07 gate, 4.3 in the
+# 2026-10-11 check), so the 1.5x standard asks for 6.6 GB, which the ladder
+# covers with `small` (8). The owner asked for the check bucket's peak to
+# carry 6 rather than 8, so the job sits on the `mid` rung one step below the
+# standard, and the deviation is registered in CLASS_ABOVE_PEAK like every
+# other deliberate class-vs-peak decision. What replaced the 55.8 GB figure is
 # MEASURED_PEAK_GB, read off a run's log by the same wrapper that enforces the
 # ceiling — and note that the same measurement taken on 2026-09-29 for
 # `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
 # the 55.8/96 numbers are not this workload's RSS on this tree. A build that
 # genuinely needs more says so: MEMLIMIT_GB=96.
-test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
-     memwhy='measured 4.4 GB (2026-10-07 gate): `fire.build_executable` of '
-            'fire.py, the same whole-closure self-compile as `mojoc` plus the '
-            'link. 1.5x is 6.6 GB, so `small` (8) is the smallest class that '
-            'covers it. Over the 4 GB line and therefore a debt, not a fact — '
-            'see ' + MEM_DEBT_DOC,
+test('selfhost', [PY, 'test_selfhost.py'], mem='mid', cache=True,
+     memwhy='measured 4.4 GB (2026-10-07 gate), 4.3 GB (2026-10-11 check): '
+            '`fire.build_executable` of fire.py, the same whole-closure '
+            'self-compile as `mojoc` plus the link. `mid` (6) covers the '
+            'measurement at 1.36x, one step below the 1.5x standard that '
+            'would assign `small` (8); the owner asked for the check peak to '
+            'carry 6, and the deviation is in CLASS_ABOVE_PEAK. Over the '
+            '4 GB line and therefore a debt, not a fact — see '
+            + MEM_DEBT_DOC,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
      desc='the compiler compiles itself to a linked binary, cleanly')

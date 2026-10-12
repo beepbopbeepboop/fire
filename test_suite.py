@@ -930,8 +930,8 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
               f'class_shortfalls on a synthetic 9.9 GB modcache: '
               f'{suite.class_shortfalls({"modcache": 9.9})}')
         check('peak log: a peak the class covers produces no shortfall',
-              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 7.9}),
-              f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
+              not suite.class_shortfalls({'modcache': 0.3, 'selfhost': 5.5}),
+              f'{suite.class_shortfalls({"modcache": 0.3, "selfhost": 5.5})}')
     else:
         print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
               'skipped (every class is the override)')
