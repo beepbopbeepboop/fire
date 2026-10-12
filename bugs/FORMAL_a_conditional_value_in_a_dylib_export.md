@@ -143,6 +143,47 @@ move the read into the startup stub. So the block layer's half of this document
 is landed and pinned, and the test goes green when that claimed regression is
 fixed — not before.
 
+### 1.5 2026-10-12: the startup-stub fix landed, the tests stayed red, and the residual cause was NOT a `bl` but the IMAGE TAIL
+
+The getrlimit read did move into the startup stub (`formal/arm64` — commit
+`f8ff50f2`, "read RLIMIT_STACK once in the startup stub, restore the arm64
+value theorem"), and the §1.4 prediction was **false**: both tests stayed red,
+each one hole over its expectation, and **the hole is not a `bl` at all.**
+Measured on this tree, `_cfg_decomposition_refusal` for the offending export
+(`test_formal_dylib.py`'s `several` `pick`) says *"every instruction in its own
+code has a step, so the cause is not an unmodelled word"*, and the export's own
+words contain no `bl`.
+
+**The cause is `_export_extent` and the last export.** `_export_extent` is the
+next export's entry, or `base + code_size` for the LAST one (the library's
+`DylibExport.exportEnd`; `exportEnd_last` proves the two agree). So the last
+export's CFG extent does not stop at its own `ret` — it runs on through the
+stack-floor handler, the runtime routines, and then the image's **DATA**.
+`_gen_universal_e2e_cfg`'s constant-fuel guard read **every** block
+`_cfg_blocks` finds in `[entry, func_end)`, and the tail broke it twice over:
+its back edges made `_acyclic` false, and `_gen_run_cert` returns `None` for the
+first data word (`0x6e612034` here — not an instruction), which made the whole
+walk `None`. `_dylib_total_proof` renders `None` as a named `sorry`, so the last
+export's `semantics_total` was a `sorry` over a termination claim that is true.
+
+**The fix asks the CFG the RUN uses.** The constant-fuel guard, the per-block
+runs certificate loop, and the loop-contract discovery now judge the blocks
+**REACHABLE from `func_entry`** (the successor relation `_cfg_blocks` itself
+encodes: `targets` for a branch, the next block in pc order for a `seq`, none
+for a `ret`) rather than every block in the extent. An unreachable block gets a
+placeholder `run_info` entry and no certificate, and an unreachable loop is not
+contracted. The change is gated on `fuel is not None`, which only
+`_dylib_total_proof` sets, so **every ordinary proof is byte-identical** — and
+for a non-last export the extent is already the next entry, so only the last
+export's verdict moves.
+
+**Measured after: `test_formal_dylib.py` is 27/27** (was 24/2), including the two
+tests above, whose `n_sorries` assertions (0 and 1) now hold. Pinned by
+`test_formal_dylib.py::test_the_last_exports_walk_ignores_the_image_tail`, which
+puts the BRANCHING export LAST (only the last extent reaches the tail) and
+requires its `semantics_total` to be the proved `total_of_halts` shape rather
+than `sorry`.
+
 ---
 
 ## 2. Modelling `CSEL` turns a NAMED OBLIGATION into a BUILD FAILURE

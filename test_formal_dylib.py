@@ -2254,6 +2254,57 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
+def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
+    """The LAST export's CFG walk judged the image's runtime tail, not its own
+    reachable code, so its termination was a named `sorry`.
+
+    `_export_extent` is the next export's entry, or `base + code_size` for the
+    last one (the library's `DylibExport.exportEnd`, whose `exportEnd_last`
+    proves the two agree).  For the last export that extent spans what the
+    emitter laid down after its own `ret`: the stack-floor handler, the runtime
+    routines, and then the image's DATA.  `_gen_universal_e2e_cfg`'s
+    constant-fuel guard read every block `_cfg_blocks` finds in
+    `[entry, func_end)`, so the tail's back edges made `_acyclic` false AND
+    `_gen_run_cert` returned None for the first data word — and the walk then
+    reported `None`, which `_dylib_total_proof` renders as a `sorry` over a
+    termination claim that is true.  The guard now judges the blocks REACHABLE
+    from the entry, which is the CFG the run uses, so the walk proves the last
+    export like any other.
+
+    No Lean here: this pins the EMITTER's verdict, and `several exports, and
+    one with no derivable spec` is what checks the file it produces.  The
+    program is the smallest one that has the defect: a straight-line export
+    first, and the BRANCHING one LAST, because only the last export's extent
+    reaches the image's tail.
+    """
+    import re as _re
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    src = os.path.join(tmpdir, "tail.mojo")
+    with open(src, "w") as f:
+        f.write("def head(n):\n  return n + 1\n\n\n"
+                "def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
+    out = os.path.join(tmpdir, "tail.dylib")
+    built = compile_formal_dylib([src], output=out, prove=False)
+    path = os.path.join(tmpdir, "tail_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(
+            built["code"], built["info"], built["exports"],
+            {"head": "(fun n => (n + (1 : UInt64)))"}))
+    text = open(path).read()
+    m = _re.search(r"theorem (dylib_export_\w*branchy)_semantics_total :\n"
+                   r"    DylibExport\.Total dylib_image \1 :=\n\s*(.+)", text)
+    check(m is not None, "the last, branching export has no `semantics_total` "
+                         "theorem at all, so this row is not looking at it")
+    check(m.group(2).strip() != "sorry",
+          "the LAST export's termination is a named `sorry`: its CFG walk was "
+          "defeated by the image tail after its own `ret`, which no argument "
+          "of the export can reach")
+    check("total_of_halts" in m.group(2),
+          f"the last export's termination is not the PROVED shape: "
+          f"{m.group(2).strip()!r}")
+
+
 TESTS = [
     ("every unordered pair of segments is visited exactly once",
      test_segment_pairs_are_covered_exactly_once),
@@ -2277,6 +2328,8 @@ TESTS = [
      test_a_conditional_expression_derives_a_spec),
     ("a conditional value is not a branch",
      test_a_conditional_value_is_not_a_branch),
+    ("the last export's walk ignores the image tail",
+     test_the_last_exports_walk_ignores_the_image_tail),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
