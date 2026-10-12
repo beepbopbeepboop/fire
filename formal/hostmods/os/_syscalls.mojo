@@ -1242,6 +1242,27 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32_signed(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` zero-extends, which is right for `st_uid`/`st_gid` (`uid_t`/`gid_t`
+    are `uint32`) and WRONG for `st_dev`/`st_rdev`: those are `dev_t`, which is
+    `int32` in the layout above, and CPython hands one back as the
+    SIGN-EXTENDED word. Measured on this host, `/dev/null`'s `0xa8fb1a80` is
+    `18446744072249612928` (`0xffffffffa8fb1a80`) and not `2835028608`: the two
+    readings agree for every device number below `2**31` and disagree above it,
+    which is a plausible-looking wrong number rather than an error.
+
+    A negative return is the same 64-bit word CPython reports — `-1459281920`
+    and `18446744072249612928` are one pattern — so a caller that renders it
+    unsigned (`%llu`) prints CPython's decimal.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1592,16 +1613,25 @@ def fs_stat_field16(p, follow, at) -> int:
     return le16(buf, at)
 
 
-def fs_stat_field32(p, follow, at) -> int:
+def fs_stat_field32(p, follow, at, signed) -> int:
     """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
-    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
-    and reading it as 64 would take the four bytes of padding after it, so the
+    `st_dev`, `st_uid`, `st_gid` and `st_rdev` are 32 bits in the layout above
+    and reading one as 64 would take the four bytes of padding after it, so the
     width is the field's and not the alignment's.
+
+    `signed` is the field's OWN C signedness and not a formatting choice: a
+    `dev_t` is `int32`, so `st_dev` is read sign-extended (see `le32_signed`)
+    while `uid_t`/`gid_t` are `uint32` and are read zero-extended. Asking the
+    caller to pass it is what keeps ONE reader for all four fields — the
+    alternative, four functions, is the shape this module's `fs_stat_field64`
+    docstring already rejects.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
+    if signed == 1:
+        return le32_signed(buf, at)
     return le32(buf, at)
 
 
