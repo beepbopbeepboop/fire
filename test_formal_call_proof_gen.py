@@ -5662,11 +5662,37 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 cls.out[label] = ""
                 continue
             if _ADMIT not in tail:
-                cls.blind[label] = (
-                    f"the fixture generates no `q_compiles_correctly_universal` "
-                    f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is "
-                    f"a no-op and no goal can be traced: whatever the div0 "
-                    f"residual is today, this class is not looking at it")
+                # WHICH drift took the residual away, not just that one did.
+                # The walk substitutes a REACHABILITY theorem for a program
+                # whose run halts at a call it cannot follow, and `q(a, b)`'s
+                # divide-by-zero arm ends in the compiler's own `BL fflush` —
+                # the trap `formal/arm64_codegen.py` records in
+                # `info["compiler_traps"]` — so the halt address is that call
+                # and no terminal value flow (and so no `_ADMIT`) is emitted.
+                # Naming the substitution is what makes the red actionable: it
+                # says the residual is not "moved", it is behind
+                # `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
+                # conditional_path.md`, and this class goes green the way that
+                # doc's step 1 describes.  The substitution is pinned, Lean
+                # free, by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`.
+                reach = re.search(r"^theorem (\w+)_reaches_call_at_", head + tail,
+                                  re.M)
+                if reach:
+                    cls.blind[label] = (
+                        f"the fixture substitutes a REACHABILITY theorem "
+                        f"(`{reach.group(0)[len('theorem '):]}`) for the "
+                        f"universal one: the div0 arm's `BL fflush` is the halt "
+                        f"address the walk stops at, so the terminal value flow "
+                        f"that states `{_ADMIT}` is never emitted and no goal "
+                        f"can be traced: whatever the div0 residual is today, "
+                        f"this class is not looking at it")
+                else:
+                    cls.blind[label] = (
+                        f"the fixture generates no `q_compiles_correctly_"
+                        f"universal` carrying `{_ADMIT}`, so `tail.replace("
+                        f"_ADMIT, _TRACE)` is a no-op and no goal can be "
+                        f"traced: whatever the div0 residual is today, this "
+                        f"class is not looking at it")
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -5747,6 +5773,69 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                          "bugs/FORMAL_a_division_by_a_symbolic_value_leaves_"
                          "the_zero_guard_open.md records, and its next step "
                          "and its Status both need re-reading")
+
+
+class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
+    """Why `TestTheZeroDivisorGuardAgainstLean` cannot trace the residual — the
+    root cause, pinned with no Lean at all.
+
+    That class measures the div0 path's terminal value flow by replacing the
+    walk's admission with `trace_state`; the mechanism is a no-op when the
+    fixture stops emitting a theorem that carries the admission.  On this tree
+    it does not refuse and it does not emit an empty file: it SUBSTITUTES a
+    reachability theorem, and the substitution is the compiler's own trap.
+
+    `formal/arm64_codegen.py::_emit_div_shift_pow`'s divide-by-zero arm ends in
+    `BL fflush`, which the emitter records in `info["compiler_traps"]` for the
+    RUN tests' benefit (`_program_extern_calls` subtracts it) but which the
+    UNIVERSAL theorem's walk does not subtract: `_unfollowable_calls` sees it as
+    a call out of the image, so the halt address becomes that call and the
+    theorem becomes `q_reaches_call_at_0x…` rather than
+    `q_compiles_correctly_universal`.  With no value theorem there is no
+    terminal value flow, so no `⊢ 1 =` residual and nothing for the class above
+    to see.
+
+    Pinning the substitution rather than only the class's failure is what makes
+    the failure a direction: when the walk can discharge a call on a
+    conditional path (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
+    conditional_path.md`), this test goes red and says the fixture is measur-
+    able again — and the class above starts looking at the residual it exists
+    for, instead of reporting a drift nobody can act on.
+    """
+
+    def test_the_fixture_substitutes_a_reachability_theorem(self):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-div0-subst-")
+        try:
+            src = os.path.join(tmp, "symdiv.mojo")
+            with open(src, "w") as f:
+                f.write(_SYMBOLIC_DIVISOR)
+            out = os.path.join(tmp, "symdiv.aout")
+            r = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                                  check=False)
+            text = open(r["proof_path"]).read()
+            # The universal theorem is ABSENT, and the reachability statement
+            # that took its place is present.  The partition (rather than an
+            # `assertNotIn`) is what keeps the long explanatory comment above
+            # the theorem — which names `q_compiles_correctly_universal` in
+            # prose — from reading as the declaration itself.
+            self.assertEqual(
+                text.partition("theorem q_compiles_correctly_universal")[1], "",
+                "the fixture now emits the universal theorem again, so the "
+                "residual the class above exists for is reachable and its "
+                "`blind` report is the wrong answer: re-measure the class")
+            self.assertIn(
+                "theorem q_reaches_call_at_0x100000504", text,
+                "the walk no longer substitutes a reachability theorem for "
+                "`q(a, b)`; the class above is blind for some OTHER reason now, "
+                "and its `blind` message must be re-read before it is trusted")
+            self.assertEqual(
+                text.count(_ADMIT), 0,
+                f"`{_ADMIT}` is emitted again, so there IS a terminal value "
+                f"flow for this fixture and the class above should be tracing "
+                f"it")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestUnsignedOffsetAccess(unittest.TestCase):
