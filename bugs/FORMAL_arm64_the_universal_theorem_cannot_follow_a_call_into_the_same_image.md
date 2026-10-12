@@ -1,5 +1,49 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**Status 2026-10-12 (`work/formal276-docs`): the MULTI-CALL-SITE case is
+PARTIALLY landed — two calls into DISTINCT leaf callees are now followed, and
+`main(n) = a(n) + b(n)` generates and PROVES. What is still refused is a callee
+that calls (the `main -> b -> c` chain, this file's own recursion shape) and two
+calls to the SAME callee.**
+
+The map is now one entry PER CALL SITE, which is how the walk already read it
+(`_gen_universal_e2e_cfg`'s `bl` arm looks up `_intra_returns[bl_pc]`, and the
+caller's continuation drops the address again), so the change is confined to
+`_same_image_call_plan`'s `len(intra) > 1` refusal. The invariant that makes it
+sound is that each callee's blocks are entered ONCE: two calls to distinct
+callees each emit their own callee's certificates, while two calls to the SAME
+callee would enter its blocks from two call sites and emit a duplicate
+declaration (the block certificates are named by block index), so that shape is
+refused with its own message. `generate_arm64_proof`'s "more than one call the
+walk cannot discharge" count is now the count of OPAQUE calls rather than
+`len(calls) - 1`, because the old arithmetic counted a followed intra-image call
+as unfollowable once there was more than one.
+
+Measured, through `formal/lean.py::run_lean`:
+
+| program | before | after |
+|---|---|---|
+| `main(n) = a(n) + b(n)`, two distinct leaves | REFUSED, "2 calls into the same image" | **rc=0, 0 `sorry`, 5.76 GB, 280 s** |
+| `main(n) = a(n) + a(n)`, one callee twice | REFUSED | REFUSED (shared callee: its blocks are entered twice) |
+| `main -> b -> c` (`callee_chain`) | REFUSED | REFUSED (the callee calls) |
+
+Pinned by `test_formal_call_proof_gen.py`: `TestCallProofs`'s
+`test_two_distinct_leaf_callees_are_followed` (generation and the full-theorem
+markers) and `test_two_calls_to_the_same_callee_are_still_refused`, plus the
+plan-level cases in `test_the_plan_declines_exactly_the_shapes_it_cannot_follow`
+(two entries for two distinct leaves, a refusal for the shared callee, and the
+leaf refusal for `callee_chain`). The typecheck is deliberately NOT run in that
+file — the proof is 7.3k lines and 5.76 GB / 280 s, over the test's `tiny`
+(4 GB) class — so the rc=0 figure above is a hand measurement, not a gate row.
+
+**Two things this does not change.** The one-call-site proof the Status below
+calls "proved" does NOT typecheck on this tree: `same_image_leaf` fails with
+`maximum recursion depth has been reached` (measured uncached: rc=1, 2.85 GB,
+100 s), and the emitted bytes are IDENTICAL with and without this change, so it
+is the pre-existing `arm64_ext_imm12` elaborator loop that
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` owns. And the
+census re-run below is still owed.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1

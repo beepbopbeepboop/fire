@@ -139,9 +139,16 @@ REFUSED = {
     "callee_chain": ("fn c(n):\n    return n\n"
                      "fn b(n):\n    return c(n) + 1\n"
                      "fn main():\n    return b(1)\n",
-                     "two call sites into the same image: `x30` at the callee's "
-                     "`RET` is then a property of the CALL PATH, and one return "
-                     "address does not serve two of them"),
+                     "a callee that calls: `main` calls `b` and `b` calls `c`, so "
+                     "the return-address map that is exact for a leaf has a "
+                     "SECOND return address to remember inside the callee, and "
+                     "the recursion contract's frame bound and fuel descent would "
+                     "have to be re-proved for it"),
+    "same_callee_twice": ("fn a(n):\n    return n + 1\n"
+                          "fn main(n):\n    return a(n) + a(n)\n",
+                          "two calls into the same image to the SAME callee: its "
+                          "blocks would be entered from two call sites, so the "
+                          "block certificates cannot be told apart"),
 }
 
 
@@ -215,6 +222,31 @@ SAME_IMAGE_CALL = {
         "    return helper(x)\n",
         "the same call with a conditional callee: generation is what is pinned "
         "here, and the cost boundary is the walk's path count, not the call"),
+}
+
+# Programs with TWO calls into the SAME image, to DISTINCT leaf callees.  The
+# return-address map is one entry PER CALL SITE, and the walk is already keyed by
+# call site (`_gen_universal_e2e_cfg`'s `bl` arm reads `_intra_returns[bl_pc]`),
+# so two calls that each enter their OWN callee's blocks are followable and each
+# callee's certificates are emitted once.  Two calls to the SAME callee are NOT
+# (`REFUSED['same_callee_twice']`): its blocks would be entered twice and the
+# block certificates are named by block index.
+#
+# `two_leaf_callees` is `main(n) = a(n) + b(n)` — two distinct leaves on ONE
+# path.  Generation is pinned here; the typecheck is deliberately NOT run in this
+# file, because the proof is 7.3k lines and costs 5.8 GB / 280 s, over this
+# test's `tiny` (4 GB) class.  The check was measured once by hand and is
+# recorded in the doc: rc=0, 0 `sorry`, 5.76 GB, 280 s.
+MULTI_SAME_IMAGE_CALL = {
+    "two_leaf_callees": (
+        "def main(n):\n"
+        "    return a(n) + b(n)\n\n"
+        "def a(x):\n"
+        "    return x + 1\n\n"
+        "def b(x):\n"
+        "    return x * 2\n",
+        "two calls to DISTINCT leaf callees: one return address per call site, "
+        "each callee's blocks entered once"),
 }
 
 
@@ -2265,7 +2297,8 @@ class TestCallProofs(unittest.TestCase):
         cls.errors = {}
         for name, (src, _why) in (list(PROGRAMS.items()) + list(REFUSED.items())
                                   + list(TWO_OPAQUE_CALLS.items())
-                                  + list(SAME_IMAGE_CALL.items())):
+                                  + list(SAME_IMAGE_CALL.items())
+                                  + list(MULTI_SAME_IMAGE_CALL.items())):
             p, err = _generate(cls.tmp, src, name)
             cls.proofs[name] = p
             cls.errors[name] = err
@@ -2296,6 +2329,35 @@ class TestCallProofs(unittest.TestCase):
                               f"{name}: a call into the same image is followed "
                               f"now, so a refusal here is a regression to the "
                               f"per-function walk: {self.errors[name]}")
+
+    def test_two_distinct_leaf_callees_are_followed(self):
+        """Two call sites, to two DIFFERENT leaves, are two return addresses.
+
+        The map is one entry per call site, so a program whose entry calls two
+        distinct leaf callees is followable even though it has more than one
+        `BL` into the image: each callee's blocks are entered once, so the block
+        certificates are still named by block index without collision.  What is
+        NOT followable is two calls to the SAME callee (its blocks would be
+        entered twice) or a callee that calls at all — both are in `REFUSED`,
+        and the plan test below asks the boundary directly.
+        """
+        for name in MULTI_SAME_IMAGE_CALL:
+            self.assertIsNone(self.errors[name],
+                              f"{name}: two distinct leaf callees are two "
+                              f"return addresses now, so a refusal here is a "
+                              f"regression to the one-call-only map: "
+                              f"{self.errors[name]}")
+            p = self.proofs[name]
+            self.assertIsNotNone(p)
+            with open(p) as f:
+                text = f.read()
+            with self.subTest(program=name):
+                self.assertNotIn("CALL BOUNDARY", text)
+                self.assertNotIn("reaches_call_at_", text)
+                self.assertIn("theorem main_compiles_correctly_universal", text)
+                self.assertIn("theorem main_compiles_correctly :", text,
+                              "both calls are followed, so the theorem is about "
+                              "what the program returns, not a halt at a call")
 
     def test_the_followed_call_is_proved_not_merely_reached(self):
         """A followed call must get the FULL theorem, not the reachability one.
@@ -2353,26 +2415,48 @@ class TestCallProofs(unittest.TestCase):
                "`RET`: the return address map is built and never read, so the "
                "callee's `ret` ends the path instead of returning")
 
-    def test_a_second_call_site_into_the_same_image_is_still_refused(self):
-        """The boundary of the fix, and it is a boundary of the MAP.
+    def test_a_callee_that_calls_is_still_refused(self):
+        """The boundary of the fix, and it is a boundary of the LEAF.
 
-        Two call sites means `x30` at the callee's `RET` is a property of the
-        CALL PATH rather than a constant, which is the whole of what the fix
-        buys; the refusal has to say so, and it has to say it instead of the
-        recursion arm's error about a program with no recursion in it.
+        The map gives `x30` at the callee's `RET` the constant `call_pc + 4`,
+        which is exact only for a callee whose own body has no call: a callee
+        that calls has a SECOND return address to remember, so the recursion
+        contract's frame bound and fuel descent would have to be re-proved for
+        the second function.  `callee_chain` (`main -> b -> c`) is that shape,
+        and the refusal has to say so instead of the recursion arm's error about
+        a program with no recursion in it.
         """
         err = self.errors["callee_chain"]
         self.assertIsNotNone(err, "callee_chain: expected a refusal, got a proof")
         self.assertNotIn("recursion argument bound", err,
                          "callee_chain: the old recursion-only error "
                          "misdescribes a program with no recursion in it")
-        self.assertIn("2 calls into the same image", err,
+        self.assertIn("not a straight-line leaf", err,
                       f"callee_chain: the refusal must name the shape, so a "
-                      f"reader can tell it from the one-call case that now "
-                      f"proves: {err}")
+                      f"reader can tell it from the leaf case that proves: {err}")
+        self.assertIn("RECURSION", err,
+                      f"callee_chain: and it must say what is missing — the "
+                      f"callee's own return address: {err}")
+
+    def test_two_calls_to_the_same_callee_are_still_refused(self):
+        """The other half of the boundary, and it is a boundary of the BLOCKS.
+
+        Two calls to the SAME callee would enter its blocks from two call sites,
+        and the block certificates are named by block index — the second entry
+        would emit a duplicate declaration rather than a second certificate.  So
+        the plan declines it, and says which of the two reasons it is: not the
+        leaf check (`same_callee_twice`'s `a` is a leaf) but the shared callee.
+        """
+        err = self.errors["same_callee_twice"]
+        self.assertIsNotNone(err, "same_callee_twice: expected a refusal, got a "
+                                  "proof")
+        self.assertNotIn("recursion argument bound", err)
+        self.assertIn("same callee", err,
+                      f"same_callee_twice: the refusal must name the shared "
+                      f"callee rather than blame the leaf: {err}")
         self.assertIn("return address", err,
-                      f"callee_chain: and it must say what is missing — a "
-                      f"return address per call path: {err}")
+                      f"same_callee_twice: and it must say what is missing: "
+                      f"{err}")
 
     def test_a_two_argument_callee_is_refused_by_the_bridge(self):
         """`REFUSED['two_args']` keeps its own reason, and states it.
@@ -2432,8 +2516,26 @@ class TestCallProofs(unittest.TestCase):
                          "it, and that constant is the whole mechanism")
 
         got, why = plan(REFUSED["callee_chain"][0])
-        self.assertIsNone(got, "two call sites is not a constant")
-        self.assertIn("ONE return address does not serve them", why)
+        self.assertIsNone(got, "a callee that calls is not a return address")
+        self.assertIn("not a straight-line leaf", why)
+
+        # TWO calls into the same image to DISTINCT leaves are two return
+        # addresses, one per call site: the walk is keyed by call site, so each
+        # callee's blocks are entered once and their certificates do not collide.
+        got, why = plan(MULTI_SAME_IMAGE_CALL["two_leaf_callees"][0])
+        self.assertEqual(len(got or {}), 2,
+                         f"two distinct leaf callees are two return addresses, "
+                         f"one per call site: {why}")
+        for call_pc, ret_pc in (got or {}).items():
+            self.assertEqual(ret_pc, call_pc + 4,
+                             "each `BL`'s return address is the instruction "
+                             "after it")
+
+        # ... but two calls to the SAME callee are not: its blocks would be
+        # entered from two call sites, and the certificates are named by block.
+        got, why = plan(REFUSED["same_callee_twice"][0])
+        self.assertIsNone(got, "the same callee twice is not one return address")
+        self.assertIn("same callee", why)
 
         # A callee that calls BACK INTO THE ENTRY is recursion the plan cannot
         # see as a second call site — `_unfollowable_calls` skips a target equal
