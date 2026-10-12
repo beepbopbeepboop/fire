@@ -1,8 +1,50 @@
 # FORMAL_a_linked_library_path_is_in_the_image: one image cannot be byte-identical across two CAS roots, and the reason is dyld
 
+**Status: NOT FIXED — the load contract; the byte account below is CORRECTED
+(2026-10-12) and the surviving property is now PINNED.** The conclusion is
+unchanged: the library has to live beside the executable for one image to be a
+function of the source alone, which is a design change and not a worker's. What
+is corrected is the SENTENCE below that says "Every differing byte is inside one
+`LC_LOAD_DYLIB` name": on today's tree the path difference CASCADES into two
+content digests, so more than that one command moves. §"The corrected byte
+account" measures it; `test_formal_reproducible.py`'s new case reads
+`two CAS roots differ only by the library path`.
+
 **Measured 2026-10-05 on `work/formal38-reproducible-builds`, both backends.**
 This is the one axis of the reproducibility sweep that is left, and it is not a
 defect in the emitter: it is the load contract.
+
+## The corrected byte account (2026-10-12), and why the old one was one byte
+
+The original account was taken when `LC_UUID` was the **all-zero constant** this
+backend used to emit, so the only byte a CAS root moved was the one character of
+the path — `home1` vs `home2` — inside the `LC_LOAD_DYLIB`. `LC_UUID` is now a
+content digest (`test_formal_reproducible.py`'s case 6, `formal/macho_linker.py`'s
+`_stamp_content_uuid`) and the ad-hoc signature signs the content, so BOTH
+move with the path. Re-measured on this tree, one importing program built from
+two same-length CAS roots (`arm64`):
+
+```
+differing runs: 9
+  run 808:824   len=16  inside=LC_UUID            (a content digest)
+  run 958:959   len=1   inside=LC_LOAD_DYLIB      (the "home1"/"home2" byte)
+  run 49330:49463 …      inside=LC_CODE_SIGNATURE  (signs the whole image)
+same length: 49600 / 49600
+the module dylib's content-addressed BASENAME is the same on both sides
+```
+
+So the honest sentence is: **every differing byte lies in a load command that
+NAMES A PATH, or in a digest that is a function of the image.** Nothing the
+PROGRAM wrote moves, and the library's own name does not. That is the property
+`test_formal_reproducible.py`'s `two CAS roots differ only by the library path`
+pins, by asserting every differing run is inside `LC_LOAD_DYLIB`/`LC_ID_DYLIB`/
+`LC_RPATH`/`LC_UUID` or the `LC_CODE_SIGNATURE` blob — a `LC_SEGMENT` that moved
+would be a real defect and the case would fail on it.
+
+The DESIGN conclusion is untouched: making the two images equal needs the
+library beside the executable (`@executable_path`), which §"Why it is not fixed
+here" already weighs and declines as a worker's change.
+
 
 ## What was measured
 
@@ -19,7 +61,9 @@ $ cmp .tmp/repro/mod1/prog.aout .tmp/repro/mod2/prog.aout
 .tmp/repro/mod1/prog.aout .tmp/repro/mod2/prog.aout differ: char 959, line 1
 ```
 
-Every differing byte is inside one `LC_LOAD_DYLIB` name:
+Every differing byte is inside one `LC_LOAD_DYLIB` name — **STALE: this was
+measured when `LC_UUID` was all-zero; read §"The corrected byte account", where
+the path's difference also moves the UUID and the signature**:
 
 ```
 offset 904, 67 568-byte image:
