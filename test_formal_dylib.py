@@ -189,12 +189,17 @@ def parse_macho(data):
                 segname = data[sect + 16:sect + 32].rstrip(b"\0").decode("ascii")
                 addr, size = struct.unpack_from("<2Q", data, sect + 32)
                 offset, = struct.unpack_from("<I", data, sect + 48)
+                sflags, reserved1, reserved2 = struct.unpack_from(
+                    "<3I", data, sect + 64)
                 sections.append({"sectname": sname, "segname": segname,
-                                 "addr": addr, "size": size, "offset": offset})
+                                 "addr": addr, "size": size, "offset": offset,
+                                 "flags": sflags, "reserved1": reserved1,
+                                 "reserved2": reserved2})
                 sect += 80
             info["segments"][name] = {
                 "vmaddr": vmaddr, "vmsize": vmsize, "fileoff": fileoff,
                 "filesize": filesize, "maxprot": maxprot, "initprot": initprot,
+                "segflags": segflags,
                 "sections": sections,
             }
         elif cmd == LC_ID_DYLIB:
@@ -1691,6 +1696,67 @@ def test_dylib_calls_out_to_libSystem(tmpdir, shared):
     check(r.returncode == 42, f"returned {r.returncode}, expected 42")
 
 
+def test_macho_header_and_stub_metadata_match_ld(tmpdir, shared):
+    """The three Mach-O spec details that only a byte-level check can see.
+
+    None of these changes whether the image runs (the loader ignores the stub
+    `reserved*` fields unless it consults an indirect symbol table, which these
+    images do not carry), so nothing else in this file can catch a regression in
+    them. Each is a place this tree disagreed with `ld` for the same dylib, and
+    each is measured here against the value `ld` writes:
+
+      * the mach_header's flags: `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS`
+        = 0x100085. The buggy literal was 0x800005, which is missing
+        MH_TWOLEVEL (0x80) and instead sets MH_HAS_TLV_DESCRIPTORS (0x800000);
+      * a `S_SYMBOL_STUBS` section's `reserved1` is the indirect-symbol-table
+        index (0 here) and `reserved2` is **the size of one stub** (12 on
+        arm64), not the other way round;
+      * a GOT-carrying __DATA_CONST segment is `SG_READ_ONLY` (0x10), so dyld
+        remaps it read-only once it has applied the bind fixups.
+    """
+    lib = os.path.join(tmpdir, "stubmeta.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("hi\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libstubmeta.dylib")
+    rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out, lib]).returncode
+    check(rc == 0, f"dylib with an extern failed to build: {rc}")
+
+    with open(out, "rb") as f:
+        data = f.read()
+    info = parse_macho(data)
+
+    MH_TWOLEVEL = 0x80
+    MH_HAS_TLV_DESCRIPTORS = 0x800000
+    MH_NO_REEXPORTED_DYLIBS = 0x100000
+    check(info["flags"] & MH_TWOLEVEL,
+          f"MH_TWOLEVEL is not set (flags {info['flags']:#x}); dyld then reads "
+          f"the library's symbols in flat-namespace mode")
+    check(not (info["flags"] & MH_HAS_TLV_DESCRIPTORS),
+          f"MH_HAS_TLV_DESCRIPTORS is set (flags {info['flags']:#x}) on a "
+          f"library that carries no thread-local descriptors")
+    check(info["flags"] & MH_NO_REEXPORTED_DYLIBS,
+          f"MH_NO_REEXPORTED_DYLIBS is not set (flags {info['flags']:#x})")
+    check(info["flags"] & 0x4,
+          f"MH_DYLDLINK is not set (flags {info['flags']:#x})")
+
+    text = info["segments"]["__TEXT"]
+    stubs = [s for s in text["sections"] if s["sectname"] == "__stubs"]
+    check(len(stubs) == 1, "the `printf` in the library emitted no __stubs")
+    check(stubs[0]["reserved1"] == 0,
+          f"__stubs reserved1 is {stubs[0]['reserved1']}, not the indirect "
+          f"symbol table index 0")
+    check(stubs[0]["reserved2"] == 12,
+          f"__stubs reserved2 is {stubs[0]['reserved2']}, not the arm64 stub "
+          f"size 12 (the size belongs in reserved2, not reserved1)")
+
+    check("__DATA_CONST" in info["segments"],
+          "the library calls out but carries no __DATA_CONST GOT segment")
+    dc = info["segments"]["__DATA_CONST"]
+    check(dc["segflags"] & 0x10,
+          f"__DATA_CONST has no SG_READ_ONLY (segflags {dc['segflags']:#x}); it "
+          f"is not remapped read-only after the bind fixups")
+
+
 def test_frame_params_are_published_not_empty(tmpdir, shared):
     """A module that takes a FRAME publishes a per-parameter frame contract.
 
@@ -2291,6 +2357,8 @@ TESTS = [
      test_a_proved_dylib_is_an_arm64_artifact_and_says_so),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
+    ("the mach_header flags and __stubs/__DATA_CONST metadata match ld",
+     test_macho_header_and_stub_metadata_match_ld),
     ("a frame parameter's contract is published, not empty",
      test_frame_params_are_published_not_empty),
 ("no module under lib/ admits a sorry or an admit",

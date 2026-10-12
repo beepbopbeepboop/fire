@@ -338,9 +338,15 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
                         sections: list) -> int:
     """Write the __TEXT segment command and its section headers at `o`.
 
-    One section is a (name, vmaddr, size, fileoff, flags, reserved1) tuple —
-    reserved1 is what carries a stub section's stub size. Returns the offset
-    just past the command.
+    One section is a (name, vmaddr, size, fileoff, flags, stub_size) tuple —
+    `stub_size` is the last element and it is written to `reserved2`, NOT to
+    `reserved1`, because that is the field `<mach-o/loader.h>` defines it in:
+    for `S_SYMBOL_STUBS`, `reserved1` is the indirect-symbol-table index and
+    `reserved2` is **the size of one stub**. Every other section passes 0 and
+    gets `reserved1 == reserved2 == 0`. `ld` emits `reserved1 0 / reserved2 12`
+    on arm64 (6 on x86-64) for the same section, and this tree had the two
+    swapped until it was compared against `ld`. Returns the offset just past the
+    command.
     """
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
@@ -358,7 +364,7 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
     patch(o + 64, "<I", len(sections))
     patch(o + 68, "<I", 0)
     s = o + 72
-    for name, vmaddr, size, fileoff, flags, reserved1 in sections:
+    for name, vmaddr, size, fileoff, flags, stub_size in sections:
         file[s : s + 16] = name.ljust(16, b"\0")
         file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
         patch(s + 32, "<Q", vmaddr)
@@ -368,16 +374,39 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
         patch(s + 56, "<I", 0)      # reloff
         patch(s + 60, "<I", 0)      # nreloc
         patch(s + 64, "<I", flags)
-        patch(s + 68, "<I", reserved1)
-        patch(s + 72, "<I", 0)      # reserved2
+        patch(s + 68, "<I", 0)      # reserved1: indirect-symbol-table index
+        patch(s + 72, "<I", stub_size)   # reserved2: stub size (STUBS only)
         s += 80
     return o + cmdsize
+
+# `mach-o/loader.h`'s header, section and segment flags, named because the
+# numbers are not self-describing and a wrong one is still a valid value.
+MH_NOUNDEFS = 0x1
+MH_DYLDLINK = 0x4
+MH_TWOLEVEL = 0x80
+MH_NO_REEXPORTED_DYLIBS = 0x100000
+MH_PIE = 0x200000
+MH_HAS_TLV_DESCRIPTORS = 0x800000
+
+# A GOT-carrying __DATA_CONST is hardened once dyld has applied its fixups:
+# `SG_READ_ONLY` says "map this read-only after binding". `ld` sets it on the
+# GOT segment of every executable and library; this tree left it 0.
+SG_READ_ONLY = 0x10
 
 # MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE. The last two are not
 # cosmetic: a main executable without MH_DYLDLINK and MH_PIE is killed by
 # dyld before it reaches its entry point (verified by bisecting the load
 # commands of a hand-built image — the same image runs with these flags set).
-MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
+MH_EXECUTE_FLAGS = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
+
+# The same set `ld` writes for a dylib: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+# | MH_NO_REEXPORTED_DYLIBS (0x100085). It used to be the literal 0x800005,
+# which is missing MH_TWOLEVEL and sets MH_HAS_TLV_DESCRIPTORS — a bit saying
+# the library carries thread-local descriptors, which it does not. Measured:
+# `otool -hv` on a `clang -dynamiclib` output reads
+# `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS` for the same shape.
+MH_DYLIB_FLAGS = (MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+                  | MH_NO_REEXPORTED_DYLIBS)
 
 
 def build_macho_executable(code: bytes, arch: str = "arm64",
@@ -948,7 +977,7 @@ def build_macho_executable_extern(
     patch(o + 56, "<I", 0x3)  # rw- : dyld writes the GOT slot at load time
     patch(o + 60, "<I", 0x3)
     patch(o + 64, "<I", 1)  # nsects: __got
-    patch(o + 68, "<I", 0)
+    patch(o + 68, "<I", SG_READ_ONLY)  # dyld remaps it read-only after fixups
     s = o + 72
     file[s : s + 16] = b"__got".ljust(16, b"\0")
     file[s + 16 : s + 32] = b"__DATA_CONST".ljust(16, b"\0")
@@ -1536,7 +1565,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(12, "<I", MH_DYLIB)
     patch(16, "<I", ncmds)
     patch(20, "<I", sizeofcmds)
-    patch(24, "<I", 0x800005)
+    patch(24, "<I", MH_DYLIB_FLAGS)
     o = 32
 
     text_sections = [(b"__text", base_addr, len(code), code_file, 0x80000400, 0)]
@@ -1564,7 +1593,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         patch(o + 56, "<I", 0x3)
         patch(o + 60, "<I", 0x3)
         patch(o + 64, "<I", 1)             # nsects: __got
-        patch(o + 68, "<I", 0)
+        patch(o + 68, "<I", SG_READ_ONLY)  # dyld remaps it read-only after fixups
         s2 = o + 72
         file[s2 : s2 + 16] = b"__got".ljust(16, b"\0")
         file[s2 + 16 : s2 + 32] = b"__DATA_CONST".ljust(16, b"\0")
