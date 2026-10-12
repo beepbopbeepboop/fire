@@ -1571,6 +1571,11 @@ def main():
             print(f"Error generating --dump-full: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+            # Nonzero: a closure compile that raised wrote no .ci (or a stale
+            # one survives from an earlier run), and exiting 0 here let
+            # `bootstrap-stage2-transitive` report a compile that never
+            # happened as a pass.
+            sys.exit(1)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files

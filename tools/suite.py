@@ -2592,10 +2592,23 @@ fanout('bootstrap-stage1-dumps',
 # numbers were measuring (a macOS *footprint* probe, on a tree state weeks
 # older) is not what memcap enforces: a ceiling is applied to summed RSS of
 # the process tree, and that is 1.1-1.2 GB.
+#
+# `reject=CLOSURE_INCOMPLETE`: `_compile_imported_module` deliberately
+# survives a sibling module that raises — it prints `# ERROR: compiling
+# imported module ...`, rolls the module back and keeps going, which is the
+# right fallback for a user program and exactly wrong here. A closure missing
+# a module still links (every call into it becomes a weak "unavailable in
+# compiled mode" stub), so this step used to PASS while `stage2/mojo` lacked
+# all of `emit_stmts.py` — the binary then lowered no statement at all and
+# every later bootstrap failure was downstream of a dropped module, not of the
+# code being debugged. The stage2/stage3 closure dumps reject the stub's own
+# diagnostic too: the binary calling a stub while compiling itself is the
+# same hole seen from the other side.
+CLOSURE_INCOMPLETE = r'# ERROR: compiling imported module|unavailable in compiled mode'
 test('bootstrap-stage1-transitive',
      [PY, '../fire.py', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage1', env={'PYTHONPATH': '..'},
-     deps=['bootstrap-stage1-dumps'],
+     deps=['bootstrap-stage1-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
 
 # The gcc -O0 -fgimple compile of the 40 MB closure into a real binary. Its
@@ -2649,7 +2662,7 @@ test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
-     deps=['bootstrap-stage2-dumps'],
+     deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
 
 fanout('bootstrap-stage3-dumps',
@@ -2663,7 +2676,7 @@ test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
-     deps=['bootstrap-stage3-dumps'],
+     deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
