@@ -24415,13 +24415,18 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
-    # The three set operators arm64 grew beside the union, and each is a
-    # blob-producing site of its own: `&` and `-` reserve `nL` and `^` reserves
-    # `nL + nR`, so a guard missing on any of them is the same silent frame
-    # overrun the union's had. The operands are sets for the union's reason —
-    # `[1, 2] & [2]` is a TypeError and the shared gate refuses it — and all
-    # three are arm64-only, which is why each probe names that backend.
+    # The three set operators, each a blob-producing site of its own: `&` and
+    # `-` reserve `nL` and `^` reserves `nL + nR`, so a guard missing on any of
+    # them is the same silent frame overrun the union's had. The operands are
+    # sets for the union's reason — `[1, 2] & [2]` is a TypeError and the shared
+    # gate refuses it. Both backends lower all three now (arm64 first, x86-64
+    # second), so each operator has a probe per backend: the two emitters are
+    # separate implementations, and a guard on one says nothing about the other.
     ("arm64", "sin",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a & b\n    return len(c)\n",
+     {"a set intersection"}),
+    ("x86_64", "sin",
      "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
      "    var c = a & b\n    return len(c)\n",
      {"a set intersection"}),
@@ -24429,7 +24434,15 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
      "    var c = a - b\n    return len(c)\n",
      {"a set difference"}),
+    ("x86_64", "sdf",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a - b\n    return len(c)\n",
+     {"a set difference"}),
     ("arm64", "ssd",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var c = a ^ b\n    return len(c)\n",
+     {"a set symmetric difference"}),
+    ("x86_64", "ssd",
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
      {"a set symmetric difference"}),

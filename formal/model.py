@@ -14181,12 +14181,16 @@ def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
 
     * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
       sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
-      refusal names that rather than pretending a lowering was missing.  This
-      is the arm64 answer when it cannot establish both operands are sets, and
-      the x86-64 answer for every two-blob shape.
+      refusal names that rather than pretending a lowering was missing.  Both
+      backends reach this branch when they cannot establish that both operands
+      are sets; each has an emitter for the two-set case, so `backend_has_emitter`
+      is True at both call sites.
     * **two sets, no emitter** — the operator really is the set operation the
       source writes, and the machine simply does not lower it.  The message
       says which machine does, so the reader is not sent looking for a spec.
+      No backend reaches this branch today (arm64 grew the emitters first,
+      x86-64 second); it is kept for the machine that would, and the wording is
+      still what `|`'s split names.
 
     The wording lives here, beside the other refusal texts and beside
     `set_union_refusal`, so the two backends cannot word the same state
@@ -14246,8 +14250,8 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     container operator except `+`, `|` and — on two blobs — the set-algebra
     three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
     `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
-    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
-    `set_algebra_refusal` on x86-64 rather than to the integer ALU.
+    blobs, which is what routes them to `_maybe_emit_set_binop` — the set
+    emitter each backend now has — rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
             or container_operand_is_blob(value_kind))
