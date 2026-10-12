@@ -4153,6 +4153,64 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
                                 % (key, err))
 
 
+class TestTheFrameOkWindowExamplesAreDeclared(unittest.TestCase):
+    """`fact`, `sum` and `sqsum` are MARKED, and they still generate a proof.
+
+    These three were UNDECLARED reds of the `formal` job until 2026-10-12, which
+    is the hole `bugs/FORMAL_arm64_known_proof_gaps.md`'s own argument is about:
+    a gap that is not in `test_formal.py::EXPECTED_FAILURES` is reported as a
+    FAILURE, and a whole-corpus run reported them with no document anywhere
+    saying why.
+
+    **The failure is NOT the dec1 return frame's x30 read the doc recorded.**
+    Measured on this tree, one Lean run each through
+    `compile_formal(prove=True, check=True)`: all three generate a proof that
+    carries `_compiles_correctly_universal`, and Lean rejects it at `rfl` inside
+    the `runs-ret-frame-ok-window` leaf — the `FrameOk` WINDOW read at
+    `st.sp + j` over the callee's frame stores. That is `fib`'s gap one shape
+    over, so the markers say so and `fib`'s entry names the fix.
+
+    Lean-free: it reads `test_formal.py`'s table and the generated TEXT, and it
+    asserts the two things that make a marker honest in both directions — the
+    stem is marked, and the marker is not naming a GENERATION refusal (a stem
+    that stopped generating would be a different gap).
+    """
+
+    STEMS = ("fact", "sum", "sqsum")
+
+    def test_all_three_are_marked_with_a_reason(self):
+        import test_formal as T
+        for stem in self.STEMS:
+            self.assertIn(stem, T.EXPECTED_FAILURES,
+                          "%s is an UNMARKED failure of the `formal` job again: "
+                          "the next session reads the marker list, does not "
+                          "find it, and re-derives this" % stem)
+            self.assertTrue(T.EXPECTED_FAILURES[stem].strip(),
+                            "%s is marked with an empty reason, which is a "
+                            "silenced test rather than a declared gap" % stem)
+
+    def test_all_three_still_generate_a_proof(self):
+        tmp = tempfile.mkdtemp(prefix="framewin-")
+        try:
+            for stem in self.STEMS:
+                src = os.path.join(HERE, "formal", "examples", stem + ".mojo")
+                with open(src) as f:
+                    text = f.read()
+                path, err = _generate(tmp, text, stem)
+                self.assertIsNone(
+                    err, "%s generates no proof, so the marker names a "
+                         "GENERATION refusal and not the window read it "
+                         "states: %s" % (stem, err))
+                with open(path) as f:
+                    proof = f.read()
+                self.assertIn(
+                    "_compiles_correctly_universal", proof,
+                    "%s generated a file with no end-to-end theorem in it, so "
+                    "the marker is measuring something else" % stem)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestBottomTestedRangeLoop(unittest.TestCase):
     """A `for … in range(…)` loop, whose back edge is a CONDITIONAL branch.
 

@@ -251,6 +251,35 @@ EXPECTED_FAILURES = {
             "materialised by adrp/add, so the read is at a literal rather than "
             "at sp - K and the slot peel cannot match it",
 
+    # `fact`, `sum` and `sqsum` are the other three members of the dec1
+    # recursion family, and they were UNDECLARED reds of the `formal` job until
+    # 2026-10-12: nothing in either table named them, so a whole-corpus run
+    # reported three of the corpus's recursive examples as FAILURES with no
+    # document anywhere saying why.  That is `known_proof_gaps`' own argument --
+    # a gap outside this table is a failure -- and this is the entry it asks
+    # for.
+    #
+    # **What they hit is NOT what that doc recorded.**  It said they failed on
+    # the dec1 return frame's x30 read, which is `count`/`pow2`'s entry above.
+    # Measured on this tree (one Lean run each, through
+    # `formal.build.compile_formal(prove=True, check=True)`): all three GENERATE
+    # a proof carrying `_compiles_correctly_universal`, and Lean rejects it at
+    # `rfl` inside the `runs-ret-frame-ok-window` leaf -- the `FrameOk` WINDOW
+    # read at `st.sp + j`, whose left-hand side is a chain of the callee's frame
+    # stores that `rfl` cannot see through (`mem_read_u64 (… (st.sp + j) …)
+    # (st.sp + j)` is not definitionally equal to `mem_read_u64 st.mem
+    # (st.sp + j)`).  That is `fib`'s gap one shape over, and `fib`'s entry above
+    # names the fix.
+    "fact": "tree recursion whose FrameOk WINDOW read at `st.sp + j` sits over "
+            "the callee's frame stores, so `rfl` cannot see through the chain "
+            "(measured `fact_proof.lean:4858:16`, leaf "
+            "`runs-ret-frame-ok-window`) -- `fib`'s gap, and the fix is teaching "
+            "`mem_read_write_below` the split form",
+    "sum": "the same FrameOk window read as `fact`, on the sum example "
+           "(measured `sum_proof.lean:4858:16`)",
+    "sqsum": "the same FrameOk window read as `fact`, on the sum-of-squares "
+             "example (measured `sqsum_proof.lean:5227:16`)",
+
     # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
     #
     # `formal/examples` grew from 52 programs to 96 and every one of these is a

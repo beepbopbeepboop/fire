@@ -8,6 +8,34 @@ had gone stale in three separate ways, and a census that is stale in the
 direction of "more broken than it says" is as wrong as one that is stale the
 other way.**
 
+**Status 2026-10-12 (`work/formal278-docs`): the three UNDECLARED reds this
+file's own argument is about are DECLARED, and the obligation they fail is NOT
+the one the 2026-10-04 census recorded for them.** `fact`, `sum` and `sqsum` are
+now in `test_formal.py::EXPECTED_FAILURES`, with the measured sites
+(`fact_proof.lean:4858:16`, `sum_proof.lean:4858:16`, `sqsum_proof.lean:5227:16`),
+so the `formal` job reports them as `KNOWN-GAP` rather than as FAILURES, and
+`test_formal_call_proof_gen.py::TestTheFrameOkWindowExamplesAreDeclared` pins
+both directions — the stems are marked, and they still GENERATE a proof (a
+generation refusal would be a different gap).
+
+**The correction to the census, measured one Lean run at a time on this tree:**
+all five dec1 examples (`count`, `pow2`, `fact`, `sum`, `sqsum`) GENERATE a
+proof carrying `_compiles_correctly_universal` — the 2026-10-07 note in
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` that they REFUSE at generation
+is itself stale — and the three this file called undeclared fail at `rfl` inside
+the `runs-ret-frame-ok-window` leaf: the `FrameOk` WINDOW read at `st.sp + j`,
+whose left-hand side is a chain of the callee's frame stores `rfl` cannot see
+through. That is `fib`'s gap one shape over, and NOT the return frame's x30 read.
+`count`/`pow2` keep their x30-read entry; the family is two obligations, not one,
+and the three markers say which.
+
+**And the corpus has nearly doubled.** `formal/examples` is 93 programs, not the
+52 these sections were written against, and the census authority is now
+`test_formal.py::EXPECTED_FAILURES` together with `tools/formal_proof_census.py`
+(the committed baseline), not a hand table here. The sections below are kept for
+their measurements and their owners; their numbers are 2026-10-04/05 figures and
+must be re-measured before they are quoted.
+
 **Measured, `python3 test_formal.py -j 1 <stem>`, one at a time (each is a
 150-300 s Lean run, which is why this is a sample of the corpus and not all of
 it — the full sweep is a heavy run and belongs to the integrator):**
