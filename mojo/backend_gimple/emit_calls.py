@@ -3830,12 +3830,49 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
                           ('int', '1' if reverse else '0')])
     if elem and elem != 'int64_t':
         gen._elem_types[res] = elem
+    # sorted() only reorders: the pair shape of a `d.items()` list and the
+    # slot types of a list of tuples ride along, so `for k, v in sorted(
+    # d.items(), key=...)` unpacks with the same accessors `for k, v in
+    # d.items()` does.
+    if av in gen._dict_items_val_elems:
+        gen._dict_items_val_elems[res] = gen._dict_items_val_elems[av]
+    if av in gen._nested_elem_types:
+        gen._nested_elem_types[res] = gen._nested_elem_types[av]
     return 'MojoList *', res
 
 
 def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
                         keyed: bool = True) -> tuple[str, str]:
     arg0 = node.args[0]
+    # `key=` / `reverse=` — real Python ordering options this lowering used
+    # to drop on the floor: `sorted([1, 3, 2], key=lambda v: -v)` sorted
+    # ASCENDING (silently wrong) and `reverse=True` did nothing. The C++20
+    # companion path implements both, so the same source also sorted
+    # differently depending on which backend handled it.
+    kwargs = getattr(node, 'kwargs', []) or []
+    key_expr = None
+    reverse = False
+    for _k, _v in kwargs:
+        if _k == 'key':
+            key_expr = _v
+        elif _k == 'reverse':
+            # `reverse=<anything truthy>`; only a literal False/0 is
+            # statically decidable, and anything else is treated as True
+            # (the Python truthiness rule for a flag argument).
+            if isinstance(_v, gimple_ctypes.BoolLiteral) and not _v.value:
+                reverse = False
+            elif isinstance(_v, gimple_ctypes.IntLiteral) and _v.value == 0:
+                reverse = False
+            else:
+                reverse = True
+    # Ahead of the `.items()` fast path below, which sorts by the dict KEY and
+    # nothing else: it used to run first and drop `key=`/`reverse=` on the
+    # floor, so `sorted(d.items(), key=lambda kv: kv[1])` ordered by key --
+    # the self-hosted compiler's own string-pool registration
+    # (`module_gen`, sorted by pool NAME) came out in dict-key order and every
+    # stage2 `.ci` differed from stage1's in that constructor.
+    if keyed and (key_expr is not None or reverse):
+        return _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse)
     # sorted(dict.items()) — a list of (key, value) tuples sorted by key.
     # Without this, mojo_sorted's int64-payload sort orders the tuple
     # POINTERS, a non-deterministic order that diverges from Python (this
@@ -3863,29 +3900,6 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
                 _siv = gen._field_dict_val_types.get(_fsn, {}).get(arg0.func.obj.member)
         gen._dict_items_val_elems[t] = _siv or 'int64_t'
         return 'MojoList *', t
-    # `key=` / `reverse=` — real Python ordering options this lowering used
-    # to drop on the floor: `sorted([1, 3, 2], key=lambda v: -v)` sorted
-    # ASCENDING (silently wrong) and `reverse=True` did nothing. The C++20
-    # companion path implements both, so the same source also sorted
-    # differently depending on which backend handled it.
-    kwargs = getattr(node, 'kwargs', []) or []
-    key_expr = None
-    reverse = False
-    for _k, _v in kwargs:
-        if _k == 'key':
-            key_expr = _v
-        elif _k == 'reverse':
-            # `reverse=<anything truthy>`; only a literal False/0 is
-            # statically decidable, and anything else is treated as True
-            # (the Python truthiness rule for a flag argument).
-            if isinstance(_v, gimple_ctypes.BoolLiteral) and not _v.value:
-                reverse = False
-            elif isinstance(_v, gimple_ctypes.IntLiteral) and _v.value == 0:
-                reverse = False
-            else:
-                reverse = True
-    if keyed and (key_expr is not None or reverse):
-        return _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse)
 
     at, av = gen.lower_expr(arg0)
     for a in node.args[1:]: gen.lower_expr(a)
@@ -5301,76 +5315,26 @@ def _lower_LambdaExpr(gen, node) -> tuple:
             param_ctypes.append('int64_t')
     gen.func_param_types[lifted_name] = param_ctypes
 
-    # Generate the lifted function body and queue for emission
-    # Save/restore per-function state around the nested codegen
-    saved_decls          = gen.decls
-    saved_body           = gen.body_lines
-    saved_var_types      = dict(gen.var_types)
-    # `_c_names` is the ONE entry in `_reset_func`'s per-function list whose
-    # keys are not temp names, so dropping it is not the "safe direction" that
-    # list's own comment promises. It is the source-level-name → C-identifier
-    # map, and an entry in it exists only because some local SHADOWED
-    # something: a C keyword, a macro, a libc function (`close`), a struct
-    # typedef. Losing the map does not lose a temp, it changes the SPELLING of
-    # the enclosing function's own already-declared local — and every later
-    # reference falls back to the raw Python name, which is either a different
-    # variable or nothing at all.
+    # Generate the lifted function body and queue for emission.
     #
-    # Real: `elab_intu._mentions` declares `close = _matching_bracket(ann,
-    # open_at)` (so `_declare_var` mints `int64_t _var_close;` and records the
-    # rename), then a lambda — `found.sort(key=lambda t: t[3] - t[1])` — runs
-    # `_reset_func` in the middle of the parent, and the SECOND
-    # `for base, bs, open_at, close in found:` unpack then wrote the raw
-    # spelling into a C variable nothing declares:
-    #
-    #     error: 'close' undeclared (first use in this function);
-    #            did you mean 'pclose'?
-    #
-    # `base`, `bs` and `open_at` in that same unpack were declared normally and
-    # gcc reported only `close`, which is what makes this one name's history
-    # rather than the unpack's. This is the same defect
-    # `_callable_ret_types`/`_dict_callable_ret` below were saved for, and the
-    # same discipline: `_reset_func`'s list and this list have to agree, name
-    # for name, or a nested lift silently changes the parent's meaning.
-    saved_c_names        = dict(gen._c_names)
-    # The callable-value knowledge the ENCLOSING function has built up, for
-    # the same reason and with the same shape as the state saved just below:
-    # `_gen_lifted_closure` calls `_reset_func` to generate the lambda's own
-    # body, and `_reset_func` clears these maps because their keys are temp
-    # names that recycle across functions. So lifting a lambda erased the
-    # enclosing function's record of what it had already stored —
-    # `d['k'] = lambda: False; d['j'] = lambda: 1; print(d['j']())` then saw
-    # an EMPTY set and the wrong answer for both. Restored below with the
-    # rest of it.
-    saved_callable_rets  = gen._callable_ret_types
-    saved_dict_callable  = gen._container_callable_ret
+    # `_gen_lifted_closure` runs `_reset_func` for the lambda's own body, IN
+    # THE MIDDLE of the enclosing function, so every per-function table is
+    # the parent's and must come back intact: the C body and its counters,
+    # `var_types`, `_c_names` (a shadowed C keyword's rename -- losing it
+    # changed the SPELLING of the parent's own local, `elab_intu._mentions`'s
+    # `close`), the callable-value maps (`d['j'] = lambda: 1` then
+    # `d['j']()`), the container element/pair tables (`sorted(d.items(),
+    # key=lambda kv: kv[1])` lost the pair record of the list it sorted), ...
+    # This was a hand-kept list of ~20 names that had to agree "name for name"
+    # with `_reset_func`'s ~70 and did not. `save_func_state` is generated
+    # from `_reset_func`'s own list, and test_gimple.py holds the two together.
+    _parent_state = ginf.save_func_state(gen)
+    saved_closure_envs = dict(gen._closure_envs)
+    # The lambda body starts with no callable-value knowledge of its own
+    # (`_reset_func` would empty these too; done here, ahead of the env
+    # computation below, which must not see the parent's).
     gen._callable_ret_types = {}
     gen._container_callable_ret = {}
-    saved_func_name      = gen.current_func_name
-    saved_ret_type       = gen.func_ret_type
-    saved_bb             = gen.bb_counter
-    saved_temp           = gen.temp_counter
-    saved_captures       = dict(gen._captures)
-    saved_env            = gen._env_param
-    saved_inner          = gen._inner_func_name
-    saved_loop_stack     = list(gen.loop_stack)
-    saved_loop_depth     = gen._loop_depth
-    saved_closure_envs   = dict(gen._closure_envs)
-    saved_func_decl_glob = set(gen._func_declared_globals)
-    saved_func_decl_nonlocal = set(gen._func_declared_nonlocals)
-    # `_gen_lifted_closure` -> `_reset_func` OVERWRITES these with the lifted
-    # body's own statement list and parameter set, and this function restored
-    # every other piece of per-function state around the lift without them —
-    # so after the first `f = lambda ...` in a function, every LATER
-    # statement in that function was analysed against the LAMBDA's body
-    # instead of the function's. `lambdareduce`'s escape / candidate /
-    # bound-local scans all answer from `gen._cur_func_body`, so a second
-    # lambda in the same function was never recognised as one: its
-    # `_bound_local` stamp was not written, it was not beta-reduced at its
-    # call site, and the enclosing function's own later statements were
-    # judged for escape against the wrong node list.
-    saved_cur_body        = gen._cur_func_body
-    saved_cur_params      = gen._cur_func_params
 
     # Expose outer closure info so the lambda body can resolve calls to parent
     # nested functions (e.g. compile_one_object) via their lifted C names with
@@ -5478,26 +5442,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                 gen._elaborated_externs.append(_env_hd)
                 gen._elaborated_externs.append('')
 
-    gen.decls                   = saved_decls
-    gen.body_lines              = saved_body
-    gen._callable_ret_types     = saved_callable_rets
-    gen._container_callable_ret      = saved_dict_callable
-    gen.var_types               = saved_var_types
-    gen._c_names                = saved_c_names
-    gen.current_func_name       = saved_func_name
-    gen.func_ret_type           = saved_ret_type
-    gen.bb_counter              = saved_bb
-    gen.temp_counter            = saved_temp
-    gen._captures               = saved_captures
-    gen._env_param              = saved_env
-    gen._inner_func_name        = saved_inner
-    gen.loop_stack              = saved_loop_stack
-    gen._loop_depth             = saved_loop_depth
-    gen._closure_envs           = saved_closure_envs
-    gen._func_declared_globals  = saved_func_decl_glob
-    gen._func_declared_nonlocals = saved_func_decl_nonlocal
-    gen._cur_func_body           = saved_cur_body
-    gen._cur_func_params         = saved_cur_params
+    ginf.restore_func_state(gen, _parent_state)
 
     gen._lambda_parts.append(body_code)
     gen._lambda_parts.append('')

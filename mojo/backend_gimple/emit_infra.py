@@ -747,6 +747,305 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._in_toplevel_gen: bool          = False
 
 
+# ── Per-function state snapshot ─────────────────────────────────────────────
+#
+# `_reset_func` owns every table that is "per FUNCTION" -- the C body being
+# built, the temp/bb counters and every table keyed by a temp or local name.
+# A lambda is lifted in the MIDDLE of its enclosing function
+# (`_lower_LambdaExpr` -> `_gen_lifted_closure` -> `_reset_func`), so all of
+# that state is the parent's and has to come back intact afterwards. That used
+# to be an ad-hoc list of ~20 fields in `_lower_LambdaExpr`; the other ~50 were
+# silently lost, and whichever the parent read next went wrong. The measured
+# case: `sorted(d.items(), key=lambda kv: kv[1])` lost the `.items()` pair
+# record (`_dict_items_val_elems`) of the list it was sorting, so the
+# `for k, v in ...` that consumed it read both slots as integers.
+#
+# ONE snapshot of exactly the fields `_reset_func` resets, and `test_gimple.py`
+# checks the two cannot drift: a field added to `_reset_func` and not here
+# fails that check rather than corrupting the parent of the next lambda.
+# Fields `_reset_func` empties IN PLACE (`.clear()` rather than a rebind; see
+# its notes on the self-hosted leak) are kept as the object AND a copy of its
+# contents (`*_items`), because the in-place clear would otherwise empty the
+# snapshot too.
+class FuncState:
+    """Everything `_reset_func` resets, captured by `save_func_state`."""
+    def __init__(self):
+        self.fs_cur_func_body: list = []
+        self.fs_cur_func_params: set = set()
+        self.fsbb_counter: int = 0
+        self.fstemp_counter: int = 0
+        self.fs_fresh_vals: set = set()
+        self.fs_fresh_str_tmps: set = set()
+        self.fs_boxed_vals: set = set()
+        self.fs_func_value_names: dict = {}
+        self.fsdecls: list = []
+        self.fsbody_lines: list = []
+        self.fsvar_types: dict = {}
+        self.fs_callable_param_gen_api: dict = {}
+        self.fs_callable_param_ret_types: dict = {}
+        self.fs_gimple_mut_ptr: dict = {}
+        self.fs_boxed_mut_locals: dict = {}
+        self.fs_mut_boxed_param_c: dict = {}
+        self.fs_addressed_locals: set = set()
+        self.fs_tagged_gen_tuple_locals: set = set()
+        self.fs_tagged_dyn_src: dict = {}
+        self.fs_tagged_dyn_vals: dict = {}
+        self.fs_owned_str_elem_vals: set = set()
+        self.fs_owned_str_elem_names: set = set()
+        self.fs_closure_vals: set = set()
+        self.fs_owned_closure_names: set = set()
+        self.fs_owned_env_names: set = set()
+        self.fs_maybe_kinds_vals: set = set()
+        self.fsloop_stack: list = []
+        self.fsexc_depth: int = 0
+        self.fs_try_loop_protect: list = []
+        self.fs_try_finally_bodies: list = []
+        self.fs_func_used_setjmp: bool = False
+        self.fsfunc_ret_type: str = ''
+        self.fs_last_was_terminal: bool = False
+        self.fs_elem_types: dict = {}
+        self.fs_nested_elem_types: dict = {}
+        self.fs_dict_items_val_elems: dict = {}
+        self.fs_dict_items_int_keys: set = set()
+        self.fs_dict_item_int_key_vars: set = set()
+        self.fs_int_key_loop_vars: set = set()
+        self.fs_tuple_slot_types: dict = {}
+        self.fs_dict_item_pair_vars: dict = {}
+        self.fs_list_iter_cursor: dict = {}
+        self.fs_boxed_container_vals: set = set()
+        self.fs_span_mut_params: dict = {}
+        self.fs_actual_types: dict = {}
+        self.fs_narrowed_exprs: dict = {}
+        self.fs_param_struct_types: dict = {}
+        self.fs_bound_method_ret_types: dict = {}
+        self.fs_callable_ret_types: dict = {}
+        self.fs_container_callable_ret: dict = {}
+        self.fs_builtin_method_values: dict = {}
+        self.fs_bm_tainted_locals: set = set()
+        self.fs_mixed_container_locals: object = None
+        self.fs_dict_val_types: dict = {}
+        self.fs_dict_nested_val_types: dict = {}
+        self.fs_struct_layout: dict = {}
+        self.fs_layout_hint: str = ''
+        self.fscurrent_func_name: str = ''
+        self.fs_loop_depth: int = 0
+        self.fs_captures: dict = {}
+        self.fs_env_param: str = ''
+        self.fs_closure_envs: dict = {}
+        self.fs_inner_func_name: str = ''
+        self.fs_c_names: dict = {}
+        self.fs_except_as_names: set = set()
+        self.fs_func_declared_globals: set = set()
+        self.fs_func_declared_nonlocals: set = set()
+        self.fs_in_toplevel_gen: bool = False
+        self.fs_cstr_key_src: dict = {}
+        self.fs_kw_key_src: dict = {}
+        self.fs_int_word_vals: set = set()
+        self.fs_struct_field_owners: dict = {}
+        self.fs_cstr_key_src_items: dict = {}
+        self.fs_kw_key_src_items: dict = {}
+        self.fs_int_word_vals_items: set = set()
+        self.fs_fresh_vals_items: set = set()
+        self.fs_boxed_vals_items: set = set()
+        self.fs_func_value_names_items: dict = {}
+        self.fs_fresh_str_tmps_items: set = set()
+        self.fs_struct_field_owners_items: dict = {}
+
+
+def save_func_state(gen) -> FuncState:
+    """Snapshot the per-function state (see `FuncState`)."""
+    st = FuncState()
+    st.fs_cur_func_body = gen._cur_func_body
+    st.fs_cur_func_params = gen._cur_func_params
+    st.fsbb_counter = gen.bb_counter
+    st.fstemp_counter = gen.temp_counter
+    st.fs_fresh_vals = gen._fresh_vals
+    st.fs_fresh_str_tmps = gen._fresh_str_tmps
+    st.fs_boxed_vals = gen._boxed_vals
+    st.fs_func_value_names = gen._func_value_names
+    st.fsdecls = gen.decls
+    st.fsbody_lines = gen.body_lines
+    st.fsvar_types = gen.var_types
+    st.fs_callable_param_gen_api = gen._callable_param_gen_api
+    st.fs_callable_param_ret_types = gen._callable_param_ret_types
+    st.fs_gimple_mut_ptr = gen._gimple_mut_ptr
+    st.fs_boxed_mut_locals = gen._boxed_mut_locals
+    st.fs_mut_boxed_param_c = gen._mut_boxed_param_c
+    st.fs_addressed_locals = gen._addressed_locals
+    st.fs_tagged_gen_tuple_locals = gen._tagged_gen_tuple_locals
+    st.fs_tagged_dyn_src = gen._tagged_dyn_src
+    st.fs_tagged_dyn_vals = gen._tagged_dyn_vals
+    st.fs_owned_str_elem_vals = gen._owned_str_elem_vals
+    st.fs_owned_str_elem_names = gen._owned_str_elem_names
+    st.fs_closure_vals = gen._closure_vals
+    st.fs_owned_closure_names = gen._owned_closure_names
+    st.fs_owned_env_names = gen._owned_env_names
+    st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
+    st.fsloop_stack = gen.loop_stack
+    st.fsexc_depth = gen.exc_depth
+    st.fs_try_loop_protect = gen._try_loop_protect
+    st.fs_try_finally_bodies = gen._try_finally_bodies
+    st.fs_func_used_setjmp = gen._func_used_setjmp
+    st.fsfunc_ret_type = gen.func_ret_type
+    st.fs_last_was_terminal = gen._last_was_terminal
+    st.fs_elem_types = gen._elem_types
+    st.fs_nested_elem_types = gen._nested_elem_types
+    st.fs_dict_items_val_elems = gen._dict_items_val_elems
+    st.fs_dict_items_int_keys = gen._dict_items_int_keys
+    st.fs_dict_item_int_key_vars = gen._dict_item_int_key_vars
+    st.fs_int_key_loop_vars = gen._int_key_loop_vars
+    st.fs_tuple_slot_types = gen._tuple_slot_types
+    st.fs_dict_item_pair_vars = gen._dict_item_pair_vars
+    st.fs_list_iter_cursor = gen._list_iter_cursor
+    st.fs_boxed_container_vals = gen._boxed_container_vals
+    st.fs_span_mut_params = gen._span_mut_params
+    st.fs_actual_types = gen._actual_types
+    st.fs_narrowed_exprs = gen._narrowed_exprs
+    st.fs_param_struct_types = gen._param_struct_types
+    st.fs_bound_method_ret_types = gen._bound_method_ret_types
+    st.fs_callable_ret_types = gen._callable_ret_types
+    st.fs_container_callable_ret = gen._container_callable_ret
+    st.fs_builtin_method_values = gen._builtin_method_values
+    st.fs_bm_tainted_locals = gen._bm_tainted_locals
+    st.fs_mixed_container_locals = gen._mixed_container_locals
+    st.fs_dict_val_types = gen._dict_val_types
+    st.fs_dict_nested_val_types = gen._dict_nested_val_types
+    st.fs_struct_layout = gen._struct_layout
+    st.fs_layout_hint = gen._layout_hint
+    st.fscurrent_func_name = gen.current_func_name
+    st.fs_loop_depth = gen._loop_depth
+    st.fs_captures = gen._captures
+    st.fs_env_param = gen._env_param
+    st.fs_closure_envs = gen._closure_envs
+    st.fs_inner_func_name = gen._inner_func_name
+    st.fs_c_names = gen._c_names
+    st.fs_except_as_names = gen._except_as_names
+    st.fs_func_declared_globals = gen._func_declared_globals
+    st.fs_func_declared_nonlocals = gen._func_declared_nonlocals
+    st.fs_in_toplevel_gen = gen._in_toplevel_gen
+    st.fs_cstr_key_src = gen._cstr_key_src
+    for _k in gen._cstr_key_src:
+        st.fs_cstr_key_src_items[_k] = gen._cstr_key_src[_k]
+    st.fs_kw_key_src = gen._kw_key_src
+    for _k in gen._kw_key_src:
+        st.fs_kw_key_src_items[_k] = gen._kw_key_src[_k]
+    st.fs_int_word_vals = gen._int_word_vals
+    for _k in gen._int_word_vals:
+        st.fs_int_word_vals_items.add(_k)
+    for _k in gen._fresh_vals:
+        st.fs_fresh_vals_items.add(_k)
+    for _k in gen._boxed_vals:
+        st.fs_boxed_vals_items.add(_k)
+    for _k in gen._func_value_names:
+        st.fs_func_value_names_items[_k] = gen._func_value_names[_k]
+    for _k in gen._fresh_str_tmps:
+        st.fs_fresh_str_tmps_items.add(_k)
+    st.fs_struct_field_owners = gen._struct_field_owners
+    for _k in gen._struct_field_owners:
+        st.fs_struct_field_owners_items[_k] = gen._struct_field_owners[_k]
+    return st
+
+
+def restore_func_state(gen, st: FuncState) -> None:
+    """Put back what `save_func_state` captured."""
+    gen._cur_func_body = st.fs_cur_func_body
+    gen._cur_func_params = st.fs_cur_func_params
+    gen.bb_counter = st.fsbb_counter
+    gen.temp_counter = st.fstemp_counter
+    gen._fresh_vals = st.fs_fresh_vals
+    gen._fresh_str_tmps = st.fs_fresh_str_tmps
+    gen._boxed_vals = st.fs_boxed_vals
+    gen._func_value_names = st.fs_func_value_names
+    gen.decls = st.fsdecls
+    gen.body_lines = st.fsbody_lines
+    gen.var_types = st.fsvar_types
+    gen._callable_param_gen_api = st.fs_callable_param_gen_api
+    gen._callable_param_ret_types = st.fs_callable_param_ret_types
+    gen._gimple_mut_ptr = st.fs_gimple_mut_ptr
+    gen._boxed_mut_locals = st.fs_boxed_mut_locals
+    gen._mut_boxed_param_c = st.fs_mut_boxed_param_c
+    gen._addressed_locals = st.fs_addressed_locals
+    gen._tagged_gen_tuple_locals = st.fs_tagged_gen_tuple_locals
+    gen._tagged_dyn_src = st.fs_tagged_dyn_src
+    gen._tagged_dyn_vals = st.fs_tagged_dyn_vals
+    gen._owned_str_elem_vals = st.fs_owned_str_elem_vals
+    gen._owned_str_elem_names = st.fs_owned_str_elem_names
+    gen._closure_vals = st.fs_closure_vals
+    gen._owned_closure_names = st.fs_owned_closure_names
+    gen._owned_env_names = st.fs_owned_env_names
+    gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
+    gen.loop_stack = st.fsloop_stack
+    gen.exc_depth = st.fsexc_depth
+    gen._try_loop_protect = st.fs_try_loop_protect
+    gen._try_finally_bodies = st.fs_try_finally_bodies
+    gen._func_used_setjmp = st.fs_func_used_setjmp
+    gen.func_ret_type = st.fsfunc_ret_type
+    gen._last_was_terminal = st.fs_last_was_terminal
+    gen._elem_types = st.fs_elem_types
+    gen._nested_elem_types = st.fs_nested_elem_types
+    gen._dict_items_val_elems = st.fs_dict_items_val_elems
+    gen._dict_items_int_keys = st.fs_dict_items_int_keys
+    gen._dict_item_int_key_vars = st.fs_dict_item_int_key_vars
+    gen._int_key_loop_vars = st.fs_int_key_loop_vars
+    gen._tuple_slot_types = st.fs_tuple_slot_types
+    gen._dict_item_pair_vars = st.fs_dict_item_pair_vars
+    gen._list_iter_cursor = st.fs_list_iter_cursor
+    gen._boxed_container_vals = st.fs_boxed_container_vals
+    gen._span_mut_params = st.fs_span_mut_params
+    gen._actual_types = st.fs_actual_types
+    gen._narrowed_exprs = st.fs_narrowed_exprs
+    gen._param_struct_types = st.fs_param_struct_types
+    gen._bound_method_ret_types = st.fs_bound_method_ret_types
+    gen._callable_ret_types = st.fs_callable_ret_types
+    gen._container_callable_ret = st.fs_container_callable_ret
+    gen._builtin_method_values = st.fs_builtin_method_values
+    gen._bm_tainted_locals = st.fs_bm_tainted_locals
+    gen._mixed_container_locals = st.fs_mixed_container_locals
+    gen._dict_val_types = st.fs_dict_val_types
+    gen._dict_nested_val_types = st.fs_dict_nested_val_types
+    gen._struct_layout = st.fs_struct_layout
+    gen._layout_hint = st.fs_layout_hint
+    gen.current_func_name = st.fscurrent_func_name
+    gen._loop_depth = st.fs_loop_depth
+    gen._captures = st.fs_captures
+    gen._env_param = st.fs_env_param
+    gen._closure_envs = st.fs_closure_envs
+    gen._inner_func_name = st.fs_inner_func_name
+    gen._c_names = st.fs_c_names
+    gen._except_as_names = st.fs_except_as_names
+    gen._func_declared_globals = st.fs_func_declared_globals
+    gen._func_declared_nonlocals = st.fs_func_declared_nonlocals
+    gen._in_toplevel_gen = st.fs_in_toplevel_gen
+    gen._cstr_key_src = st.fs_cstr_key_src
+    gen._cstr_key_src.clear()
+    for _k in st.fs_cstr_key_src_items:
+        gen._cstr_key_src[_k] = st.fs_cstr_key_src_items[_k]
+    gen._kw_key_src = st.fs_kw_key_src
+    gen._kw_key_src.clear()
+    for _k in st.fs_kw_key_src_items:
+        gen._kw_key_src[_k] = st.fs_kw_key_src_items[_k]
+    gen._int_word_vals = st.fs_int_word_vals
+    gen._int_word_vals.clear()
+    for _k in st.fs_int_word_vals_items:
+        gen._int_word_vals.add(_k)
+    gen._fresh_vals.clear()
+    for _k in st.fs_fresh_vals_items:
+        gen._fresh_vals.add(_k)
+    gen._boxed_vals.clear()
+    for _k in st.fs_boxed_vals_items:
+        gen._boxed_vals.add(_k)
+    gen._func_value_names.clear()
+    for _k in st.fs_func_value_names_items:
+        gen._func_value_names[_k] = st.fs_func_value_names_items[_k]
+    gen._fresh_str_tmps.clear()
+    for _k in st.fs_fresh_str_tmps_items:
+        gen._fresh_str_tmps.add(_k)
+    gen._struct_field_owners = st.fs_struct_field_owners
+    gen._struct_field_owners.clear()
+    for _k in st.fs_struct_field_owners_items:
+        gen._struct_field_owners[_k] = st.fs_struct_field_owners_items[_k]
+
+
 def _record_sys_path_inserts(gen, source: str, base_dir: str = None) -> None:
     """Statically scan `source` for literal sys.path.insert(N, "...") calls
     and remember each target directory in self._extra_search_paths (highest
