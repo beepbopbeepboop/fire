@@ -676,14 +676,20 @@ def _x_mem_pair(window, ctx):
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
-    if a.form == "mov_rm64_r64" and b.form == "mov_rm64_r64":
-        if (a.mem_base, a.mem_disp, a.rm) == (b.mem_base, b.mem_disp, b.rm):
+    da, db = a.dec, b.dec
+    if da is None or db is None:
+        return None
+    if da.form == "mov_rm64_r64" and db.form == "mov_rm64_r64":
+        if (da.mem_base, da.mem_disp, da.rm) == (db.mem_base, db.mem_disp,
+                                                db.rm):
             return b"", 1
-    if a.form == "mov_rm64_imm32" and b.form == "mov_rm64_imm32":
-        if (a.mem_base, a.mem_disp, a.imm) == (b.mem_base, b.mem_disp, b.imm):
+    if da.form == "mov_rm64_imm32" and db.form == "mov_rm64_imm32":
+        if (da.mem_base, da.mem_disp, da.imm) == (db.mem_base, db.mem_disp,
+                                                  db.imm):
             return b"", 1
-    if a.form == "mov_r64_rm64" and b.form == "mov_r64_rm64":
-        if (a.reg, a.mem_base, a.mem_disp) == (b.reg, b.mem_base, b.mem_disp):
+    if da.form == "mov_r64_rm64" and db.form == "mov_r64_rm64":
+        if (da.reg, da.mem_base, da.mem_disp) == (db.reg, db.mem_base,
+                                                  db.mem_disp):
             return b"", 1
     return None
 
@@ -693,21 +699,45 @@ def _x_store_load(window, ctx):
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
-    if a.form != "mov_rm64_r64" or b.form != "mov_r64_rm64":
+    da, db = a.dec, b.dec
+    if da is None or db is None:
         return None
-    if (a.rm, a.mem_base, a.mem_disp) != (b.reg, b.mem_base, b.mem_disp):
+    if da.form != "mov_rm64_r64" or db.form != "mov_r64_rm64":
+        return None
+    if (da.rm, da.mem_base, da.mem_disp) != (db.reg, db.mem_base,
+                                             db.mem_disp):
         return None
     return b"", 1
 
 
 def _x_mov_self(window, ctx):
-    """`mov r, r` — a register copied into itself."""
+    """`mov r, r` — a register copied into itself (REX.W `89 /r`, mod=3).
+
+    The form `mov_rm64_r64` and the fields read comes from the ENTRY's decoded
+    instruction (`a.dec`), which is where every other x86 matcher must read
+    them too — an x86 `Entry` does not carry the fields the arm64 ones sit on
+    (`a.form`/`a.reg`/`a.rm`), and reading them off the entry would be an
+    `AttributeError` on the first match. The opcode `0x89` (store direction)
+    is the one the emitters produce and the only 0x89-encoded self-copy with a
+    theorem: the `0x8b` spelling (`mov r, r/m`, `48 8b c0`) would need its own
+    `peephole_x86_mov_self_rev`, and the decoder only ever sees the `89` form
+    here — the four observed self-moves across the 93 examples are all
+    `48 89 c0`. The theorem's side conditions discharge one-for-one: `h_mod`
+    is `d.mod = 3` (a register operand, so the "write" cannot be a store with
+    an addressing side effect), and the REX-extended `reg == rm` is exactly
+    `h_same`'s `rm + x86_rex_b rex = reg + x86_rex_r rex` (`rm`/`reg` here are
+    the decoder's extended 0-15 indices, and each extended index equals its
+    raw 0-7 field plus its REX extension bit). `(b"", 1)` CONSUMES the
+    instruction — a deletion returning `(b"", 0)` removes nothing and makes
+    the pass spin on a window that never shrinks (`_a_mov_self` returns
+    `(b"", 1)` for the same reason)."""
     if len(window) < 1:
         return None
     a = window[0]
-    if a.form == "mov_r64_rm64" and a.reg == a.rm and a.mem_base is None:
-        return b"", 0
-    return None
+    d = a.dec
+    if d is None or d.form != "mov_rm64_r64" or d.mod != 3 or d.reg != d.rm:
+        return None
+    return b"", 1
 
 
 def _x_imm_zero(window, ctx):
@@ -727,24 +757,28 @@ def _x_imm_zero(window, ctx):
     if len(window) < 1:
         return None
     a = window[0]
-    if a.form not in ("alu_ri32:add", "alu_ri32:sub") or a.imm != 0:
+    d = a.dec
+    if d is None or d.form not in ("alu_ri32:add", "alu_ri32:sub") or \
+            d.imm != 0:
         return None
-    if a.op & 0x04:                 # the direction bit: a memory operand
+    if d.mod != 3:          # a memory operand — the instruction is a store
         return None
     if not ctx.flags_dead_after(a.index + 1):
         return None
-    return b"", 0
+    return b"", 1
 
 
-#: No x86-64 rule is enabled yet, and that is a fact about the PROOFS rather
-#: than about the decoder: `x86_step`'s arms for the forms these rules need
-#: (`mov r/m, r`, `mov r, r/m`, `alu r/m, imm32`) sit below about thirty other
-#: tests, and each rule's Lean theorem has to discharge every one of them before
-#: it can say the form is the one it rewrites. `bugs/FORMAL_peephole_rules_without_proofs.md`
-#: records the measurement and the exact lemma each one is waiting on, which is
-#: why this is a comment on an empty table rather than a rule with a `sorry`
-#: beside it.
-X86_RULES: list = []
+#: Every x86-64 rule the pass may run, each one naming its theorem in
+#: `lib/Peephole.lean`. `x86_64/mov_self` is the one measured by the bug doc
+#: and the only one with a theorem that discharges its whole window; the rest
+#: of the table's candidates are recorded (with the exact lemma each is
+#: waiting on) in `bugs/FORMAL_peephole_rules_without_proofs.md` §3.
+X86_RULES: list = [
+    Rule("x86_64/mov_self", "x86_64", "peephole_x86_mov_self",
+         ("mod == 3", "reg == rm", "rm < 16"),
+         _x_mov_self,
+         "a register copied into itself"),
+]
 
 #: Rules whose theorem is proved but whose MATCHER is not yet sound, kept out
 #: of `ARM64_RULES` and named here so the gap is visible and testable rather
@@ -1175,6 +1209,31 @@ def _run(asm, arch, rules, stats=None) -> int:
     return removed
 
 
+def _x86_relative_slot(dec):
+    """The displacement at the TAIL of an x86-64 relative reference, or None.
+
+    x86-64 encodes every relative reference the emitters make — the two
+    rel32 jumps, the rel32 call, the RIP-relative LEA, and the rel8 jumps the
+    decoder still knows — with its displacement in the LAST bytes of the
+    instruction and measured from the NEXT instruction. That is the whole
+    reason this arm exists: a displacement in the MIDDLE of an instruction is
+    not re-derivable from the entry's own `raw`, and these are the only forms
+    where deletion changes a number the assembler already resolved.
+
+    Returns `(old_disp, disp_size)` or `None`. A memory-operand `lea` or a
+    `call r64`/`jmp r64` through a register is not relative and must not be
+    touched.
+    """
+    form = dec.form
+    if form == "lea_r64_rip" or form == "call_rm64" or form == "jmp_rm64":
+        return dec.rip_rel, 4
+    if form == "call_rel32" or form == "jmp_rel32" or form == "jcc_rel32":
+        return dec.imm, 4
+    if form == "jcc_rel8" or form == "jmp_rel8":
+        return dec.imm, 1
+    return None
+
+
 def _repatch_branches(entries, at: list, arch: str) -> None:
     """Re-derive every branch displacement for the layout `at` describes.
 
@@ -1198,28 +1257,53 @@ def _repatch_branches(entries, at: list, arch: str) -> None:
     `arm64_successors` reads the branch words to build the CFG the next rule
     asks about: a target that has moved and a displacement that has not is a
     control-flow graph with an edge into the middle of an instruction, which
-    `window_dead`'s second condition would then believe. Nothing
-    on x86-64 is touched — no rule is enabled there and a variable-length
-    instruction's displacement is not the 32-bit field this writes.
+    `window_dead`'s second condition would then believe.
+
+    x86-64 is the same rule under a different ruler: the relative references
+    (jcc/jmp/call rel32, the rel8 jumps, and the RIP-relative LEA that the
+    string-literals pool needs) carry their displacement in the LAST bytes and
+    measure from the NEXT instruction, so `at_here` is `at[orig + length]`
+    rather than `at[orig]`, and the rewritten displacement is written back
+    into the entry's own tail. A branch whose target is an instruction the pass
+    deleted lands where the deletion collapsed to, which is what `at` answers
+    for it just as on arm64.
     """
-    if arch != "arm64":
+    if arch == "arm64":
+        for e in entries:
+            if len(e.raw) != 4:
+                continue
+            word = struct.unpack_from("<I", e.raw, 0)[0]
+            slot = _branch_slot(word)
+            if slot is None:
+                continue
+            field, lsb, _keep = slot
+            at_here = at[e.orig]
+            # The word's displacement is the OLD offset of its target, because that
+            # is the only target it can still name. `at` maps it forward.
+            old_target = e.orig + _sign_extend((word >> lsb) & field,
+                                               field.bit_length()) * 4
+            new = _repatch_branch(word, (at[old_target] - at_here) // 4)
+            if new != word:
+                e.raw = struct.pack("<I", new)
         return
     for e in entries:
-        if len(e.raw) != 4:
+        if e.dec is None:
             continue
-        word = struct.unpack_from("<I", e.raw, 0)[0]
-        slot = _branch_slot(word)
+        slot = _x86_relative_slot(e.dec)
         if slot is None:
             continue
-        field, lsb, _keep = slot
-        at_here = at[e.orig]
-        # The word's displacement is the OLD offset of its target, because that
-        # is the only target it can still name. `at` maps it forward.
-        old_target = e.orig + _sign_extend((word >> lsb) & field,
-                                           field.bit_length()) * 4
-        new = _repatch_branch(word, (at[old_target] - at_here) // 4)
-        if new != word:
-            e.raw = struct.pack("<I", new)
+        rel, size = slot
+        here = e.orig + e.dec.length
+        old_target = here + rel
+        if old_target < 0 or old_target >= len(at):
+            continue
+        new = at[old_target] - at[here]
+        if new == rel:
+            continue
+        if size == 4:
+            e.raw = e.raw[:len(e.raw) - 4] + struct.pack("<i", new)
+        else:
+            e.raw = e.raw[:len(e.raw) - 1] + bytes([new & 0xff])
 
 
 def _redecode(raw: bytes, arch):
