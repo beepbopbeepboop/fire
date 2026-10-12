@@ -479,6 +479,24 @@ CASES = [
      "    max = 3\n"
      "    print(max + 1)\n"
      "    return 0\n"),
+    # A READ-ONLY `nonlocal` is not a write, and it must build: the declaration
+    # is a scoping directive that emits nothing, and after `_flatten_closures`
+    # the read resolves to the by-value capture parameter. This is the row that
+    # keeps `model.nonlocal_write_refusal` from refusing the whole construct —
+    # its `own_frame_refusal` has to attribute the declaration to the nested
+    # `def` and ask whether THAT body writes the name, or the enclosing frame's
+    # own `c = 5` (the cell's initializer) reads as the write and this program is
+    # refused. The write half is `nonlocal_writes_to_a_captured_cell` below.
+    ("nonlocal_read_only_resolves_to_the_capture",
+     "def make():\n"
+     "    c = 5\n"
+     "    def bump():\n"
+     "        nonlocal c\n"
+     "        return c\n"
+     "    return bump()\n"
+     "def main():\n"
+     "    print(make())\n"
+     "    return 0\n"),
 ]
 
 # ── REFUSAL cases: (name, source, needles) ────────────────────────────────
@@ -739,6 +757,12 @@ REFUSALS = [
      ["`d[\"a\"]`"]),
 
     # ── `nonlocal` ──
+    # The needle is the REFUSAL's own sentence and not the bare word
+    # `nonlocal`: the construct used to reach this case as a `NameError`
+    # (`model.nonlocal_write_refusal` called `_names_bound_in`, which lives in
+    # `formal/build.py`), and the traceback's frame name `nonlocal_write_refusal`
+    # CONTAINS "nonlocal", so the old needle passed on a crash rather than on a
+    # refusal. A needle on the sentence cannot be satisfied by a traceback.
     ("nonlocal_writes_to_a_captured_cell",
      "def make():\n"
      "    c = 0\n"
@@ -751,7 +775,7 @@ REFUSALS = [
      "def main():\n"
      "    print(make())\n"
      "    return 0\n",
-     ["nonlocal"]),
+     ["this `nonlocal` writes `c`", "captures by VALUE"]),
 
     # ── higher-order builtins ──
     #

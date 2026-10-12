@@ -44292,7 +44292,7 @@ def nonlocal_write_refusal(functions) -> str:
 
     Only a `nonlocal` that WRITES is refused. A `nonlocal` that merely reads
     resolves to the by-value capture parameter `_flatten_closures` prepended,
-    which is the right answer for a read \u2014 nothing can observe that the copy
+    which is the right answer for a read — nothing can observe that the copy
     differs, because nothing else reads the cell. A WRITE is different in the
     way that matters: the enclosing frame holds its own copy of the name, the
     lifted function holds the parameter, and an assignment through `nonlocal`
@@ -44304,47 +44304,86 @@ def nonlocal_write_refusal(functions) -> str:
     the function that declares them, not by whether the enclosing frame has an
     assignment: `nonlocal c` followed by `c = c + 1` inside the nested function
     is the case, and a `nonlocal` with no assignment to any of its names is the
-    read-only spelling that must keep building. `model.read_before_store`'s
-    `_names_bound_in` is the walk that answers the question for a body, and it
-    is asked per function here so the declaration and the assignment have to be
-    in the SAME frame to count.
+    read-only spelling that must keep building.
+
+    **The DECLARING frame is the one that matters, and finding it needs a walk
+    that does NOT cross into a nested `def`.** `nonlocal c` and the assignment
+    it makes have to be in the SAME frame, and a `nonlocal` is declared by the
+    nested function while the enclosing one is the frame that OWNS the cell. A
+    walk that descends into the nested `def` — `iter_nodes` with no `skip` —
+    finds the declaration while iterating the ENCLOSING function, and then asks
+    whether the ENCLOSING body writes the name; the enclosing body's own
+    `c = 0` (the cell's initializer) answers yes, so a read-only `nonlocal` is
+    refused as a write. So the walk skips `FunctionDef.body`/`LambdaExpr.body`
+    (`formal/build.py`'s `_SKIP_DESCEND_FIELDS`, the set the statement rewrite
+    already declines to cross for the same reason) and each nested `def` is
+    checked as its own frame.
+
+    **`_write_targets` and `_SKIP_DESCEND_FIELDS` are imported LAZILY from
+    `formal.build` rather than moved here**, and that is a layering decision with
+    a measurement behind it: the readers are "what does this body write", they
+    live beside the register allocator's table they are checked against, and
+    `formal/build.py` imports `formal.model`, so a module-level import would be a
+    cycle. This function is reached only from `_prepare_functions`, after
+    `formal.build` is fully imported, so the lazy import is a dict lookup.
+    (Before this it was a bare `_names_bound_in(fn)`, which is a `NameError` —
+    that reader has been in `formal/build.py` since wave 6, and every `nonlocal`
+    crashed the build with a traceback whose frame name happened to satisfy the
+    one test needle.)
     """
-    for fn in (functions or []):
-        for node in iter_nodes(getattr(fn, "body", None)):
-            if type(node).__name__ != "NonlocalStmt":
-                continue
-            names = list(getattr(node, "names", None) or ())
+    import formal.build as _B                        # lazy — see the docstring
+    skip = _B._SKIP_DESCEND_FIELDS
+
+    def own_frame_refusal(fn) -> str:
+        written: set = set()
+        declared: list = []
+        for node in iter_nodes(getattr(fn, "body", None), skip=skip):
+            if type(node).__name__ == "NonlocalStmt":
+                declared.append(node)
+            for target in _B._write_targets(node):
+                if isinstance(target, str):
+                    written.add(target)
+                elif isinstance(target, F.IdentExpr):
+                    written.add(target.name)
+        for node in declared:
+            names = [n for n in (getattr(node, "names", None) or ())
+                     if isinstance(n, str) and n in written]
             if not names:
-                continue
-            stored = _names_bound_in(fn) | {
-                p[0] if isinstance(p, (tuple, list)) and p else p
-                for p in (getattr(fn, "params", None) or ())}
-            written = [n for n in names if n in stored]
-            if not written:
                 continue
             where = ""
             line = getattr(node, "line", 0) or 0
             if line:
                 where = f"line {line}: "
-            spelled = ", ".join(f"`{n}`" for n in written)
+            spelled = ", ".join(f"`{n}`" for n in names)
             return (
                 f"{where}this `nonlocal` writes {spelled}, and a captured name "
                 f"has no shared cell for a write to reach: this path captures by "
-                f"VALUE \u2014 `formal/build.py`'s `_flatten_closures` prepends each "
+                f"VALUE — `formal/build.py`'s `_flatten_closures` prepends each "
                 f"captured name to the lifted function as an ordinary leading "
-                f"PARAMETER, so `{fn.name}` keeps its own copy and the nested "
-                f"function a second one. Assigning through `nonlocal` would change "
-                f"only the second, and the program would build, run and answer "
-                f"{fn.name}'s old value, which is a wrong answer with exit 0 "
-                f"rather than an error. A `nonlocal` that only READS is not "
-                f"refused \u2014 the read resolves to the parameter, which is what it "
-                f"is for \u2014 so the working spellings are to return the value "
-                f"(`return c`) and to pass it back as an argument, or to make the "
-                f"state a value the caller owns: build a list, append to it, and "
-                f"return it")
+                f"PARAMETER, so the frame that defined {spelled} keeps its own "
+                f"copy and `{fn.name}` a second one. Assigning through `nonlocal` "
+                f"would change only the second, and the program would build, run "
+                f"and answer the defining frame's old value, which is a wrong "
+                f"answer with exit 0 rather than an error. A `nonlocal` that only "
+                f"READS is not refused — the read resolves to the parameter, which "
+                f"is what it is for — so the working spellings are to return the "
+                f"value (`return c`) and to pass it back as an argument, or to "
+                f"make the state a value the caller owns: build a list, append to "
+                f"it, and return it")
+        # A nested `def` is its own frame: a `nonlocal` inside it is about ITS
+        # body, so the declaration and the assignment have to be there.
+        for node in iter_nodes(getattr(fn, "body", None)):
+            if type(node).__name__ == "FunctionDef":
+                why = own_frame_refusal(node)
+                if why is not None:
+                    return why
+        return None
+
+    for fn in (functions or []):
+        why = own_frame_refusal(fn)
+        if why is not None:
+            return why
     return None
-
-
 def unapplied_decorator_refusal(functions) -> str:
     """Why a `@decorator` on a `def` of this unit is refused, or None.
 

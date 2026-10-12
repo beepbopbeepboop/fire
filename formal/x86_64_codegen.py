@@ -2250,12 +2250,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(stmt, F.PassStmt):
             return
 
-        if isinstance(stmt, F.GlobalStmt):
-            # `global NAME` is a binding declaration only. formal's locals are
-            # callee-saved registers or stack slots; there is no separate
-            # module-global storage to redirect subsequent stores into, so the
-            # declaration is a no-op and the AssignStmt still targets the
-            # local. Same reading as the arm64 backend.
+        if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
+            # `global NAME` / `nonlocal NAME` is a binding declaration only.
+            # formal's locals are callee-saved registers or stack slots; there is
+            # no separate module-global storage to redirect subsequent stores
+            # into, so the declaration is a no-op and the AssignStmt still
+            # targets the local. A `nonlocal` reaching here is READ-ONLY: a write
+            # is refused earlier by `model.nonlocal_write_refusal`, and after
+            # `_flatten_closures` the captured name is an ordinary leading
+            # parameter, which is what a read resolves to. Same reading as the
+            # arm64 backend.
             return
 
         if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
