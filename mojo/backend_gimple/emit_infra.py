@@ -230,10 +230,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
-    # PART 6 (2026-10-22, family C): the tagged-Optional read table is
-    # per-function (temp names are per-function); clear it like the other
-    # per-func maps so a stale entry can never leak into the next body.
-    gen._tagged_opt_read: dict[str, tuple] = {}
     # This function's higher-order parameters whose declared default names
     # a compiled generator of this compile — `{param: generator api}`.
     # Per-FUNCTION, like every other map here (and reset HERE, not left to
@@ -435,22 +431,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # table is.
     gen._boxed_vals.clear()
     gen._func_value_names.clear()
-    # The per-slot kind of a `struct.unpack` result (and of a local bound
-    # from one), in the long-form spelling the statically-indexed MojoList
-    # subscript reads. Same storage SHAPE as the two sets above — keyed by C
-    # NAMES that include temps, where `temp_counter` restarts at 0 for every
-    # function — and it was the last one still accumulating for the whole
-    # module, so a later function's `_tN` read an EARLIER function's entry.
-    # Measured: `fn make(): return struct.unpack('<if', buf[0])` followed by
-    # `fn uniform(): return struct.unpack('<HH', buf[0])` gave the CALLER of
-    # `make` the kinds `['int','int']` — the SECOND function's format, because
-    # that function had overwritten the shared `_t9` key — so `u[1]`, a float
-    # slot, was read through `mojo_list_get_int` and printed
-    # `4602678819172646912`. Per-function is correct, not merely safe: this
-    # table's cross-function half is `_return_value_slot_kinds`, keyed by
-    # CALLEE name, whose value the call site copies onto its own temp AFTER
-    # this reset (see `_lower_named_call`).
-    gen._struct_slot_kinds.clear()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -537,16 +517,6 @@ def _reset_func(gen, body: list = None, params: list = None,
         if _gek_s not in _reset_locally_bound:
             gen._elem_types[_gek_s] = _as_str(gen._global_elem_types[_gek])
     gen._nested_elem_types: dict[str, str] = {}
-    # locals whose PythonObject box holds a double LITERAL's bits (part 4,
-    # further, test_python_object): `var py_float = PythonObject(0.123...)`
-    # — recorded in _gen_stmt_VarDecl, read by the `Float64(py=<local>)`
-    # ctor arm, which must BITCAST the word rather than convert its value.
-    gen._pybox_double_vars = set()
-    # every local whose value statically produces a PythonObject box (the
-    # broader set above; see _py_box_expr in calls_shared) — the box-binform
-    # dispatch gate (emit_exprs) and the truediv double-bits fallback both
-    # read it.
-    gen._pybox_vars = set()
     # Per-function, keyed by C temp/value NAMES (`_t40`, ...) which repeat
     # across functions — so a stale entry (e.g. `_dict_items_val_elems
     # ['_t40'] = 'int'` from a `sorted(d.items())` in an earlier function)
@@ -1070,24 +1040,6 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
                     ret = _pin[0]
                     ptypes = list(_pin[1])
                     sig = f"{ret} {name} ({', '.join(ptypes)})"
-            if isinstance(ret, str) and ret.startswith('MojoTuple_'):
-                # Part 4 (measured 2026-10-21 integration, `split`'s
-                # `-> Tuple[String, String]`): the export text scan resolves a
-                # `Tuple[...]` RETURN annotation to the synthesized by-value
-                # struct, but the defining unit made the body-sensitive
-                # decision (a body that builds the tuple as a RUNTIME
-                # list-backed literal returns `MojoList *`) and published
-                # that answer for its own definition — it must win, or this
-                # `_MOJO_STUB_` extern disagrees with the definition's own
-                # prototype. A defining unit that never compiled in this
-                # closure publishes nothing; `MojoList *` is the only shape a
-                # runtime tuple literal has, so it is the honest fallback.
-                _home_ret = gen._func_return_type_for_call(name, None)
-                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
-                    ret = _home_ret if _home_ret else 'MojoList *'
-                    _tail = sig.split(None, 1)
-                    if len(_tail) == 2:
-                        sig = ret + ' ' + _tail[1]
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
@@ -1878,6 +1830,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             param_types = mangled_sig
         if param_types is None:
             param_types = mangled_sig or []
+
 
     # If function takes *args, pack variadic args into a MojoList*
     # '...' = free function varargs (pack all args)
@@ -3244,7 +3197,7 @@ def _emit_mut_local_box_allocs(gen):
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
-        vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
+        vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
         _box_param_c = gen._mut_boxed_param_c.get(mn)
         if _box_param_c:
@@ -3453,52 +3406,6 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         return _sl
     if src_type == 'MojoGenerator *':
         return _generator_to_list(gen, value)
-    if src_type == 'MojoBytes *':
-        # A bytes operand iterates its BYTES as ints 0-255 (CPython), so its
-        # materialized view is a fresh MojoList of int slots, one per byte,
-        # read with the same element source `for x in b:` uses
-        # (emit_loops._gen_for_bytes: a mojo_bytes_len/mojo_bytes_get index
-        # loop). Before this arm, a statically-typed bytes value fell into
-        # the generic pointer branch below: boxed to int64, all three
-        # registry probes missed (a MojoBytes * is registered in none of
-        # them), and `mojo_iter_boxed_list` classified the live allocation
-        # as a STRING — mojo_boxed_is_str accepts any unregistered heap
-        # pointer — and read the struct's own fields as a char string:
-        # read the struct's own fields as a char string: `list(b"cd")`
-        # answered five ascending pointer-sized words and exited 0 — the gap
-        # CODEGEN_list_of_bytes_reads_the_struct_slots documented (that doc
-        # is gone, closed by this change). `tuple(x)` reaches this arm too
-        # (it builds an ordinary list and marks it a tuple afterwards), so it
-        # is fixed by the same branch.
-        res = gen._new_temp('MojoList *')
-        gen._emit(f"  {res} = mojo_list_new ();")
-        len_t = gen._new_val('int64_t', f"mojo_bytes_len ({value})")
-        idx = gen._new_temp('int64_t')
-        gen._emit(f"  {idx} = (int64_t)0;")
-        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-        gen._emit(f"  goto {bb_cond};")
-        gen._emit_label(bb_cond)
-        cond = gen._new_val('_Bool', f"{idx} < {len_t}")
-        gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
-        gen._emit_label(bb_body)
-        byte = gen._new_val('int64_t', f"mojo_bytes_get ({value}, {idx})")
-        gen._void_call('mojo_list_append_int',
-                       [('MojoList *', res), ('int64_t', byte)])
-        # The increment is written INSIDE the body on purpose (same reason
-        # as the enumerate lowering in emit_calls): `_new_val` emits the
-        # declaration at the current point, so calling it before the loop
-        # would compute `idx + 1` once, re-assign that same value every
-        # iteration, and the loop would never terminate.
-        one = gen._new_val('int64_t', '(int64_t)1')
-        nidx = gen._new_val('int64_t', f'{idx} + {one}')
-        gen._emit(f"  {idx} = {nidx};")
-        gen._emit(f"  goto {bb_cond};")
-        gen._emit_label(bb_after)
-        # Bytes elements are always ints — record it so a consumer that
-        # asks (enumerate's pair slot, set.update, star-unpack, ...) reads
-        # the slots with the int accessor.
-        gen._elem_types[res] = 'int64_t'
-        return res
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
         _td = _tagged_dyn_read(gen, value, 'list')
         if _td is not None:
@@ -3860,124 +3767,6 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     elif fn == 'mojo_repr_list_slotkinds':
         args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
-
-
-def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
-    """Consume an in-TU iterator-factory wrapper local (`_Enumerate_... *`
-    / `_TakeIterator_... *` / ... — the lifted `enumerate`/`take`/`drop`/
-    ... bindings, whose mangled name is in `gen._intu_prereg_structs`)
-    into a plain `MojoList *` of the element words its `__next__` would
-    yield, and return the list's temp name.
-
-    The in-TU `__next__` raises by `mojo_exc_type_set(StopIteration);
-    mojo_raise()` (a longjmp) on exhaustion (measured ladder C: the
-    `_ListIterOwned___next__` tail), so the consumer must hold a setjmp
-    frame across the call — the exact frame idiom the raise-exhaustion
-    for-loop in emit_loops._gen_for_struct_iter emits (measured byte-for-
-    byte in the take ladder C): push once, `setjmp`, the longjmp returns
-    to the `!= 0` arm, `mojo_exc_pop()` + tag check, `mojo_raise()` for
-    anything that is not StopIteration, and the body loops back to itself
-    so the single frame stays live across every iteration.
-
-    The element word is appended raw (`mojo_list_append_int`) exactly as
-    that same ladder C's for-loop consumption does. An `_Enumerate`
-    wrapper's element is a boxed tuple-PAIR list pointer word, so its
-    list gets the same repr tracking `_lower_builtin_enumerate_value`
-    sets on the pair list it builds (`_elem_types` = 'MojoList *' +
-    `_nested_elem_types` = ['int64_t', elem]) — that is what routes the
-    print to the pair-aware `mojo_repr_list_pairs` (measured baseline C:
-    `mojo_repr_list_pairs (z)` for the old materialized pair list). A
-    wrapper whose `__next__` answers a BY-VALUE `MojoTuple_...` struct
-    (the part-4 struct-tuple zip — measured 2026-10-22, gimplerunner
-    `print(zip([0, 1], [2, 3]))`: the spliced zip body's `var res:
-    Self.Element` is a real pass-by-value struct) gets each element
-    materialized as a runtime marked pair list instead (the same
-    representation `mojo_zip` builds), because a by-value struct cannot
-    be the argument of the word append. The
-    materialization CONSUMES the iterator — that is the print contract
-    (and `len()` deliberately does NOT route through here; it reads the
-    non-consuming `bounds()` upper instead, see _lower_builtin_len).
-    """
-    out = gen._new_temp('MojoList *')
-    gen._emit(f'  {out} = mojo_list_new ();')
-    bb_push = gen._new_bb(); bb_body = gen._new_bb()
-    bb_exc = gen._new_bb(); bb_after = gen._new_bb()
-    gen._emit(f'  goto {bb_push};')
-    gen._emit_label(bb_push)
-    fsave = gen._new_val('int64_t', '_mojo_exc_top')
-    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
-    gen._emit(f'  _mojo_exc_top = {fpush};')
-    ftop = gen._new_val('int64_t', '_mojo_exc_top')
-    gen._void_call('mojo_cleanup_checkpoint_save', [])
-    fret = gen._new_val('int64_t', f'setjmp (_mojo_exc_stack[{ftop}])')
-    fnz = gen._new_val('_Bool', f'{fret} != 0')
-    gen._emit(f'  if ({fnz}) goto {bb_exc}; else goto {bb_body};')
-    gen._emit_label(bb_body)
-    nxsym = gen._struct_method_csym(csn, '__next__', '')
-    _ret = gen.func_return_types.get(nxsym, 'int64_t')
-    _pair_by_value = False
-    if isinstance(_ret, str) and _ret.startswith('MojoTuple_'):
-        # A BY-VALUE tuple element (measured 2026-10-22, gimplerunner
-        # `print(zip([0, 1], [2, 3]))`): the part-4 struct-tuple `__next__`
-        # — the spliced zip body's `var res: Self.Element` — answers the real
-        # pass-by-value `MojoTuple_...` struct, not a word. The word append
-        # above cannot take it (gcc: `incompatible types ... from
-        # 'MojoTuple_...'`). Each element is materialized as a RUNTIME pair
-        # list in `mojo_zip`'s own idiom — fresh list, the raw element words,
-        # the tuple mark — so the generic repr's pair walker recognizes it
-        # (the same marked-pair representation the old `mojo_zip` lowering
-        # printed through). The pair's element words come from the tuple
-        # struct's registered fields, in declaration order.
-        tup = gen._new_val(_ret, f'{nxsym} ({w})')
-        _flds = list((gen.struct_field_types.get(_ret) or {}).keys())
-        _pair_by_value = False
-        if _flds:
-            _pair_by_value = True
-            _pair = gen._new_temp('MojoList *')
-            gen._emit(f'  {_pair} = mojo_list_new ();')
-            for _f in _flds:
-                gen._void_call('mojo_list_append_int', [
-                    ('MojoList *', _pair),
-                    ('int64_t', f'(int64_t){tup}.{_f}')])
-            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _pair)])
-            gen._void_call('mojo_list_append_int', [
-                ('MojoList *', out), ('int64_t', f'(int64_t)(intptr_t){_pair}')])
-        else:
-            e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
-            gen._void_call('mojo_list_append_int', [
-                ('MojoList *', out), ('int64_t', e64)])
-    else:
-        e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
-        gen._void_call('mojo_list_append_int', [('MojoList *', out), ('int64_t', e64)])
-    gen._emit(f'  goto {bb_body};')
-    bb_reraise = gen._new_bb()
-    gen._emit_label(bb_exc)
-    gen._void_call('mojo_exc_pop', [])
-    tag = gen._new_val('int64_t', 'mojo_exc_type_get ()')
-    # The StopIteration id goes through `_new_val` so it lands in an
-    # `int64_t` temp with the explicit cast: a cast literal directly in
-    # the comparison is not a valid raw-GIMPLE operand (measured
-    # 2026-10-21 part 4 integration), and the single-branch if-goto form
-    # is rejected outright ("expected else statement").
-    iss = gen._new_val(
-        '_Bool', f'{tag} == {gen._new_val("int64_t", str(gen._exc_type_id("StopIteration")))}')
-    gen._emit(f'  if ({iss}) goto {bb_after}; else goto {bb_reraise};')
-    gen._emit_label(bb_reraise)
-    gen._void_call('mojo_raise', [])
-    gen._emit_label(bb_after)
-    if csn.startswith('_Enumerate'):
-        gen._elem_types[out] = 'MojoList *'
-        gen._nested_elem_types[out] = ['int64_t', 'int64_t']
-    elif _pair_by_value:
-        # The by-value-tuple element is a runtime pair list (above): the
-        # same pair tracking the `_Enumerate` branch sets, with the pair's
-        # own per-slot element types from the tuple struct's field map.
-        gen._elem_types[out] = 'MojoList *'
-        gen._nested_elem_types[out] = list(
-            (gen.struct_field_types.get(_ret) or {}).values())
-    else:
-        gen._elem_types[out] = 'int64_t'
-    return out
 
 
 def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
@@ -5629,10 +5418,7 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
     _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
-    # Code-point count, not strlen: a string is a UTF-8 buffer, and Python's
-    # len counts code points (mojo_str_codepoint_len's doc comment). The
-    # BYTES arm above deliberately stays mojo_bytes_len: len(b) is bytes.
-    gen._emit(f'  {_res} = mojo_str_codepoint_len ({_sp2});')
+    gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
     _lp2 = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
@@ -5907,7 +5693,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit_label(bb_chk3)
             gen._emit(f'  if ({_tag} == 3) goto {bb_list}; else goto {bb_chk2};')
             gen._emit_label(bb_list)
-            _lrepr = gen._call_expr('char *', *gen._list_repr_call(_lp))
+            _lrfn, _lrargs = gen._list_repr_call(_lp)
+            _lrepr = gen._call_expr('char *', _lrfn, _lrargs)
             gen._emit(f'  {_res} = {_lrepr};')
             gen._emit(f'  goto {bb_done};')
             gen._emit_label(bb_chk2)
@@ -5988,35 +5775,6 @@ def _gen_print(gen, args: list, kwargs: list = None):
                                _owned_reprs)
                 aval = rv
                 atype = 'char *'
-        # An in-TU iterator-factory wrapper (`z = enumerate(x)` /
-        # `take(x, n)` / ... after the lift): the value is a LAZY iterator
-        # struct, and this codebase's print contract for the old
-        # materialized pair-list model is the element list itself —
-        # consume it here and let the `MojoList *` arm of the emission
-        # loop below repr the materialized result (for enumerate that is
-        # the pair-aware `mojo_repr_list_pairs`, the measured baseline
-        # spelling). The module-global read-back arrives boxed (int64_t)
-        # with the wrapper pointer in `_actual_types`, so resolve the
-        # actual type first. Before this, a directly-typed wrapper local
-        # fell to the generic numeric path and printed nothing, and the
-        # boxed global printed the raw pointer (measured: test_gimple_
-        # runner's gimple_enumerate_value_printed /
-        # gimple_global_from_enumerate_call).
-        _wct = None
-        if isinstance(atype, str) and atype.endswith(' *') \
-                and atype[:-2] in getattr(gen, '_intu_prereg_structs', ()):
-            _wct = atype
-        else:
-            _wact = gen._get_actual_type(atype, aval)
-            if isinstance(_wact, str) and _wact.endswith(' *') \
-                    and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
-                _wct = _wact
-                aval = gen._new_val(_wact, f'({_wact}){aval}')
-        if _wct is not None and gen._struct_defines_method(
-                _wct[:-2], '__next__'):
-            _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
-            resolved_parts.append(('MojoList *', _wout))
-            continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):
@@ -6771,7 +6529,7 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
     st = gen._literal_storage
     if st != '' and gen._literal_storage_ctype == ctype:
         gen._literal_storage = ''
-        gen._emit(f"  {_OWNED_STACK_KIND[ctype][0]} (&{st});")
+        gen._emit(f"  {_owned_stack_init_fn(ctype)} (&{st});")
         gen._emit(f"  {t} = &{st};")
         return
     if ctype == 'MojoDict *':
@@ -7226,6 +6984,19 @@ _OWNED_STACK_KIND = {
     'MojoSet *':  ('mojo_set_init',  'MojoSet'),
 }
 
+def _owned_stack_init_fn(ctype: str) -> str:
+    """`_OWNED_STACK_KIND[ctype][0]` as a `str`. Indexed and `_as_str`'d rather
+    than unpacked from the dict's tuple value: the unpack boxes both slots once
+    self-hosted, so the storage declaration printed the address of the struct
+    name (`4344599392 _owned_storage1_items;`)."""
+    return _as_str(_as_list(_OWNED_STACK_KIND[ctype])[0])
+
+
+def _owned_stack_struct(ctype: str) -> str:
+    """`_OWNED_STACK_KIND[ctype][1]` as a `str` — see `_owned_stack_init_fn`."""
+    return _as_str(_as_list(_OWNED_STACK_KIND[ctype])[1])
+
+
 def ann_container_ctype(gen, ann):
     """The container ctype a binding statement's OWN annotation names, when
     it names one of the three owned-stack container kinds; else None.
@@ -7380,13 +7151,14 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
             gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
             gen._literal_storage_ctype = f"{_sname} *"
             return False
-        _init_fn, _struct = _OWNED_STACK_KIND[lit]
+        _struct = _owned_stack_struct(lit)
         gen.temp_counter += 1
         gen.decls.append(f"  {_struct} _owned_storage{gen.temp_counter}_{name};")
         gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
         gen._literal_storage_ctype = lit
         return False
-    init_fn, struct_name = _OWNED_STACK_KIND[ctype]
+    init_fn = _owned_stack_init_fn(ctype)
+    struct_name = _owned_stack_struct(ctype)
     gen.temp_counter += 1
     storage = f'_owned_storage{gen.temp_counter}_{name}'
     gen.decls.append(f"  {struct_name} {storage};")

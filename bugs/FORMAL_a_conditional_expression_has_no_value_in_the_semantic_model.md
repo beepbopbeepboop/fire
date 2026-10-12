@@ -73,43 +73,19 @@ Four pieces, in `formal/arm64_proof_gen.py`, plus the test class
 **And the "4 CFG decomposition unsupported" family in the table below was never
 this bug.** Re-measured per record, all three of the four are a `STUR`: a
 function with enough spilled locals reaches a frame offset a scaled 12-bit
-displacement cannot express, and the emitter uses the unscaled 9-bit form —
-twelve spilled locals is enough to reproduce. **`LDUR`/`STUR` were modelled on
-2026-10-05** (`_STEP_CONDS` rows 64/65, `work_step_ldur`/`work_step_stur`; the
-other ten narrower/unscaled memory forms came with them), so a spilled function
-now GENERATES a proof instead of being refused, and row
-`a_spill_is_not_attributed_to_the_conditional_expression` is RE-MEASURED to say
-so — the property it was written to protect (a spill is nothing to do with the
-ternary; a reader must not be sent to fix `_ternary_go`) is kept, and the "gets
-no proof" half is what moved. `bugs/FORMAL_arm64_instruction_coverage.md`'s
-`LDUR`/`STUR` entry carries the wiring.
+displacement cannot express, the emitter uses the unscaled 9-bit form, and
+`arm64_step` has no arm for it — twelve spilled locals is enough to reproduce,
+and `bugs/FORMAL_arm64_instruction_coverage.md` already lists `LDUR`/`STUR` as
+the one uncovered instruction whose emission carried a real bug. That is a
+separate wall with its own row, and a message that blamed the ternary for it
+would send a reader to fix the wrong thing, which is what row
+`a_spill_is_not_attributed_to_the_conditional_expression` pins.
 
 **Verified with Lean**, which is the half the text rows cannot reach:
 `test_formal_eval_eq_mojo_bridge.py::TestTheConditionalExpressionModelTypechecks`
 checks the generated x86-64 file — `ok`, and exactly the two designed trust
 boundaries as holes (the AST/model conformance theorem and the end-to-end one).
 Without `lib/ProofLib.olean` it skips loudly, like its siblings.
-
-### 0b. 2026-10-13: the same file's ARM64 `TestBridgeTypechecks` was red, and it was the `hcond` SPILL READ's `sh` bit
-
-Independent of the model: `TestBridgeTypechecks` typechecks the generated ARM64
-file for `ifonly` / `condassign` / `elif3`, and all three were red on master with
-`Tactic 'rewrite' failed: Did not find an occurrence of the pattern … (s_0.sp -
-32 - 16)` against a target holding `s_0.sp - 131072 - 16`. The `sp` expression
-the spill rewrite is handed was built without the ADD/SUB immediate's shift
-selector (`32 << 12` is the 128 KiB frame scratch), so it named an address the
-composed state cannot contain. **FIXED** in this branch — `_addsub_imm` in
-`formal/arm64_proof_gen.py` is now the one reader of that immediate and all four
-byte-level `sp` trackers use it; the three fixtures typecheck and
-`TestTheAddSubImmediateShiftBit` pins the decode without Lean. The `hcond`
-obligation is a separate doc, since deleted by `a9080ffa` because its own subject
-landed 2026-10-09: a conditional branch's flag lemma has to be `try rw`-ed
-BEFORE the `simp only` that unfolds `arm64_subs_flags` /
-`arm64_matches_condition`, because that unfold is irreversible. What §0 above
-landed is
-unaffected: the CSEL/`_ternary_go` model half is still the residue this doc is
-about, and the machine half is still
-`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`.
 
 ## What was run
 

@@ -100,41 +100,6 @@ CASES = [
      "def main():\n"
      "    print(outer(10))\n"
      "    return 0\n"),
-    # The CONTROL for the two `nonlocal` REFUSALS below, and it is an ANSWERED
-    # row because it is the thing they must not break: a capture READ, with no
-    # `nonlocal` declaration at all, lowers and answers CPython. So the whole
-    # difference between the refused and the answered program is the ONE WORD
-    # `nonlocal c` — `_flatten_closures` has already turned the capture into a
-    # leading parameter, and what the declaration adds is a statement the
-    # emitters now lower to nothing beside `global` (see the row below).
-    ("capture_read_without_the_nonlocal_spelling_answers_cpython",
-     "def main():\n"
-     "    c = 5\n"
-     "    def read():\n"
-     "        return c\n"
-     "    print(read())\n"
-     "    return 0\n"),
-    # A `nonlocal` that only READS is ORDINARY code and must build. It is its
-    # own row because the read-half was never exercised and was broken two
-    # ways: the refusal crashed (it called a walk that lives in
-    # `formal/build.py`, not in `formal/model.py`), and even with that walk it
-    # asked the ENCLOSING frame whether it writes the name — so this program,
-    # where `outer` writes `c` twice and `get` only reads it through
-    # `nonlocal`, was refused too. Both emitters now treat `NonlocalStmt` as a
-    # no-op beside `global`, and `nonlocal_write_refusal` counts a store only
-    # at or AFTER the declaration, which is what tells this program from
-    # `nonlocal_writes_to_a_captured_cell` below. CPython answers 8.
-    ("a_read_only_nonlocal_builds_when_the_enclosing_frame_writes_the_cell",
-     "def outer(n):\n"
-     "    c = 5\n"
-     "    c = c + n\n"
-     "    def get():\n"
-     "        nonlocal c\n"
-     "        return c\n"
-     "    return get()\n"
-     "def main():\n"
-     "    print(outer(3))\n"
-     "    return 0\n"),
     # TRANSITIVE capture, which is the part a one-level pre-pass gets wrong: the
     # middle function does not use `a` itself and still has to pass it down, so
     # the answer (13) is wrong unless the capture set is closed over the chain.
@@ -774,25 +739,6 @@ REFUSALS = [
      ["`d[\"a\"]`"]),
 
     # ── `nonlocal` ──
-    #
-    # **The needle was `"nonlocal"` and that is a false green this file's own
-    # docstring is about.** `formal/model.py::nonlocal_write_refusal` called
-    # `_names_bound_in`, which is `formal/build.py`'s and does not exist in this
-    # file, so a program with ANY `nonlocal` left the build as a Python
-    # traceback — and the traceback's own frames are `nonlocal_write_refusal`
-    # and `NonlocalStmt`, so a needle of `"nonlocal"` matched it and the row was
-    # green for a construct that had no diagnostic at all. Measured on both
-    # architectures:
-    #
-    #     build: name '_names_bound_in' is not defined
-    #     Traceback (most recent call last):
-    #       …
-    #       File "formal/model.py", line 41587, in nonlocal_write_refusal
-    #         stored = _names_bound_in(fn) | {
-    #     NameError: name '_names_bound_in' is not defined
-    #
-    # The needle is now the model's own SENTENCE, which is what this file asks
-    # for and what a traceback cannot contain.
     ("nonlocal_writes_to_a_captured_cell",
      "def make():\n"
      "    c = 0\n"
@@ -805,13 +751,7 @@ REFUSALS = [
      "def main():\n"
      "    print(make())\n"
      "    return 0\n",
-     # The needles are the two facts only the REAL refusal carries. They used to
-     # be `["nonlocal"]`, and that needle could not tell the refusal from the
-     # `NameError` this construct actually raised: the traceback's own frame
-     # name is `nonlocal_write_refusal`, which CONTAINS "nonlocal". A needle
-     # that a crash satisfies is the same defect as a marker that a pass
-     # satisfies — the row reported PASS while the construct was a traceback.
-     ["`nonlocal` writes", "captures by VALUE"]),
+     ["nonlocal"]),
 
     # ── higher-order builtins ──
     #

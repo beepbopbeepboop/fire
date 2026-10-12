@@ -56,7 +56,6 @@ from mojo.middle.stmts_shared import (
 )
 from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
-from mojo.middle.calls_shared import _py_box_expr
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
 # re-raises, and `emit_loops` cannot be imported here (it goes through
@@ -366,41 +365,6 @@ def _record_bool_valued(gen, name: str, value) -> None:
 def _gen_stmt_VarDecl(gen, node):
     if node.value is not None and _try_bind_iter_cursor(gen, node.name, node.value):
         return
-    # A box-producing initializer (2026-10-21 part 4, further,
-    # test_python_object): `var py_float = PythonObject(0.123...)` stores
-    # the literal's BITS (recorded in _pybox_double_vars so a later
-    # `Float64(py=<local>)` ctor site bitcasts instead of value-converts),
-    # and every other box expression (`var x = PythonObject(34)`, `var c =
-    # a + b` with box operands) records the local in _pybox_vars so a
-    # later binary op on it routes to the runtime's boxed-word dispatch.
-    # Name-only tracking: the box word flows into exactly this one local
-    # per declaration.
-    if (isinstance(node.name, str) and ',' not in node.name
-            and node.value is not None):
-        _bx, _dbl = _py_box_expr(gen, node.value)
-        if _bx:
-            gen._pybox_vars.add(node.name)
-            if _dbl:
-                gen._pybox_double_vars.add(node.name)
-            else:
-                # A non-double box value REBINDS the local: drop a stale
-                # double-bits flag (`c = a / b; c = a % b; c %= 3` — the
-                # third op must not see c as double bits; measured:
-                # test_with_python_dunder_methods' `c %= 3` passed a_dbl=1
-                # and fmod(bitcast(4), 3) answered 4 instead of 1).
-                gen._pybox_double_vars.discard(node.name)
-        elif getattr(node, 'type_ann', None) == 'PythonObject':
-            # `var list_obj: PythonObject = [1, 2]` — an ANNOTATED box
-            # local initialized from a container/string/number literal:
-            # the value is not a PythonObject(...) call so _py_box_expr
-            # misses it, yet the codegen boxes it to the same int64 word.
-            # Without this the local's ops fall through to raw C (measured:
-            # the inplace helper's `list_obj *= 2` did pointer arithmetic
-            # and String(py=...) printed an empty string). Double-bits is
-            # deliberately NOT set: only the explicit PythonObject(<float
-            # literal>) ctor is measured to store bits.
-            gen._pybox_vars.add(node.name)
-            gen._pybox_double_vars.discard(node.name)
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
     # local_types's docstring): `_declare_var` already emitted the
@@ -473,8 +437,6 @@ def _gen_stmt_VarDecl(gen, node):
                     ctype = 'int64_t'
         else:
             ctype = gen._resolve_type(node.type_ann)
-            if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
-                gen._ensure_tuple_struct(node.type_ann)
         gen._declare_var(node.name, ctype)
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
@@ -621,8 +583,6 @@ def _gen_stmt_VarDecl(gen, node):
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
-        if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
-            gen._ensure_tuple_struct(node.type_ann)
         gen._declare_var(node.name, ctype)
         # BUG-2026-030: a default-constructed struct local (`var w: W`, no
         # initializer) used to leave `w` a bare, never-allocated `W *` --
@@ -916,24 +876,6 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # parameter usage guess, say) is not something a store site may overturn.
     if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
         gen._actual_types.setdefault(tname, vtype)
-    elif (isinstance(vtype, str) and vtype.endswith(' *')
-            and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
-        # An in-TU iterator-factory wrapper stored into a module global
-        # (`z = enumerate(x)` at module level after the lift). The
-        # setdefault above deliberately cannot reach it (the kind list is
-        # the three runtime containers), and the `v in _actual_types`
-        # propagation at the top recorded nothing either, because the
-        # factory dispatch returns the wrapper pointer's own ctype for its
-        # temp without registering an overlay entry. Without a record the
-        # read-back stays a boxed int64_t, the print/len/list consumers see
-        # no pointer kind, and a module-level `print(z)` repr'd the struct
-        # header as a garbage list (measured: test_gimple_runner's
-        # gimple_global_from_enumerate_call printed nothing). Assignment,
-        # NOT setdefault, on purpose: any earlier pass's conclusion for the
-        # name is the pre-pass's static `MojoList *` table guess — stale for
-        # exactly this value — and the emitted ctype is ground truth, the
-        # same trust rule as the plain-AssignStmt first-bind fix below.
-        gen._actual_types[tname] = vtype
     # The same carry, for the same reason, one table over: "this value is a
     # plain integer" (`gen._int_word_vals`) has to survive the store or a
     # module-level key is asked of the runtime's range-only discriminator,
@@ -979,76 +921,7 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     ginf._note_global_callable_store(gen, tname, v)
 
 
-def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
-                             struct_name, safe_field):
-    """PART 6 (2026-10-22, family C): the C expression for the `is_some`
-    side-band of a tagged-Optional field STORE. The word store already
-    happened; this answers the tag:
-      - a None RHS stores None -> '0';
-      - an `Optional[...]` constructor: a value arg wraps Some -> '1', an
-        empty call is None -> '0';
-      - a `.copy()` on a READ OF THE SAME TAGGED FIELD (the spliced copy
-        constructor `self._x = copy._x.copy()`) -> the bare source-field
-        expression (a raw-word `!= 0` would mis-tag Some(0));
-      - anything else is a value store (an element, `next(...)`, a
-        fieldwise-init parameter holding `Optional(element)`): always
-        Some -> '1'. A stored Optional-typed value word that is genuinely
-        None or Some(0) is the documented value-level boundary (the raw
-        word carries no tag across a call boundary); no measured spliced
-        body stores one.
-
-    The RETURN VALUE is consumed by the caller as a GIMPLE operand, so it
-    is either the single-digit constant '0'/'1' or a bare component-ref
-    expression — never parenthesized: a `__GIMPLE`-tagged function's body
-    must already BE valid raw GIMPLE, where a parenthesized expression is
-    a hard frontend error ("expected expression before '(' token") and a
-    cast may not sit directly on a component ref (see `_new_val`'s own
-    docstring for the measured negative-literal analogue). The caller
-    routes the value through a same-type `_Bool` temp before the plain
-    field store, the one shape gimple's verifier accepts."""
-    v = value_node
-    if isinstance(v, NoneLiteral):
-        return '0'
-    if isinstance(v, IdentExpr) and v.name == 'None':
-        return '0'
-    if isinstance(v, CallExpr):
-        _fn = v.func
-        _fn_name = None
-        if isinstance(_fn, IdentExpr):
-            _fn_name = _fn.name
-        elif isinstance(_fn, MemberExpr):
-            _fn_name = _as_str(_fn.member)
-        if _fn_name == 'Optional':
-            return '1' if getattr(v, 'args', None) else '0'
-        if (isinstance(_fn, MemberExpr) and _fn_name == 'copy'
-                and isinstance(_fn.obj, MemberExpr)
-                and _as_str(_fn.obj.member) == target_node.member):
-            # `copy.<field>.copy()` — copy the source field's side-band.
-            _st, _sv = gen.lower_expr(_fn.obj.obj)
-            _sf = gimple_ctypes._safe_field(_as_str(_fn.obj.member))
-            return f"{_sv}{op}{_sf}_is_some"
-    return '1'
-
-
 def _gen_stmt_AssignStmt(gen, node):
-    # Box tracking (part 4, further, test_python_object): a box-producing
-    # VALUE records its target local (`c = a / b` makes c a box — a
-    # truediv result, so a double-bits one too) for later binary-op
-    # dispatch. Purely a set write: no emission, no early return.
-    if (isinstance(node.target, gimple_ctypes.IdentExpr)
-            and getattr(node, 'value', None) is not None):
-        _bx, _dbl = _py_box_expr(gen, node.value)
-        if _bx:
-            gen._pybox_vars.add(node.target.name)
-            if _dbl:
-                gen._pybox_double_vars.add(node.target.name)
-            else:
-                gen._pybox_double_vars.discard(node.target.name)
-        elif (node.target.name in getattr(gen, '_pybox_vars', ())
-                and type(node.value).__name__ == 'IntLiteral'):
-            # A tracked box local rebound to a plain int literal holds a
-            # raw number word (never double bits) — clear a stale flag.
-            gen._pybox_double_vars.discard(node.target.name)
     if isinstance(node.target, gimple_ctypes.IdentExpr) \
             and getattr(node, 'value', None) is not None:
         _record_bool_valued(gen, node.target.name, node.value)
@@ -1301,39 +1174,6 @@ def _gen_stmt_AssignStmt(gen, node):
                 if func_key and hasattr(gen, '_inferred_var_types'):
                     if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
                         ctype = gen._inferred_var_types[func_key][tname]
-                        # The pre-pass's builtin table still lists the
-                        # iterator-factory family (`enumerate`/`take`/...)
-                        # as `MojoList *` (the old materialized pair-list
-                        # model), but the lifted factory dispatch emits an
-                        # in-TU wrapper struct pointer — the freshly-lowered
-                        # ctype is ground truth, and the VarDecl twin above
-                        # (`node.type_ann is None: ctype = vtype`) already
-                        # trusts it. Pinning the stale `MojoList *` here
-                        # cast the wrapper into a list header: `len(z)`
-                        # read a struct field as a length and `print(z)`
-                        # walked garbage (measured: test_gimple_runner's
-                        # gimple_enumerate_value_printed printed the
-                        # pointer bits `4376269232` instead of `2`).
-                        if (isinstance(node.value, gimple_ctypes.CallExpr)
-                                and isinstance(vtype, str)
-                                and vtype.endswith(' *')
-                                and ctype != vtype
-                                and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
-                            ctype = vtype
-                        # A BY-VALUE struct value (part 4: zip's `__next__`
-                        # hands back the synthesized `MojoTuple_*` element
-                        # tuple, and `_ = it.__next__()` inside
-                        # `with assert_raises():` is the measured spelling)
-                        # cannot be boxed into the inferred `int64_t` box —
-                        # gcc: `aggregate value used where an integer was
-                        # expected` on `_ = (int64_t)_t46;`. The first
-                        # assignment gives the local the value's own struct
-                        # type, the by-value twin of the in-TU-struct-pointer
-                        # correction above.
-                        if (ctype in ('int', 'int64_t')
-                                and isinstance(vtype, str)
-                                and vtype in gen.struct_field_types):
-                            ctype = vtype
                     else:
                         ctype = vtype
                 else:
@@ -1494,6 +1334,16 @@ def _gen_stmt_AssignStmt(gen, node):
                     or (isinstance(node.value, gimple_ctypes.IdentExpr)
                         and node.value.name == 'None')):
                 ctype = 'int64_t'
+            # `ptype: str = None` ANNOTATES the variable as a string-or-None,
+            # so its slot is a `char *` whatever the pre-pass hinted for the
+            # name, and a tuple built from it records a str kind (whose null
+            # word reprs as None) instead of an int kind (which reprs the same
+            # word as `0`).
+            if (_as_str(getattr(node, 'type_ann', None)) in ('str', 'String')
+                    and (isinstance(node.value, gimple_ctypes.NoneLiteral)
+                         or (isinstance(node.value, gimple_ctypes.IdentExpr)
+                             and node.value.name == 'None'))):
+                ctype = 'char *'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an
@@ -1821,31 +1671,6 @@ def _gen_stmt_AssignStmt(gen, node):
             if _reified is not None:
                 vtype, v = field_type, _reified
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
-            # PART 6 (2026-10-22, family C): the tagged-Optional side-band
-            # store — the word store above is the payload; the adjacent
-            # `_Bool <f>_is_some` records Some/None so a Some(0) payload is
-            # not misread as None by the boolean-context reads. Gated on the
-            # field having been marked tagged (in-TU struct, non-pointer
-            # scalar Optional payload), so no other store is touched.
-            if (struct_name in gen._tagged_optional_fields
-                    and node.target.member in gen._tagged_optional_fields[struct_name]):
-                _sf = gimple_ctypes._safe_field(node.target.member)
-                _some = _tagged_opt_is_some_expr(
-                    gen, node.value, node.target, ot, ov, op,
-                    struct_name, _sf)
-                # GIMPLE strict mode: the store's RHS must be a register —
-                # a constant, a cast, or a component ref all need their own
-                # same-type `_Bool` temp first (measured: `p->b = (0)`,
-                # `p->b = 0`, `p->b = (_Bool)0`, `p->b = (p->b)` are all
-                # hard gimple-frontend errors in a `__GIMPLE`-tagged fn;
-                # `t = ...; p->b = t;` is not — see `_new_val`'s docstring
-                # and the gimple_test6/8 matrix in the part-6 record).
-                if _some in ('0', '1'):
-                    _some_t = gen._new_val('_Bool', _some)
-                else:
-                    _some_t = gen._new_temp('_Bool')
-                    gen._emit(f'  {_some_t} = {_some};')
-                gen._emit(f'  {ov}{op}{_sf}_is_some = {_some_t};')
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the
             # element type for subscript/list-iter dispatch — without this,
@@ -1882,21 +1707,6 @@ def _gen_stmt_AssignStmt(gen, node):
             gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
         if _setitem_r is not None:
             return
-        # Constant-index write into a synthesized `Tuple[...]` value
-        # (part 4: the zip `__next__` body's `res[i] = next(...)` — the
-        # spliced body's canonical one-line subscript assignment): a
-        # member write with the element ctype straight off the registered
-        # field table, mirroring `_lower_subscript`'s read side. An
-        # augmented tuple subscript is a DIFFERENT statement
-        # (AugAssignStmt) and falls through to the old path unmeasured,
-        # as before.
-        if (isinstance(ot, str) and ot.startswith('MojoTuple_')
-                and isinstance(node.target.index, gimple_ctypes.IntLiteral)):
-            _tf = gen.struct_field_types.get(ot, {})
-            _ef = f'_{int(node.target.index.value)}'
-            if _ef in _tf:
-                gen._safe_coerce_emit(vtype, _tf[_ef], v, f'{obj_v}.{_ef}')
-                return
         if ot == 'MojoList *':
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2084,12 +1894,12 @@ def _gen_stmt_AssignStmt(gen, node):
                                         else:
                                             _am = gimple_ctypes.re.match(r'^(.+)\[(\d+)\]$', ftype)
                                             _ect, _acnt = (_am.group(1), int(_am.group(2))) if _am else ('int64_t', 1)
-                                        if _ect in gimple_codegen._SCALAR_CTYPE_SIZE:
+                                        if gen._has_scalar_ctype_size(_ect):
                                             # Scalar element type: `sizeof(int64_t)` itself
                                             # is rejected by GIMPLE's sizeof grammar (see
                                             # above), so use a literal byte count computed
                                             # in Python instead.
-                                            _nbytes = gimple_codegen._SCALAR_CTYPE_SIZE[_ect] * _acnt
+                                            _nbytes = gen._scalar_ctype_size(_ect, 8) * _acnt
                                         else:
                                             # Struct element type: unlike a scalar typedef,
                                             # `sizeof(StructName)` (a bare aggregate type
@@ -2213,21 +2023,6 @@ def _gen_stmt_AssignStmt(gen, node):
 
 def _gen_stmt_AugAssignStmt(gen, node):
     base_op = node.op[:-1]
-    # Box tracking (part 4, further, test_python_object): `c += 100` on a
-    # box local lowers through the fake BinaryOp below, so the box
-    # expression check runs on that op — `c` stays a box (and a truediv
-    # keeps its double-bits flag through the rebind).
-    if (isinstance(node.target, gimple_ctypes.IdentExpr)
-            and base_op in ('+', '-', '*', '/', '%', '**')):
-        _fake = gimple_ctypes.BinaryOp(op=base_op,
-                                       left=node.target, right=node.value)
-        _bx, _dbl = _py_box_expr(gen, _fake)
-        if _bx:
-            gen._pybox_vars.add(node.target.name)
-            if _dbl:
-                gen._pybox_double_vars.add(node.target.name)
-            else:
-                gen._pybox_double_vars.discard(node.target.name)
     # For augmented assignments, use lower_expr with a fake BinaryOp to get proper type handling
     # This includes string concatenation, list concatenation, etc.
     # '@' (matrix-multiply, `a @= b`) must go through this path too — it
@@ -2626,6 +2421,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         else:
             gen._emit(gimple_codegen._RETURN)
     else:
+        # Declared `str` BEFORE the unpack: `lower_expr`'s tuple result comes
+        # back as an untyped pair once self-hosted, so an undeclared `v` was an
+        # `int64_t`, and the `f"  return {v};"` below formatted the temp's
+        # ADDRESS as a decimal (`return 515548663312;`) for every function that
+        # returns a non-literal.
+        vtype: str = ''
+        v: str = ''
         vtype, v = gen.lower_expr(node.value)
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately
@@ -2836,19 +2638,6 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {b} = {ip} != {zero};")
         return b
     if ctype == 'int64_t':
-        # PART 6 (2026-10-22, family C): a temp holding a READ of a tagged
-        # Optional field tests the is_some side-band, not the raw word —
-        # the whole point is that Some(0) (word 0) is truthy, where the
-        # generic `!= 0` below would read it as None.
-        _tag = gen._tagged_opt_read.get(val)
-        if _tag is not None:
-            _ov, _op, _sf = _tag
-            b = gen._new_temp('_Bool')
-            # Same-type component-ref read into the `_Bool` temp, NO
-            # parens: `t = (p->b)` is a gimple-frontend error in a
-            # `__GIMPLE`-tagged function, `t = p->b` is not (m4 shape).
-            gen._emit(f"  {b} = {_ov}{_op}{_sf}_is_some;")
-            return b
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
         gen._emit(f"  {zero} = (int64_t)0;")
@@ -4187,20 +3976,6 @@ def _gen_stmt_ExprStmt(gen, node):
 
 
 def _gen_stmt_AssertStmt(gen, node):
-    # `comptime assert` is a COMPILE-TIME check in Mojo — it has no runtime
-    # semantics. Lowering it like a plain assert is measured-wrong: the
-    # drop iterator's `comptime assert conforms_to(Self.Element,
-    # Deinitable)` (std/itertools/itertools.mojo, spliced into every
-    # lifted `_DropIterator`) became a value-path branch on `conforms_to`
-    # (an undefined runtime symbol) plus a `__builtin_trap` in the hot
-    # `__next__` loop. No runtime lowering; the compile-time check itself
-    # is not implemented here (honest note — this is not swallowing a
-    # runtime check, since real Mojo runs none either).
-    if getattr(node, 'is_comptime', False):
-        gimple_ctypes._debug_note(
-            'comptime assert: no runtime lowering (compile-time '
-            'checking not implemented)')
-        return
     _, v = gen.lower_expr(node.value)
     bb_trap = gen._new_bb()
     bb_ok   = gen._new_bb()
@@ -4858,36 +4633,6 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
             gen._emit(f"  /* with: __exit__ ({sn}) */")
 
 
-def _with_is_assert_raises(expr):
-    """`with assert_raises():` — the std.testing error-expectation marker.
-
-    The struct is IMPORTED into the test TU (the tests spell `from
-    std.testing import ...`), so its `__enter__`/`__exit__` are never
-    elaborated into this TU: the generic context-protocol path finds no
-    methods (the struct name erases to the plain type), emits placeholder
-    comments, and runs the body with NO setjmp frame at all. The expected
-    failure then calls `mojo_raise()` with `_mojo_exc_top < 0`, which the
-    runtime treats as an uncaught exception and `exit(1)`s — the test
-    cannot continue past the `with` and value-level checking is impossible.
-
-    Recognized by source spelling only: a call spelled `assert_raises`
-    (optionally dotted), because the import scan mangles the symbol name
-    (bare vs `std_testing___init___`-prefixed) while the source spelling
-    is stable. Callers must additionally verify the struct's `__exit__` is
-    NOT visible in `gen.func_return_types`, so a TU where the struct is
-    genuinely elaborated (a real in-TU `__exit__`) keeps the existing
-    generic-protocol lowering untouched.
-    """
-    if type(expr).__name__ != 'CallExpr':
-        return False
-    fn = expr.func
-    if type(fn).__name__ == 'IdentExpr':
-        return getattr(fn, 'name', None) == 'assert_raises'
-    if type(fn).__name__ == 'MemberExpr':
-        return getattr(fn, 'member', None) == 'assert_raises'
-    return False
-
-
 def _gen_stmt_WithStmt(gen, node):
     # `contexts` tracks the ORIGINAL context-manager value (`ctx_v`,
     # `ctx_t`) for each item, separately from the user-visible bound
@@ -5010,107 +4755,6 @@ def _gen_stmt_WithStmt(gen, node):
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-
-    # `with assert_raises():` — the items loop above already emitted the
-    # marker CALL (driver-side `assert_raises` arms the expectation) and a
-    # placeholder `__enter__` comment, because the imported struct's methods
-    # are not in-TU. The generic protocol cannot build a setjmp frame here
-    # (no `__exit__` to find), so take over now and lower the block to the
-    # same setjmp idiom as _gen_stmt_TryStmt, with the marker's swallowing
-    # semantics:
-    #   body raises        -> bb_exc: pop the frame, SWALLOW, continue —
-    #                         the block is REQUIRED to raise, and it did,
-    #                         so the statement's assertion is satisfied
-    #   body returns       -> assert_raises_no_raise() (driver aborts: the
-    #                         block failed to raise), then the return
-    #   body breaks/continues -> same no_raise call, then the loop jump
-    #   body falls through -> assert_raises_no_raise() + continue
-    # The `assert_raises_no_raise` extern goes into gen.decls, which is
-    # flushed at the top of the function body before any statement — the
-    # file-scope import preamble cannot know about a symbol this statement
-    # invents (see _reset_func's decls handling). Message matching for
-    # `assert_raises(contains=...)` / error-type arguments is NOT verified:
-    # the driver's marker takes no arguments; documented simplification.
-    # Scoped to a single bare `with assert_raises():` whose struct has no
-    # in-TU `__exit__` — anything else (multi-context, `as` binding, a
-    # genuinely elaborated struct) keeps the existing lowering.
-    if (len(node.items) == 1
-            and node.items[0].alias is None
-            and _with_is_assert_raises(node.items[0].expr)):
-        _ar_sn = _ctx_sns[0] if _ctx_sns else None
-        _ar_has_exit = _ar_sn is not None and (
-                gen._struct_method_csym(_ar_sn, '__exit__', '') in gen.func_return_types
-                or f"{_ar_sn}___exit__" in gen.func_return_types)
-        if not _ar_has_exit:
-            # Same setjmp/__GIMPLE hazard as the has_exit branch below: a
-            # function whose body emits a real setjmp must not be tagged
-            # __GIMPLE (see _reset_func's _func_used_setjmp comment).
-            gen._func_used_setjmp = True
-            _ar_extern = '  extern void assert_raises_no_raise (void);'
-            if _ar_extern not in gen.decls:
-                gen.decls.append(_ar_extern)
-            sj_ret = gen._new_temp('int')
-            cond_t = gen._new_temp('_Bool')
-            bb_try   = gen._new_bb()
-            bb_exc   = gen._new_bb()
-            bb_after = gen._new_bb()
-            temp_top1 = gen._new_temp('int')
-            temp_inc  = gen._new_temp('int')
-            temp_top2 = gen._new_temp('int')
-            gen._emit(f"  {temp_top1} = _mojo_exc_top;")
-            gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
-            gen._emit(f"  _mojo_exc_top = {temp_inc};")
-            gen._emit(f"  {temp_top2} = _mojo_exc_top;")
-            # Checkpoint the cleanup-thunk stack exactly like the try/
-            # except idiom: on the longjmp the runtime unwinds to it.
-            gen._emit("  mojo_cleanup_checkpoint_save ();")
-            gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
-            gen._emit(f"  {cond_t} = {sj_ret} != 0;")
-            gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
-
-            gen._emit_label(bb_try)
-            for s in node.body:
-                if type(s).__name__ == 'ReturnStmt':
-                    # A `return` out of the block is normal control flow:
-                    # the block did NOT raise, so the expectation fails.
-                    # (Pop first, so the stack is balanced if the driver
-                    # no_raise call ever becomes a no-op.)
-                    gen._emit("  mojo_exc_pop ();")
-                    gen._emit("  assert_raises_no_raise ();")
-                # break/continue lower to a bare `goto <loop label>;` and
-                # leave this protected region without raising — the block
-                # failed to raise, so no_raise before the jump (same leak
-                # pattern the has_exit branch handles with its teardown).
-                original_emit = gen._emit
-                def intercepted_emit(line, rv=None, rt=None):
-                    stripped = line.strip()
-                    if gen.loop_stack and stripped in (
-                        f"goto {gen._loop_continue_bb()};",
-                        f"goto {gen._loop_break_bb()};"):
-                        original_emit("  mojo_exc_pop ();")
-                        original_emit("  assert_raises_no_raise ();")
-                        original_emit(line)
-                        return
-                    original_emit(line)
-                gen._emit = intercepted_emit
-                gen.gen_stmt(s)
-                gen._emit = original_emit
-
-            if not gen._last_was_terminal:
-                gen._emit("  mojo_exc_pop ();")
-                gen._emit("  assert_raises_no_raise ();")
-                gen._emit(f"  goto {bb_after};")
-
-            gen._emit_label(bb_exc)
-            gen._emit("  mojo_exc_pop ();")
-            # The block raised, as required: swallow and continue. The
-            # exception state (type tag / message) is left as-is — the
-            # marker's driver-side bookkeeping owns it, and the next
-            # assert site reads no exception state.
-            gen._emit(f"  goto {bb_after};")
-
-            gen._emit_label(bb_after)
-            return
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):

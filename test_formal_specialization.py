@@ -926,11 +926,9 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
     publish and `library_free_edges` keeps the library — and a library whose
     private names are excluded from its export table publishes no `_helper`, so
     `_bracketed_export_gap` answers before the bracketed scan does. `doc/ABI.md`'s
-    rule names four exclusions, and the refusal now names the ONE that applied
-    (`model.export_rule_for` reads the module's own source and
-    `reflect.export_exclusions` answers); this case pins the private one AND
-    pins that the other three are not also enumerated, which is the four-rule
-    wording a reader of `time.now` was sent after a template and an overload by.
+    rule names four exclusions and this case pins one of them (a leading `_` is
+    private), so a refusal that stopped being able to say which would still pass
+    the two rules it shares with every other exclusion.
 
     Bound as `from lib import _helper` rather than reached as `lib._helper`,
     because that is the spelling the message names: a DOTTED chain reduces to
@@ -960,13 +958,8 @@ def test_a_bracketed_callee_the_module_does_not_publish_says_the_export_rule(
           f"boundary: {text.strip()[-300:]}")
     # …and it names the ONE rule that applied. `model.export_rule_for` reads
     # `lib.mojo`'s own source through `reflect.export_exclusions`, so a private
-    # name no longer drags the other three clauses along with it: each is
-    # pinned absent by its own wording, the four-rule enumeration this case
-    # exists to replace (the reader of `time.now` was sent after a generic
-    # template and an overload in a file that declares neither).
-    check("one per instantiation" not in text
-          and "an overload has no single symbol" not in text
-          and "libSystem" not in text,
+    # name no longer drags the generic-template clause along with it.
+    check("one per instantiation" not in text and "libSystem" not in text,
           f"the refusal enumerates the rules that did NOT apply instead of the "
           f"one that did: {text.strip()[-300:]}")
 

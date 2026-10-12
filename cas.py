@@ -488,49 +488,21 @@ def module_key(source: str, imported_sigs, gcc: str, flags: tuple = (),
 
 
 def _inst_hash(domain: str, template_id: str, type_args, comptime_args,
-               gcc: str, flags: tuple, extra=None) -> str:
+               gcc: str, flags: tuple) -> str:
     ta = '\x1f'.join(f"{k}={v}" for k, v in sorted((type_args or {}).items()))
     ca = '\x1f'.join(f"{k}={v}" for k, v in sorted((comptime_args or {}).items()))
-    if extra is None:
-        return _hash(domain, ABI_VERSION, compiler_fingerprint(),
-                     toolchain_fingerprint(gcc, flags), template_id, ta, ca)
     return _hash(domain, ABI_VERSION, compiler_fingerprint(),
-                 toolchain_fingerprint(gcc, flags), template_id, ta, ca, extra)
-
-
-def _extra_str(extra) -> str:
-    """Canonical string for `instantiation_key`'s `extra` material (the tuple of
-    renames + spliced nested definitions): type-tagged and length-prefixed so no
-    concatenation of struct sources can collide with another's."""
-    if isinstance(extra, str):
-        return f"s:{len(extra)}:{extra}"
-    if isinstance(extra, (list, tuple)):
-        return 't' + ''.join(_extra_str(e) for e in extra)
-    if extra is None:
-        return 'n'
-    s = str(extra)
-    return f"s:{len(s)}:{s}"
+                 toolchain_fingerprint(gcc, flags), template_id, ta, ca)
 
 
 def instantiation_key(template_id: str, type_args, comptime_args,
-                      gcc: str, flags: tuple = (), extra=None) -> str:
+                      gcc: str, flags: tuple = ()) -> str:
     """Content key (`inst/<hash>`) for a generic instantiation. template_id is the
     template's canonical identity (its source); type_args / comptime_args are the
     concrete arguments. Same key ⇒ same monomorphized output, so an instantiation
-    is compiled once, ever, and shared across clients (MODULE_CACHE_DESIGN.md).
-
-    `extra` is the one extension: instantiation material that is NOT a function of
-    (template, type_args) alone — a nested-struct preamble spliced into the
-    translation unit (see monomorphize.instantiate's `nested_defs`). It takes a
-    DISTINCT version tag (`mojo-inst-v2-nested`) so a nested instantiation can never
-    collide with a plain one, while every key computed without `extra` stays
-    byte-identical to the v1 form — the CAS content of every plain instantiation
-    is unchanged, so no recompile of the existing cache."""
-    if extra is None:
-        return 'inst/' + _inst_hash('mojo-inst-v1', template_id, type_args,
-                                    comptime_args, gcc, flags)
-    return 'inst/' + _inst_hash('mojo-inst-v2-nested', template_id, type_args,
-                                comptime_args, gcc, flags, _extra_str(extra))
+    is compiled once, ever, and shared across clients (MODULE_CACHE_DESIGN.md)."""
+    return 'inst/' + _inst_hash('mojo-inst-v1', template_id, type_args,
+                                comptime_args, gcc, flags)
 
 
 def comptime_key(fn_src: str, fn_name: str, gcc: str, flags: tuple = ()) -> str:

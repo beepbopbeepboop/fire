@@ -29,7 +29,7 @@ _CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
 
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
-    os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp'),
     os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
     os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
     os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),

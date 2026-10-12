@@ -25,6 +25,79 @@ _C_KEYWORDS = frozenset({
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _ml_parse_var_global(text: str) -> list:
+    """`[name, annotation, rhs]` for a top-level `var NAME[: ANN][= RHS]` line
+    (already stripped), or `[]` when the line is not that shape.
+
+    Exactly what the regex it replaced accepted: `var`, whitespace, an
+    identifier, an optional `: ANN` (ANN non-empty, no `=` in it), an optional
+    `= RHS` (RHS non-empty), nothing else. Plain string scanning so the
+    self-hosted build can run it (see the call site)."""
+    n = len(text)
+    if not text.startswith('var'):
+        return []
+    i = 3
+    j = i
+    while j < n and (text[j] == ' ' or text[j] == '\t'):
+        j += 1
+    if j == i:
+        return []
+    k = j
+    if k < n and (text[k].isalpha() or text[k] == '_'):
+        k += 1
+        while k < n and (text[k].isalnum() or text[k] == '_'):
+            k += 1
+    else:
+        return []
+    name = text[j:k]
+    rest = text[k:].strip()
+    ann = ''
+    rhs = ''
+    if rest.startswith(':'):
+        body = rest[1:]
+        eq = body.find('=')
+        if eq < 0:
+            ann = body.strip()
+        else:
+            ann = body[:eq].strip()
+            rhs = body[eq + 1:].strip()
+            if not rhs:
+                return []
+        if not ann:
+            return []
+    elif rest.startswith('='):
+        rhs = rest[1:].strip()
+        if not rhs:
+            return []
+    elif rest != '':
+        return []
+    return [name, ann, rhs]
+
+
+def _ml_number_kind(s: str) -> int:
+    """2 when `s` STARTS with `-?DIGITS.DIGITS`, 1 when it is entirely
+    `-?DIGITS`, else 0 — the two `re.match` shapes the global scan used."""
+    n = len(s)
+    i = 0
+    if i < n and s[i] == '-':
+        i += 1
+    d0 = i
+    while i < n and s[i].isdigit():
+        i += 1
+    if i == d0:
+        return 0
+    if i == n:
+        return 1
+    if s[i] == '.':
+        j = i + 1
+        k = j
+        while k < n and s[k].isdigit():
+            k += 1
+        if k > j:
+            return 2
+    return 0
+
+
 def _ml_as_str(e: object) -> str:
     """Re-tag a value the self-hosted backend erased to int64_t back to `str`.
     Identity on CPython; the char* bits are intact, only the static type was lost.
@@ -419,56 +492,11 @@ class ModuleLoader:
                 # doesn't have — out of scope here; left as an honest
                 # (link-time, not silent) failure for that narrower case.
 
-                # Block stack for nested-def detection: (indent, kind), kind
-                # 'fn' or 'other'. Maintained as the loop walks (see the
-                # nested-closure note on the skip below for the measured
-                # failure this exists for).
-                _block_stack: list = []
-                for _raw_line in src_content.split('\n'):
-                    line = _raw_line.strip()
+                for line in src_content.split('\n'):
+                    line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    _indent = len(_raw_line) - len(_raw_line.lstrip(' '))
-                    while _block_stack and _block_stack[-1][0] >= _indent:
-                        _block_stack.pop()
-                    _is_defline = line.startswith('fn ') or line.startswith('def ')
-                    _nested_def = _is_defline and any(
-                        _k == 'fn' for _i, _k in _block_stack)
-                    if _is_defline:
-                        _block_stack.append((_indent, 'fn'))
-                    elif line.endswith(':'):
-                        _block_stack.append((_indent, 'other'))
-                    if _nested_def:
-                        # A nested closure (`def inner` inside a function
-                        # body): the stripped-line match used to register it
-                        # as a module-level function export, and — because the
-                        # param extraction only keeps ANNOTATED params (`if
-                        # ':' in param`) while the Python stdlib's nested defs
-                        # are unannotated — the entry came out `int64_t
-                        # fsdecode (void)`: a 0-arg prototype the importer
-                        # emits as `extern int64_t os_fsdecode (void);` for
-                        # `os.fsdecode(x)` — gcc's "too many arguments ...
-                        # expected 0, have 1" at Lib/ntpath.py:317/373/387/461
-                        # and Lib/posixpath.py:266/278/325 (the
-                        # os_fsdecode/os_fsencode 0-arg-stub class on rows
-                        # 10/24/25, measured 2026-10-24). It is doubly wrong:
-                        # the C function a nested def compiles to is named
-                        # after the ENCLOSING function (closure_lifted_name:
-                        # `outer_inner`), so the `module_name` symbol the
-                        # extern names does not exist at all — the
-                        # module-level binding (`fsencode, fsdecode =
-                        # _fscodec()` in os.py) is a VALUE, and its
-                        # cross-module call falls to the dynamic dispatch
-                        # path, which refuses loudly rather than binding to a
-                        # non-existent symbol. Module-level defs inside
-                        # module-level control flow and class methods are NOT
-                        # nested: their innermost open block is 'other', and
-                        # they register exactly as before. The overload
-                        # COUNTING pre-pass above deliberately still sees
-                        # nested defs, so a module-level def that merely
-                        # shares a name with a nested one keeps its measured
-                        # variadic treatment byte for byte.
-                        continue
+
                     # Match 'fn name(...) -> Type:' or 'fn name(...)'
                     if line.startswith('fn ') or line.startswith('def '):
                         # Remove 'fn ' or 'def '
@@ -849,7 +877,6 @@ class ModuleLoader:
             # mirrors here so both sides of the accessor call agree on the
             # return type without either side needing to know the other's
             # verdict in advance).
-            import re as _re
             # BUG-2026-029 cross-file follow-up: a DECLARATION-ONLY global
             # (`var g_world: World`, no `= EXPR` — the real box.3d/game
             # shape, assigned later inside `ffi_init()`) never matched this
@@ -864,21 +891,28 @@ class ModuleLoader:
             # `_local_sibling_module_exports` / `_emit_imported_global_
             # accessors`, not reflect.py's `collect_exports`/
             # `_register_link_imports`, which is `fire build`'s link-mode-
-            # only path). The `(?:=\s*(?P<rhs>.+?))?` group is now optional;
+            # only path). The `= EXPR` part is optional;
             # a bare `var NAME: Type` (or untyped `var NAME`, though Mojo
             # requires an annotation or initializer) still exports an entry.
-            _VAR_GLOBAL_RE = _re.compile(
-                r'^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(?P<ann>[^=]+?))?'
-                r'\s*(?:=\s*(?P<rhs>.+?))?\s*$')
+            # Parsed by `_ml_parse_var_global` (plain string scanning), NOT a
+            # regex: this file is compiled by the self-hosted compiler, where a
+            # FUNCTION-LOCAL `import re as _re` is not an importable module —
+            # `_re.compile(...)` raised "module 're' is not compiled into this
+            # binary", the surrounding `except Exception` swallowed it, and
+            # EVERY exports table this function built came back EMPTY, so no
+            # sibling-module import resolved to a signature and every call to
+            # one bound to a bare, unqualified, weak-stub symbol.
             for _line in content.split('\n'):
                 if not _line or _line[0] in ' \t#':
                     continue   # indented (not top-level) or a comment
-                _m = _VAR_GLOBAL_RE.match(_line.strip()) if _line.strip().startswith('var ') else None
-                if not _m:
+                _vparts = []
+                if _line.strip().startswith('var '):
+                    _vparts = _ml_parse_var_global(_line.strip())
+                if len(_vparts) == 0:
                     continue
-                _vname = _m.group(1)
-                _vrhs = (_m.group('rhs') or '').strip()
-                _vann = (_m.group('ann') or '').strip()
+                _vname = _vparts[0]
+                _vann = _vparts[1]
+                _vrhs = _vparts[2]
                 if _vname in exports or (_apply_c_stdlib_skip and _vname in _C_STDLIB_SKIP):
                     continue   # a same-named fn/def export always wins
                 _SCALAR_INT_ANNS = frozenset({
@@ -922,9 +956,9 @@ class ModuleLoader:
                     _vctype = 'char *'
                 elif _vrhs in ('True', 'False'):
                     _vctype = '_Bool'
-                elif _re.match(r'^-?\d+\.\d+', _vrhs):
+                elif _ml_number_kind(_vrhs) == 2:
                     _vctype = 'double'
-                elif _re.match(r'^-?\d+$', _vrhs):
+                elif _ml_number_kind(_vrhs) == 1:
                     _vctype = 'int64_t'
                 elif _vann.split('[', 1)[0].strip() in _SCALAR_INT_ANNS:
                     # An explicit scalar-int annotation overrides a

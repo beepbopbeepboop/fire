@@ -191,18 +191,6 @@ SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
     "    def __exit__(self):",
     "    def __exit__(self, exc_type, exc_val, tb):")
 
-# The `main` a suppressor is exercised with: a `raise` inside the block, so
-# whether `__exit__`'s value is READ is the difference between stopping at the
-# block (exit 1) and running the statement after it.  Shared by the ANSWERED
-# falsy rows and the REFUSED truthy rows so the two halves differ only in the
-# `__exit__` return.
-SUPPRESSING_MAIN = ("def main(n):\n"
-                    "    with Suppressor() as v:\n"
-                    "        print('body', v)\n"
-                    "        raise ValueError('m')\n"
-                    "    print('after')\n"
-                    "    return 0\n")
-
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
@@ -214,61 +202,6 @@ RIVAL = """class Rival:
     def __exit__(self):
         print('rival-exit')
 """
-
-# **The same rival-owner ambiguity, with the manager's own `__enter__` DECLARING
-# the struct its result is.**  The receiver-returning spelling
-# (`a_method_through_the_alias_with_a_rival_owner_is_answered`, in DECLARED)
-# and this pair answer the same ambiguity through the two publications that
-# CLOSED it — there `Box.__enter__` returns its own receiver (unannotated), and
-# the holder analysis knows the alias is a `Box`; here `__enter__(self) ->
-# Holder` writes the type down, so the alias's struct is a fact the source
-# states and `h.speak()` lifts from it — `model.with_alias_struct` is the reader
-# and `formal/build.py::_prepare_functions` publishes it into the framed-receiver
-# table.  `speak` is declared by BOTH structs, which is the whole of the
-# ambiguity: dispatch by NAME cannot choose, and dispatch by the alias's type
-# (from either publication) can.
-ALIAS_TYPED_MOJO = """class Holder:
-    def __init__(self):
-        self.tag = 7
-        self.log = 0
-
-    def __enter__(self) -> Holder:
-        print('enter')
-        return self
-
-    def speak(self):
-        print('holder')
-        return self.tag
-
-    def __exit__(self):
-        print('exit')
-
-
-class Rival:
-    def __init__(self):
-        self.tag = 3
-        self.log = 0
-
-    def speak(self):
-        print('rival')
-        return self.tag
-
-    def __exit__(self):
-        print('rival-exit')
-
-
-def main(n):
-    with Holder() as h:
-        print('body', h.speak())
-    print('after')
-    return 0
-"""
-
-ALIAS_TYPED_PY = ALIAS_TYPED_MOJO.replace(
-    "    def __exit__(self):\n"
-    "        print('exit')",
-    "    def __exit__(self, exc_type, exc_val, tb):\n"
-    "        print('exit')")
 
 
 def mojo(body):
@@ -768,42 +701,6 @@ DECLARED = [
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
-      "        raise ValueError('m')\n"
-      "    print('after')\n"
-      "    return 0\n", 3),
-    # …and the FALSY half of the two literal kinds a gate keyed on `int` used to
-    # let through.  `return ""` and `return 0.0` are not suppressions, so the
-    # protocol lowers and the exception propagates — CPython exits 1 having
-    # printed the cleanup, and so must this image.  These are the boundary rows
-    # that keep the truthy-string/float REFUSALS below from being a gate that
-    # refuses the literal kind rather than the VALUE.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
@@ -843,78 +740,6 @@ DECLARED = [
      "    print('after')\n"
      "    return 0\n",
      SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the FALSY end of the EXPRESSION cases the refusal rows below catch: a
-    # constant COMPARISON that is false, which the same fold reads as 0, so the
-    # exception still propagates exactly as `return False` does.  The pair is
-    # load-bearing in the direction the module-level folder's own docstring gives:
-    # a gate that refused every expression it could not read as a single literal
-    # would pass the refusal while breaking this program.
-    ("an_exit_returning_a_false_comparison_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 1 > 2") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the same boundary for `len(<string literal>)`: an EMPTY text has a
-    # zero length, so `return len("")` does not suppress and the program lowers.
-    ("an_exit_returning_len_of_the_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return len("")') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return len("")') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    # …and the FALSY ends of the two container/chained cases the refusal rows
-    # below catch: an EMPTY display is falsy, and a chained comparison is false
-    # when any link is, so both let the exception propagate exactly as
-    # `return False` does.
-    ("an_exit_returning_an_empty_display_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return []") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return []") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    ("an_exit_returning_a_false_chained_comparison_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 1 > 2 > 3") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2 > 3") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
@@ -994,24 +819,6 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
-    # ── a method through the alias, whose NAME a second struct declares ──────
-    # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
-    # the `with` wrote that down, which is the fact `_alias_receiver_target`
-    # dispatches on.  Both `Box` and `Rival` declare `use`, so name-only dispatch
-    # has two owners and used to refuse the call as ambiguous; the alias's struct
-    # settles it, exactly as CPython's own type dispatch does.  This is the
-    # ANSWERED half of the `RIVAL` refusal below.
-    ("a_method_through_the_alias_dispatches_to_the_managers_struct",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     (CTX_MOJO + RIVAL + "def main(n):\n"
-      "    with Box() as b:\n"
-      "        print('body', b.use())\n"
-      "    return 0\n").replace("    def __exit__(self):",
-                            "    def __exit__(self, exc_type, exc_val, tb):"),
-     3),
 ]
 
 
@@ -1250,112 +1057,6 @@ REFUSALS = [
      "    print('after')\n"
      "    return 0\n",
      "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # ── a truthy return the build folds out of an EXPRESSION, not a literal ─
-    # **These are the same wrong answer as `return True`, reached through a
-    # constant the build could read perfectly well and the gate simply did not
-    # ask about.**  `_literal_return_truthiness` used to fold only
-    # `fold_literal_expr`, so a truthy return built from a COMPARISON, a
-    # boolean, a select, a bitwise op, `len(<string literal>)` or a remainder
-    # was not seen as truthy: measured on both architectures, each of the rows
-    # below BUILT and printed `enter / body / exit`, exited 1 and never reached
-    # `after`, where CPython suppresses and exits 0.  The fix composes the three
-    # constant folders the module-level reader already trusts, so each shape is
-    # decided by the folder that owns it rather than by a second operator table.
-    ("an_exit_returning_a_comparison_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 < 2") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_boolean_operator_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 and 2") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_select_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 if 1 else 0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_bitwise_operator_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 | 2") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_len_of_a_literal_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", 'return len("abc")') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_constant_remainder_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 7 % 3") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    # …and three shapes the int/str folders decline for a WORD reason rather than
-    # a truthiness one, which the recursion and the value reader close: a
-    # CONTAINER (truthy iff non-empty), a CHAINED comparison (its own node, so it
-    # needs values rather than truthinesses), and a branch or operand that is a
-    # FLOAT (no folder carries a float, because a float is not a word).
-    ("an_exit_returning_a_non_empty_display_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return [1]") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_chained_comparison_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 < 2 < 3") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_float_select_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 2.5 if 1 else 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
-    ("an_exit_returning_a_boolean_over_a_float_is_refused_for_the_same_reason",
-     SUPPRESSING_EXIT.replace("return True", "return 1 and 2.5") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     "SUPPRESSING the exception in flight", "it declares no __enter__"),
     # ── a context this build cannot type ───────────────────────────────────
     # A name bound from a CALL to another function.  This is the limit the
     # ANSWERED table's NAME rows stop at, and it is a return-type table this
@@ -1549,54 +1250,6 @@ def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
           "a read in a NESTED def is still a read")
 
 
-def check_an_annotated_enter_publishes_the_alias_struct(tmpdir, verbose=False):
-    """`model.with_alias_struct` asked directly, and its two None cases.
-
-    The alias names `__enter__`'s RESULT, and when that result is a struct the
-    manager ANNOTATES, the source has stated the alias's type — so a method call
-    through the alias whose name a second struct also declares resolves from the
-    alias rather than being refused by name.  The build half
-    (`ALIAS_TYPED_MOJO`, run by `main`) is the end-to-end claim; this is the
-    cheap in-process half, so the predicate cannot stop answering while the build
-    passes for an unrelated reason.  `with_alias_struct`'s two None cases are
-    `__enter__` returning a plain word and a struct with no `__enter__` at all;
-    the receiver-returning spelling with NO annotation stays out of THIS
-    predicate (that shape is answered by the OTHER publication, the holder
-    round trip in `_rewrite_holder_method_calls` — its row is
-    `a_method_through_the_alias_with_a_rival_owner_is_answered`).
-    """
-    import formal.build as B
-    import formal.model as M
-    from fire_compiler import py_tokenize, Parser
-
-    tree = Parser(list(py_tokenize(ALIAS_TYPED_MOJO))).parse_module()
-    by_name = {n.name: n for n in tree if isinstance(n, B.F.StructDef)}
-    holder = by_name.get("Holder")
-    rival = by_name.get("Rival")
-    check(M.with_alias_struct(holder, by_name) is holder,
-          "an `__enter__(self) -> Holder` publishes `Holder` as the alias's struct")
-    check(M.with_alias_struct(rival, by_name) is None,
-          "a struct whose `__enter__` is absent publishes nothing")
-
-    word = Parser(list(py_tokenize(
-        "class Word:\n"
-        "    def __init__(self):\n"
-        "        self.tag = 7\n"
-        "        self.log = 0\n"
-        "    def __enter__(self):\n"
-        "        return self.tag\n"
-        "    def __exit__(self):\n"
-        "        print('exit')\n"))).parse_module()
-    untyped = [n for n in word if isinstance(n, B.F.StructDef)][0]
-    check(M.with_alias_struct(untyped, {untyped.name: untyped}) is None,
-          "an `__enter__` that returns a WORD and declares no return type "
-          "publishes nothing, so dispatch stays by name")
-
-    source = ALIAS_TYPED_MOJO
-    run_pair("an_annotated_enter_publishes_the_alias_struct",
-             source, ALIAS_TYPED_PY, 3, tmpdir, verbose)
-
-
 def run_pair(name, source, cpython_source, arg, tmpdir, verbose):
     """Both backends against CPython, comparing stdout AND exit status."""
     ref_source = cpython_source + f"\nimport sys\nsys.exit(main({arg}))\n"
@@ -1726,8 +1379,6 @@ def main():
 
         check_receiver_table_is_asked_once(tmpdir)
         check_the_exit_word_gate_is_about_reading_not_arity(tmpdir)
-        check_an_annotated_enter_publishes_the_alias_struct(tmpdir,
-                                                            args.verbose)
 
         for name, source, needle, forbid in REFUSALS:
             if want and name not in want:

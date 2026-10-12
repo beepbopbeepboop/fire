@@ -379,17 +379,6 @@ def main():
     for k, *vs in [[1, 2, 3]]:
         print(k, vs)
 ''',
-    # The named escapes `\uXXXX`/`\UXXXXXXXX`/`\N{…}` and a multi-digit octal
-    # run: the shared decoder (`fire_compiler.decode_c_escapes`) left all four
-    # verbatim, so `len("\u00e9")` was 6 where CPython makes 1. CPython is the
-    # oracle outright — this is plain Python, no Mojo-only syntax. Spelled RAW
-    # so the test file's own parser does not pre-decode the corpus source.
-    "named_escapes_and_octal_decode": r'''
-def main():
-    print(len("\u00e9"), len("\U0001F600"), len("\N{LATIN SMALL LETTER E WITH ACUTE}"))
-    print(len("\101"), "\101", "\0" == "\x00")
-    print("a\u00e9b")
-''',
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a

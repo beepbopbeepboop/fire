@@ -27,7 +27,7 @@ import subprocess
 import tempfile
 
 # This file exercises the gimple_cpp_* C++20-coroutine backend's TaskGroup
-# intrinsics (its build helper links fire_async_runtime.cpp, the cpp
+# intrinsics (its build helper links mojo_async_runtime.cpp, the cpp
 # scheduler). Since doc/COROUTINE.html §5.5's cutover made the A3 stack-
 # switch backend the default, pin the escape hatch explicitly -- the
 # equivalent stack-switch TaskGroup coverage lives in
@@ -41,7 +41,7 @@ from build_config import find_gcc, find_gxx
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
 
@@ -100,7 +100,7 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
         with open(cpp_path, 'w') as f:
             f.write(cpp_code)
         async_o = os.path.join(wd, 'prog_async.o')
-        async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
+        async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
 
         r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_o, cpp_path],
                             capture_output=True, text=True, timeout=30)
@@ -110,10 +110,10 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
         r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
                             ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
-            raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
+            raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
         objs += [async_o, async_runtime_o]
 
-    r = fire.link_executable(objs, exe, cxx=cxx)
+    r = mojo.link_executable(objs, exe, cxx=cxx)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx={cxx}) failed: {r.stderr}")
 

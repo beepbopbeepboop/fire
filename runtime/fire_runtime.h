@@ -799,10 +799,6 @@ void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
-/* Extended (with-step) list slice: `lst[a:b:c]` — see the C file for the
- * step==0 convention; step-less slices keep mojo_list_slice. */
-MojoList*mojo_list_slice_step(MojoList *l, int has_start, int64_t start,
-                              int has_stop, int64_t stop, int64_t step);
 void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
 void     mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl);
 void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
@@ -901,25 +897,8 @@ MojoList *mojo_str_rpartition(char *s, char *sep);
 char *mojo_c_getenv(char *name);
 
 int mojo_truthy_cstr(char *s);
-int mojo_pyobject_truthy(int64_t box);
-int mojo_pyobject_is_container(int64_t box);
-int64_t mojo_pyobject_hash(int64_t box);
-char *mojo_pyobject_str(int64_t box);
-double mojo_pyobject_box_as_double(int64_t box);
-int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl);
-int64_t mojo_pyobject_truediv(int64_t a, int64_t b, int a_dbl, int b_dbl);
-int64_t mojo_pyobject_floordiv(int64_t a, int64_t b, int a_dbl, int b_dbl);
-int64_t mojo_pyobject_pow(int64_t a, int64_t b, int a_dbl);
-int mojo_pyobject_cmp(char op, int64_t a, int64_t b);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
-int64_t mojo_str_codepoint_len(char *s);
-/* PART 6 (2026-10-23, family S): the first UTF-8 CODE POINT of s, decoded
- * (not its first byte — mojo_ord's byte read answers 0xE0 for "߷" where
- * the real `Codepoint.ord` is 2295; test_iterators pins that equality
- * against the codepoints iterator's decoded value). Same 1/2/3/4-byte
- * sequence shape mojo_str_codepoint_len's non-continuation test counts. */
-int64_t mojo_str_first_codepoint(char *s);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
@@ -2146,6 +2125,7 @@ char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filen
 int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
 int int_isfile(int64_t marker, int64_t path);          /* os.path.isfile */
 int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
+int64_t int_normpath(int64_t marker, int64_t path);    /* os.path.normpath */
 int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
 int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */

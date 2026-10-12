@@ -7,61 +7,6 @@ This is the wave note for three modules written (`formal/hostmods/{traceback,
 signal,operator}.mojo`) and it is the queue for everything the wave could not
 write, which is most of what is left.
 
-<!-- conflict 0: both statuses kept -->
-**Status 2026-10-12 (`work/formal285-docs`): the sibling ranking this doc
-pointed at is DELETED, folded in here.** That ranking
-(`FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`)
-was the `glob`-wave ranking, and every item in its queue has closed: `glob`
-landed (42 of 50 files changed class, 0
-reached `pass`, 35 of the 42 landing on `cas.py:164`'s handler-arm refusal,
-`FORMAL_except_arm_is_never_emitted`); `shlex.quote` landed
-(`formal/hostmods/shlex.mojo`, `test_formal_shlex.py`, `quote` only — `split`
-/`join` answer a list or a generator); and `random` landed
-(`formal/hostmods/random.mojo`, `test_formal_random.py` — `seed` and
-`randrange` over a 624-word module-level state, 8 of 8 files changed class, 0
-passes), over the module-state premise that a module's OWN `global` has storage
-and survives across calls in one process. Its `types` "uses" tool defect was
-fixed in `6a7c36bb` (`_host_declared_names` was scanning `ast.parse(...).body`
-and stopping there, so a `SimpleNamespace` bound inside a module-level `try:`
-read as pure closure). Its remaining rows — `zlib` (a DEFLATE project),
-`collections` (claimed) and the type factories (`types`/`copy`/`datetime`/
-`resource`, each with its own doc) — are the six capabilities §3 below already
-names per row, so nothing was lost by folding it in: this document is the wall
-tool's reference and the ranking was its narrower first half.
-
-**Status 2026-10-08 (`work/formal206-docs`): the SIBLING ranking `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` is DELETED and folded here.** It ranked the rows after `glob` by files blocked (`tools/formal_sweep_causes.py --host`), and its whole queue has since closed:
-
-* **`glob`** — `formal/hostmods/glob.mojo`, the 50-file row: **42 of 50 changed
-  class, 0 reached `pass`**, and 35 of the 42 land on ONE row — `cas.py:164`'s
-  handler arm, which is `FORMAL_a_try_handler_arm_is_still_never_emitted.md`'s
-  refusal and is CORRECT, because `formal` has no unwinder.
-* **`shlex.quote`** — 1 file, the cheapest row in its census:
-  `formal/hostmods/shlex.mojo`, `test_formal_shlex.py`.
-* **`random`** — `formal/hostmods/random.mojo`, `test_formal_random.py`, over
-  the premise its §1a measured: a module's OWN `global` has storage and survives
-  across calls inside one image (which is why the row was reachable at all).
-
-Its conclusion — the task's "next 4-6 modules by files blocked" does not exist
-as stated — is what §3's per-name table repeats, and
-`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §0 measures
-the same thing a second time with a per-use shape column. One of its own
-measurements was a tool defect: its `types` row read `0 uses — pure closure`
-because `tools/formal_sweep_causes.py::_host_declared_names` scanned
-`ast.parse(...).body` and stopped there; fixed in `6a7c36bb` with a regression
-test in `test_refusal_taxonomy.py`. No part of its queue is open, which is why
-it is deleted rather than kept as a second census of the same wall.
-
-Merged 2026-10-13 (`work/formal255-docs`): the deleted doc carried one
-correction outside its own queue, folded here rather than lost — its §2
-`zlib` row and §5 item 3's "`zlib`, 27 files" (from its 2026-10-08
-`work/formal180-docs` Status) are FALSE: `zlib` is 0 files and 0 uses,
-measured in `formal/imports.py`'s `HOST_UNREACHABLE` comment (the 27 files
-were closure through `coro.py`'s `import zlib as _zlib`,
-`gimple_codegen.py`'s `mojo_zlib_*` signature table — runtime entry points it
-never calls — and a `types.py` docstring, and the three DEAD `import zlib`
-lines are deleted); §0.1's census not listing `zlib` is the same measurement
-from the other side.
-
 **Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
 §3 has been re-measured on this tree by it. The queue itself is unchanged: 20
 names, six capabilities, and every one of them still a project rather than a

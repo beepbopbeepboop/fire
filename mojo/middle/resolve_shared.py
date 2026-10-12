@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import determinism_trace as _dtrace
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_list, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -31,7 +31,6 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
-    _body_builds_struct_tuple,
 )
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
@@ -1545,7 +1544,15 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         # Drop the `None` marker before joining (see `_local_value_type`):
         # `None` is the NULL sentinel and must not narrow a pointer slot.
         # A name whose only assignment is `None` is still the int64_t box.
-        types = [t for t in inferred[vname] if t != _NONE_TYPE_MARKER]
+        # Explicit loop over `_as_list(...)`: a comprehension over
+        # `inferred[vname]` (a dict VALUE, erased to a word once self-hosted)
+        # lowers to "comprehension over int64_t" and yields an EMPTY list, so
+        # every local fell back to `int64_t` (`x = True` declared `int64_t`).
+        types: list = []
+        for _tk in _as_list(inferred[vname]):
+            _tks = _as_str(_tk)
+            if _tks != _NONE_TYPE_MARKER:
+                types.append(_tks)
         if not types:
             types = ['int64_t']
         result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
@@ -1591,9 +1598,12 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     _known_structs = set(gen.struct_field_types)
     conflicting: set = set()
     for vname in inferred:
-        _kinds = {t for t in inferred[vname]
-                  if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)}
+        _kinds: set = set()
+        for _ik in _as_list(inferred[vname]):
+            _iks = _as_str(_ik)
+            if (_iks in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                    or gimple_exprtypes._is_known_struct_ptr_ctype(_iks, _known_structs)):
+                _kinds.add(_iks)
         if not _kinds:
             continue
         # A container kind and a real SCALAR is the same "no single C type"
@@ -1618,8 +1628,11 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         # `_non_kind` excludes the `None` marker: `None` is the NULL
         # sentinel, pointer-compatible, and `slots = None` then
         # `slots = list(...)` must keep the container type.
-        _non_kind = {t for t in inferred[vname]
-                     if t not in _kinds and t != _NONE_TYPE_MARKER}
+        _non_kind: set = set()
+        for _nk in _as_list(inferred[vname]):
+            _nks = _as_str(_nk)
+            if _nks not in _kinds and _nks != _NONE_TYPE_MARKER:
+                _non_kind.add(_nks)
         _float_conflict = any(
             gimple_ctypes.TypeLattice.is_float(t) for t in _non_kind)
         # An INT conflict is trusted only when this name was assigned a
@@ -1797,24 +1810,12 @@ def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
             break
     if _all_quote:
         return prefix + val, ('1' if is_fstring else '')
-    # A NON-interpolated value reached here already stripped: the parser's
-    # `_strip_string_prefix_and_quotes` removes the prefix and the outer quote
-    # delimiters from every plain (non-f/t) STRING token, triple-quoted
-    # placeholder or not, so `val` is the literal's BODY. The only thing the
-    # block below can do to a body is remove CONTENT, and it is exactly what a
-    # body that both STARTS and ENDS with a quote character needs kept:
-    # `x = "'x'"` has the three-character body `'x'`, and `q = "'''x'''"` the
-    # seven-character body `'''x'''`; both satisfied every "still carries
-    # delimiters" test below and lost their outer characters, so the compiled
-    # path printed `x` where CPython prints `'x'` / `'''x'''` (measured; the
-    # interpreter and the formal path were already right). An interpolated
-    # (f/t) value is the ONE producer that keeps its prefix and quotes — see
-    # `_raw_string_is_ftstring`, which returns the token intact — so only it
-    # falls through to the strip.
-    if not is_fstring:
-        return prefix + val, ''
-    # val still carries quotes: an f/t-string (the only remaining producer —
-    # a plain value returned just above).
+    # val still carries quotes: an f/t-string, or a triple-quoted value handed
+    # back from the placeholder cache (`replace_multiline_strings` caches the
+    # literal source, quotes and all, under a `__MOJO_STR_n__` name — for an
+    # ordinary triple-quoted docstring that is the whole body with nothing else
+    # to tell it apart from a delimiter, which is why this arm is reachable
+    # without `is_interp`).
     # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
     # `"`, this file's own such literals) starts and ends with the quote but
     # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
@@ -1960,44 +1961,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
             if better_ret != 'int64_t':
-                if (isinstance(better_ret, str)
-                        and better_ret.startswith('MojoTuple_')
-                        and not _body_builds_struct_tuple(
-                                getattr(s, 'body', None))):
-                    # The SAME body-sensitive decision every other
-                    # `Tuple[...]` return site makes (see
-                    # register_imported_symbol / module_gen's
-                    # all-functions loop / _elab_signature): a body that
-                    # builds the tuple as a RUNTIME (list-backed) tuple
-                    # literal returns `MojoList *`. Without this this
-                    # refinement overwrites _elab_signature's guarded
-                    # `MojoList *` back into the struct (measured 2026-10-21
-                    # part 4 integration: test_location's
-                    # `get_call_locs_inlined_twice` forwards
-                    # `get_call_locs_inlined[depth]()`, its local stayed
-                    # `MojoList *`, and the call-site assignment became
-                    # `cannot convert to a pointer type`).
-                    better_ret = 'MojoList *'
                 info['ret'] = better_ret
-                if isinstance(better_ret, str) and better_ret.startswith(
-                        'MojoTuple_'):
-                    # Part 4 (measured 2026-10-21 integration): the
-                    # by-value struct for a `Tuple[...]` return must exist in
-                    # EVERY translation unit that references it, not only the
-                    # instantiating one — the caller's extern and call-site
-                    # temps are by-value, so its TU needs the typedef or gcc
-                    # rejects the unit with `unknown type name 'MojoTuple_...'`
-                    # (test_builtin/test_tuple's `_default_construct[T:
-                    # Tuple[Int, String]]` and test_location's
-                    # `get_call_locs_inlined_twice` both left their struct
-                    # name in the CALLER's TU with no registration).
-                    # `_ensure_tuple_struct` is idempotent and `ret_ann` is
-                    # the very annotation `better_ret` was resolved from, so
-                    # the registered layout and the name agree by
-                    # construction; the typedef emission pass (module_gen's
-                    # `struct_field_types` loop) runs AFTER the bodies, so a
-                    # registration made here is seen by it.
-                    gen._ensure_tuple_struct(ret_ann)
             break
 
 def _is_none_literal(el) -> bool:
