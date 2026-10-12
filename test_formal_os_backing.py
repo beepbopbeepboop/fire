@@ -746,7 +746,7 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
+    printf("m2 size=%d ino=%d dev=%llu blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",
@@ -790,7 +790,15 @@ def _stat_oracle(p):
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"),
+        # `st_dev` is a `dev_t` (`int32`) and CPython hands it back as the
+        # SIGN-EXTENDED 64-bit word, so it is rendered UNSIGNED in the program
+        # (`%llu`) and the oracle's `%d` of a Python int is that same decimal:
+        # `/dev/null` on a host whose root device number has its high bit set is
+        # `18446744072249612928`, not the `2835028608` a zero-extended read
+        # gives. `-1` (no `stat`) is the all-ones word, which is what the mask
+        # makes the oracle say too.
+        field(s, "st_dev") & 0xFFFFFFFFFFFFFFFF,
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
