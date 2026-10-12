@@ -6511,6 +6511,30 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    printf(\"%f\", g(3.9))\n"
      "    return 0\n", 0, "4.900000"),
+    # A `Pointer[Float64]` LOAD is now ANSWERED, and this row is the whole of
+    # what that buys on both architectures.  The eight bytes of b"ABCDEFG@" are
+    # the little-endian double `46.548988850442136`, and the program prints it
+    # two ways: `%g` through the FORMAT's placement, and `Int(...)` through
+    # `FCVTZS`.  Both have to be CPython's (`46.549` and `46`), and the second is
+    # what a bit MOVE could not produce — the raw word is 0x4047464544434241, a
+    # different answer entirely.  The values are in range on purpose: a double
+    # past 2^63 is the one shape where `FCVTZS` (arm64) and `CVTTSD2SI` (x86-64)
+    # legitimately disagree, and that saturation is the documented conversion
+    # note rather than this row's subject.  (Kept from `work/formal150-docs` on
+    # the 2026-10-12 merge; measured green on the merged tree, both backends.
+    # The branch's companion STORE row is not merged: this tree refuses a store
+    # through a float pointee, see `bugs/FORMAL_float_pointer_subscript.md`.)
+    ("a_binary64_pointer_load_reaches_int_and_the_format",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"%g\", p.value())\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFG@\"\n"
+     "    show(s)\n"
+     "    printf(\" %d\", read_f(s))\n"
+     "    return 0\n", 0, "46.549 46"),
     # …and the shape that was the OTHER HALF of that construct and was refused
     # for a month afterwards, which is why the row above is not the whole of it.
     # `mk(1) == mk(2)` alone leaves the holder check nothing to disagree about;
@@ -16363,6 +16387,51 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return f(s)\n",
      "refuse:declared to return Int", None),
+    # The FORMAT consumer reached through the dereference itself: `FLOAT_REFUSALS`
+    # pins a `%d` of a bare double without a pointer, and this pins the same
+    # refusal when the double arrives as `p.value()` — the kind that makes the
+    # load answerable is exactly what the format reads it against.  Kept from
+    # `work/formal150-docs` on the 2026-10-12 merge; the needle is the merged
+    # tree's message, measured on both backends.
+    ("deref_refuse_a_binary64_load_at_a_d_conversion",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var p: Pointer[Float64] = s\n"
+     "    printf(\"%d\", p.value())\n"
+     "    return 0\n",
+     "refuse:reads `p.value(...)` as an integer", None),
+    # The WORD-POSITION consumer reached through a printf ARGUMENT:
+    # `a_binary64_pointee_in_word_position_is_refused` above pins `g(p.value())`
+    # in a RETURN on the message's parameter clause, and this pins the same
+    # check in a different statement shape (the call is a printf argument) on
+    # the message's KIND clause.  Kept from `work/formal150-docs` on the
+    # 2026-10-12 merge; needle measured on the merged tree.
+    ("deref_refuse_a_binary64_load_in_word_position",
+     "def g(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var p: Pointer[Float64] = s\n"
+     "    printf(\"%d\", g(p.value()))\n"
+     "    return 0\n",
+     "refuse:is an IEEE double", None),
+    # The STORE subscript: `p[0] = 3.9` on a `Pointer[Float64]` is refused by
+    # the same sentence the LOAD subscript row `deref_refuse_a_float_pointee_
+    # subscript` further down in this group pins, because the store's base goes
+    # through the same subscript reader (`subscript_base_lowering`), which
+    # carries a dereference's kind but not a SUBSCRIPT's.  `work/formal150-docs`
+    # measured a subscript store that had written the value's bits: `p[0] = 1`
+    # came back `4.94066e-324` on both architectures, a denormal.  Kept on the
+    # 2026-10-12 merge with the merged tree's needle; it holds the STORE
+    # spelling to the refusal so a later change cannot lower it silently.
+    ("deref_refuse_a_binary64_subscript_store",
+     "def f(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 3.9\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return f(b)\n",
+     "refuse:reads an element of a FLOAT pointee", None),
     # THE TWO CONSUMERS the pointer load's kind reaches, and both are
     # reachable WITHOUT the pointer, which is what makes them rows here rather
     # than a note beside the pointer rows.  They are the
