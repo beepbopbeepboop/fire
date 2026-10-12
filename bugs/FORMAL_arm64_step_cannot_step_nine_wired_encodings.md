@@ -7,13 +7,15 @@ claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED a
 produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
 its own document now:**
 
-| defect | document |
+| defect | state |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — the arm reads and writes `Rd`; the `CMN` and `adds` spellings are pinned together by `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one `arm64_ext_imm12` helper scales all five arms, with an UNSHIFTED anti-rot row in the same test |
 
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
+Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they were
+written down rather than attempted, and both were fixed there and separately
+documented; **those two docs are deleted now that their source fix has been
+rebuilt into `lib/ProofLib.olean` and the CPU-vs-model rows above pass**. **Neither is in this file's `NOSTEP` table**,
 which is the generalisable half: this file's §5 is right that "the gap is the
 model is silent", and the two new defects are the OTHER failure — the model is
 *loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
