@@ -8640,6 +8640,13 @@ def check_construction_shapes(functions, structs_by_name,
                                string_names=FT.STRING_TYPE_NAMES)
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
+        # `{name: DictExpr}` for THIS function's single-literal locals, built
+        # only when a `**` spread is actually present — a spread through such a
+        # local is un-spread exactly like a literal, and this pass has to make
+        # the same decision the emitters make (they read the same table from the
+        # `ValueKinds` they hold). `None` until a spread needs it, so a file
+        # with no spread pays nothing.
+        mappings = None
         for node in M.iter_nodes(getattr(fn, "body", None)):
             if not isinstance(node, F.CallExpr) \
                     or not isinstance(node.func, F.IdentExpr):
@@ -8659,8 +8666,12 @@ def check_construction_shapes(functions, structs_by_name,
                     name, owners[name], _one(sources)))
             if M.type_constructor_kind(name) is not None:
                 continue
+            if mappings is None and any(
+                    isinstance(a, F.UnaryOp) and a.op == "**"
+                    for a in (node.args or ())):
+                mappings = M.local_dict_literals(fn)
             _plan, refusal = M.struct_construction_plan(
-                st, node, structs_by_name, cands, rets)
+                st, node, structs_by_name, cands, rets, mappings)
             if refusal is not None:
                 raise CodegenError(refusal)
 

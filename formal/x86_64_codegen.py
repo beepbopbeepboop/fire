@@ -931,6 +931,9 @@ class X86_64Codegen:
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
         self._vkinds_cache: dict = {}
+        # `{name: DictExpr}` for the CURRENT function's single-literal locals,
+        # set beside `_vkinds` in `_emit_function`.
+        self._spread_mappings: dict = {}
 
     # ── entry point ──────────────────────────────────────────────────
 
@@ -1444,6 +1447,10 @@ class X86_64Codegen:
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
         self._vkinds = self._scan_value_kinds(f)
+        # The same whole-function property as `_vkinds`, for the same reason:
+        # `{name: DictExpr}` for the locals whose only binding is a dict
+        # literal, so a `**d` spread is un-spread exactly like a literal.
+        self._spread_mappings = self._vkinds.dict_inits()
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
         self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
@@ -11211,7 +11218,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"keyword arguments are not supported "
                     f"({[k for k, _ in e.kwargs]})")
             return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs,
+                                           self._spread_mappings)
         if err is not None:
             raise CodegenError(err)
         return slots
@@ -11429,7 +11437,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # fresh zero word — wrong on this machine and on arm64, identically,
         # which is what kept it invisible.
         value, refusal = M.one_word_construction(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
@@ -11527,7 +11536,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         instruction: arm64 emits `LDR`/`STR Xt, [Xn, #8k]` for the same layout
         and this emits `mov` to and from `[RBP + 8k]`."""
         plan, refusal = M.struct_construction_plan(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         shape = plan[0]
