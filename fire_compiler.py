@@ -5071,12 +5071,21 @@ class Parser:
             return UnaryOp(op="*", operand=self._parse_unary())
         return self._parse_postfix()
 
-    def _parse_subscript_item(self):
+    def _parse_subscript_item(self) -> object:
         """Parse one subscript element: a slice (`start:stop:step`, every part
         optional) or a plain expression. Slices are returned as a SliceExpr with
         obj=None (the caller attaches the object); plain indices are returned as
         the bare expression node. Used for both 1-D and multi-dim (`a[0:2, ::]`)
-        indexing."""
+        indexing.
+
+        `-> object` because that is what it returns: a function-type index
+        comes back as the annotation STRING `_parse_type_ann` produced, every
+        other item as an AST node. Unannotated, the compiled path joined the
+        returns to `char *` (the string absorbs every other pointer in the
+        return-type lattice), so the caller's `items` list was a list of
+        strings and its `isinstance(only, SliceExpr)` folded to False: every
+        `x[a:b]` the self-hosted binary parsed stayed a `SubscriptExpr` around
+        a bare slice (the stage1-vs-stage2 `.ast` divergence)."""
         start = None
         if self._peek().kind != "COLON":
             # A FUNCTION TYPE in index position: `unsafe_bitcast[def(*a: *T)
@@ -5087,7 +5096,14 @@ class Parser:
             # `(*a: *T)` annotation colon is not an expression at all, so the
             # expression parse died on it before the ARROW handling below could
             # ever run.
-            if self._peek().kind == "KW" and self._peek().value in ("def", "fn"):
+            # Only when a parameter list follows: `fn` is an ordinary NAME in
+            # Python source, and `found[fn] = ft` (module_shared's struct-field
+            # scan) parsed its index as the annotation string "fn" -- the
+            # store then lowered with no key at all, and every class whose
+            # fields come from `self.x = ...` got one field named `0` in the
+            # self-hosted binary.
+            if (self._peek().kind == "KW" and self._peek().value in ("def", "fn")
+                    and self._peek(1).kind == "LPAREN"):
                 start = self._parse_type_ann()
                 self._skip_fn_quals()
                 if self._peek().kind == "ARROW":
