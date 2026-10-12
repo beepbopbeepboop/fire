@@ -9,6 +9,52 @@ failures the narrow `test_formal_call_proof_gen.py` run still shows after every
 whose `setUpClass` never populated `cls.infos`, and so on — all fixed and
 committed on that branch).
 
+## Status 2026-10-12 (`work/formal275-docs`): the reds are unchanged, the
+## `arm64_ext_imm12` cause below is DISPROVEN, and the real site is in the
+## CFG RUN proof
+
+Re-measured on master with the library built
+(`test_formal_call_proof_gen.py`'s four classes, `TestTheZeroDivisorGuardAgainstLean`
+included — 8 failures of 15). The failure named below is still, byte for byte,
+`mod_proof.lean:4899:68: error: maximum recursion depth has been reached`, and
+the Lean verdict is a cache REPLAY (the whole class runs in 0.7 s), so the
+proof bytes are unchanged.
+
+**It is not `arm64_ext_imm12`, and this is measurable without Lean.** The
+generated `mod_by_var` proof contains **zero** occurrences of
+`arm64_ext_imm12`; the only construct that names it is the step-RESULT lemma's
+proof (`sr_87`'s `exact work_step_add_imm64 …`, which reads the model term by
+DEFEQ), and that theorem is declared at line 2753 and accepted. The failing
+declaration is the run proof's `b6_self1`:
+
+```
+4899  rw [runs_cons_seq st (mod_by_var_b6_qT0 st) mod_by_var_code 0 hs0 rfl,
+4900      show st.pc + 4 = 4294968608 from by rw [hpc]]
+```
+
+so the recursion is in the `rw`'s matching over the CFG block state defs
+(`qS0`/`qT0`/`qS1`), not in reducing the immediate. The next reader should
+start at `runs_cons_seq` and the generated `{name}_{tag}_self{k}` chain
+(`formal/arm64_proof_gen.py`, the `self{k}` emitter around the `runs_cons_seq`
+call), NOT at `lib/ProofLib.lean`.
+
+The other three reds are still present and were confirmed in the same run:
+`TestSameImageCallLean.test_the_followed_call_proves_with_no_admission` (the
+same `maximum recursion depth`, in `same_image_leaf_proof.lean`),
+`TestNestedConditionFactSharing.test_the_fact_count_grows_with_the_paths_and_not_with_the_branches`
+(2 → 3 conditions grow the `hprior_` facts 9 → 21, and the count is
+`3 * (2**k - 1)` over k conditions — `9, 21, 45` — so the growth is above the
+test's `x2.2` for the small-k step only; this is a property of the generated
+path/scope tree and has nothing in it that names the model), and
+`TestANarrowTypedParameterGetsItsRange.test_lean_accepts_the_three_examples`
+(`sgt8`). `TestTheZeroDivisorGuardAgainstLean`'s rows are the class's own
+"the fixture generates no `q_compiles_correctly_universal`" guard, i.e. the
+pre-existing div0 residual recorded elsewhere, not a new failure.
+
+**This doc's fix is NOT the same as `lib/ProofLib.lean`'s imm12 arms.** Not
+fixed here — a light worker cannot iterate on a proof this deep without a Lean
+run per attempt, and the corrected site above is the next step.
+
 ## What was run
 
     python3 tools/memslot.py --gb 8 --label t -- \
