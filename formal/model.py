@@ -11017,7 +11017,7 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     argument text at all". The width question needs the first and the conversion
     question needs the second, and a caller that has no way to answer the first
     passes None — which is the permissive direction, exactly as `text_of`'s own
-    None row is. **`class_of` is optional for the same reason**: it is
+    None row is. **    `class_of` is optional for the same reason**: it is
     `printf_arg_float_evidence`'s three-way answer, and a caller that has no
     `ValueKinds` to hand passes None, which never refuses. **`container_of` is
     the same**: it answers the OPERAND'S KIND (`ValueKinds.kind_of`) and a

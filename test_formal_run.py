@@ -18534,6 +18534,20 @@ PRINTF_CONTAINER_REFUSALS = [
      "\n"
      "def main() -> Int:\n"
      "    return show(5)\n", 0, None),
+    # The `%p` boundary: the one conversion that RENDERS an address, and a
+    # container's word IS an address — CPython answers `"%p" % [1, 2, 3]`.
+    # The container hook still refuses it: it covers every non-`s` conversion,
+    # and the message answers "pass an element or the count" rather than
+    # emitting the pointer. The row pins that the boundary is DECLARED by a
+    # refusal with the container's kind, not by an allow that a reader has to
+    # find in a table comment.
+    ("container_a_pointer_conversion_is_the_container_refusal",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%p\", xs)\n"
+     "    return 0\n",
+     "refuse:the `%p` conversion in printf's format string reads `xs` as a "
+     "number, and `xs` is a CONTAINER", None),
 ]
 
 
@@ -18603,6 +18617,8 @@ CONTAINER_REFUSALS = [
      "    printf(\"[%s]\", \"hi\")\n"
      "    return 0\n", 0, "[hi]"),
 ]
+
+
 
 
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
