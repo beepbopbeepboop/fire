@@ -362,6 +362,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
     # wrong here). See `register_nested_env_free`.
     gen._owned_env_names: set = set()
+    # Temps holding the raw word an UNTYPED `_mojo_dispatch_getattr` returned
+    # (`_lower_MemberExpr` on a boxed receiver whose member no struct types
+    # unambiguously): the value is a string, an int, or any handle, and only
+    # the runtime can say which. `_stringify_value` asks it
+    # (`mojo_cstr_or_int_str`) instead of formatting the word as a decimal.
+    gen._dyn_word_vals: set = set()
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -795,6 +801,7 @@ class FuncState:
         self.fs_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
+        self.fs_dyn_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fsloop_stack: list = []
         self.fsexc_depth: int = 0
@@ -880,6 +887,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_closure_vals = gen._closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
+    st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fsloop_stack = gen.loop_stack
     st.fsexc_depth = gen.exc_depth
@@ -973,6 +981,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._closure_vals = st.fs_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
+    gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen.loop_stack = st.fsloop_stack
     gen.exc_depth = st.fsexc_depth
@@ -4139,6 +4148,16 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         if ev in getattr(gen, '_boxed_vals', ()):
             nv = gen._ensure_local('int64_t', ev)
             return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', nv)])
+        # An untyped attribute read (`_dyn_word_vals`): a string as often as
+        # an int -- `f"{sd.name}_{m.name}"` over a boxed StructDef, whose
+        # `name` no struct types unambiguously, formatted the name's ADDRESS
+        # as a decimal in the self-hosted compiler, so every
+        # `func_return_types` key it built missed. The runtime's own
+        # discriminator is right in both directions (a string comes back as
+        # itself, an int as its decimal) and is what argument coercion to a
+        # `str` parameter already uses for the same word.
+        if et == 'int64_t' and ev in gen._dyn_word_vals:
+            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float'):

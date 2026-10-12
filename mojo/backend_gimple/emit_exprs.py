@@ -2499,6 +2499,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 gen._emit(f"  {t} = ({_boxed_ft}){raw};")
             _boxed_propagate_container_elems(gen, node.member, _boxed_ft, t)
             return _boxed_ft, t
+        gen._dyn_word_vals.add(raw)
         return 'int64_t', raw
     elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
         # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
@@ -2587,8 +2588,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if ot in ('int', 'char'):
             ov = gen._new_val('int64_t', f'(int64_t){ov}')
         vp = gen._new_val('void *', f'(void *){ov}')
-        return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                        [('void *', vp), ('char *', f'"{node.member}"')])
+        _dyn_raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                  [('void *', vp), ('char *', f'"{node.member}"')])
+        gen._dyn_word_vals.add(_dyn_raw)
+        return 'int64_t', _dyn_raw
     elif struct_name in gimple_ctypes._FIXED_RUNTIME_STRUCT_NAMES:
         # Step 4 (“setting/getting an arbitrary attribute on a generically-typed object”):
         # `ot` resolved to one of THIS codegen's own fixed-layout runtime
