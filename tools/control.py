@@ -160,7 +160,7 @@ def cmd_spawn(a):
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)
-        cmd = ["opencode", "--model", a.model, "run", "--auto", "--dir", wt, "--title", a.name,
+        cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name,   # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
                "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
@@ -340,12 +340,13 @@ def cmd_hold(a):
 
 def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
-    arguments: ours are launched with `--model M run --auto --dir <PARENT>/work-N`, theirs have neither."""
+    arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
+    --dir <PARENT>/work-N`), theirs have neither."""
     tasks = {os.path.realpath(t["worktree"]): n for n, t in load().items()}
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
     for line in out.splitlines():
-        m = re.search(r"opencode .*--dir (\S+)", line)
+        m = re.search(r"opencode .*(?:--dir |instructions are in )(\S+?)(?:/TASK\.md)?(?:\s|$)", line)
         if m and " run " in line and "sh -c" not in line[:40]:
             pid, et, rss, _ = line.split(None, 3)
             print("%-24s pid %-6s up %-10s %5.0f MB" % (tasks.get(os.path.realpath(m.group(1)), "?"), pid, et, int(rss) / 1024))
