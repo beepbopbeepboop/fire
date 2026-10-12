@@ -7,6 +7,31 @@ merge. NOT reproduced on `master`, and the difference is the library, not the
 code** — see §1. **Needs a Lean-backed read, so it is filed rather than
 guessed at**; this session is a light worker and may not launch lean.
 
+**Status 2026-10-09 (this worktree): the route is now doubly gone, and the
+class has been taught to say so by name.** Re-measured on this tree with
+`lib/*.olean` materialised from the cas (0.0 GB / seconds, not a build):
+`_symbolic_divisor_proof` **refuses at GENERATION** — `FormalBuildError /
+NotImplementedError: universal theorem: 2 calls this walk cannot follow
+(0x100000424 -> 0x100000890 (opaque), 0x100000518 -> 0x100000884 (opaque))`.
+The two opaque calls are the compiler's own: the stack-floor guard's
+`getrlimit` (the `every_function` image rule puts it in `q`'s prologue,
+`model.stack_floor_guarded_names`) and the div0 arm's `fflush`. So §3's
+"warnings and no goals" hypothesis is superseded on this tree before Lean even
+runs — there is no proof file to read. Master is in the same state (identical
+_refusal, `formal-call-proofgen` recorded as 9/175 red in `tools/suite.py`).
+
+The measurement-class repair landed here as a port of master `e06800ff`:
+`setUpClass` records per-spelling why the mechanism did not fire (`cls.blind`)
+and `test_the_measurement_class_can_still_see_what_it_measures` fails on it by
+name, so the three rows now report the refusal rather than "the residual
+moved"; see `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_
+any_more.md`'s 2026-10-07 Status. The fix itself is unchanged and still not
+this lane's: the emitter regression (compiler calls read as program calls
+because arm64 `compiler_traps` is published and empty) and the conditional-halt
+walk gap (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_
+path.md`) both have to land before `a // b` again reaches a terminal value
+flow, and neither is a `test_formal_*` change.
+
 ## 1. What I ran, and why `master` is green
 
 ```console

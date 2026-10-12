@@ -111,10 +111,11 @@ the measurement that would justify either change cannot be taken here.
 **`FORMAL.md` §2.2/§6's published figures were behind the tree** — it published
 206 exported / 166 reachable where the same census measured 216 / 176, and
 `test_formal_doc_truth.py` and `test_formal_runtime_link.py` were both red on
-exactly that. **Swept 2026-10-05**: `FORMAL.md` now publishes the measured
-triple — 272 word-shaped, 216 exported, 176 reachable — and both jobs are green,
-so the eight stale figures `1dd68a48`/`ca50560f` had published are current
-again.
+exactly that. **Swept twice** — `e2b98c23` (2026-10-05) and `1dc2fbfd`
+(2026-10-09, `work/formal259-docs-r2-r2`): `FORMAL.md` now publishes the
+measured triple — 272 word-shaped, 216 exported, 176 reachable — plus the other
+stale figures `1dd68a48`/`ca50560f` had published (`runtime/fire_runtime.c`
+524 KB, 411 non-word, 93 `formal/examples/*.mojo`), and both jobs are green.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
