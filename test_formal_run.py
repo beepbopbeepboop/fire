@@ -6410,6 +6410,29 @@ BOTH_ARCH_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d %d\", count(\"a\"), count(\"abcd\"), count(\"\"))\n"
      "    return 0\n", 0, "1 4 0"),
+    # A generic struct whose type parameter is PHANTOM (it occurs nowhere in
+    # the body) is already a concrete declaration, so an INFERRED-argument
+    # construction of it binds like any one-word constructor. Before this it
+    # was refused at the binding — `bugs/FORMAL_generic_local_binding_has_no_home.md`
+    # — because `formal/monomorph.py::without_template_bodies` dropped every
+    # struct template, leaving the construction with no home. Both machines,
+    # because the filter and the holder analysis are shared
+    # (`formal/monomorph.py`, `formal/build.py::_frame_receivers`).
+    ("an_inferred_generic_struct_construction_binds_its_home",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: Int\n"
+     "struct Bag:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def tag(b: Bag) -> Int:\n"
+     "    var m = Marker(b.a)\n"
+     "    return m.v\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = Bag()\n"
+     "    g.a = 7\n"
+     "    g.b = 8\n"
+     "    printf(\"%d\", tag(g))\n"
+     "    return 0\n", 0, "7"),
     # …and the eq-dispatch case that is in this group for the reason the group's
     # docstring gives, read for this construct: the two backends' HOLDER
     # analysis is one shared table (`formal/build.py`'s `_frame_receivers`), so
@@ -21110,15 +21133,15 @@ ORIGIN_OF_CASES = [
     # still builds, on both architectures. A type ANNOTATION is not a runtime
     # expression, so nothing is emitted for the `origin_of` in it and the
     # escape check — which walks `fn.body` for statements — never saw it.
-    # This row's premise — a generic `Marker[...]` constructed from a ref
-    # parameter's field — is now refused at the BINDING, before the
-    # annotation is ever relevant: any annotated (or inferred-type-arg)
-    # construction of a generic struct in this position loses its home
-    # classification on both architectures (filed as
-    # bugs/FORMAL_generic_local_binding_has_no_home.md). The row pins the
-    # refusal that actually fires, so a re-point at the annotation itself is
-    # possible only after that defect is fixed — with `Marker[Int](b.a)`,
-    # the explicit-type-argument spelling, it builds.
+    # This row used to be re-pointed at a refusal: the annotated (or
+    # inferred-type-arg) construction of the generic `Marker` lost its home
+    # classification, so the BINDING refused before the annotation was ever
+    # relevant (bugs/FORMAL_generic_local_binding_has_no_home.md). That
+    # defect is fixed — a struct template whose type parameters are all
+    # PHANTOM is already a concrete declaration, so its declaration is kept and
+    # `Marker(...)` binds like any one-word constructor — and the row is back
+    # to its real subject: the `origin_of` in the annotation is a TYPE, emits
+    # nothing, and the program answers 7 (main returns `tag(g)`).
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -21132,7 +21155,7 @@ ORIGIN_OF_CASES = [
      "    var g = Bag()\n"
      "    g.a = 7\n"
      "    g.b = 8\n"
-     "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
+     "    return tag(g)\n", 7, None),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that

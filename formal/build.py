@@ -1527,7 +1527,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     return code, info, external_syms, binary
 
 
-def _without_own_template_bodies(source_path: str, stmts: list) -> list:
+def _without_own_template_bodies(source_path: str, stmts: list,
+                                 concrete_generics: bool = False) -> list:
     """`stmts` with THIS source's generic template declarations dropped.
 
     One call, two call sites, and the reason it is a function rather than an
@@ -1537,6 +1538,17 @@ def _without_own_template_bodies(source_path: str, stmts: list) -> list:
     does the same for an EXECUTABLE. `monomorph.without_template_bodies` is the
     rule and this is the seam — the source text, which is the other half of its
     question, is the same file both paths read.
+
+    `concrete_generics` keeps a struct template whose type parameters are all
+    PHANTOM (`monomorph.concrete_struct_templates`), because such a declaration
+    is already concrete and an un-bracketed construction of it needs the
+    declaration in the unit to bind a home
+    (`bugs/FORMAL_generic_local_binding_has_no_home.md`). The EXECUTABLE path
+    passes it and the LIBRARY path does not, and the difference is the export
+    boundary rather than a convenience: a kept declaration joins
+    `_method_exports`' source set and would publish its methods under the
+    template's own name, so turning it on for a library is an ABI decision that
+    belongs with the generics document rather than here.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     try:
@@ -1544,7 +1556,8 @@ def _without_own_template_bodies(source_path: str, stmts: list) -> list:
             source = f.read()
     except OSError:
         return stmts
-    return MM.without_template_bodies(stmts, source)
+    keep = MM.concrete_struct_templates(source) if concrete_generics else ()
+    return MM.without_template_bodies(stmts, source, keep=keep)
 
 
 def _imported_structs(source_path: str, stmts: list, arch: str,
@@ -1916,7 +1929,13 @@ def compile_formal(source_path: str, output: str = None,
     # docstring: a template's body has no instantiation in scope when it is
     # analysed, so a read of a bracket parameter is refused — with a message
     # about `len(Self.keys)` — in a body that is in no image.
-    stmts = _without_own_template_bodies(source_path, stmts)
+    # `concrete_generics=True` is the executable's half: a struct template whose
+    # type parameters are all phantom is already concrete, and an un-bracketed
+    # construction of it (`Marker(b.a)`, the argument inferred or annotated) is
+    # a local whose binding needs the declaration here to get a home. The
+    # library path does not pass it (see `_without_own_template_bodies`).
+    stmts = _without_own_template_bodies(source_path, stmts,
+                                         concrete_generics=True)
     # …and the target again, because the dylib builds above republished it as
     # the dylib's own Mach-O target. This is the one place the two genuinely
     # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O

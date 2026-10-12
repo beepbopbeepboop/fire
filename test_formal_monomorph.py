@@ -2205,6 +2205,66 @@ def test_a_function_templates_body_is_still_compiled(_tmpdir):
           "one reader of that question is gone")
 
 
+def test_a_phantom_struct_template_is_kept(_tmpdir):
+    """A struct template whose type parameter occurs NOWHERE in its body is
+    already concrete, so the filter KEEPS its declaration.
+
+    This is the mechanism behind an INFERRED-argument construction —
+    `Marker(b.a)` with no `[…]` — binding a home. The ordinary constructor path
+    needs the declaration in the unit; the filter used to remove every struct
+    template, so the binding got no classification and every field access
+    through it was refused. That is
+    `bugs/FORMAL_generic_local_binding_has_no_home.md`, and the phantom
+    predicate is `elaborate.phantom_type_params`.
+
+    The USED parameter is the control and it is the important half: a template
+    whose `T` is a field's type must still be dropped, or its declaration would
+    be compiled with an unbound parameter in it. So both are asserted rather
+    than only the case that changed.
+    """
+    import fire_compiler as FC
+    import elaborate as E
+    from formal import monomorph as MM
+    src = ("struct Marker[T: AnyType]:\n"
+           "    var v: Int\n"
+           "struct Wrapper[T]:\n"
+           "    var v: T\n"
+           "def plain(x: Int) -> Int:\n"
+           "    return x\n")
+    stmts = FC.Parser(FC.py_tokenize(src)).parse_module()
+    # The predicate the executable path keeps by name — `compile_formal` passes
+    # these as `keep`, and the library path passes none.
+    check(MM.concrete_struct_templates(src) == {"Marker"},
+          "concrete_struct_templates filed the wrong set: it must name the "
+          "phantom template `Marker` and NOT `Wrapper`, whose `T` is a field's "
+          "type")
+    kept = {getattr(s, "name", None)
+            for s in MM.without_template_bodies(
+                stmts, src, keep=MM.concrete_struct_templates(src))}
+    check("Marker" in kept,
+          "the filter dropped the phantom struct template `Marker`, whose "
+          "`T` occurs nowhere in its body, so an inferred-argument "
+          "construction of it loses its home again")
+    check("Wrapper" not in kept,
+          "the filter kept `Wrapper`, whose `T` IS its field's type — that "
+          "declaration is not concrete and an instantiation must replace it")
+    # ...and without the keep, the library path's rule is the old one, so this
+    # change cannot move a dylib's export surface.
+    check("Marker" not in {getattr(s, "name", None)
+                           for s in MM.without_template_bodies(stmts, src)},
+          "the LIBRARY path now keeps a phantom template too; a kept "
+          "declaration joins `_method_exports` and would publish the "
+          "template's methods under its own name")
+    # …and the predicate the filter reads is the reader, so a second spelling
+    # of "is this parameter used" cannot drift from it.
+    check(E.phantom_type_params(E.extract_struct_source(src, "Marker"),
+                                ["T"]) == {"T"},
+          "phantom_type_params does not see that `T` is unused")
+    check(E.phantom_type_params(E.extract_struct_source(src, "Wrapper"),
+                                ["T"]) == set(),
+          "phantom_type_params called a USED parameter phantom")
+
+
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -3050,6 +3110,8 @@ TESTS = [
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",
      test_a_function_templates_body_is_still_compiled),
+    ("a phantom struct template is kept",
+     test_a_phantom_struct_template_is_kept),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",

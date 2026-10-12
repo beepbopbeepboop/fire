@@ -241,6 +241,19 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     gives about the memoised parse: these nodes are shared with every other reader
     in the process, and a template removed from one build's view of them would be
     gone from the next build's too.
+
+    **A struct template whose type parameters are all PHANTOM need not be
+    dropped, and an executable keeps it** — via `keep=concrete_struct_templates(
+    src)`. Its body mentions none of the parameters, so dropping the `[…]` from
+    the source yields a declaration that is already concrete: no bracket read
+    behind any name and nothing for `instantiate` to substitute. Keeping it is
+    what lets an un-bracketed construction of it (`Marker(b.a)`, the type
+    argument inferred or annotated rather than spelled in the call) bind a home —
+    the defect `bugs/FORMAL_generic_local_binding_has_no_home.md` records. The
+    LIBRARY path deliberately does not pass it: a kept declaration becomes part
+    of `_method_exports`' source set, so it would publish the template's methods
+    under the template's own name, and changing a dylib's export surface is not
+    a decision to make from this row.
     """
     import fire_compiler as F                        # lazy — the AST classes
     drop = {n for n in template_names(src)
@@ -250,6 +263,53 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
+
+
+def concrete_struct_templates(src: str) -> set:
+    """The STRUCT templates whose type parameters are ALL phantom.
+
+    A phantom parameter (`elaborate.phantom_type_params`) occurs nowhere outside
+    the generic head, so the declaration is what it would be for any argument:
+    dropping the `[…]` yields a valid concrete `struct`, with no bracket
+    parameter for the body to read and nothing for `instantiate` to substitute.
+    Such a template therefore needs no instantiation at all to be compiled, and
+    the names are exactly the ones a caller of `without_template_bodies` should
+    pass as `keep` (the executable path does; see that function's docstring for
+    why the library path does not).
+
+    Read from the SOURCE for the same reason `template_names` is: the question
+    is a property of the declaration text and the extractors
+    (`_template_source`) are the one reader of it. A name `template_kind` filed
+    as a struct but neither extractor can pull out is skipped rather than
+    refused here: it is the nested-`def` imprecision `template_kind`'s own
+    docstring names, and this function is asking whether to KEEP a declaration,
+    not whether the source is well formed.
+
+    **A name the source applies with BRACKETS is excluded**, even when phantom,
+    and `_bracketed_callee_bases`'s own docstring carries the measurement: a
+    bracketed application is answered by the instantiation machinery or by the
+    refusal the bracket earns, and keeping the declaration as well moves the
+    answer. The case this function exists for is the UN-bracketed one —
+    `Marker(b.a)` — where no other mechanism names the type.
+    """
+    import elaborate                                # lazy — see module docstring
+    structs = [n for n in template_names(src)
+               if template_kind(src, n) == KIND_STRUCT]
+    if not structs:
+        return set()                 # no bracket walk for a module with none
+    bracketed = _bracketed_callee_bases(src)
+    out = set()
+    for name in structs:
+        if name in bracketed:
+            continue
+        try:
+            tmpl = _template_source(src, name, KIND_STRUCT)
+        except MonomorphError:
+            continue
+        params = elaborate.type_param_names(tmpl)
+        if params and len(elaborate.phantom_type_params(tmpl, params)) == len(params):
+            out.add(name)
+    return out
 
 
 def template_kind(src: str, name: str) -> str:
@@ -1009,9 +1069,21 @@ def _consumer_statements(consumer_src: str) -> list:
     consumer whose own parse failed has a more fundamental problem than a demand
     for an instantiation, and swallowing that here would turn a parse error into
     an empty demand set and then into "that module exports nothing".
+
+    **Once per source text**, because there are now two readers of it —
+    `all_instantiation_calls` and `_bracketed_callee_bases` — and both are
+    questions about the same bytes.  Each answers a different question about the
+    SAME walk, and re-parsing a whole file for the second one is exactly the
+    cost this module's docstring measures (`py_tokenize_named` was 51 % of a
+    stdlib build before its parses were deduplicated).  The stored value is the
+    parsed list, which callers only read; the top-level `list()` copy below
+    keeps a caller from mutating the shared list's own structure, and the nodes
+    are shared exactly as `without_template_bodies`'s docstring says they are.
     """
     from formal.build import parse_module          # lazy — cycle
-    return parse_module(consumer_src)
+    return list(_derived_from_source(
+        "_consumer_statements", consumer_src,
+        lambda: parse_module(consumer_src)))
 
 
 def _callee_base(call):
@@ -1080,6 +1152,40 @@ def bracket_items(sub) -> list:
     index = sub.index
     return list(index.elements) if isinstance(
         index, (F.TupleExpr, F.ListExpr)) else [index]
+
+
+def _bracketed_callee_bases(consumer_src: str) -> set:
+    """Every bare name used as a BRACKETED callee in `consumer_src`.
+
+    `f[a, b](…)` for ANY bracket items — a type list, a value list, a mixed one
+    — and dotted bases excluded, because `_callee_base` is the one recogniser
+    and it answers None for those.  `all_instantiation_calls` is this same walk
+    with the concrete-TYPE-argument filter on top; this is the unfiltered
+    question, and `concrete_struct_templates` asks it because a template a call
+    site applies with BRACKETS is already answered by the instantiation
+    machinery (type items) or by the refusal those brackets earn (value items),
+    so keeping the declaration as well would move which code path answers that
+    call — measured: `Triple[Int, s, False](5)` on a phantom-parameter template
+    stopped producing "a S receiver is stored in a container" and produced the
+    tuple-index refusal instead.
+
+    **Read from the SOURCE, not from a build's statement list.** By the time
+    `without_template_bodies` runs, `_imported_structs` has already REWRITTEN
+    this file's own bracketed instantiation calls to their mangled names, so a
+    statement-list walk no longer sees the bracket that earned each demand —
+    measured: `Box[Int, [1, 2, 3]]()` was rewritten, its phantom template was
+    then kept, and the build refused. The parse is `_consumer_statements`, which
+    is memoised and already made for `all_instantiation_calls`.
+    """
+    from formal import model as M                  # lazy — cycle
+    found = set()
+    for st in _consumer_statements(consumer_src):
+        for node in M.iter_nodes(st):
+            if isinstance(node, F.CallExpr):
+                base = _callee_base(node)
+                if base:
+                    found.add(base)
+    return found
 
 
 def supplied_bracket_args(call) -> list:
