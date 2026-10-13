@@ -13707,8 +13707,13 @@ def gen_module_impl(self, stmts):
             f"static void _init_{sn} ({sn} * _p)\n"
             f"{{\n"
             f"{_dsub_decls}"
+            f"  static int _tag_noted = 0;\n"
             f"  memset (_p, 0, sizeof({sn}));\n"
             f"  _p->__mojo_type_id = (int64_t){_struct_type_id(sn)};\n"
+            # The runtime learns this struct's tag on its first instance, so
+            # `mojo_boxed_is_str` can tell a struct handle from a string (see
+            # `_reg_struct_tag` in fire_runtime.c).
+            f"  if (!_tag_noted) {{ _tag_noted = 1; mojo_struct_tag_register ((int64_t){_struct_type_id(sn)}); }}\n"
             f"{_dsub_init}"
             f"{attr_inits}"
             f"}}"

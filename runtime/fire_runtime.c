@@ -655,6 +655,33 @@ void mojo_str_register(char *s) {
     _pr_add(&_reg_str, (uint64_t)(uintptr_t)s);
 }
 
+/* The type TAGS of every codegen-emitted struct this process has
+ * initialised (`_init_<S>` registers its own on first use). A struct instance
+ * is a live heap block, so `mojo_boxed_is_str`'s "a live allocation is a
+ * string" half answered YES for every boxed struct handle -- `isinstance(node,
+ * str)`, a struct used as a dict key, an f-string over an untyped word all
+ * read a struct's bytes as text. A struct is recognised by the tag at its
+ * offset 0 being one of these. The ambiguity left is a STRING whose first 8
+ * bytes equal a registered 31-bit tag, i.e. a <= 3-character string followed
+ * by zero bytes that also collides with one of a few hundred random CRCs. */
+static _PtrReg _reg_struct_tag;
+
+void mojo_struct_tag_register(int64_t tag) {
+    if (tag <= 0) return;
+    if (!_pr_has(&_reg_struct_tag, (uint64_t)tag))
+        _pr_add(&_reg_struct_tag, (uint64_t)tag);
+}
+
+static int _mojo_tagged_addr_ok(int64_t addr);
+
+/* Is this pointer-shaped heap word a codegen-emitted struct instance? */
+static int _mojo_is_struct_word(int64_t v) {
+    if (!_reg_struct_tag.used || !_mojo_tagged_addr_ok(v)) return 0;
+    int64_t tag = *(int64_t *)(intptr_t)v;
+    if (tag <= 0 || tag > 0x7fffffffLL) return 0;
+    return _pr_has(&_reg_struct_tag, (uint64_t)tag);
+}
+
 /* ── Per-slot element kinds on a MojoList ────────────────────────────────
  *
  * A MojoList's `data` is a flat `int64_t` array with NO per-element type
@@ -1339,7 +1366,10 @@ int mojo_boxed_is_str(int64_t v) {
      * positive membership and for the `malloc_size` history. */
     if (_pr_has(&_reg_str, (uint64_t)v)) return 1;
     if (MOJO_HAVE_MALLOC_USABLE_SIZE
-        && MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)v) > 0) return 1;
+        && MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)v) > 0)
+        /* ...unless the live block is a struct instance (see
+         * `_reg_struct_tag`): a struct handle is not a string. */
+        return !_mojo_is_struct_word(v);
     return 0;
 }
 
@@ -7199,6 +7229,8 @@ int mojo_isinstance(int64_t obj, int type_id) {
      * asked on the two C types a value can have, so they must not answer
      * differently. `type_id == 7` (`set`) is a separate container and is
      * left as it was. */
+    if (type_id == 4)  /* str: see mojo_isinstance_p's identical arm */
+        return mojo_boxed_is_str(obj);
     if (type_id == 5)  /* list: a registered MojoList that is NOT a tuple */
         return mojo_is_registered_list(obj)
             && !mojo_is_tuple((MojoList *)(intptr_t)obj);
@@ -7216,6 +7248,15 @@ int mojo_isinstance(int64_t obj, int type_id) {
 int mojo_isinstance_p(int64_t obj, int type_id) {
     /* Full-width sibling of mojo_isinstance -- no pointer truncation; see the
      * `type_id == 5` note above for why a tuple is not a `list`. */
+    /* `str`: a boxed word is a string exactly when the runtime's provenance
+     * discriminator says so (a registered literal or a live heap block; see
+     * mojo_boxed_is_str). This arm did not exist, so `isinstance(x, str)` on
+     * an `object`-typed value was ALWAYS False compiled: the self-hosted
+     * compiler's `for_target_is_tuple(target: object)` never saw its
+     * `'(path, base)'` text as a string and declared one C variable named
+     * `(path, base)`. */
+    if (type_id == 4)
+        return mojo_boxed_is_str(obj);
     if (type_id == 5)
         return mojo_is_registered_list(obj)
             && !mojo_is_tuple((MojoList *)(intptr_t)obj);
