@@ -67,13 +67,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_os_backing_sub_word_pointer_and_stat_dev_are_red.md` | **unclaimed** | 6 of 70 cases in `test_formal_os_backing.py` disagree with CPython, on BOTH architectures, and no doc records either cause |
 | `FORMAL_pointer_subscript_loads_a_word_for_a_sub_word_pointee.md` | **unclaimed** | `p[i]` on a `Pointer[Int32]` reads eight bytes, and `formal-os-backing` is red for it |
 
-### `formal/arm64_proof_gen` — 19 documents, 4 claimed
+### `formal/arm64_proof_gen` — 18 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal358-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow.md` | `formal355-docs` | the div0 residual goal the zero-divisor class pins is no longer REACHED, so three `test_formal_call_proof_gen.py` rows are red on any tree with a built library |
-| `FORMAL_wide_receiver_by_reference.md` | `formal357-docs` | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | `formal359-docs` | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | **unclaimed** | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
 | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | **unclaimed** | `bv_decide` reports a counterexample for a flag the spill hid |
@@ -91,13 +90,14 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 
-### `formal/build` — 14 documents, 3 claimed
+### `formal/build` — 15 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal358-docs` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_build_cost_2026-10-03.md` | `formal358-docs` | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
 | `FORMAL_string_value_model.md` | `formal355-docs` | what a string IS on the formal path, and the two things that want to be one |
+| `FORMAL_wide_receiver_by_reference.md` | `formal357-docs` | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | **unclaimed** | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
