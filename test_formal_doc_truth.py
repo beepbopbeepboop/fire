@@ -426,10 +426,22 @@ def group_closed():
     # like import-and-compare would turn into a compile. They are checked where
     # the library is already built and already computed:
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
+    #
+    # §6's figure is READ OUT OF THE DOCUMENT, per rule 1 above: this check used
+    # to carry its own hard-coded copy of the number, which is the second table
+    # the rule forbids -- and it drifted, so a tree at 273 was reported as
+    # "FORMAL.md §6 phase 2 publishes 272" while the document said 272 as well.
+    # `test_formal_runtime_link.py`'s `_published_phase2_surface` is the reader
+    # for all three rows; this is the cheap half that needs no dylib.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 272,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
+    published_word, ok = read_int(
+        text, r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+        'word-shaped count')
+    check(ok, 'FORMAL.md §6 phase 2 still publishes its word-shaped count')
+    check(ok and published_word == len(word),
+          f'FORMAL.md §6 phase 2 publishes {published_word} word-shaped entry '
+          f'points, runtime_abi() says {len(word)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
