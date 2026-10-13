@@ -1,5 +1,33 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
+**RE-MEASURED 2026-10-12 (`work/formal320-docs`): the "currently MASKED" claim
+in the 2026-10-07 entry below is now FALSE — the dec1 programs GENERATE, the
+`x30` obligation is reached, and it fails — and the failure is no longer the
+single `hx30fr` `rfl` this file's body is written around.** No fix landed here;
+this entry corrects the state so the next worker sizes the right thing.
+
+* `formal.build.compile_formal('formal/examples/count.mojo', arch='arm64',
+  output=…, prove=True, check=False)` emits a 347 KB proof on this tree. The
+  conditional-halt refusal the 2026-10-07 entry quotes no longer fires for
+  `count` (or for `pow2`, `sqsum`, `fact`, `sum`), so the work this file asks
+  for is verifiable by a bounded worker again — one proof-check, 3.2 GB.
+* `formal/lean.py::check_proof_cached` on that proof returns **`ok=False`,
+  0 sorries, 3.2 GB**. The failing sites are SIX, not the two this file's §
+  "What is broken" and § "What this costs" describe: two `hx30fr`/`FrameOk`
+  `rfl` failures (the subject here), a `maximum recursion depth` error in a
+  `count_b5_self2` certificate, one `unsolved goals`, and two
+  `mem_read_two_writes_adj_uint` rewrites that do not find their pattern in an
+  `hcond_*` proof. So §Status's "the two error SITES are five goals of one
+  shape, and **closing the shape closes both sites**" is stale: the `sp`
+  premise this file asks for is still necessary (the emitted universal theorem
+  is still false for an arbitrary `st.sp`, which §"The correction" proves) but
+  it is not sufficient for the examples any more.
+* `count` and `pow2` remain declared in `test_formal.py`'s
+  `EXPECTED_FAILURES`, whose entries diagnose the same return-frame read as the
+  ADRP/ADD-materialised literal address the slot peel cannot match — a second
+  reading of the shape, and the one the gate currently records. Neither entry
+  is edited here.
+
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
 **Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
 CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is
