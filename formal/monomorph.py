@@ -223,12 +223,27 @@ def template_struct_names(src: str) -> list:
     from the SOURCE, which is the only place they survive, and this is the one
     reader of them.
 
+    A name `template_kind` cannot find in the source is SKIPPED rather than
+    raised over: `template_names` reads the export rule, whose own docstring
+    records one known imprecision (a NESTED `def name[...]`), and this reader is
+    asked about a module that may not be compiled in this build at all — so
+    raising here would turn a name that is not a template into a failed build.
+    `without_template_bodies`, which needs an answer for every name, still gets
+    `template_kind`'s raise.
+
     Derives once per distinct source text (`_derived_from_source`), for the
     reason `template_names` gives: it is a function of the text alone.
     """
-    return list(_derived_from_source("template_struct_names", src, lambda: tuple(
-        n for n in template_names(src)
-        if template_kind(src, n) == KIND_STRUCT)))
+    def derive():
+        out = []
+        for n in template_names(src):
+            try:
+                if template_kind(src, n) == KIND_STRUCT:
+                    out.append(n)
+            except (MonomorphError, ValueError):
+                continue
+        return tuple(out)
+    return list(_derived_from_source("template_struct_names", src, derive))
 
 
 def without_template_bodies(stmts: list, src: str, keep=()) -> list:
@@ -814,8 +829,7 @@ def own_demands(module_src: str) -> dict:
     """
     names = template_names(module_src)
     typed = demands(module_src, names, own=())
-    structs = [n for n in names
-               if template_kind(module_src, n) == KIND_STRUCT]
+    structs = template_struct_names(module_src)
     if structs:
         value = demands_from_calls(
             all_instantiation_calls(module_src, literals=True), structs)
