@@ -3778,7 +3778,12 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     # `prooflib` because `test_library_state_agrees_with_the_question_it_asks`
+     # requires `lib/*.olean` to be CURRENT, and without the dep a `proofs`
+     # bucket starting in parallel with `prooflib` reads a library that is not
+     # there (or is stale) rather than the one the measurement is about. Its
+     # sibling `formal-dylib` is the other `mem='tiny'` job with that dep.
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
