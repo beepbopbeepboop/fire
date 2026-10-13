@@ -736,6 +736,15 @@ def main(n):
 # CPython's own `os.stat` in this process. The shapes are the point: a layout
 # that is right for a regular file is right for all of them, and a case set
 # with only a regular file in it would not know that.
+#
+# `dev` is printed with `%u` and every other field with `%d`, which is not a
+# style choice: `st_dev` is a `dev_t`, `Int32` on this target, and CPython
+# exposes it as the 64-bit two's complement of that signed field — for
+# `/dev/null` an encoding with bit 31 set, CPython answers
+# `18446744072249612928 == 0xFFFFFFFF_A8FB1A80`, which a signed `%d` cannot
+# spell (it would print `-1459938688`, the same bits under another rendering).
+# The unsigned conversion is what makes this row a comparison of the whole
+# 64-bit word rather than of its low half.
 STAT_PROGRAM = '''\
 from os.path import isfile, isdir, islink, lexists, exists, getsize
 from os.path import stat_mode, stat_size, stat_ino, stat_dev, stat_nlink
@@ -746,7 +755,7 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
+    printf("m2 size=%d ino=%d dev=%u blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",
@@ -790,7 +799,15 @@ def _stat_oracle(p):
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"),
+        # `dev` is compared as the 64-bit WORD the program prints with `%u`.
+        # CPython's `st_dev` is already that word for a real path (its own
+        # `os.stat` sign-extends `dev_t` to 64 bits, so `/dev/null` answers
+        # `18446744072249612928`), and the masking only states the missing-path
+        # sentinel `-1` as the all-ones word `%u` renders. Older CPythons answer
+        # `st_dev` as the SIGNED 32-bit field (`-1459938688` on `python3` 3.9);
+        # the mask makes the oracle agree with the program's word either way.
+        field(s, "st_dev") & 0xFFFFFFFFFFFFFFFF,
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

@@ -72,7 +72,7 @@ from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
-from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32_signed, fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -620,8 +620,15 @@ def stat_dev(p, follow) -> int:
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+
+    Read SIGNED, because `dev_t` is `Int32` on this target and the field is a
+    two's-complement value: a device encoding with bit 31 set — `/dev/null`'s
+    `0xA8FB1A80` — is negative, and CPython exposes it as the 64-bit two's
+    complement of that negative (`18446744072249612928`), not as the unsigned
+    32-bit magnitude `2835028608`. Read unsigned, the module and CPython
+    disagree on exactly the devices whose high bit is set.
     """
-    return fs_stat_field32(p, follow, 0)
+    return fs_stat_field32_signed(p, follow, 0)
 
 
 def stat_nlink(p, follow) -> int:

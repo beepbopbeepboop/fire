@@ -1242,6 +1242,32 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32_signed(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` reads the same four bytes as an unsigned magnitude; this reads them
+    as a two's-complement `int32` and returns the value the SIGN bit names, so
+    the result is a negative `int` whenever bit 31 is set. The one field this
+    target needs it for is `st_dev`: Darwin declares `dev_t` as `Int32` (the
+    Mojo stdlib's `std.os._macos.comptime dev_t = Int32`), and a device whose
+    encoding has bit 31 set — `/dev/null`'s `0xA8FB1A80` — is negative as a
+    `dev_t`. CPython's `os.stat` exposes the same field as the SIXTY-FOUR-bit
+    two's complement of that negative (measured on `python3` 3.14, this host:
+    `os.stat("/dev/null").st_dev == 18446744072249612928 == 0xFFFFFFFF_A8FB1A80`
+    where `printf("%u")` of the sign-extended word is the same number), which is
+    why the sign has to be carried into the word rather than dropped.
+
+    Read through `le32` and a subtraction rather than a second byte loop: the
+    four-byte assembly is one algorithm and a copy of it is a second thing to be
+    wrong about, which is the reason `le16`/`le32`/`le64` are separate functions
+    at all.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1603,6 +1629,22 @@ def fs_stat_field32(p, follow, at) -> int:
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32_signed(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    The one caller is `st_dev`, whose `dev_t` is `Int32` on this target, so the
+    field is a two's-complement value rather than a magnitude — see
+    `le32_signed` for why the sign is load-bearing and for the CPython answer it
+    has to agree with. A separate reader from `fs_stat_field32` because uid and
+    gid are genuinely unsigned on the same layout, so the signedness is a
+    property of the FIELD and not of the width.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32_signed(buf, at)
 
 
 def fs_realpath(p) -> str:
