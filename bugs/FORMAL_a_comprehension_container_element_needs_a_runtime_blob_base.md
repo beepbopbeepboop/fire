@@ -61,7 +61,10 @@ it is unchanged here.
 build-and-run rows `a_nested_comprehension_with_a_pointer_free_region_is_per_iteration`
 and `a_nested_comprehension_element_still_sees_its_own_iteration` (the second
 varies the inner element by the outer variable, which is the read a shared inner
-object gets wrong), and the refusal row
+object gets wrong), the two more that pin the OTHER side of the rule
+(`a_nested_comprehension_element_that_names_an_outer_list_shares_it` and
+`a_nested_comprehension_over_an_outer_list_iterable_is_per_iteration` — a name
+whose blob is OUTSIDE the region must stay shared), and the refusal row
 `a_nested_comprehension_whose_element_opens_a_container_is_refused`. The old
 `a_nested_comprehension_as_the_element_is_refused` row is now the first of those.
 
@@ -329,6 +332,8 @@ python3 test_formal_run.py \
   a_comprehension_element_that_is_a_set_literal_is_per_iteration \
   a_nested_comprehension_with_a_pointer_free_region_is_per_iteration \
   a_nested_comprehension_element_still_sees_its_own_iteration \
+  a_nested_comprehension_element_that_names_an_outer_list_shares_it \
+  a_nested_comprehension_over_an_outer_list_iterable_is_per_iteration \
   a_nested_comprehension_whose_element_opens_a_container_is_refused \
   a_dict_comprehension_whose_value_opens_a_container_is_refused \
   a_list_of_lists_as_the_element_is_refused \

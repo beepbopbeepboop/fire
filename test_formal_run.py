@@ -17474,6 +17474,33 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      0, "180"),
+    # …and the OTHER side of the soundness rule: an element that NAMES an outer
+    # container stores a pointer to a blob OUTSIDE the region, which the copy
+    # carries unchanged and every iteration shares — exactly what CPython does,
+    # and the case a predicate that demanded a pointer-free element would wrongly
+    # refuse. `a` is one outer list here, so the row answers 45 only if all three
+    # inner lists still name it.
+    ("a_nested_comprehension_element_that_names_an_outer_list_shares_it",
+     "def main() -> Int:\n"
+     "    var a = [7, 8]\n"
+     "    var s = 0\n"
+     "    for v in [[a for x in [1]] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0][0] + v[0][1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "45"),
+    # …and an ITERABLE that is a name rather than a literal: `a` reserves no blob
+    # in the region, so each inner comprehension walks the one outer list and
+    # answers its values.
+    ("a_nested_comprehension_over_an_outer_list_iterable_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [1, 2]\n"
+     "    var s = 0\n"
+     "    for v in [[x for x in a] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0] + v[1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "9"),
     # A nested comprehension whose OWN element builds a container is the
     # shallow-copy boundary that survives: its region holds a pointer to an
     # in-region blob (the inner array), and the copy relocates the blob without
