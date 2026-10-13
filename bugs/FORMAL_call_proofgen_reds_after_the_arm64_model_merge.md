@@ -9,6 +9,55 @@ failures the narrow `test_formal_call_proof_gen.py` run still shows after every
 whose `setUpClass` never populated `cls.infos`, and so on — all fixed and
 committed on that branch).
 
+## Status, 2026-10-13 (`work/formal338-docs`): the `arm64_ext_imm12` attribution
+## below is REFUTED; the recursion is `_code`'s `List.getD`, and it is deep, not
+## infinite
+
+Everything below is from 2026-10-08 and its "most likely cause" is wrong.  The
+reproduction still holds — `mod_by_var`'s proof still stops with `maximum
+recursion depth` — but the term that recurses is not `arm64_ext_imm12`:
+
+* **`arm64_ext_imm12` reduces cheaply, at the DEFAULT depth.**  With the library
+  built, `example : arm64_ext_imm12 (2436924415 : UInt32) = 131072 := by rfl`
+  — and again with `decide`, `native_decide`, and `simp [arm64_ext_imm12]` —
+  each checks at `maxRecDepth 1000` (not 100000).  So neither the ADD/SUB/CMP
+  arm change nor an `@[simp]` lemma for it can be the cause, and the doc's
+  option 2 cannot help a failing `rw` (which does not `simp`).
+* **`set_option diagnostics true` names the recursion instead**:
+  `List.get?Internal` / `List.rec` / `Nat.rec`, unfolding to depth > 100000.
+  That is `_code`'s own definition,
+  `formal/arm64_proof_gen.py::_gen_code_defs`:
+  `def <name>_code addr := if addr < base then 0 else
+  <name>_code_list.getD (addr - base) 0` — a `List.getD` indexed by a
+  NEGATIVE-shifted `Nat`, so `List.get?Internal`/`Nat.rec` unfold on the index
+  wherever the address is symbolic.
+* **The depth boundary, measured on this tree** (the same
+  `mod_by_var` proof, only `set_option maxRecDepth` moved):
+  FAILS at `100000` (the generated file's own setting); TYPECHECKS at `150000`
+  (69.8 s, 4.1 GB peak), `200000` (58.1 s), `300000` (58.9 s), `4000000`
+  (48.0 s).  So it is deep-but-finite, needs ~1.2-1.5x the current bound, and
+  costs ~60 s / ~4 GB once allowed to finish at all.
+* **The `hprior` fact-count red is a separate question and is also not this
+  cause.**  Its sibling `test_every_fact_is_proved_once_per_scope_and_in_scope`
+  PASSES, so no fact is proved twice in a scope and the total (measured 3 / 9 /
+  21 / 45 for 1..4 conditions = `3 * (2^k - 1)`) is minimal for the emission
+  scheme.  The `2.2` ratio bound fails only at the 2 -> 3 step (21 / 9 = 2.33),
+  because the counts are now small enough that the `-3` constant dominates; the
+  ratio is 2.14 at the 3 -> 4 step.  Nothing here moved it.
+
+**The corrected next step is a representation change in `_gen_code_defs`, not a
+model or lemma change.**  A `List.getD` forces the `get?Internal`/`Nat.rec`
+unfold; a `match addr with | <base + i> => byte | _ => 0` over the concrete
+addresses (or a `ByteArray`/`Vector` read) is STUCK on a symbolic `addr`
+instead of unfolding, which is what removes the depth.  It touches every
+generated proof's `_code`, so it wants its own pass and a
+`tools/formal_proof_census.py` re-measure, not a drive-by.
+
+The pin is unchanged:
+`test_formal_call_proof_gen.py::TestExternCallTheRunDoesNotReach.test_the_corpus_example_that_was_false_is_proved`
+— it SKIPS without a built `lib/ProofLib.olean`, so build the library first
+(`formal/lean.py::ensure_library`) before re-running it.
+
 ## What was run
 
     python3 tools/memslot.py --gb 8 --label t -- \
