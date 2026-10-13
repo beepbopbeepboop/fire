@@ -4199,6 +4199,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             rv = gen._new_val('int64_t', f'(int64_t){rv}')
             rt = 'int64_t'
 
+    # A module-level container is a boxed `int64_t` at the read, with its real
+    # kind recorded in `_actual_types` (`_lower_IdentExpr`'s global-read arm).
+    # The set/dict operator dispatch below asks about the KIND, so recover it
+    # first: `A = frozenset([...]); C = A | B` at module level emitted a C
+    # bitwise `|` of the two set POINTERS, and the self-hosted compiler's own
+    # `_FRESH_STRING_RETURNS = _FRESH_STRING_RETURNS | _OWNED_REPR_FNS` became
+    # an unusable word -- every "may the consumer free this?" answer was No.
+    if op in ('|', '-', '&', '^'):
+        lt, lv = gen._resolve_container_kind(lt, lv)
+        rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
 

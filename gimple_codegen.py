@@ -4265,6 +4265,14 @@ class GimpleGen:
     def _lower_builtin_dir(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dir(self, node)
 
+    def _resolve_container_kind(self, at: str, av: str) -> tuple[str, str]:
+        # A delegate, not a `ggc.` call from emit_exprs: emit_exprs and
+        # emit_calls import each other, and a module-qualified call across
+        # that cycle is a weak "unavailable in compiled mode" stub in the
+        # self-hosted binary (it returned 0 and every BinaryOp result type
+        # came out as the empty string).
+        return ggc._resolve_container_kind(self, at, av)
+
     def _lower_builtin_sorted(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_sorted(self, node)
 

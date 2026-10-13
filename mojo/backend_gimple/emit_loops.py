@@ -2086,6 +2086,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # assigns them from opaque boxed pairs, matching the pre-typed-
         # slots behavior for that shape).
         slot_elems = _tuple_unpack_slot_elems(gen, it_val, len(var_names))
+        # No per-slot record of any kind for this iterable (not dict items,
+        # no tuple slot types, no nested element type): an `int64_t` slot is
+        # then a word whose kind only the runtime knows, and `str()`/f-strings
+        # must ask it (`_dyn_word_locals`). `for n, r, p in
+        # gimple_codegen._selfhost_syms(): f"{r} {n} ({p})"` emitted three
+        # pointer decimals per forward declaration in the self-hosted compiler.
+        _fl_no_slot_record = (it_val not in gen._dict_items_val_elems
+                              and gen._tuple_slot_types.get(it_val) is None
+                              and it_val not in gen._nested_elem_types)
         for _fli in range(len(var_names)):
             _fl_vn = _as_str(var_names[_fli])
             _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
@@ -2100,6 +2109,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     gen._elem_types[starred_slot_name(_fl_vn)] = _fl_se
                 continue
             _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
+            if _fl_no_slot_record and _fl_se == 'int64_t':
+                gen._dyn_word_locals.add(_fl_vn)
     else:
         var_names = None
         _fl_ctype = _as_str(elem) if elem is not None else elem

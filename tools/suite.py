@@ -2605,6 +2605,12 @@ fanout('bootstrap-stage1-dumps',
 # diagnostic too: the binary calling a stub while compiling itself is the
 # same hole seen from the other side.
 CLOSURE_INCOMPLETE = r'# ERROR: compiling imported module|unavailable in compiled mode'
+# The per-file dumps of the COMPILED binary reject the same stub diagnostic:
+# the binary calling a weak stub while compiling a file means a call into a
+# sibling module of its own closure was never resolved (a module-qualified
+# call across an import cycle is the usual cause), and the file it was
+# compiling came out wrong with exit 0.
+SELFHOST_DUMP_REJECT = r'mojo_unsupported_iter|unavailable in compiled mode'
 test('bootstrap-stage1-transitive',
      [PY, '../fire.py', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage1', env={'PYTHONPATH': '..'},
@@ -2652,7 +2658,7 @@ fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
-       deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
+       deps=['bootstrap-stage2-cc'], reject=SELFHOST_DUMP_REJECT,
        items_are_files=True,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
@@ -2669,7 +2675,7 @@ fanout('bootstrap-stage3-dumps',
        ['../stage2/mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage3',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
-       deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
+       deps=['bootstrap-stage2-transitive'], reject=SELFHOST_DUMP_REJECT,
        items_are_files=True,
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
