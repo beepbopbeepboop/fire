@@ -6821,6 +6821,63 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.inner.get()\n", 42, None),
+     # ── A ONE-FIELD STRUCT RETURNED BY A CALL, READ THROUGH ITS FIELD ────────
+     #
+     # `c = make_box(5); c.v` was refused as "a field access through 'c'" — the
+     # binding of a local is what decides how a field is lowered, and the two
+     # sources this path read were a CONSTRUCTOR (`var b = Box()`) and a declared
+     # parameter. A call whose DECLARED return type is a one-field struct is the
+     # same fact one spelling further out: a one-field struct has no frame, so
+     # the word `make_box` returns IS its only field and `c.v` is the identity
+     # `c`. `formal/build.py::_call_returns_one_word_struct` is the third source,
+     # read at both bindings (`_one_word_field_map` and
+     # `_one_word_constructor_bindings`).
+     #
+     # Two call sites, so a fix that special-cased one function name cannot pass,
+     # and the answers are 0, 5 and 10 so a wrong candidate answers a number this
+     # program never computes. `d.v` after a second call is the row a "remember
+     # the first call's struct" fix would get right; `c.v + d.v` is 15.
+     ("both_arch_one_field_struct_returned_by_a_call_reads_through_its_field",
+      "struct Box:\n"
+      "    var v: Int = 0\n"
+      "\n"
+      "def make_box(n: Int) -> Box:\n"
+      "    var b = Box()\n"
+      "    b.v = n\n"
+      "    return b\n"
+      "\n"
+      "def main() -> Int:\n"
+      "    c = make_box(5)\n"
+      "    d = make_box(10)\n"
+      "    return c.v + d.v\n", 15, None),
+     # ── THE SAME BINDING, IN THE `==`-DISPATCH TABLE ─────────────────────────
+     #
+     # The second binding of a call's answer is the one-word COMPARISON table: a
+     # one-field struct's own `__eq__` is reachable by name and `==` on a name
+     # THIS function bound from the struct's construction dispatches to it. A
+     # name bound from a CALL it returns was in no table, so `a == b` fell back to
+     # the inherited word compare — a wrong BRANCH, not a wrong number, which is
+     # the shape this whole table exists to prevent
+     # (`_seed_one_word_call_edges`' docstring has the same program through a
+     # parameter boundary). `Tag.__eq__` says True for every pair, so the correct
+     # exit is 1 and the word-compare answer is 0.
+     ("both_arch_one_field_struct_returned_by_a_call_dispatches_eq",
+      "struct Tag:\n"
+      "    var v: Int = 0\n"
+      "    def __eq__(self, other: Self) -> Bool:\n"
+      "        return True\n"
+      "\n"
+      "def make_tag(n: Int) -> Tag:\n"
+      "    var t = Tag()\n"
+      "    t.v = n\n"
+      "    return t\n"
+      "\n"
+      "def main() -> Int:\n"
+      "    a = make_tag(5)\n"
+      "    b = make_tag(6)\n"
+      "    if a == b:\n"
+      "        return 1\n"
+      "    return 0\n", 1, None),
     # ── AN AMBIGUOUS METHOD NAME, SETTLED BY THE RECEIVER'S OWN BINDING ──────
     #
     # `get` is declared by BOTH structs here, which is the ordinary situation in
