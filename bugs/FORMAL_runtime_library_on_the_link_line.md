@@ -111,10 +111,22 @@ the measurement that would justify either change cannot be taken here.
 **`FORMAL.md` §2.2/§6's published figures were behind the tree** — it published
 206 exported / 166 reachable where the same census measured 216 / 176, and
 `test_formal_doc_truth.py` and `test_formal_runtime_link.py` were both red on
-exactly that. **Swept 2026-10-05**: `FORMAL.md` now publishes the measured
-triple — 272 word-shaped, 216 exported, 176 reachable — and both jobs are green,
-so the eight stale figures `1dd68a48`/`ca50560f` had published are current
-again.
+exactly that. **Swept twice** — `e2b98c23` (2026-10-05) and `1dc2fbfd`
+(2026-10-09, `work/formal259-docs-r2-r2`): `FORMAL.md` now publishes the
+measured triple — 272 word-shaped, 216 exported, 176 reachable — plus the other
+stale figures `1dd68a48`/`ca50560f` had published (`runtime/fire_runtime.c`
+524 KB, 411 non-word, 93 `formal/examples/*.mojo`), and both jobs are green.
+
+**Re-measured 2026-10-12 on the merged tree (`work/merge-qwen1`), the triple is
+273 word-shaped, 217 exported, 177 reachable on BOTH architectures** — a point-in-time move, not a regression: `mojo_str_register`
+(`void mojo_str_register(char *s)`) landed in `runtime/fire_runtime.h`/`fire_runtime.c`
+on master after the 2026-10-09 sweep, word-shaped, exported, and needing no heap
+handle, so it joins all three rows at once and the two gaps did not move
+(`273 − 217 = 56`, `217 − 177 = 40`). `FORMAL.md` §2.2 already published the
+move (273 of 684); §6's three-row table and the eleven-named table beside it
+were aligned in this merge, and `test_formal_doc_truth.py`'s phase-2 row is the
+check that first caught §6 still publishing 272. The "now" column above is the
+2026-10-09 sweep's point-in-time triple, kept as history rather than rewritten.
 
 **Re-measured 2026-10-04 (`work/formal19-4`): the "what this does not do" bullet
 about proofs was STALE, and its replacement is a different doc's subject — so the
@@ -726,18 +738,23 @@ identical and a reader should be able to see that rather than take it:
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label ceil -- python3 .tmp/ceilings.py
 python3 tools/memslot.py --gb 8 --label t -- \
-    python3 test_formal_runtime_link.py            # 159 passed, 4 failed
+    python3 test_formal_runtime_link.py            # recorded 159 passed, 4 figure-drift failed
 python3 tools/memslot.py --gb 8 --label t -- \
     python3 -c "import test_formal_runtime_link as T; \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py`'s **4 failures were pre-existing and were not this
+document's**: they compared the live count against `FORMAL.md` §6 phase 2's
+published `206`/`166`, which the tree had outgrown (`1dd68a48` published them on
+2026-10-04). `test_formal_doc_truth.py` was red on the same drift (8 checks, 7
+of them the same figures). Both are green now that the figure sweep landed
+(2026-10-08, and again on this merged tree 2026-10-12, where the triple is
+273 / 217 / 177 — the first paragraph above has the full history), and the
+census half — `test_link_line_is_the_dylibs_exports`, which is the one that
+builds the dylib — measures exactly what §6 phase 2 publishes, so the counted
+run is the `159 passed, 4 failed` above minus the four. `.tmp/ceilings.py` is
+scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as

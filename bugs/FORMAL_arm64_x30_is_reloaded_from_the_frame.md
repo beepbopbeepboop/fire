@@ -1,5 +1,58 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
+**Status 2026-10-08 (`work/formal184-docs`): MEASURED, and the fix is LARGER than
+"one more binder on the universal theorem" — this doc's own step 0 needs a
+`lib/Refine.lean` signature change, not only a generator one.  Two findings, both
+new here.**
+
+**(1) The five programs no longer reach this goal, so the doc's measurement is
+masked.**  On this tree `count`, `pow2`, `sqsum`, `sum` and `fact` all emit a
+REACHABILITY theorem (`f_reaches_call_at_…`) and **no**
+`f_compiles_correctly_universal`, because the stack-floor guard's `getrlimit`
+(`bfeec991`, 2026-10-05) is an out-of-image `BL` in every prologue and the walk
+halts at it.  Measured generation-only:
+
+    formal/examples/pow2.mojo   NO VALUE THEOREM reach
+
+That is the getrlimit subject of
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` on the merged tree (the branch's branch named
+the same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
+every_function.md`, owned by `formal163-docs`, branch `dfb40ce7`), and the
+`hx30fr_N` obligation this doc is about should reappear when that merges.  Until
+then the five are not testable.
+
+**(2) The premise is NOT preserved by a fixed lower bound, which is why step 0 is
+a `Refine.lean` change and not a theorem binder.**  The recursive call's state is
+`call_state.sp = st.sp - _P` (`formal/arm64_proof_gen.py`'s `hsp_{n}`/`hcur`,
+emitted at the recursion step), where `_P` is the per-level stack cost.  So a
+premise of the fixed form `<floor> + C ≤ st.sp` is FALSE for the callee the IH is
+applied to whenever `st.sp - _P < floor + C`.  The premise has to be RELATIVE to
+the frame bound the induction already carries — e.g.
+`floor + C + stride * (arg.toNat + 1) ≤ st.sp.toNat`, which descends by one
+application of `frameBound_descend_le` exactly as `FrameBound` does — and that
+means `contract_sound` and `contract_sound_tree` (`lib/Refine.lean:745`/`:792`)
+gain a hypothesis threaded through `hbase`/`hstep`/the IH, and the generator's
+`{name}_contract` header and `refine contract_sound …` call move with them.
+`lib/Refine.lean` builds in 1.2 GB (affordable), so this is not the ProofLib
+wall — it is the design decision this doc's §"What this costs the fix" item 1
+called "the smaller and more honest one" and it is bigger than it reads: three
+signatures, the induction, and every generated contract.  The `sp` fact the
+`hx30fr` peel needs (`mem_read_after_write_u64_ne` for the stack-floor store) is
+then `omega` from that relative premise.
+
+**merged 2026-10-13 (merging `work/formal184-docs`): finding (1) is a
+branch-tree fact, and the merged tree has moved past it — re-measured
+generation-only here, all five programs (`count`, `fact`, `pow2`, `sqsum`,
+`sum`) emit the value theorem (`f_compiles_correctly_universal`); the
+`getrlimit` is no longer a prologue `BL` (`70b76755` reads `RLIMIT_STACK` in
+the startup stub), and the `hx30fr` obligation has reappeared in the
+generated proofs — discharged, per the 164 section below (neither
+`hx30fr_12` nor `hx30fr_17` is in `count`'s error list). Finding (2), the
+`Refine.lean` relative-premise design, is this section's unique record and
+stands as written: the merged `lib/Refine.lean` is byte-identical to the
+branch's. The branch lands no code on the merged tree.
+
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
 **Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
 CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is
@@ -9,6 +62,38 @@ but not sufficient.** The reduced goal is quoted verbatim from a real run, the
 what has to be added first. Everything else in this file — the two error sites,
 the measurement table, the five affected examples, the peel machinery that
 exists — was re-confirmed on this tree and still stands.
+
+**RE-MEASURED 2026-10-08 (`work/formal164-docs`): the examples now GENERATE,
+and the `hx30fr` obligation this file is about is no longer among their errors,
+so the FALSE-theorem correction below is MOOT on this tree rather than fixed in
+place.** Three things moved under it since the 2026-10-05 measurement:
+
+* the reached-walk masking is gone (`caa3d1a7`: `_reached_without_a_condition`
+  asks about the halt's own path, not about any conditional anywhere), so
+  `count`/`fact`/`pow2`/`sqsum`/`sum` reach a proof file again;
+* a NEW blocker stood in front of `hx30fr` — the step-RESULT emitter's
+  sign-extend `hb` read bit 13 of the WORD instead of the 14-bit immediate's own
+  bit 18, so `count.mojo`'s `tbz x4, #6, +9228` (word `0x36312064`) emitted
+  `have hb : ¬ (0 = 0)` and `native_decide` refused the step lemma. **Fixed this
+  branch** (`formal/arm64_proof_gen.py`, pinned by `test_formal_call_proof_gen.
+  py::TestBitTestBranches::test_the_sign_extend_decision_reads_the_immediate_s_
+  own_sign_bit`);
+* with that closed, `count`'s proof's error list is five errors — `3600` (max
+  recursion depth), `5904`/`5909`/`5935` (the followed call's value flow and the
+  halt-avoidance obligation), `6435` (the Lean kernel's own `-M` ceiling) — and
+  **neither `hx30fr_12` nor `hx30fr_17` is among them**. The absolute
+  `stack_floor_address` store the correction rests on is gone from the chain
+  (the guard now reads `RLIMIT_STACK` in the startup stub and issues no call,
+  `70b76755`), which is why the emitted `(…).x30 = st.x30` is now true.
+
+So the defect this file NAMES is not reachable on this tree, and the five
+examples are red for the same-image/halt obligations owned by
+`FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
+and `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, not for
+this one. The file stays because those examples are still red and the peel
+machinery they will need is written down here; a Lean run is what would confirm
+the obligation closes for all five, and it is not affordable from a bounded
+worker.
 
 **RE-MEASURED 2026-10-05 (`work/formal42-2`) on this tree: five diagnostics,
 all five goals quoted, and the next step is now PRICED — this one is NOT behind

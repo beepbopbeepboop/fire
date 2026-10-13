@@ -304,7 +304,8 @@ MLIR_ATTR_ROOT = "__mlir_attr"
 # "this path has no MLIR … an MLIR attribute, type or operation has no
 # representation in [a 64-bit word]" — and that sentence asserts a property of
 # the TARGET where the property belongs to the OPERATION. Measured over the
-# stdlib (`../new-modular`, `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`):
+# stdlib (`../new-modular`), where that one sentence was false for a quarter of
+# the arithmetic operations:
 # 259 `__mlir_op` sites over 104 distinct operations in 49 files. Sorted by what
 # each one DENOTES, not by what it is called:
 #
@@ -571,8 +572,8 @@ MLIR_UNGUARDED_OPS = {
 
 # ── The OPERAND's DECLARED type, which is the fact every arithmetic arm needs ──
 #
-# `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
-# Correction measured the thing this section exists for: counted by OPERATION
+# The operation-vs-operand-type correction measured the thing this section
+# exists for: counted by OPERATION
 # NAME, the corpus's arithmetic sites look scalar (38 sites over 27 operations,
 # the names read `add`/`sub`/`mul`/`cmp`), and a table keyed on the name that
 # emitted `a + b` for `pop.add` would be RIGHT for 9 of them and WRONG for 26.
@@ -630,9 +631,9 @@ MLIR_SELF_TYPE_NAMES = frozenset(("self", "this", "Self"))
 # The elementwise operations this path REWRITES when the operand's declared type
 # is one word, and the ordinary operator each denotes. Rewriting to the
 # ordinary spelling rather than adding an instruction selection is the whole of
-# the design, and it is the reason `bugs/FORMAL_mlir_dialect_refusal_is_false_
-# of_the_word_valued_ops.md`'s "each arm must select instructions from the
-# decisions the two backends already SHARE" is satisfied by construction: `+`,
+# the design, and it is the reason the design note's "each arm must select
+# instructions from the decisions the two backends already SHARE" is satisfied
+# by construction: `+`,
 # `-`, `*`, `/`, `%`, `&`, `>>` already go through `common_type`, `cmp_signed`
 # and `shift_signedness` in both emitters, so an arm here that would re-decide
 # any of them would be a second copy of an answer that exists.
@@ -1369,9 +1370,8 @@ def mlir_dialect_op_refusal(op: str, operand: str = None,
     # A NAME-keyed "this operation denotes one 64-bit word, so write the
     # ordinary spelling" table is DELIBERATELY not here, and this is the place
     # that says so, because a version of this function did carry one and it was
-    # wrong: `MLIR_EFFECT_OPS` above and the census in
-    # `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
-    # Correction both exist because the answer to "is this operation's result a
+    # wrong: `MLIR_EFFECT_OPS` above and the operation-vs-operand-type census
+    # both exist because the answer to "is this operation's result a
     # word?" is a fact about its OPERANDS, not its name — 26 of the 38
     # arithmetic sites are elementwise over an N-lane vector, and a name-keyed
     # table would have lowered those to a scalar add of two vector-typed words.
@@ -5168,7 +5168,23 @@ _NEVER_RUNS = "never"
 _MAYBE_RUNS = "maybe"
 
 
-def _for_emptiness(s, consts=None) -> str:
+def _iterable_literal_emptiness(it):
+    """`'always'` / `'never'` for an iterable that is a LITERAL, else None.
+
+    The one reader of "what does this literal yield", shared by an iterable
+    written at the `for` (`for i in []`) and a NAME whose every binding on the
+    path is such a literal (`xs = []` then `for i in xs`). A `range` is NOT
+    this: its emptiness is a function of its arguments rather than of whether
+    a written sequence has elements, so it stays `_range_is_nonempty`'s.
+    """
+    if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _ALWAYS_RUNS if getattr(it, "elements", None) else _NEVER_RUNS
+    if isinstance(it, F.StringLiteral):
+        return _ALWAYS_RUNS if it.value else _NEVER_RUNS
+    return None
+
+
+def _for_emptiness(s, consts=None, seqs=None) -> str:
     """`'always'` / `'never'` / `'maybe'` — whether this `for`'s ITERABLE
     yields a value.
 
@@ -5179,10 +5195,12 @@ def _for_emptiness(s, consts=None) -> str:
     answered one of them and not the other is a graph and a walk disagreeing
     about the same loop.
 
-    It is decidable for a literal sequence (`[1, 2]`, `"ab"`) and for a `range`
-    whose arguments `_range_is_nonempty` can decide — from the literals in the
-    call, plus whatever `consts` (`_preheader_literals`' table) has decided about
-    a name. `range` is the one call this reads because CPython's own emptiness
+    It is decidable for a literal sequence (`[1, 2]`, `"ab"`), for a NAME the
+    preheader decided is such a literal (`xs = []` then `for i in xs` — `seqs`,
+    from `_preheader_facts`), and for a `range` whose arguments
+    `_range_is_nonempty` can decide — from the literals in the call, plus
+    whatever `consts` (`_preheader_facts`' integer table) has decided about a
+    name. `range` is the one CALL this reads because CPython's own emptiness
     rule is a closed-form function of its three arguments. Everything else is
     `'maybe'`, which is the answer that keeps the zero-iteration edge and the
     header's definition: both are the safe direction for a loop whose emptiness
@@ -5190,10 +5208,20 @@ def _for_emptiness(s, consts=None) -> str:
     `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
     """
     it = getattr(s, "iterable", None)
-    if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return _ALWAYS_RUNS if getattr(it, "elements", None) else _NEVER_RUNS
-    if isinstance(it, F.StringLiteral):
-        return _ALWAYS_RUNS if it.value else _NEVER_RUNS
+    direct = _iterable_literal_emptiness(it)
+    if direct is not None:
+        return direct
+    if seqs and isinstance(it, F.IdentExpr):
+        # A NAME the preheader decided is a SEQUENCE LITERAL, and it is the same
+        # fact `for i in []` states: an empty one binds no target, so the read
+        # after the loop is CPython's `UnboundLocalError` and this path refuses
+        # rather than answering a leftover word. Without this arm the name was
+        # not a literal at all and `'maybe'` kept the header's definition —
+        # measured on both architectures, `xs = []` then `for q in xs` then
+        # `printf("q=%d", q)` printed `6159200192` where CPython raises.
+        resolved = _iterable_literal_emptiness(seqs.get(it.name))
+        if resolved is not None:
+            return resolved
     if isinstance(it, F.CallExpr) and not (getattr(it, "kwargs", None) or []):
         func = getattr(it, "func", None)
         if isinstance(func, F.IdentExpr) and func.name == "range":
@@ -5206,7 +5234,7 @@ def _for_emptiness(s, consts=None) -> str:
     return _MAYBE_RUNS
 
 
-def _for_target_never_binds(stmt, consts=None) -> bool:
+def _for_target_never_binds(stmt, consts=None, seqs=None) -> bool:
     """Whether this `for` provably produces NO value, so it never binds its
     target — which is CPython's rule, not an optimisation:
 
@@ -5230,15 +5258,16 @@ def _for_target_never_binds(stmt, consts=None) -> bool:
     target as a definition.
 
     The emptiness is read through `_for_emptiness`, so it is `'never'` for a
-    literal sequence and for a `range` the PREHEADER decides as well as one it
-    writes out (`k = 0` then `range(0, k)`) — an emptiness this build cannot
-    decide keeps the target defined, which is a real loss
+    literal sequence, a NAME the preheader decides is such a literal (`seqs`),
+    and a `range` the PREHEADER decides as well as one it writes out (`k = 0`
+    then `range(0, k)`) — an emptiness this build cannot decide keeps the target
+    defined, which is a real loss
     (`bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
     and the safe direction: keeping a definition can only let through a program
     whose range happened to be non-empty, where dropping it would refuse a
     program CPython runs.
     """
-    return _for_emptiness(stmt, consts) == _NEVER_RUNS
+    return _for_emptiness(stmt, consts, seqs) == _NEVER_RUNS
 
 
 def _loop_target_defs(stmt, consts=None) -> set:
@@ -5274,7 +5303,7 @@ def _cfg_int_value(e, consts=None) -> object:
 
     `_cfg_int_literal` answers "is this node a literal"; this answers "what
     integer is this operand", which is the same question plus one source of
-    evidence. `consts` is `_preheader_literals`'s `{name: int}`, and a name it
+    evidence. `consts` is `_preheader_facts`' `{name: int}` table, and a name it
     does not have is still None — the conservative answer, and the one that
     keeps the edge."""
     v = _cfg_int_literal(e)
@@ -5291,7 +5320,7 @@ def _literal_truth(e, consts=None) -> object:
     the program, while an answer computed from a name would be an assumption
     about what the name holds — unless the name's every binding on the path is
     itself a literal, which is what `consts` carries and
-    `_preheader_literals` establishes. Anything unrecognised — an undecided
+    `_preheader_facts` establishes. Anything unrecognised — an undecided
     name, a call, a chained comparison with an undecided operand, a float — is
     None, and None is the answer that keeps the edge.
 
@@ -5346,6 +5375,24 @@ def _literal_truth(e, consts=None) -> object:
     return None
 
 
+def _cfg_literal_fact(e):
+    """`(int, None)` / `(None, node)` for a value a preheader can carry, else None.
+
+    The lattice value `_preheader_facts` walks, and the tuple is what keeps two
+    questions from being read as each other: an integer literal (the table
+    `_range_is_nonempty` and `_literal_truth` read) and a SEQUENCE/string
+    literal node (the table `_for_emptiness` reads for a named iterable). One
+    walk answers both because the preheader is one region and the two facts are
+    established by the same intersections along the same edges.
+    """
+    v = _cfg_int_literal(e)
+    if v is not None:
+        return (int(v), None)
+    if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.StringLiteral)):
+        return (None, e)
+    return None
+
+
 def _cfg_literal_effects(stmts, consts: dict) -> dict:
     """`consts` after a straight-line run, with each statement's own effect.
 
@@ -5354,12 +5401,12 @@ def _cfg_literal_effects(stmts, consts: dict) -> dict:
     and its arms are separate blocks, so it has no effect here either, and the
     join intersects.
 
-    **A binding to anything but an integer literal REMOVES the name**, and that
-    is the direction that matters. `i = 0` then `i = f()` leaves `i` undecided,
-    so a later `while i < 3` keeps its zero-iteration edge; the alternative —
-    keeping the older literal — would answer `True` for a program whose loop may
-    not run at all, which is the wrong-answer direction this whole analysis is
-    built to refuse.
+    **A binding to anything but an integer literal or a literal sequence
+    REMOVES the name**, and that is the direction that matters. `i = 0` then
+    `i = f()` leaves `i` undecided, so a later `while i < 3` keeps its
+    zero-iteration edge; the alternative — keeping the older literal — would
+    answer `True` for a program whose loop may not run at all, which is the
+    wrong-answer direction this whole analysis is built to refuse.
     """
     out = dict(consts)
     for s in (stmts or []):
@@ -5367,13 +5414,13 @@ def _cfg_literal_effects(stmts, consts: dict) -> dict:
         if kind in ("AssignStmt", "VarDecl"):
             target = getattr(s, "target", None)
             name = getattr(s, "name", None)
-            value = _cfg_int_literal(getattr(s, "value", None))
+            value = _cfg_literal_fact(getattr(s, "value", None))
             if value is not None:
                 if kind == "AssignStmt":
                     for n in _store_names(target):
-                        out[n] = int(value)
+                        out[n] = value
                 elif isinstance(name, str):
-                    out[name] = int(value)
+                    out[name] = value
                 continue
             names = _store_names(target) if kind == "AssignStmt" else (
                 {name} if isinstance(name, str) else set())
@@ -5404,8 +5451,8 @@ def _cfg_literal_effects(stmts, consts: dict) -> dict:
     return out
 
 
-def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
-    """`{name: int}` bound to an integer literal on EVERY path into `head_index`.
+def _preheader_facts(blocks: list, head_index: int, entry: int) -> tuple:
+    """`({name: int}, {name: literal-node})` decided on EVERY path into the header.
 
     **The second source of evidence `_loop_body_always_runs` reads.** "Did the
     body run at least once" is a question about the condition ON ENTRY, and the
@@ -5413,7 +5460,15 @@ def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
     preheader states and the edges cannot. So this walks the same CFG a third
     time — `head_index`'s predecessors, and everything that reaches them,
     which is every block on some path to the header and no block after it — and
-    carries a "definitely this integer" table along each edge.
+    carries a "definitely this value" table along each edge.
+
+    **One walk, two tables**, because the two facts are established by the same
+    intersections along the same edges and a second walk would be the same
+    lattice recomputed. The integer table answers `_range_is_nonempty` (a
+    `range` bound a name decided) and `_literal_truth` (a `while` condition);
+    the literal-sequence table answers `_for_emptiness` for a NAMED iterable
+    (`xs = []` then `for i in xs`), which is the same question `for i in []`
+    asks of the literal written at the `for`.
 
     The lattice is a partial map, and the two directions are both deliberate:
 
@@ -5441,7 +5496,7 @@ def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
         region.add(i)
         stack.extend(blocks[i].preds)
     if not region:
-        return {}
+        return {}, {}
     order = sorted(region)
     out: dict = {i: {} for i in order}
     changed = True
@@ -5478,10 +5533,13 @@ def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
         p_out = _cfg_literal_effects(blocks[p].stmts, out[p])
         merged = dict(p_out) if merged is None else {
             n: v for n, v in merged.items() if n in p_out and p_out[n] == v}
-    return merged or {}
+    pairs = merged or {}
+    ints = {n: v[0] for n, v in pairs.items() if v[0] is not None}
+    seqs = {n: v[1] for n, v in pairs.items() if v[1] is not None}
+    return ints, seqs
 
 
-def _loop_body_always_runs(s, consts=None) -> bool:
+def _loop_body_always_runs(s, consts=None, seqs=None) -> bool:
     """Whether this loop's body is guaranteed to execute at least once.
 
     **The one question a CFG cannot answer, and the two cases where it can.**
@@ -5528,7 +5586,7 @@ def _loop_body_always_runs(s, consts=None) -> bool:
         # One reader with `_for_target_defs`'s other half: "always runs" is
         # `_for_emptiness`'s `'always'`, and the iterable shapes it reads are
         # the ones this arm used to spell out for itself.
-        return _for_emptiness(s, consts) == _ALWAYS_RUNS
+        return _for_emptiness(s, consts, seqs) == _ALWAYS_RUNS
     return False
 
 
@@ -5604,7 +5662,7 @@ def _build_cfg(body) -> tuple:
         they have to be added together.
 
         `preds` used to be filled in a single pass at the end of the build, out
-        of `succs`. That cannot serve `_preheader_literals`, which is called
+        of `succs`. That cannot serve `_preheader_facts`, which is called
         from INSIDE the build (a loop header's condition has to be decided
         while its own block is being emitted) and reads `preds` to find the
         blocks that reach it. Two lists maintained in two places is also how one
@@ -5815,7 +5873,8 @@ def _build_cfg(body) -> tuple:
                 # have to be the same walk — a value the first can see and the
                 # second cannot is a loop whose body and whose target disagree
                 # about the same `range`.
-                loop_consts = _preheader_literals(blocks, head.index, entry)
+                loop_consts, loop_seqs = _preheader_facts(blocks, head.index,
+                                                          entry)
                 # The LATCH is the node the loop is in only because its body
                 # ran at least once, and it is what keeps "the condition failed
                 # immediately" (the `head` -> join edge below) apart from "the
@@ -5838,7 +5897,7 @@ def _build_cfg(body) -> tuple:
                 # Emitted with this loop POPPED, so a `break` inside it is the
                 # enclosing loop's rather than this one's.
                 exit_from = [latch.index]
-                if not _loop_body_always_runs(s, loop_consts):
+                if not _loop_body_always_runs(s, loop_consts, loop_seqs):
                     exit_from.append(head.index)
                     # The header's exit edge IS "the condition failed", the same
                     # fact the `else` clause carries and for the same reason.
@@ -5855,7 +5914,7 @@ def _build_cfg(body) -> tuple:
                 # preheader does not have keeps the header's definition, which
                 # is the safe direction — see
                 # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
-                if _for_target_never_binds(s, loop_consts):
+                if _for_target_never_binds(s, loop_consts, loop_seqs):
                     head.defs -= _store_names(getattr(s, "target", None))
                 else_body = getattr(s, "else_body", None)
                 if else_body:
@@ -6327,11 +6386,11 @@ def _build_cfg(body) -> tuple:
     # exits.
     #
     # `preds` is NOT filled in here.  It used to be a single pass over `succs` at
-    # the end of the build, which cannot serve `_preheader_literals`: that is
+    # the end of the build, which cannot serve `_preheader_facts`: that is
     # called from INSIDE the build — a loop header's condition has to be decided
     # while its own block is being emitted — and it reads `preds` to find the
     # blocks that reach it, so at that moment `preds` was empty and every
-    # `_preheader_literals` answer was "the loop may not run".  `edge` now adds
+    # `_preheader_facts` answer was "the loop may not run".  `edge` now adds
     # to both lists together, so a second pass here would APPEND each
     # predecessor twice: `b.preds` would read `[head, head]` for a one-edge
     # block and the shape tests that compare a predecessor LIST — the
@@ -8452,10 +8511,11 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
 #     and it answers in the CURRENT LOCALE: in the C locale it fails for every
 #     byte >= 0x80 and returns `(size_t)-1`. A locale is not a decidable
 #     answer, so it is not an answer.
-#   * No `\u` / `\U` / `\N{}` ESCAPE decoding. That is a front-end question —
-#     `fire_compiler.decode_c_escapes` — and all three engines share it, so it
-#     is not a formal-backend divergence to fix here. Filed:
-#     `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+#   * No `\u` / `\U` / `\N{}` ESCAPE decoding HERE. That is a front-end
+#     question — `fire_compiler.decode_c_escapes`, shared by all three engines —
+#     and it decodes all four of those spellings (plus a multi-digit octal run)
+#     as of 2026-10-07, so text reaches this path already decoded and this
+#     block only has to answer about the bytes it is handed.
 
 # The two facts about a piece of TEXT, named so a reader can see which question
 # a call site is asking. `ASCII` is the permissive one and it is a fact about
@@ -11748,6 +11808,68 @@ def _interpolated_shape_sentence(segs: list) -> str:
     return out
 
 
+def fold_constant_interpolated_literals(stmts) -> int:
+    """Rewrite every f-string that interpolates NOTHING into the string it denotes.
+
+    **An f-string with no replacement field is a CONSTANT**: its value is its
+    text with `{{`/`}}` unescaped, and nothing has to be composed at run time.
+    The build refuses interpolated literals wholesale because there is no buffer
+    to compose one in (`interpolated_literal_refusal`), and this is the one case
+    that refusal cannot be about — the message itself says so
+    (`_interpolated_shape_sentence`'s "This one has NO field at all … so its
+    value is a CONSTANT"). Refusing it is a divergence: CPython prints `abc` for
+    `print(f"abc")` where this path refused the program.
+
+    **`t`-strings are NOT folded.** A `t"…"`'s value is a `Template` object and
+    not a `str`, so there is no constant for it to become; the refusal's second
+    reason covers that construct. Only an f-string prefix is rewritten.
+
+    The rewrite is IN PLACE and it is the WHOLE literal: `value` becomes the
+    composed text and `is_interpolated` becomes `False`, which is exactly the
+    shape an ordinary string literal of the same text has. Every downstream
+    reader — both backends' expression walks, the proof generators, the
+    non-ASCII scan — then sees a plain literal and no other rule has to learn
+    about this one. `is_raw` carries the `r` of an `rf"…"`, because
+    `interpolated_literal_segments` leaves escape text undecoded (as it does for
+    an ordinary literal) and the shared decoder `fire_compiler.decoded_literal`
+    needs the flag to know `rf"a\\nb"` is four characters wide.
+
+    `interpolated_literal_segments` is the ONE reader of the token, so a chunk
+    boundary the reader refuses is not folded either: `CodegenError` is left
+    for `refuse_interpolated_literals` to report as the reader's own reason,
+    because guessing a text there would compose a string with a character in the
+    wrong place. Returns the number folded, so the caller can report it.
+    """
+    folded = 0
+    for node in iter_nodes(stmts):
+        if not is_interpolated_literal(node):
+            continue
+        spelled = getattr(node, "value", "")
+        if not isinstance(spelled, str):
+            continue
+        _prefix_end = interpolated_literal_quote_start(spelled)
+        _is_t = False
+        _is_raw = False
+        for _ch in spelled[:_prefix_end]:
+            if _ch == 't' or _ch == 'T':
+                _is_t = True
+            if _ch == 'r' or _ch == 'R':
+                _is_raw = True
+        if _is_t:
+            continue
+        try:
+            segs = interpolated_literal_segments(spelled)
+        except CodegenError:
+            continue
+        if any(s[0] == 'field' for s in segs):
+            continue
+        node.value = ''.join(s[1] for s in segs if s[0] == 'lit')
+        node.is_interpolated = False
+        node.is_raw = _is_raw
+        folded += 1
+    return folded
+
+
 def refuse_interpolated_literals(stmts) -> None:
     """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
 
@@ -14047,7 +14169,7 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
 #: backend decides, because whether the pair is a set algebra this path lowers
 #: is a fact about the backend and not about the operator.  arm64 lowers the
-#: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
+#: three for two sets (see `_emit_set_op`); x86-64 has no emitter and
 #: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
@@ -14117,7 +14239,7 @@ def container_operator_refusal(op: str, left_kind, right_kind,
         # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
         # question for the backend (see `SET_ALGEBRA_OPS`), and
         # `set_algebra_refusal` is where the two answers are worded.  Defer
-        # rather than refuse, so arm64 can reach `_emit_set_algebra` and x86-64
+        # rather than refuse, so arm64 can reach `_emit_set_op` and x86-64
         # can reach its own named refusal.  `aug_assign_operands_are_blobs`
         # then routes the augmented spelling through `_emit_binop`, which is
         # the second emitter the desugaring exists for.
@@ -14246,7 +14368,7 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     container operator except `+`, `|` and — on two blobs — the set-algebra
     three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
     `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
-    blobs, which is what routes them to `_emit_set_algebra` on arm64 and to
+    blobs, which is what routes them to `_emit_set_op` on arm64 and to
     `set_algebra_refusal` on x86-64 rather than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
@@ -16519,6 +16641,16 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
+    # **`Float64` USED TO BE HERE, and it is now LOADED** rather than refused:
+    # the width of the load is `dereference_lowering`'s `("float", 8, False)`
+    # answer, and the KIND its loaded word carries is `pointer_deref_kind`'s,
+    # so a `Pointer[Float64].value()` is a double in every consumer that asks
+    # what it holds (`Int(...)` becomes `FCVTZS`, `%f` places it as a double,
+    # `%d` and an `Int` parameter are refused by the rules
+    # `call_argument_kind_refusal` and `return_annotation_kind_refusal` state).
+    # The row that stood here said the load was bit-exact and the KIND was the
+    # missing piece; that piece is `pointer_deref_kind`, and keeping the row
+    # would refuse a load this path can now place correctly.
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -23318,6 +23450,12 @@ def container_literal_elem_kind(node) -> str | None:
     deleted `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`
     carried, and the reason this arm exists.
     """
+    repeated = _repeated_container(node)
+    if repeated is not None:
+        # `[e0, e1] * N` writes every element of its left operand, N times, so
+        # the element-kind question is the same one the written-out literal
+        # answers — asked of that operand's own elements.
+        return _list_literal_elem_kind(list(repeated[0].elements or []))
     if isinstance(node, F.DictExpr):
         values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
         return _kind_of_elements(values)
@@ -27016,6 +27154,25 @@ def for_target_tree(target):
             return None
         tree.append(child)
     return tree if tree else None
+
+
+def for_target_leaves(tree) -> list:
+    """Leaf names of `for_target_tree`'s output, nested groups flattened.
+
+    A star leaf keeps its `*`, so the caller's identifier check refuses it —
+    a `for`/comprehension target is validated by this walk rather than by
+    `boundnames._lbn_target_names`, which STRIPS the star and would pass a
+    `*rest` through to a store under a name nothing allocated. `_tuple_target_key`
+    makes the same refusal of a starred tuple ASSIGNMENT target, and this is the
+    loop's half of that rule. Both backends read this, so a starred leaf is one
+    refusal rather than arm64 lowering it and x86-64 refusing it.
+    """
+    if isinstance(tree, list):
+        out = []
+        for child in tree:
+            out.extend(for_target_leaves(child))
+        return out
+    return [tree]
 
 
 def _comprehension_target_names(target) -> list:
@@ -30729,6 +30886,25 @@ def _expr_builds_a_container(e) -> bool:
     return False
 
 
+def _comprehension_result_is_flat(comp) -> bool:
+    """True when a comprehension's own RESULT blob holds no nested container.
+
+    A comprehension's result is a `[count][element…]` blob (a list of pairs for
+    a dict), so a byte copy of it duplicates every produced value. That copy is
+    sound exactly when no produced value is itself a container built by this
+    site: a container would be carried as its ADDRESS, so every copy would point
+    at one shared scratch blob — the same aliasing defect
+    `comprehension_element_is_flat_container` exists to prevent, one level up.
+    The produced value is the comprehension's `element` (and its `value` for a
+    dict), so this asks each of those whether it builds a container.
+    """
+    if not isinstance(comp, F.Comprehension):
+        return False
+    parts = ([comp.element, comp.value] if comp.kind == "dict"
+             else [comp.element])
+    return not any(_expr_builds_a_container(p) for p in parts)
+
+
 def comprehension_element_is_flat_container(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
@@ -30753,12 +30929,24 @@ def comprehension_element_is_flat_container(element) -> bool:
     distinct outer lists over the same elements. Only a container the element
     position itself BUILDS is the defect.
 
+    A nested COMPREHENSION whose produced values are words is accepted, and the
+    reason is the same recursion: `[[x + y for x in [1, 2]] for y in …]`'s inner
+    result is a `[count][int…]` blob, so copying it per outer iteration gives
+    each outer element its own list. What is still refused is an inner result
+    that itself holds containers (`[[[z] for z in …] for y in …]`), where the
+    copied words would be addresses of one shared scratch. The copy lands the
+    inner result, already built, into the outer element array; it does NOT have
+    to relocate the inner comprehension's own base, which is why the nested case
+    does not need the runtime blob base the flat case does not need either.
+
     The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    a comprehension whose produced values are containers, a list of lists, a
+    slice, a constructor call, and every non-container expression. Those are the
+    cases whose per-iteration materialisation needs the runtime blob base the
+    refusal's own document describes.
     """
+    if isinstance(element, F.Comprehension):
+        return _comprehension_result_is_flat(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -30771,24 +30959,49 @@ def comprehension_element_is_flat_container(element) -> bool:
 
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
-    """The diagnostic for a comprehension ELEMENT that opens a container.
+    """The diagnostic for a comprehension ELEMENT that opens a container and
+    whose result a byte copy cannot materialize per iteration.
 
-    **A silent wrong answer, and the reason this is a refusal rather than an
-    allocation scheme.** A container on this path is a blob in the frame, and the
-    frame is ONE sequential ledger: `_reserve_blob` steps `_list_cursor` along
-    `_blob_cap`, so a site's reservation happens ONCE at compile time. A
-    comprehension's element is one site that runs `cap` times, so the blob is one
-    allocation shared by every iteration and each iteration overwrites the last
-    one's contents. Measured on both architectures, CPython 3.14 against the
-    same source:
+    **This is now the FALLBACK, not the whole answer.** A FLAT element — a
+    display of scalars, or a dict display of scalars; one whose result blob
+    holds no pointer to a blob built in the same emission — is given its own
+    arena slot per iteration by both backends' `_materialize_compr_element`,
+    because a byte copy of its result is sound. What reaches this refusal is
+    the element that a byte copy of would STILL alias or that this path cannot
+    size, the same shapes the predicate's docstring names: a nested
+    comprehension, a list of lists, a slice, a constructor call, and every
+    non-literal expression — a call, a subscript or a member read whose result
+    this path cannot type among them.
+    `comprehension_element_is_flat_container` is the shared predicate and
+    `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
+    pins both sides.
+
+    **Where it does fire it is still a silent wrong answer if emitted, and that
+    is why it is a refusal rather than a guess.** A container on this path is a
+    blob in the frame, and the frame is ONE sequential ledger: `_reserve_blob`
+    steps `_list_cursor` along `_blob_cap`, so a site's reservation happens
+    ONCE at compile time. A comprehension's element is one site that runs `cap`
+    times, so the blob is one allocation shared by every iteration and each
+    iteration overwrites the last one's contents. Measured on both
+    architectures, CPython 3.14 against the same source:
 
         [[y, y + 1] for y in [10, 20, 30]]     CPython: 11 21 31
                                               this path: 31 31 31
         [[x + y for x in [1, 2]] for y in [10, 20, 30]] and then v[0] summed
                                               CPython: 63   this path: 93
 
-    The second is worse than a wrong number: it exits 1 as well, because the
-    count the third iteration writes lands one word past a blob sized for one
+    **Both of those are now materialised per iteration** by
+    `comprehension_element_is_flat_container`, so this message fires only on the
+    shapes whose per-iteration copy is unsound: a container literal with a nested
+    container in it, a nested comprehension whose produced values are containers,
+    a list of lists, a slice and a constructor call. The paragraph above is the
+    measurement that made the refusal the right answer for THEM; the two
+    reproducers are kept because they are what a copy must answer, and are the
+    rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
+
+    For the nested case the second row is the one that says a refusal was
+    necessary rather than tidy: it exits 1 as well as answering wrongly, because
+    the count the third iteration wrote landed one word past a blob sized for one
     element. And the first is silent in the way this repository's rules call out
     — a caller that appends to element 0 gets element 1's list too, which no
     assertion in the program can notice.
@@ -43232,7 +43445,7 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         name = _module_binding_name(stmt)
         if name is None:
             return False
-        return _is_container_literal(getattr(stmt, "value", None))
+        return _is_static_container(getattr(stmt, "value", None))
 
     def _is_real_store(stmt) -> bool:
         return not (_is_folded_constant(stmt) or _is_image_initialized(stmt))
@@ -46682,13 +46895,17 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         existed: `G = 5` with `bump()` called twice printed `G=5` where CPython
         prints `G=7` — a silently wrong answer, because the read was the folded
         5 and the write went into a register nothing else named.
-      * **its value is a CONTAINER literal.** `[1,2,3]` is not a value the
-        substitution path can express at all — there is no literal to put at the
-        read — but it IS static data: the blob is a flat run of words whose first
-        word is the count, so the linker can place it in `__DATA` and the slot
-        can hold its address. `NUMS = [10,20,30]` read from a function is the
-        case `bugs/FORMAL_module_state_no_storage.md` §1 measured as the first
-        one, and it builds and runs correctly now.
+      * **its value is a CONTAINER literal, or a repetition of one.** `[1,2,3]`
+        is not a value the substitution path can express at all — there is no
+        literal to put at the read — but it IS static data: the blob is a flat
+        run of words whose first word is the count, so the linker can place it in
+        `__DATA` and the slot can hold its address. `NUMS = [10,20,30]` read from
+        a function is the case `bugs/FORMAL_module_state_no_storage.md` §1
+        measured as the first one, and it builds and runs correctly now.
+        `[0] * 624` is the same value as the written-out literal, and
+        `_is_static_container` asks the same question of it — see
+        `_repeated_container` for why missing that spelling was a silent wrong
+        image rather than a refusal.
       * **the MODULE BODY writes it.** `G = compute()` at file level is the
         module's own top-level statement, compiled as the synthetic
         `__module_body__` and run before anything else — so it is a store, not
@@ -46763,9 +46980,9 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         value = getattr(stmt, "value", None)
         is_frame = name in frame_slots
         filled_by_body = (name in body_written and not is_frame
-                          and not _is_container_literal(value))
+                          and not _is_static_container(value))
         if name not in written and not filled_by_body \
-                and not is_frame and not _is_container_literal(value):
+                and not is_frame and not _is_static_container(value):
             continue
         if name not in finals:
             order.append(name)
@@ -46886,6 +47103,51 @@ def _is_container_literal(value) -> bool:
     by `_static_container_words` — this only asks whether the shape is one a
     `__DATA` slot can point at."""
     return isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr))
+
+
+def _repeated_container(value):
+    """`(container, count)` for a container REPETITION `[e0, e1] * N`, or None.
+
+    `[0] * 4` IS `[0, 0, 0, 0]`: the repetition evaluates to a fresh container
+    of `N` copies, and a module-level binding to one is the same static data a
+    written-out literal is. That is the spelling this exists for — a 624-word
+    table is `[0] * 624` and not 624 commas in the source — and the failure of
+    not recognising it is a SILENT one rather than a refusal: with the
+    repetition unclassified, `collect_global_slots` gave it no slot and
+    `module_body` kept the store, so `__module_body__` became the entry point,
+    `main` was never called, and the image printed nothing and exited 0. That is
+    the same failure `_is_image_initialized`'s docstring records for `NUMS =
+    [10, 20, 30]`, one spelling over.
+
+    Either operand order is accepted, because `4 * [0]` is the same container.
+    `N` must be a word this can read (an int literal, or a unary sign of one),
+    and a count or element this cannot compute answers None — the caller's
+    fallbacks then refuse rather than guess, which is deliberately NOT a partial
+    expansion."""
+    if not isinstance(value, F.BinaryOp) or value.op != "*":
+        return None
+    for container, count in ((value.left, value.right),
+                             (value.right, value.left)):
+        if isinstance(container, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            n = _static_word(count)
+            if isinstance(n, int) and n >= 0:
+                return container, n
+    return None
+
+
+def _is_static_container(value) -> bool:
+    """True for a value the linker can place as a container blob in `__DATA`.
+
+    A container literal (`_is_container_literal`) OR a repetition of one
+    (`_repeated_container`), which is the wider question the module-slot and
+    module-body paths have to ask: both are storage-shaped data and neither is a
+    value the substitution path can fold. Kept beside `_is_container_literal`
+    rather than widening it, because that predicate has a second reader —
+    `ValueKinds._value_kind`, where "is a container" decides whether an
+    unclassified local keeps its blob kind or falls to the word default — and a
+    repetition local is bound by a `BinaryOp` that `kind_of` already answers, so
+    widening it there would change a local's classification for no reason."""
+    return _is_container_literal(value) or _repeated_container(value) is not None
 
 
 # The names a `None` VALUE is spelled with, read as a bare name because that is
@@ -47170,6 +47432,12 @@ def _static_container_words(value):
     slot holds its address: the blob then has STATIC STORAGE DURATION, which is
     exactly what a frame blob does not have and exactly what a global needs.
 
+    A REPETITION of a container (`[e0, e1] * N`) is the same static data — it is
+    the element list written `N` times and nothing about it is computed at run
+    time — so it is expanded here rather than left to the caller. That is the
+    spelling a table too long to write out uses, and `_repeated_container` is the
+    one place that decides when the count and elements are all readable.
+
     A word may be a STRING rather than an int, and that is the whole of the
     second kind: a string on this path is a `char *`, so a string element is a
     word holding a pointer, and the pointer is filled in from code at first call
@@ -47189,6 +47457,23 @@ def _static_container_words(value):
     is a word this cannot compute, and a container that is not all-words has no
     initializer to write into the slot. That is said by name from
     `static_initializer_refusal_reason`."""
+    repeated = _repeated_container(value)
+    if repeated is not None:
+        # `[e0, e1] * N` is the element LIST repeated, not one element: `[1, 2]
+        # * 3` is `[1, 2, 1, 2, 1, 2]`. One `_static_word` call PER COPY, so a
+        # nested container element is laid out as `count` separate blobs rather
+        # than one shared by every pointer — a subscript store into one element
+        # must not change the others.
+        container, count = repeated
+        elements = list(container.elements or [])
+        words = [len(elements) * count]
+        for _ in range(count):
+            for el in elements:
+                word = _static_word(el)
+                if word is None:
+                    return None
+                words.append(word)
+        return words
     if isinstance(value, F.DictExpr):
         words = []
         pairs = [p for p in (value.pairs or []) if len(p) >= 2]
@@ -47258,7 +47543,7 @@ def _static_word(node):
         if isinstance(n, (str, StaticNestedBlob)):
             return None
         return None if n is None else (-n if node.op == "-" else n)
-    if _is_container_literal(node):
+    if _is_static_container(node):
         words = _static_container_words(node)
         return None if words is None else StaticNestedBlob(words)
     return None
@@ -48844,7 +49129,7 @@ def function_param_shape(fn) -> ParamShape:
 
 
 def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
-    """`(slots, error)` — a call's arguments in positional form, or why not.
+    """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
     both backends. It existed twice, once per file, and the two copies had
@@ -48852,6 +49137,21 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     the call had no keyword arguments, so the arity check only ever ran on a
     call with keywords. `f(1, 2, r)` against `def f(x, *rest)` therefore passed
     three arguments into a one-parameter function with no diagnostic at all.
+
+    `dropped` is the arguments that have NO register home — the positional tail
+    a variadic callee's `*name` would receive, and any keyword a `**kwargs`
+    would swallow. They are not discarded here: CPython evaluates EVERY argument
+    expression before the call, so a dropped argument's SIDE EFFECT is
+    observable even when the callee never reads its variadic parameter, and the
+    emitter runs each of these for effect. This is the fix for a real
+    wrong-but-exit-0 answer: `def f(x, *rest): return x` called as
+    `f(1, g())`, where `g` prints, printed only `1` — `g` was never run —
+    against CPython's `g-called / 1`. The old docstring here claimed the drop
+    was "exactly what the language observes when the callee's body never reads
+    its variadic parameter", and that was FALSE about the side effect; a body
+    that READS the parameter is refused earlier (`formal/build.py::
+    _refuse_variadic_reads`), so the value is unobservable but the evaluation is
+    not.
 
     Three rules, and they are the language's:
 
@@ -48875,13 +49175,13 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         passed", and the second half of that is the bug: it consumes ALL of
         them, it just only WRITES the ones it is passed;
       * everything from the variadic parameter's position onwards belongs to
-        `*name` / `**name`, and there is no register for it. It is DROPPED,
-        which is exactly what the language observes when the callee's body
-        never reads its variadic parameter — and `formal/build.py`'s
-        `check_module_symbols` refuses, by name, a body that does. So the
-        drop is not a gap in this function: it is a documented consequence of
-        a check that runs earlier, and the comment here is where a reader
-        should be told so."""
+        `*name` / `**name`, and there is no register for it. It is dropped from
+        `slots` and returned in `dropped` so the emitter can still EVALUATE it:
+        the callee's body cannot read the value (`formal/build.py::
+        _refuse_variadic_reads` refuses a body that does), but CPython runs the
+        expression, so its side effect has to happen. So the drop is not a gap
+        in this function: it is the placement decision, and the evaluation is
+        put back at the call site rather than lost."""
     shape = function_param_shape(fn)
     positional = shape.positional
     # A `**` SPREAD is folded in before the arity is counted, for the reason
@@ -48893,32 +49193,41 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
         list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
-        return None, spread_refusal
+        return None, [], spread_refusal
     slots: list = list(args or [])
+    dropped: list = []
     if len(slots) > len(positional):
         if not shape.variadic:
-            return None, (f"call {name}(): too many positional arguments "
-                          f"({len(slots)} for {len(positional)} parameter(s)"
-                          + (f"; the parameters are {positional}"
-                             if positional else ")"))
+            return None, [], (f"call {name}(): too many positional arguments "
+                              f"({len(slots)} for {len(positional)} "
+                              f"parameter(s)"
+                              + (f"; the parameters are {positional}"
+                                 if positional else ")"))
         # A variadic callee: the arguments past the fixed ones are `*name`'s
-        # and have nowhere to go. See the docstring.
+        # and have no register home. Kept in `dropped`, in SOURCE ORDER, so the
+        # emitter evaluates them for their side effects. See the docstring.
+        dropped.extend(slots[len(positional):])
         slots = slots[:len(positional)]
     slots.extend([None] * (len(positional) - len(slots)))
     for k, v in kwargs:
         idx = shape.index_of(k)
         if idx is None or shape.names[idx] not in positional:
             if shape.kwarg is not None:
-                continue        # **kwargs swallows it; no register to put it in
-            return None, f"call {name}(): unexpected keyword argument {k!r}"
+                # `**kwargs` swallows it; no register to put it in, but the
+                # VALUE is still evaluated by CPython, so it is kept in
+                # `dropped` for the same reason as the positional tail.
+                dropped.append(v)
+                continue
+            return None, [], f"call {name}(): unexpected keyword argument {k!r}"
         if idx < len(args):
-            return None, (f"call {name}(): multiple values for argument "
-                          f"{k!r}")
+            return None, [], (f"call {name}(): multiple values for argument "
+                              f"{k!r}")
         if slots[idx] is not None:
-            return None, (f"call {name}(): multiple values for argument "
-                          f"{k!r}")
+            return None, [], (f"call {name}(): multiple values for argument "
+                              f"{k!r}")
         slots[idx] = v
-    return _fill_gaps(name, shape, positional, slots)
+    slots, err = _fill_gaps(name, shape, positional, slots)
+    return slots, dropped, err
 
 
 def _fill_gaps(name: str, shape, positional: list, slots: list) -> tuple:
@@ -49288,6 +49597,43 @@ def context_exit_arity(struct_def) -> int:
         if getattr(m, "name", None) == CONTEXT_EXIT:
             return 4 if _dunder_receiver_params(m) > 1 else 1
     return 1
+
+
+def with_alias_struct(struct_def, structs_by_name):
+    """The struct a `with ... as NAME` alias holds, or None if the source names none.
+
+    The alias names `__enter__`'s RESULT, not the context — CPython's
+    `TARGET = type(mgr).__enter__(mgr)` — so the struct it holds is the one that
+    result is DECLARED to be, and a manager that annotates `__enter__` has
+    written it down.  Publishing it is what lets a method call through the alias
+    whose NAME a second struct of this image also declares lift from the alias's
+    own type instead of being refused, which is the SAME evidence a field access
+    reads through `struct_field_declared_type` and a parameter through
+    `parameter_declared_structs`: a type the source wrote, rather than a guess by
+    name.
+
+    `__enter__` returning a plain word (`return self.tag`) or carrying no
+    return annotation is None, and that is the honest answer: nothing in the
+    source says which struct the alias holds, so dispatch stays by name and the
+    ambiguous case stays refused (`formal/build.py::_lift_one_word_field_method`
+    declines a name two structs declare).  A result whose annotation names a
+    type THIS unit does not declare is None for the same reason — the struct is
+    in another module and there is nothing here to lift to.
+
+    One reader, asked by the ONE lowering that decides the alias's binding
+    (`formal/build.py::_one_with_item`), and it answers from `annotation_base_name`
+    so a spelling the rest of this file already accepts (`Res`, `Self`,
+    `Optional[Res]`'s base) means here what it means everywhere else.
+    """
+    enter = next((m for m in struct_methods(struct_def)
+                  if getattr(m, "name", None) == CONTEXT_ENTER), None)
+    if enter is None:
+        return None
+    base = annotation_base_name(getattr(enter, "return_type", None),
+                                self_type=getattr(struct_def, "name", None))
+    if not base:
+        return None
+    return (structs_by_name or {}).get(base)
 
 
 def with_alias_bare_name(item):

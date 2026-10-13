@@ -2687,6 +2687,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- is the `ADDS Xd, Xn, Xm` the backend emits for a signed `+` overflow check
     -- (`formal/arm64_codegen.py::_emit_int_alu_checked`, `encode_adds_xd_xn_xm(0,
     -- 0, 1)`). The one body covers both, exactly as the CMP arm's `Rd` does.
+    -- The arm used to set the flags and drop `Rd`, so an `ADDS Xd` in a real
+    -- image would step to a state the machine never reached — a soundness
+    -- defect, since a theorem over such an image reasons about that state.
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat

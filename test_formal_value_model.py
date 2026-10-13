@@ -2191,6 +2191,23 @@ REFUSALS = [
      "    printf(\"%d\\n\", v)\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # …and the same missing value through a TEXT conversion, the shape the
+    # two rows above do not carry: a NUMBER conversion renders the leftover
+    # word as a number, a `%s` renders it as a POINTER — measured `[(null)]`
+    # on both architectures when this was unguarded (2026-10-08,
+    # work/formal195-docs), the same `g(1, 2)` as the first row. The reader
+    # is the one those rows name — `model.returnless_printf_argument_refusal`,
+    # asked at `_emit_call`'s printf line in both emitters — so this is the
+    # conversion-class half of the same refusal, and the needle is the same
+    # rendering spelling.
+    ("a_printf_string_conversion_of_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\\n\", g(1, 2))\n"
+     "    return 0\n",
+     "printf() is asked to render the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

@@ -349,6 +349,9 @@ def main(n):
     printf("chmod-missing=%d@@", chmod(join(root, "no-such"), 384))
     # ── the working directory, and coming back from it ──
     printf("cwd-rel=[%s]@@", relpath(join(root, "a"), getcwd()))
+    # `start` omitted, so this is CPython's one-argument `os.path.relpath`,
+    # whose default `start` is `os.curdir` — the process's own directory.
+    printf("relpath-omitted=[%s]@@", relpath(join(root, "a/b")))
     printf("chdir=%d@@", chdir(join(root, "a")))
     printf("cwd-in=%s@@", getcwd())
     printf("chdir-back=%d@@", chdir(root))
@@ -621,6 +624,7 @@ def group_fs(tmpdir, verbose):
         "chmod": "0",
         "chmod-missing": "-1",
         "cwd-rel": f"[{posixpath.relpath(p('a'), os.getcwd())}]",
+        "relpath-omitted": f"[{posixpath.relpath(p('a', 'b'))}]",
         "chdir": "0",
         "cwd-in": p("a"),
         "chdir-back": "0",

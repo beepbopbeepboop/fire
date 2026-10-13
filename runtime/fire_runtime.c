@@ -4900,9 +4900,18 @@ MojoList *mojo_str_partition(char *s, char *sep) {
     MojoList *l = mojo_list_new();
     if (!s) s = "";
     if (!sep || !*sep) {
+        /* An EMPTY separator is a ValueError in CPython, not a never-found
+         * separator — same distinction the bytes half already draws (see
+         * mojo_bytes_partition_go). This arm used to answer `(s, "", "")`. */
+        {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "empty separator");
+            mojo_raise_value_error(detail);
+        }
         mojo_list_append_str(l, strdup(s));
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(""));
+        mojo_mark_as_tuple(l);
         return l;
     }
     char *hit = strstr(s, sep);
@@ -4910,6 +4919,7 @@ MojoList *mojo_str_partition(char *s, char *sep) {
         mojo_list_append_str(l, strdup(s));
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(""));
+        mojo_mark_as_tuple(l);
         return l;
     }
     size_t head_len = (size_t)(hit - s);
@@ -4919,6 +4929,7 @@ MojoList *mojo_str_partition(char *s, char *sep) {
     mojo_list_append_str(l, head);
     mojo_list_append_str(l, strdup(sep));
     mojo_list_append_str(l, strdup(hit + strlen(sep)));
+    mojo_mark_as_tuple(l);
     return l;
 }
 
@@ -4930,9 +4941,17 @@ MojoList *mojo_str_rpartition(char *s, char *sep) {
     MojoList *l = mojo_list_new();
     if (!s) s = "";
     if (!sep || !*sep) {
+        /* Empty separator is a ValueError in CPython — see
+         * mojo_str_partition. */
+        {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "empty separator");
+            mojo_raise_value_error(detail);
+        }
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(s));
+        mojo_mark_as_tuple(l);
         return l;
     }
     size_t sep_len = strlen(sep);
@@ -4947,6 +4966,7 @@ MojoList *mojo_str_rpartition(char *s, char *sep) {
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(""));
         mojo_list_append_str(l, strdup(s));
+        mojo_mark_as_tuple(l);
         return l;
     }
     size_t head_len = (size_t)(last_hit - s);
@@ -4956,6 +4976,7 @@ MojoList *mojo_str_rpartition(char *s, char *sep) {
     mojo_list_append_str(l, head);
     mojo_list_append_str(l, strdup(sep));
     mojo_list_append_str(l, strdup(last_hit + sep_len));
+    mojo_mark_as_tuple(l);
     return l;
 }
 

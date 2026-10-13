@@ -47,6 +47,49 @@ in §2 re-ran, and the tool's tally was never the thing that was wrong.
 
 **What this does NOT close:** §6's four items are unchanged — the `struct` decision (now named as the 3 stems above), the stdlib sweep, the two rare transforms, and the `int_only` lower bound. Nothing here is a new SWEEP; it is the suite going from red to green with the two real defects fixed.
 
+**Status 2026-10-07 (`work/formal160-docs`): FOUR tool defects and two stale
+test expectations were red, and they are fixed. `test_formal_metamorph.py` was
+55 tests with 5 failures; it is 55/55 now.** Two are `reorder` soundness holes
+that §5's table did not carry, both caught by the file's own
+`test_every_transform_preserves_the_meaning`:
+
+* **An ALIAS made two names look independent.** `A32 = h31.b23` makes `A32[0]`
+  and `h31.b23[0]` one memory, and `reorder` swapped `h31.b23[0] = 62` past
+  `w34 = A32[0]` — the two statements mention no name in common, and the
+  printed value moved 62 → 46 (generated `refs:0`). This branch's
+  `Analysis.alias_closure` and `_reference_aliases` are the relation it
+  consulted; the same fix's form in the merged tree is `_alias_classes`/
+  `_canonical` (the Status entries above name it), a sound over-approximation
+  built from assignments whose RHS is a Name/Attribute/Subscript.
+* **The call-reachability rule asked only about WRITES.** `_reachable_by_a_call`
+  is the names a CALL may READ OR WRITE, so `w13 = G8` swapped past
+  `print(bump11(1))` — which writes `G8` — moved the printed value 32 → 33
+  (generated `globals:3`). The rule now asks about reads too.
+
+The other two are in the normaliser and the tests: `normalise_mojo` removed
+`@spec`/`@require`/`@ensure` but not `@refines(Specs.factorial64; 20)`, whose
+Mojo-only arguments CPython's parser refuses, so ELEVEN examples (`fact`,
+`sum`, `absval`, `bitops`, `chain`, `bigconst`, `identity`, `localmul`,
+`nonzero`, `pair`, `shiftlr`) were undrivable; and the driver's unit tests
+mocked `cpython_answer` with a bare `(exit, stdout)` tuple, which
+`oracle_answer` rejects, so three cross-machine verdict tests read
+`not-answerable`. §6 item 1's "one unmeasured example" is therefore three
+`struct` files now (`wide_recv`, `struct_point`, `struct_method`), which is
+the documented non-goal rather than the `@refines` hole.
+
+**Status 2026-10-13 (merging `work/formal192-docs`): the branch carried a
+parallel record of the SAME six defects, so its Status section is deduped
+into the entries above rather than kept as a second copy. Its one addition
+to the merged tree is the read-hazard hunk itself: the merged code still
+asked only about WRITES (`a.writes & reach`) when the branch was merged, and
+the check is now `(a.reads | a.writes) & reach` in both directions — what the
+2026-10-07 entry above describes and measured in advance (`globals:3`,
+32 → 33). The branch's alias mechanism (`Analysis.alias_closure` and
+`_reference_aliases`) is the parallel form of `_alias_classes`, and its
+hand-written pin is covered by `ReorderAliasing`. Measured on the merged
+tree: `test_formal_metamorph.py` is 62/62 (the file has grown since the 160
+entry's 55), peak 0.2 GB; `test_formal_mlir_precedence.py` is 40/0.**
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
@@ -334,8 +377,8 @@ first three items of the previous session's list are now DONE and are recorded i
    rules remove `@spec`/`@require`/`@ensure`/`@refines`, `var` and `fn` and
    nothing else, deliberately: a Python `class` body of bare annotations has no
    attributes, so `p.get_y()` reads a name that was never assigned while the
-   struct's field reads `0` — a real disagreement with CPython manufactured by the
-   translation rather than found by it. Giving each field an initialiser is a
+   struct's field reads `0` — a real disagreement with CPython manufactured by
+   the translation rather than found by it. Giving each field an initialiser is a
    judgement about what a struct's fields are worth, not a removal of syntax. So
    the next step is a DECISION about `struct`, not another rule. (It was one file
    when this item was written; `struct_point` and `struct_method` joined the

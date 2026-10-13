@@ -399,6 +399,29 @@ def test_a_variant_that_goes_negative_is_refuted(tmpdir=None):
           "and the state it names has the variant below zero", str(witness))
 
 
+def test_a_division_in_the_loop_body_is_read_not_skipped(tmpdir=None):
+    """`collatz` halves with `v = v // 2`, and `//` is read now.
+
+    The loop-body search reads its statements through `formal/contracts.py`'s
+    expression IR, and that reader once took `/` and not the AST's own `//`, so
+    every halving step was `Unsupported('//')` and the search said nothing about
+    the variant (measured then: 11 of 12 entry values skipped).  The reader now
+    normalises `//` onto its one division tag, so the whole range is evaluated
+    and the candidate is no longer a skip.  The negative half is `array_fill` in
+    the row below: a subscript is still unread, so that one stays a skip, and the
+    two rows together say the fix is a division reader rather than a widening.
+    """
+    v = verdicts_of("collatz")[0]
+    check(bool(v.candidates),
+          "collatz: the search ran and reported per candidate")
+    check(not any(c["skipped"] for c in v.candidates),
+          "collatz: no candidate is skipped now that `//` reads",
+          str([(c["role"], c["skipped"]) for c in v.candidates]))
+    check(any(c["witness"] is not None for c in v.candidates),
+          "collatz: and the search names a witness rather than staying silent",
+          str([(c["role"], c["witness"]) for c in v.candidates]))
+
+
 def test_a_program_the_search_cannot_run_is_recorded_as_skipped(tmpdir=None):
     """`array_fill` is SKIPPED, every input, and that is not agreement.
 
@@ -697,6 +720,7 @@ ALL = [
     test_the_synthesis_derives_what_the_table_says,
     test_a_wrong_claim_is_refuted_and_the_right_one_is_not,
     test_a_variant_that_goes_negative_is_refuted,
+    test_a_division_in_the_loop_body_is_read_not_skipped,
     test_a_program_the_search_cannot_run_is_recorded_as_skipped,
     test_a_body_with_floor_division_is_run_and_not_skipped,
     test_the_ladder_is_the_shared_one,

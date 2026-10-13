@@ -79,6 +79,7 @@ import shutil
 import stat as CPY
 import subprocess
 import sys
+import time
 import tempfile as CPY_TEMPFILE     # the oracle. Not shadowed below: every
                                     # reference to the HOST's tempfile is this
                                     # name, so a reader cannot mistake it for
@@ -729,6 +730,13 @@ def _full_filesystem_base(scratch, label="FORMALFULL"):
     an `hdiutil` this host will not run — degrades to a stated SKIP rather than a
     test that quietly asserts nothing.
 
+    **The state is made STABLE, not just reached**, because the first `ENOSPC`
+    is transient: the volume returns enough room for one directory entry within
+    about a second, so a fill followed immediately by a check describes a
+    filesystem the image (run after a multi-second build) no longer sees. The
+    body refills after each recovery window until a `mkdir` still fails after the
+    wait, which is the state both the oracle and the image are then measured in.
+
     `hdiutil` needs no privileges for a sparse image under `$TMPDIR`, and the
     detach is in the caller's `finally` because a mounted volume left behind by a
     failed run is worse than a skipped group.
@@ -767,29 +775,51 @@ def _full_filesystem_base(scratch, label="FORMALFULL"):
     # loop is stopped by the FILESYSTEM refusing rather than by the bound: a
     # bound that stopped first would leave room for a directory entry and the
     # probe below would pass for the wrong reason.
-    n = 0
-    try:
-        while n < 20000:
-            with open(os.path.join(vol, "fill%05d" % n), "wb") as f:
-                f.write(b"\0" * 4096)
-            n += 1
-    except OSError:
-        pass
+    #
+    # THE FILL IS REPEATED, and that is a measured property of this filesystem
+    # rather than caution.  The first ENOSPC is a TRANSIENT state: within about a
+    # second of the failing write the volume hands back enough room for a
+    # directory entry — measured, `mkdir` fails, then succeeds ~1 s later, then
+    # keeps succeeding.  The oracle runs in THIS process immediately after the
+    # fill and so catches the transient, while the image runs after a
+    # multi-second build, by which point the transient has passed and a
+    # `mkdtemp` CPython refused succeeds; the group would then compare two
+    # answers to two different filesystem states.  So fill, wait, and refill
+    # until the full state SURVIVES the wait.  The counter is shared across
+    # rounds because a refill must create NEW names: re-opening a name that
+    # already exists consumes no space and would never re-exhaust the volume.
+    names = [0]
+
+    def fill():
+        try:
+            while names[0] < 20000:
+                with open(os.path.join(vol, "fill%05d" % names[0]), "wb") as f:
+                    f.write(b"\0" * 4096)
+                names[0] += 1
+        except OSError:
+            pass
+
+    fill()
+    probe = os.path.join(base, "probe")
+    for _ in range(10):
+        time.sleep(1.0)
+        try:
+            os.mkdir(probe)
+        except OSError:
+            break               # stable: still full after the recovery window
+        os.rmdir(probe)
+        fill()
+    else:
+        detach()
+        return None, detach, (f"{base} recovered room after every refill, so a "
+                              f"stable full state cannot be built here and the "
+                              f"case would compare two answers to two states")
     if not os.path.isdir(base) or not os.access(base, os.W_OK):
         detach()
         return None, detach, (f"{base} is not a writable directory on this "
                               f"filesystem, so it is not the case this group "
                               f"needs")
-    probe = os.path.join(base, "probe")
-    try:
-        os.mkdir(probe)
-    except OSError:
-        return base, detach, None
-    os.rmdir(probe)
-    detach()
-    return None, detach, (f"{base} still accepted a `mkdir` after being "
-                          f"filled, so this filesystem keeps room for one and "
-                          f"the case cannot be built here")
+    return base, detach, None
 
 
 def group_no_space(tmpdir, archs, verbose):

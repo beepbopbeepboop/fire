@@ -246,22 +246,6 @@ def _range_args(iterable):
     return None
 
 
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
-
 
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
@@ -596,22 +580,6 @@ def _binds_name(target, name: str) -> bool:
         from mojo.middle.boundnames import _lbn_target_names
         return name in _lbn_target_names(target)
     return False
-
-
-def _for_tree_leaves(tree) -> list:
-    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
-
-    A star leaf keeps its `*`, so the caller's identifier check refuses it —
-    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
-    the reason the for-loop's target validation is a leaf walk rather than
-    `_lbn_target_names` (which strips the star and would pass a `*rest`
-    through to a store under a name nothing allocated)."""
-    if isinstance(tree, list):
-        out = []
-        for child in tree:
-            out.extend(_for_tree_leaves(child))
-        return out
-    return [tree]
 
 
 def _dotted(func) -> str:
@@ -3088,6 +3056,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # BOTH backends refused, from the same line of source. `stmt.op` is
         # the spelling to quote, so the diagnostic names the `+=` the reader
         # is looking at rather than the `+` the table is keyed on.
+        #
+        # A SET ALGEBRA on a SET target (`s &= t`) is a blob-on-either-side
+        # shape, so it is refused by the delegation below rather than here: the
+        # shared gate's `set_algebra_refusal` is what names it, and growing a
+        # second copy at this site would let the two spellings of one operator
+        # drift.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -3649,10 +3623,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """Give the element its OWN container per iteration, or refuse.
 
         The x86-64 twin of arm64's method over the same shared predicate
-        (`M.comprehension_element_is_flat_container`) and the same message, so
-        the two architectures cannot materialise — or refuse — an element
-        differently. RAX on entry holds the element's blob and on exit the
-        per-iteration copy `_compr_append_elem` appends.
+        (`M.comprehension_element_is_flat_container`, which also accepts a
+        nested comprehension whose produced values are words) and the same
+        message, so the two architectures cannot materialise — or refuse — an
+        element differently. RAX on entry holds the element's blob and on exit
+        the per-iteration copy `_compr_append_elem` appends.
 
         `i` is the result blob's count word (elements appended so far), the
         destination is `array_base + i * bytes_`, and the copy is `memcpy`,
@@ -6676,12 +6651,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # answer. arm64 reads the same tree through the same `M` reader.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
+            # The SHAPE's leaves, for the same reason the arm64 site asks for
+            # them: a star leaf keeps its `*`, so a starred for-target is
+            # refused HERE, by this identifier check, with the same sentence
+            # arm64 gives it — the option (1) refusal of
             # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
@@ -7503,6 +7478,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        #
+        # A SET ALGEBRA is decided further down, at the one site that asks
+        # `set_algebra_refusal` for every two-blob shape (see the `&`/`-`/`^`
+        # guard below the union gate), so it is NOT answered here: a second
+        # two-set guard at this point would pre-empt that site and let the two
+        # spellings of one operator word the refusal differently.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
@@ -7535,7 +7516,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(reason)
         # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
         # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
+        # `_emit_set_op`, so every two-blob shape is refused by name —
         # both the two-set case (which arm64 lowers) and the not-two-sets case
         # (a CPython `TypeError`).  Without this the deferral would let the
         # operands reach the integer ALU as two blob ADDRESSES, which is the
@@ -9404,8 +9385,10 @@ preference.
             # `M.for_target_tree`.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            # The SHAPE's leaves, for the same reason the `for` site asks for
+            # them: a star leaf keeps its `*`, so a starred comprehension
+            # target is refused HERE with the same sentence arm64 gives it.
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
@@ -10220,9 +10203,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are.
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False
@@ -10694,11 +10678,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `formal/monomorph.py::supplied_bracket_args`, so there is one answer
         # to "what does `f[a, b](x)` pass" rather than one per backend and one
         # per callee kind.
-        args = (monomorph.supplied_bracket_args(e) + list(e.args)
-                if through_value
-                else (list(e.args)
-                      if is_extern and self._callee_decl(name) is None
-                      else self._bind_call_args(name, e)))
+        dropped: list = []
+        if through_value:
+            args = monomorph.supplied_bracket_args(e) + list(e.args)
+        elif is_extern and self._callee_decl(name) is None:
+            # Unknown signature: kwargs have no slot on a raw call and are
+            # dropped, but their VALUES are still evaluated by CPython, so they
+            # are kept in `dropped` (the same rule `bind_call_arguments` applies
+            # to a variadic tail).
+            args = list(e.args)
+            dropped = [v for _k, v in (e.kwargs or [])]
+        else:
+            args, dropped = self._bind_call_args(name, e)
         if is_extern and self._callee_decl(name) is None:
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
@@ -10934,6 +10925,21 @@ ctor_field_value=self._ctor_field_value_for(name),
                                  + sret_site[1], Reg.RAX)
             _spill()
             reg_plan.append((len(args), "sret", len(reg_plan)))
+        # Arguments with NO register home — a variadic callee's positional tail
+        # and any keyword a `**kwargs` swallowed — are evaluated HERE, after
+        # every fixed argument (which is the source's own order) and before the
+        # registers are loaded, because CPython evaluates EVERY argument
+        # expression and their side effects are observable even though the
+        # callee cannot read the values. Dropping them silently built
+        # `def f(x, *rest): return x` called as `f(1, g())` into an image that
+        # never ran `g`. Every fixed argument is already spilled here, so a
+        # dropped expression that itself calls cannot disturb one. `*`/`**`
+        # markers are unwrapped exactly as the arm64 twin does.
+        for _d in dropped:
+            if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                self._emit_expr(_d.operand)
+            else:
+                self._emit_expr(_d)
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
         # caller-saved register, including the ones argument i belongs in.
@@ -11184,8 +11190,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     self._import_aliases, self._extern_decls,
                                     name)
 
-    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """`e`'s arguments in positional form, for a known callee.
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> tuple:
+        """`(slots, dropped)` for `e`, for a known callee.
+
+        `slots` is `e`'s arguments in positional form; `dropped` is the ones
+        with no register home — a variadic callee's positional tail, and any
+        keyword a `**kwargs` swallowed — which the caller MUST still evaluate
+        for their side effects (`M.bind_call_arguments`'s own docstring states
+        why).
 
         A THIN CALL into `M.bind_call_arguments` — the same one arm64 calls,
         and the reason the two backends cannot disagree about which argument
@@ -11210,11 +11222,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"keyword arguments are not supported "
                     f"({[k for k, _ in e.kwargs]})")
-            return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+            return list(e.args or []), []
+        slots, dropped, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
-        return slots
+        return slots, dropped
 
     # ── types and immediates ─────────────────────────────────────────
 

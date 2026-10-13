@@ -245,30 +245,44 @@ def encoder_names(arch):
     return re.findall(r"^def (encode_[A-Za-z0-9_]+)", src, re.M)
 
 
+def _ast_identifier_counts(path):
+    """`Counter` of identifier occurrences in `path`, by AST.
+
+    A name is counted where it appears as CODE (`ast.Name` / `ast.Attribute`'s
+    `.attr`), not where it appears inside a string. That is the whole point: a
+    docstring that mentions an encoder is not a call site, and the text regex
+    this replaced counted `formal/x86_64_codegen.py`'s prose reference to
+    `encode_cmov_r64_r64` — named in a docstring, called nowhere — so that
+    encoder sat in the census as an EMITTED form with no model, no fuzz case and
+    no `as` check, printing as an unexplained gap and (once the arm64 rows were
+    covered) keeping `test_formal_isa_census.py` red.
+    """
+    import collections
+    counts = collections.Counter()
+    for node in ast.walk(ast.parse(_read(path))):
+        if isinstance(node, ast.Name):
+            counts[node.id] += 1
+        elif isinstance(node, ast.Attribute):
+            counts[node.attr] += 1
+    return counts
+
+
 def call_sites(arch):
     """{encoder: [(file, count)]} over the emitter files only, by AST.
 
-    The walk is over the two `LEVER_ROOTS` files and counts `encode_*` NAMES
-    and ATTRIBUTES in code — not a regex over their text. The distinction is the
-    one this module states for the FUZZ column ("a docstring mentioning an
-    encoder is not coverage") and it has to hold here for the same reason: an
-    encoder an emitter only NAMES in prose is not an instruction any image can
-    contain. Measured 2026-10-05: the regex version counted x86-64's
-    `encode_cmov_r64_r64`, which `formal/x86_64_codegen.py` mentions only in the
-    `_emit_stack_floor_init` docstring recording *why it was not used*, and
-    reported the form as an emitted gap it never was.
+    The walk is over the `LEVER_ROOTS` files and counts `encode_*` names as
+    CODE (`_ast_identifier_counts`), not through a regex over their text.
     """
-    out = {name: [] for name in encoder_names(arch)}
-    for rel in LEVER_ROOTS[arch]:
-        tree = ast.parse(_read(os.path.join(ROOT, rel)))
-        counts = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in out:
-                counts[node.attr] = counts.get(node.attr, 0) + 1
-            elif isinstance(node, ast.Name) and node.id in out:
-                counts[node.id] = counts.get(node.id, 0) + 1
-        for name, n in counts.items():
-            out[name].append((os.path.basename(rel), n))
+    counts = {rel: _ast_identifier_counts(os.path.join(ROOT, rel))
+              for rel in LEVER_ROOTS[arch]}
+    out = {}
+    for name in encoder_names(arch):
+        hits = []
+        for rel in LEVER_ROOTS[arch]:
+            n = counts[rel].get(name, 0)
+            if n:
+                hits.append((os.path.basename(rel), n))
+        out[name] = hits
     return out
 
 
@@ -600,13 +614,12 @@ BACKLOG = {
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`FF /2` with mod=11, the call through a function VALUE; the decoder "
         "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
+    # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-07: the
+    # byte-wise `and`/`or` the floating compare needs, whose gap was a REX prefix
+    # the tree's own encoder omitted for SPL/BPL/SIL/DIL. `_byte_rex_required`
+    # fixed the encoder, the pool draws both, and the census reads `yes yes yes`
+    # for each — so the entries were stale and the anti-rot half of
+    # `test_formal_isa_census.py` is what caught them.
     # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,

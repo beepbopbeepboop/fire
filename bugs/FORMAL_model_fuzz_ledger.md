@@ -303,3 +303,11 @@ conditions are covered through NZCV alone. **Not filed as a doc by this session*
 row); recorded here because §4's sentence is a claim about coverage that has
 become wrong, and a false coverage claim is what §2's `WRONG 0` discussion warns
 about.
+
+**Status 2026-10-07 (`work/formal160-docs`): the row now HAS its own document.**
+`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+is the `lib/ProofLib.lean` capability addition this section named, so the
+sentence above ("not filed as a doc") is stale and this section is the ledger's
+pointer to it rather than a second copy. Nothing else in this ledger changed:
+the `memreg`/`mem` rows, the two filed memory defects and the re-measurement
+are all still the tree's state.

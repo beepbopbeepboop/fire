@@ -250,7 +250,12 @@ HOST_UNREACHABLE = frozenset((
     # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
     # leading underscore), so this moves the PUBLIC unclassified count by zero;
     # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
+    # verdict" now answers with the tier it belongs to. `work/formal155-docs`
+    # measured the same five the same way (2026-10-07); its placement notes stay:
+    # the `_gdbm` fact is about the TARGET (libSystem does not carry gdbm), so it
+    # does not turn on this host having it; the Windows trio's no-spec is
+    # host-independent (none of their objects exist on this target at all); and
+    # `_tkinter` is a terminal as well as a library.
     "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 
@@ -2101,8 +2106,14 @@ def instantiation_demands(module_path: str, consumer_src: str,
     makes this a keyword a caller can leave alone.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
+    # The TYPE-argument demands, and the permissive superset that also sees a
+    # bare literal (`Tagged[Int, 0]`).  `all_bracketed_calls` is a superset of
+    # `all_instantiation_calls`, so this ONE walk serves both and the early
+    # "no type args" return has to key on the superset — keying it on `found`
+    # alone would drop a consumer whose only bracket is a literal.
     found = MM.all_instantiation_calls(consumer_src)
-    if not found:
+    loose = MM.all_bracketed_calls(consumer_src)
+    if not loose:
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2110,9 +2121,20 @@ def instantiation_demands(module_path: str, consumer_src: str,
         templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
     for p, names in templates.items():
-        got = MM.demands_from_calls(found, names, own=own_templates
-                                    if os.path.abspath(p) ==
-                                    os.path.abspath(module_path) else ())
+        own_here = (own_templates
+                    if os.path.abspath(p) == os.path.abspath(module_path) else ())
+        got = MM.demands_from_calls(found, names, own=own_here)
+        value_names = {n for n in names
+                       if any(a not in set(found.get(n, ()))
+                              for a in loose.get(n, ()))}
+        if value_names:
+            for name, args in MM.value_demands_for(
+                    consumer_src, module_source_text(p), names,
+                    own=own_here).items():
+                got.setdefault(name, [])
+                for a in args:
+                    if a not in got[name]:
+                        got[name].append(a)
         if got:
             out[p] = got
     return out
@@ -3724,6 +3746,16 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
     for _tmpl, _args in MM.own_demands(module_source_text(source_path)).items():
         mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
+    # …and the type arguments this module writes in a NON-CALL position, which
+    # `own_demands` cannot see: `var a: Box[Int] = Box(…)` states the
+    # instantiation in the annotation and leaves the construction bare.  The same
+    # table the executable path merges (`_own_instantiations`), and it belongs in
+    # `mine` for the same reason the call-site demands do — it changes what the
+    # library publishes, so it is part of the artifact's identity.
+    for _tmpl, _args in MM.own_annotation_demands(
+            module_source_text(source_path),
+            module_statements(source_path)).items():
+        mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
     dkey = MM.demands_key(mine)
     key = (arch, here, dkey)
     if key in _BUILT:
@@ -4308,6 +4340,17 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     wanted = MM.own_demands(consumer_src)
+    # …and the type arguments this file writes in a NON-CALL position: a
+    # `var x: Base[Int] = Base(…)` states the instantiation in the annotation and
+    # leaves the construction bare, and `own_demands` walks CALL sites only.  The
+    # STRUCT templates are the ones a construction can name; a FUNCTION template
+    # is answered by the local-specialisation machinery and must not be
+    # instantiated here.
+    for base, args in MM.own_annotation_demands(consumer_src, stmts).items():
+        entries = wanted.setdefault(base, [])
+        for a in args:
+            if a not in entries:
+                entries.append(a)
     if not wanted:
         return {}
     made, _failed = MM.instantiate_all(consumer_src, wanted)

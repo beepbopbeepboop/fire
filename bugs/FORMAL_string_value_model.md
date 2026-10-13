@@ -1069,18 +1069,17 @@ divergence, recorded there and not fixed here. For a non-ASCII string it gave a
 byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
 is refused by name.
 
-## The next step, which is not in this document's subject
+## The front-end escape fix, which was not in this document's subject
 
-**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes are not decoded by any engine
-in this repository**, so `len("\u00e9")` is 6 here and 1 in CPython, on the
-interpreter, the compiled path and both formal backends alike. That is
-`fire_compiler.decode_c_escapes` and it is a FRONT-END defect, not a
-string-value-model one: `bugs/LEXER_unicode_escapes_are_not_decoded.md`, with the
-four-row measurement and the reason "an unknown escape keeps its backslash" and
-"a known escape is missing" are the same behaviour here and opposite behaviours
-in CPython. It is worth knowing that the encoding block above makes the formal
-half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
-decoder knows the escape, because the fold reads the decoded text.
+**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes WERE not decoded by any
+engine in this repository** (`len("\u00e9")` was 6 where CPython makes 1); that
+was `fire_compiler.decode_c_escapes`, a FRONT-END defect, and it is FIXED as of
+2026-10-07 — the one shared decoder now knows all four spellings. It was worth
+knowing that the encoding block above made the formal half of that fix free:
+`len("\u00e9")` is 1 on both backends the moment the decoder knows the escape,
+because the fold reads the decoded text. What remains is the compiled path's
+`len` counting BYTES for non-ASCII text where this path and the interpreter count
+code points.
 
 ## `ord`, `chr` and `hash` were not an encoding question at all
 

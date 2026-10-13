@@ -38,11 +38,12 @@ os.environ.setdefault('MOJO_CORO', 'cpp')
 import gimple_codegen
 import fire
 from build_config import find_gcc, find_gxx
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
 GCC = find_gcc()
 GXX = find_gxx()
 
@@ -86,35 +87,35 @@ def _build_and_run(mojo_src: str) -> str:
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
     runtime_o = os.path.join(wd, 'fire_runtime.o')
-    async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
+    async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
 
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_o, cpp_path],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}\n---\n{cpp_code}")
 
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
-                        capture_output=True, text=True, timeout=30)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
     r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
-                        ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
+                        ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
-        raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
+        raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
 
-    r = mojo.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
+    r = fire.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
 
     os.chmod(exe, 0o755)
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout

@@ -145,7 +145,6 @@ import os
 import random
 import re
 import shutil
-import subprocess  # noqa: F401  — re-exported for callers that shim this module
 import sys
 import tempfile
 import time
@@ -1962,16 +1961,18 @@ def t_reorder(module, an, rng):
         `break`/`continue` not inside a loop or `try` of its own);
       * they are not BOTH observable — two statements that each print cannot be
         exchanged, because exchanging them exchanges two lines of output;
-      * a statement that WRITES a name a call from this function can reach
-        (`_reachable_by_a_call` — a module-level binding, or a name a nested
-        scope captures) is not exchanged with a statement that calls anything.
-        This is the rule no amount of looking at the two statements finds, and
-        it carries the closure-cell and the global hazards at once;
       * the names the rules above compare are the names the program can REALLY
         reach: two names bound to one object (`A32 = h31.b23`) are merged, so a
         store through one and a read through the other are not disjoint
         (`_alias_classes`).  This is the rule no amount of looking at the two
-        statements' own spellings finds.
+        statements' own spellings finds;
+      * a statement that READS OR WRITES a name a call from this function can
+        reach (`_reachable_by_a_call` — a module-level binding, or a name a
+        nested scope captures) is not exchanged with a statement that calls
+        anything.  This is the rule no amount of looking at the two statements
+        finds, and it carries the closure-cell and the global hazards at once.
+        It asks about reads as well as writes: the call can WRITE the name
+        between the read and its use.
 
     Every one of those is a decidable predicate, and the CPython oracle then
     checks the RESULT — but the predicate is the transform, and the oracle is the
@@ -2003,9 +2004,15 @@ def t_reorder(module, an, rng):
                 continue
             if a.effectful and b.effectful:
                 continue
-            if a.writes & reach and b.effectful:
+            # `_reachable_by_a_call` is the names a CALL may read OR write, so
+            # a statement that only READS one of them is in hazard too: the
+            # call can write it between the read and its use.  Measured on
+            # `globals:3`: `w13 = G8` was swapped past `print(bump11(1))`,
+            # which writes `G8`, and the printed value moved 32 -> 33.  The
+            # rule used to ask only about WRITES.
+            if (a.reads | a.writes) & reach and b.effectful:
                 continue
-            if b.writes & reach and a.effectful:
+            if (b.reads | b.writes) & reach and a.effectful:
                 continue
             if _is_constructor(an, fn) and not (
                     _self_field_stores(fn.body[i])

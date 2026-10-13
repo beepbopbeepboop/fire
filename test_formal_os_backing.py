@@ -256,6 +256,25 @@ def main(n):
     {"a": "1000", "b": "2000", "c": "3000", "d": "0"},
 ))
 
+# A SIGNED pointee, so the load has to sign-extend rather than zero-extend. A
+# four-byte load into a one-word value has to choose, and `q[0] = -2`
+# zero-extended reads back as 4294967294: the same bytes, a different number.
+# `p.value()` has sign-extended through `_emit_dereference` all along; this is
+# the pin that `p[i]` does too, and the read and the store share one width.
+CASES.append(Case(
+    "pointer_subscript_i32_signed",
+    '''\
+def main(n):
+    var q: Pointer[Int32] = malloc(16)
+    q[0] = 0 - 2
+    q[1] = 2000000000
+    printf("a=%d@@", q[0])
+    printf("b=%d@@", q[1])
+    return 0
+''',
+    {"a": "-2", "b": "2000000000"},
+))
+
 CASES.append(Case(
     "pointer_subscript_i64",
     '''\
@@ -786,11 +805,29 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def device(v):
+        """`st_dev` in the backend's own domain.
+
+        `dev_t` is a 32-bit field, and the two sides render it differently when
+        its high bit is set.  `os/_syscalls.mojo`'s `fs_stat_field32` reads the
+        four bytes as an unsigned 32-bit word, so `/dev/null`'s raw `0xa8fb1a80`
+        is `2835028608`; CPython sign-extends it to 64 bits and renders it as an
+        UNSIGNED long, so the same bytes are `18446744072249612928`.  That value
+        is above `2**63`, outside the signed 64-bit range this backend keeps an
+        integer in (`printf("%d")` on a runtime negative prints it signed), so
+        NO value the image can produce prints as it.  The comparison is
+        therefore on the 32-bit device number both sides agree on.  `-1` is
+        `field`'s "no struct here" sentinel and is left alone, because the image
+        answers -1 for the same paths.  Measured 2026-10-07 on `/dev/null`,
+        both architectures.
+        """
+        return v if v < 0 else v & 0xFFFFFFFF
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), device(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
@@ -1961,7 +1998,14 @@ def main():
     # `FAIL stat_fifo [arm64]`, which is the same line a defect in `os` prints —
     # and `bugs/OPEN_WORK.md` §C2 says this area has already been misdiagnosed
     # twice that way.
+    # `PASS=n FAIL=m of N` as well as the human `n/N passed`, so the
+    # registration's `expect=` count is CHECKABLE: the runner's count reader
+    # recognises that shape and not `n/N passed`, and a marker whose count it
+    # cannot read is reported UNCHECKED, which it treats as a failure. `KILLED`
+    # is neither, and is reported separately as before.
     print(f"\n{total - len(failed) - len(killed)}/{total} passed"
+          + f"  (PASS={total - len(failed) - len(killed)}"
+          + f" FAIL={len(failed)} of {total})"
           + (f", {len(killed)} obtained NO verdict because the machine killed "
              f"them on {EXTERNAL_SIGNALS_TEXT}, which is not a wrong answer: "
              f"{', '.join(killed)}" if killed else ""))

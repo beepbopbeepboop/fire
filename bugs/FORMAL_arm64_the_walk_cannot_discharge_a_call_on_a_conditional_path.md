@@ -24,6 +24,32 @@ change (`formal/examples/neg.mojo` fails the same way), so the gate's
 Lean-checking formal rows are unaffected. This is **partial progress**, not
 this doc's fix.
 
+**Status 2026-10-08 (`work/formal184-docs`): the reproducer now refuses EARLIER,
+for a different reason, so re-measure before sizing this.**  The two-`printf`
+program below no longer reaches the conditional/disjunction refusal: the
+stack-floor guard's `getrlimit` is an out-of-image `BL` in every prologue since
+`bfeec991` (2026-10-05), so `generate_arm64_proof` refuses with "3 calls this
+walk cannot follow (0x10000041c -> …, 0x1000004e8 -> …, 0x100000504 -> …) …
+OUT OF THE IMAGE" — the `getrlimit` plus the two `printf`s, measured, and the
+same reason the whole example corpus emits 0 value theorems.  That is the
+getrlimit subject of `bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_
+and_the_stack_guards_getrlimit_is_a_program_call.md` on the merged tree
+(the branch's branch named the same subject `FORMAL_arm64_stack_floor_
+getrlimit_is_the_opaque_call_for_every_function.md`, owned by
+`formal163-docs`; the fix it awaits landed on master as `70b76755`).  The
+`ProofLib` half this doc
+names is unchanged, and the earlier "conditional refusal" defect its §"A second,
+separable defect" names is already fixed on this tree (the walk's per-path
+`crossed` state in `_reached_without_a_condition`).
+
+**merged 2026-10-13 (merging `work/formal184-docs`): re-measured on the merged tree, the 184 section's "3 calls" is a branch-tree fact — it
+predates the compiler-trap subtraction, so its count includes `getrlimit`.
+Here the two-`printf` reproducer refuses with TWO calls (`0x1000004d8 -> …`,
+the two `printf`s; `getrlimit` subtracted as a compiler trap), and the
+refusal carries the disjunction sentence — the same gap the 10-07 note
+above leaves open, pinned by
+`TestCallProofs::test_two_calls_out_of_the_image_are_refused_by_name` (green
+on the merged tree). The branch lands no code on the merged tree.
 **Status 2026-10-05 (`work/formal40-4-r2`): the blocker this doc names is
 MISNAMED, and the correction is worth more than the work it precedes — the Lean
 gate is NOT what stands in front of option 1. It is runnable, cheaply, by

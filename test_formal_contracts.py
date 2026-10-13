@@ -224,8 +224,6 @@ def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
     check("the_unlowered_reason_names_floordiv_too",
           "//" in CT.unlowered_reason(bad, ["n"]),
           CT.unlowered_reason(bad, ["n"]))
-
-
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     """The difference every consumer needs between "promised nothing" and
     "promised something".  A checker that treats them alike reports a
@@ -315,7 +313,12 @@ def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
     operator the source actually contains was refused with a reason that named
     the wrong one, and a body that used it could not be run by the bounded
     search at all -- every input a skip. Both forms are the SAME truncating
-    operation (`_eval_of`'s `/` is `a // b`, `_lean_of`'s is `UInt64.div`)."""
+    operation (`_eval_of`'s `/` is `a // b`, `_lean_of`'s is `UInt64.div`).
+    A parallel record of this fix landed on `work/formal197-docs`
+    (2026-10-08; its merge base predates the fix on this side). Its test's
+    two pins this one lacked — the word reading at a NEGATIVE input and
+    the zero divisor's refusal — are folded in below (2026-10-13, re-
+    measured on the merged tree)."""
     from formal import contracts as CT
     src = "@ensures(result == a // b)\ndef h(a, b):\n    return a // b\n"
     fn = functions(parse(src, "x.mojo"))[0]
@@ -347,6 +350,18 @@ def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
     ir2 = CT._Reader(params).clause_ir(c2.ensures[0], params)
     check("the_slash_spelling_reads_identically",
           ir2 == ir, f"{ir2!r} vs {ir!r}")
+    # Word reading at a NEGATIVE input, and the zero divisor: folded in
+    # from the parallel record (work/formal197-docs landed this same fix
+    # independently, 2026-10-08, and its test carried these two pins this
+    # one did not have — 11 of 12 entry values for `collatz` were skips).
+    body = CT.SourceRunner(fn)
+    check("floordiv_is_evaluated_as_the_word_reading",
+          body(-7, 2) == (CT._MASK - 6) // 2, str(body(-7, 2)))
+    try:
+        body(1, 0)
+        check("floordiv_by_zero_is_a_refusal", False, "returned a value")
+    except CT.Unsupported as exc:
+        check("floordiv_by_zero_is_a_refusal", "zero" in str(exc), str(exc))
 
 
 def test_the_lean_printer_and_the_evaluator_agree_on_the_corpus(tmpdir=None):
@@ -448,6 +463,19 @@ def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
     runner = CT.SourceRunner(fn)
     check("a_floordiv_body_runs_at_its_own_word_semantics",
           runner(7, 2) == 3, repr(runner(7, 2)))
+    # The truncation wraps at the word boundary rather than in the signed
+    # region: `2^64 - 7` is one from the top of the unsigned reading, and the
+    # division must land where CPython's word reading lands, masked.
+    check("a_floordiv_body_wraps_at_the_word_boundary",
+          runner((1 << 64) - 7, 2)
+          == (((1 << 64) - 7) // 2) & ((1 << 64) - 1),
+          repr(runner((1 << 64) - 7, 2)))
+    # And the evaluator answers the clause at a fixed input, truncating,
+    # rather than skipping the operator: `result` is the third operand the
+    # machine compares against, `7 // 2 == 3`.
+    check("a_floordiv_clause_evaluates_truncating",
+          CT._eval_of(ir, {"a": 7, "b": 2, "result": 3}, [1000]) is True,
+          repr(ir))
     try:
         runner(7, 0)
         check("a_floordiv_by_zero_is_still_a_skip", False, "returned a number")

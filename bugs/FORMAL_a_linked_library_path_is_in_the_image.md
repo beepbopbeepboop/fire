@@ -1,8 +1,14 @@
 # FORMAL_a_linked_library_path_is_in_the_image: one image cannot be byte-identical across two CAS roots, and the reason is dyld
 
-**Measured 2026-10-05 on `work/formal38-reproducible-builds`, both backends.**
-This is the one axis of the reproducibility sweep that is left, and it is not a
-defect in the emitter: it is the load contract.
+**Measured 2026-10-05 on `work/formal38-reproducible-builds`, both backends;
+re-measured and corrected 2026-10-08 on `work/formal156-docs`.** This is the one
+axis of the reproducibility sweep that is left, and it is not a defect in the
+emitter: it is the load contract. **Status: OPEN as a limitation, and the
+"every differing byte is the load name" claim is WITHDRAWN** — the load path is
+the cause, and the uuid and both signature fields differ as well because they
+digest the image that carries it (see "What was measured"). No code fix is
+available without relocating libraries or changing where they are published, and
+the doc's two rejected alternatives are still the only two.
 
 ## What was measured
 
@@ -19,13 +25,37 @@ $ cmp .tmp/repro/mod1/prog.aout .tmp/repro/mod2/prog.aout
 .tmp/repro/mod1/prog.aout .tmp/repro/mod2/prog.aout differ: char 959, line 1
 ```
 
-Every differing byte is inside one `LC_LOAD_DYLIB` name:
+**The load path is the CAUSE and it is NOT the only differing byte, and that
+sentence had to be corrected.** It used to read "Every differing byte is inside
+one `LC_LOAD_DYLIB` name", which is false, and a reader who believed it would
+normalise the load command out, compare again, and still find a difference they
+had no explanation for. Re-measured 2026-10-08 (`work/formal156-docs`) on a
+program that imports a local module: **74 bytes of a 49 616-byte image differ,
+in four runs**, and only one of them is the load command itself.
+**Re-measured 2026-10-12 (`work/merge-qwen1` merge, same two-`GMOJO_HOME`
+setup, `libmod`/`twice` module):** the merged tree's compiler gives a
+49 600-byte image with **80 differing bytes** — the SAME four fields, offsets
+shifted and the run lengths moved because the two random uuids happen to
+collide on different bytes:
 
-```
-offset 904, 67 568-byte image:
-  …/home1.EnYH/cas/formal-imports/arm64/helper.95a751d9e3bc.ab4a34d4f62e.arm64.dylib
-  …/home2.uiVV/cas/formal-imports/arm64/helper.95a751d9e3bc.ab4a34d4f62e.arm64.dylib
-```
+| byte run (2026-10-12, merged tree) | where | why it moves |
+|---|---|---|
+| 16 B at `0x328`, the whole `LC_UUID` (the 10-08 build's two uuids collided on one byte, hence its 15) | load commands | the uuid is a CONTENT digest (`formal/macho_linker.py::_stamp_content_uuid`), and the content it digests carries the load path |
+| 1 B at `0x3c1`, `0x31` vs `0x32` — the `home1`/`home2` in the path | load commands | the `$GMOJO_HOME/cas/…` directory — the root cause, and the only byte the old sentence described |
+| 32 B scattered in `0xc0b2`–`0xc0d5`, the uuid hex inside the `gmojo-<uuid>` signing identifier | `__LINKEDIT` | `formal/build.py::_signature_identity` is a SHA-256 of the unsigned image, which carries the load path |
+| 31 B in `0xc117`–`0xc136` | `__LINKEDIT` | the CodeDirectory/CDHash covers the same image bytes |
+
+The 10-08 table read 15 B at `0x329`, 1 B at `0x3c3`, 24 B at `0xc0c2`, 32 B
+at `0xc127`; the difference is which bytes of the two uuids happened to match,
+not a change in what moves.
+
+So "the load path is the reason" is true and "the load path is the only
+difference" is not: the uuid and both signature fields are **derived** from it.
+**A program that links nothing but libSystem does not move at all across two CAS
+roots** — measured byte-identical, `cmp` clean — because no real `LC_LOAD_DYLIB`
+then names a file under `$GMOJO_HOME`; the derived diffs appear exactly when one
+does. That is also why the importing case in `test_formal_reproducible.py` has to
+share one `GMOJO_HOME`, and why the no-import cases are stable.
 
 The same is true of the C runtime library, and it reaches every image whose
 source calls a word-shaped `mojo_*` name (`formal/build.py::_runtime_word_calls`
@@ -42,7 +72,8 @@ Two facts about it are worth separating, because only the second is a choice:
   `libmojostdlib.<arch>.<content digest>.dylib`
   (`build_stdlib_dylib.py::runtime_dylib`). It is the same for two builds on
   one machine and changes when any input changes, which is right;
-* the **directory** is `$GMOJO_HOME/cas/…`, a per-user, per-machine
+* the **directory** is `$GMOJO_HOME/cas/…` — the prefix
+  `formal/imports.py::module_dylib_path` returns — a per-user, per-machine
   configuration. Two users, two CI workers, or one user with two `GMOJO_HOME`
   settings, produce different bytes for the same source.
 
@@ -86,11 +117,17 @@ weighed and both are design changes rather than fixes:
 `bugs/FORMAL_pointer_value_model.md` §"Three of those BUILD" recorded the same
 cluster from the other direction — two worktrees at two paths, 12 bytes inside
 an `LC_LOAD_DYLIB` name and 31 inside the `LC_CODE_SIGNATURE` — and concluded
-"two trees cannot produce one signature without one path". **The signature half
-of that is now closed**: the ad-hoc signature's identifier no longer comes from
-the file name (`formal/build.py::_signature_identity`), so two trees at two
-paths with one compiler produce one signature. The `LC_LOAD_DYLIB` half is this
-document. That doc belongs to another worker's branch and is left alone here.
+"two trees cannot produce one signature without one path". **The half that is
+closed is the identifier's SPELLING**: the ad-hoc signature's identifier no
+longer comes from the file name (`formal/build.py::_signature_identity`), so two
+trees at two paths with one compiler and ONE CAS produce one signature. **What is
+not closed — and the correction above is the measurement — is that the signature
+still moves when the signed image does**: the identifier is a SHA-256 of that
+image, so when the two trees use two `GMOJO_HOME`s the load path changes, the
+image changes, and the identifier (and the CDHash beside it) changes with it. The
+`LC_LOAD_DYLIB` half is this document, and the signature half is a consequence of
+it rather than a second axis. That doc belongs to another worker's branch and is
+left alone here.
 
 ## The CAS key
 

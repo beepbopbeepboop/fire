@@ -3,12 +3,12 @@
 codegen project (see runtime/fire_async_runtime.h/.cpp for the design
 rationale). Mirrors test_mixed_cpp_link.py's structure exactly: this
 compiles+links+runs through the REAL project build system
-(build_config.find_gxx() + mojo.link_executable(cxx=True)), not a bypassed
+(build_config.find_gxx() + fire.link_executable(cxx=True)), not a bypassed
 scratch script.
 
 Nothing here touches gimple_codegen.py or any Mojo-level codegen — this
 proves the scheduler/timer-queue/kqueue-reactor scaffold in
-mojo_async_runtime.cpp works correctly, exercised only by a hand-written
+fire_async_runtime.cpp works correctly, exercised only by a hand-written
 C++20 coroutine test program (HAND_WRITTEN_MAIN_CPP below), never anything
 the Mojo compiler emits.
 
@@ -43,7 +43,7 @@ import fire
 
 GXX = find_gxx()
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
 
 _PASS = 0
 _FAIL = 0
@@ -198,13 +198,13 @@ def test_compile_link_run(wd):
     with open(main_cpp, 'w') as f:
         f.write(HAND_WRITTEN_MAIN_CPP)
 
-    runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
+    runtime_o = os.path.join(wd, 'fire_async_runtime.o')
     main_o = os.path.join(wd, 'async_scaffold_main.o')
 
     r = subprocess.run(
         [GXX, '-std=c++20', '-I', RUNTIME_DIR, '-c', '-o', runtime_o, ASYNC_RUNTIME_CPP],
         capture_output=True, text=True)
-    check("g++ compiles mojo_async_runtime.cpp -> .o", r.returncode == 0, detail=r.stderr)
+    check("g++ compiles fire_async_runtime.cpp -> .o", r.returncode == 0, detail=r.stderr)
 
     r = subprocess.run(
         [GXX, '-std=c++20', '-I', RUNTIME_DIR, '-c', '-o', main_o, main_cpp],
@@ -215,10 +215,10 @@ def test_compile_link_run(wd):
         return
 
     exe_file = os.path.join(wd, 'async_scaffold_exe')
-    # Real project link path: mojo.link_executable(cxx=True) — the exact
+    # Real project link path: fire.link_executable(cxx=True) — the exact
     # function build_executable() itself will call once Step B needs this
     # runtime linked in, per Milestone A's precedent (test_mixed_cpp_link.py).
-    result = mojo.link_executable([main_o, runtime_o], exe_file, cxx=True)
+    result = fire.link_executable([main_o, runtime_o], exe_file, cxx=True)
     check("link_executable(cxx=True) links the scaffold test", result.returncode == 0,
           detail=result.stderr)
 

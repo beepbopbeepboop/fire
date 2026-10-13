@@ -501,6 +501,84 @@ def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
               f"anything this case wrote down")
 
 
+def test_a_type_argument_in_a_local_annotation_is_a_demand(tmpdir):
+    """`var a: Box[Int] = Box()` — the type argument is in a NON-CALL position.
+
+    `all_instantiation_calls` walks CALL sites, and `VarDecl.type_ann` is a
+    STRING by the time an AST carries it, so the bracket in `a: Box[Int]` is
+    invisible to it; the construction on the right is a bare `Box()`, and the
+    template's own body was dropped by `without_template_bodies`, so the name
+    bound by the declaration lost its home and the field read was refused:
+
+        build: main: 'a.v' is a field access through 'a', and this path has no
+        way to say what 'a' holds …
+
+    `formal/monomorph.py::annotated_construction_demands` reads the annotation
+    into a demand, and `rewrite_instantiation_calls` rewrites the matching bare
+    construction, so the machinery that already answers `Box[Int]()` answers this
+    spelling too. TWO instantiations, because the failure this must not have is
+    the two collapsing onto one symbol.
+    """
+    src = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "    def get(self) -> T:\n"
+           "        return self.v\n"
+           "\n"
+           "def main():\n"
+           "    var a: Box[Int] = Box()\n"
+           "    var b: Box[Bool] = Box()\n"
+           "    a.v = 7\n"
+           "    b.v = True\n"
+           "    print(a.get())\n"
+           "    print(b.get())\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "    def get(self):\n"
+               "        return self.v\n"
+               "\n"
+               "def main():\n"
+               "    a = Box()\n"
+               "    b = Box()\n"
+               "    a.v = 7\n"
+               "    b.v = True\n"
+               "    print(a.get())\n"
+               "    print(int(b.get()))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_ann", None, src, cpython)
+        check(got == "7\n1\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
+
+
+def test_a_bare_local_construction_with_no_annotation_is_still_refused(tmpdir):
+    """The boundary of the case above: an INFERRED type argument is NOT a demand.
+
+    `var a = Box(7)` writes no bracket anywhere, so there is no type argument to
+    demand and this reader invents none — the type-argument INFERENCE a bare call
+    needs is `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
+    inferrable.md`, a separate feature. The build must keep the refusal it has,
+    which is a fact worth pinning: a reader that turned every bare call to a
+    template into a demand would bind an instantiation nobody named.
+    """
+    src = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "def main():\n"
+           "    var a = Box(7)\n"
+           "    return Int(a.v)\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_barelocal", None, src, "",
+                             expect_ok=False)
+        check("has no way to say what 'a' holds" in text,
+              f"[{arch}] the bare construction did not keep its refusal: "
+              f"{text.strip()[-300:]}")
+
+
 def test_a_module_that_applies_its_own_template_publishes_it(tmpdir):
     """§9a: the OWN demand set is a library's too, not only an executable's.
 
@@ -608,6 +686,79 @@ def test_a_module_that_applies_its_own_template_publishes_it(tmpdir):
           f"no `pairlib_Pair_1_T_3_Int_get_first` in any pairlib dylib "
           f"({found}) — the instantiation was computed but not published, which "
           f"is the `declares only the template(s)` refusal's other half")
+
+
+def test_a_library_with_an_annotated_construction_publishes_it(tmpdir):
+    """The LIBRARY half of the annotation case: `var a: Pair[Int] = Pair()` in a
+    module built as a dylib.
+
+    The executable case (`a type argument in a local annotation is a demand`)
+    goes through `_own_instantiations`; the library path builds its own demand
+    set in `build_module_dylib`, from `own_demands` alone, so an annotated
+    construction there published no instantiation and its call site was never
+    rewritten — the module was refused with the field-access sentence about the
+    binding. `own_annotation_demands` is the one table both paths merge, and the
+    manifest assertion below is the half a program printing the right number
+    cannot see: the instantiation is a BOUNDARY symbol, so the library has to
+    carry it under its own prefix.
+    """
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "\n"
+           "    def get_first(self) -> T:\n"
+           "        return self.first\n"
+           "\n"
+           "def int_pair() -> Int:\n"
+           "    var a: Pair[Int] = Pair()\n"
+           "    a.first = 7\n"
+           "    return a.get_first()\n"
+           "\n"
+           "def bool_pair() -> Int:\n"
+           "    var b: Pair[Bool] = Pair()\n"
+           "    b.first = True\n"
+           "    return b.get_first()\n")
+    prog = ("from pairlib import int_pair, bool_pair\n"
+            "\n"
+            "def main():\n"
+            "    print(int_pair())\n"
+            "    print(bool_pair())\n")
+    cpython = ("class Pair:\n"
+               "    def __init__(self):\n"
+               "        self.first = 0\n"
+               "\n"
+               "    def get_first(self):\n"
+               "        return self.first\n"
+               "\n"
+               "def int_pair():\n"
+               "    a = Pair()\n"
+               "    a.first = 7\n"
+               "    return a.get_first()\n"
+               "\n"
+               "def bool_pair():\n"
+               "    b = Pair()\n"
+               "    b.first = True\n"
+               "    return int(b.get_first())\n"
+               "\n"
+               "def main():\n"
+               "    print(int_pair())\n"
+               "    print(bool_pair())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_annlib", lib, prog, cpython)
+        check(got == "7\n1\n",
+              f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
+              f"anything this case wrote down")
+    found = []
+    for _base, _dirs, files in os.walk(FI.CAS_IMPORTS_ROOT):
+        for name in files:
+            if name.startswith("pairlib.") and name.endswith(".manifest.json"):
+                with open(os.path.join(_base, name)) as f:
+                    found += [e["symbol"] for e in json.load(f)["exports"]]
+    check(any(s.startswith("pairlib_Pair_1_T_3_Int_get_first")
+              for s in found),
+          f"no `pairlib_Pair_1_T_3_Int_get_first` in any pairlib dylib "
+          f"({found}) — the annotated construction computed no demand, which is "
+          f"the library path's half of this case")
 
 
 def test_a_library_that_applies_another_modules_template_instantiation(tmpdir):
@@ -1146,6 +1297,49 @@ def test_only_the_export_rule_says_what_is_a_template(tmpdir):
           f"it is not a template as far as this module is concerned — a "
           f"private template is not instantiable across a boundary anyway: "
           f"{names}")
+
+
+def test_an_annotated_construction_is_a_demand_only_when_it_can_be_named(tmpdir):
+    """The DEMAND reader's decisions, pinned without an image.
+
+    `annotated_construction_demands` is where a type argument written in a
+    `VarDecl` annotation becomes a demand, so the two ways it must say NO are
+    what keep it from binding an instantiation nobody wrote:
+
+      * an argument that is a nested application (`Box[List[Int]]`) is left out,
+        because this reader has no mangler of its own and a second spelling rule
+        is what `type_arg_text` exists to prevent;
+      * an argument that is a name the scope binds as a value is a value, not a
+        type, which is `type_arg_text`'s own rule;
+      * an annotated construction INSIDE a generic template declaration states no
+        demand at all — the template's body is in no image, and demanding it
+        would publish `Inner_T` with the outer template's `T` undeclared.
+    """
+    from formal import monomorph as MM
+    from formal.build import parse_module
+    src = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "struct Outer[T]:\n"
+           "    var w: T\n"
+           "\n"
+           "    def make(self) -> Int:\n"
+           "        var x: Box[T] = Box()\n"
+           "        return 1\n"
+           "\n"
+           "def main(n: Int) -> Int:\n"
+           "    var a: Box[Int] = Box()\n"
+           "    var b: Box[List[Int]] = Box()\n"
+           "    var t = Int\n"
+           "    var c: Box[t] = Box()\n"
+           "    return Int(a.v)\n")
+    stmts = parse_module(src, filename="ann_demand.mojo")
+    got = MM.own_annotation_demands(src, stmts)
+    check(got == {"Box": [("Int",)]},
+          f"the demand reader's own decisions are wrong: {got} — it must take "
+          f"the nameable local annotation (`Box[Int]`), and leave the nested "
+          f"application, the value-named argument and the template-body "
+          f"construction out")
 
 
 def test_a_source_derived_answer_is_made_once_per_source_and_never_shared(tmpdir):
@@ -1823,6 +2017,52 @@ def main():
     print(a.size())
 """
 
+# The BARE-LITERAL value parameter: `Tagged[T, origin: Int]` applied as
+# `Tagged[Int, 0]`.  Different from every case above, whose value argument is a
+# DISPLAY (`[1, 2, 3]`) — a bare literal at the top level of a bracket is
+# `tile[2, 3]`'s shape, which the strict demand walk drops on purpose, so the
+# literal is admitted only when the declaration's own annotation says the
+# parameter is a VALUE (see the `a bare literal` case below).  `origin` is read
+# in the method body, so the two instantiations print the two values the source
+# passed and a mangling that collapsed them would print one twice.
+LITERAL_VALUE_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+    def origin_value(self) -> Int:
+        return origin
+"""
+
+LITERAL_VALUE_PROG = """\
+from taglib import Tagged
+
+def main():
+    var a = Tagged[Int, 0]()
+    a.v = 5
+    var b = Tagged[Int, 7]()
+    b.v = 9
+    print(a.v, a.origin_value())
+    print(b.v, b.origin_value())
+"""
+
+LITERAL_VALUE_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.v = 0
+        self.origin = origin
+
+    def origin_value(self):
+        return self.origin
+
+def main():
+    a = Tagged(0)
+    a.v = 5
+    b = Tagged(7)
+    b.v = 9
+    print(a.v, a.origin_value())
+    print(b.v, b.origin_value())
+"""
+
 # The CLASS-ATTRIBUTE read, which is the same subject one position over and was
 # refused for a different reason: `TypeDict.length` is a `MemberExpr` on the
 # TEMPLATE's own name, so the demand walk — which reads CALL SITES — never saw
@@ -2205,6 +2445,66 @@ def test_a_function_templates_body_is_still_compiled(_tmpdir):
           "one reader of that question is gone")
 
 
+def test_a_phantom_struct_template_is_kept(_tmpdir):
+    """A struct template whose type parameter occurs NOWHERE in its body is
+    already concrete, so the filter KEEPS its declaration.
+
+    This is the mechanism behind an INFERRED-argument construction —
+    `Marker(b.a)` with no `[…]` — binding a home. The ordinary constructor path
+    needs the declaration in the unit; the filter used to remove every struct
+    template, so the binding got no classification and every field access
+    through it was refused. That is
+    `bugs/FORMAL_generic_local_binding_has_no_home.md`, and the phantom
+    predicate is `elaborate.phantom_type_params`.
+
+    The USED parameter is the control and it is the important half: a template
+    whose `T` is a field's type must still be dropped, or its declaration would
+    be compiled with an unbound parameter in it. So both are asserted rather
+    than only the case that changed.
+    """
+    import fire_compiler as FC
+    import elaborate as E
+    from formal import monomorph as MM
+    src = ("struct Marker[T: AnyType]:\n"
+           "    var v: Int\n"
+           "struct Wrapper[T]:\n"
+           "    var v: T\n"
+           "def plain(x: Int) -> Int:\n"
+           "    return x\n")
+    stmts = FC.Parser(FC.py_tokenize(src)).parse_module()
+    # The predicate the executable path keeps by name — `compile_formal` passes
+    # these as `keep`, and the library path passes none.
+    check(MM.concrete_struct_templates(src) == {"Marker"},
+          "concrete_struct_templates filed the wrong set: it must name the "
+          "phantom template `Marker` and NOT `Wrapper`, whose `T` is a field's "
+          "type")
+    kept = {getattr(s, "name", None)
+            for s in MM.without_template_bodies(
+                stmts, src, keep=MM.concrete_struct_templates(src))}
+    check("Marker" in kept,
+          "the filter dropped the phantom struct template `Marker`, whose "
+          "`T` occurs nowhere in its body, so an inferred-argument "
+          "construction of it loses its home again")
+    check("Wrapper" not in kept,
+          "the filter kept `Wrapper`, whose `T` IS its field's type — that "
+          "declaration is not concrete and an instantiation must replace it")
+    # ...and without the keep, the library path's rule is the old one, so this
+    # change cannot move a dylib's export surface.
+    check("Marker" not in {getattr(s, "name", None)
+                           for s in MM.without_template_bodies(stmts, src)},
+          "the LIBRARY path now keeps a phantom template too; a kept "
+          "declaration joins `_method_exports` and would publish the "
+          "template's methods under its own name")
+    # …and the predicate the filter reads is the reader, so a second spelling
+    # of "is this parameter used" cannot drift from it.
+    check(E.phantom_type_params(E.extract_struct_source(src, "Marker"),
+                                ["T"]) == {"T"},
+          "phantom_type_params does not see that `T` is unused")
+    check(E.phantom_type_params(E.extract_struct_source(src, "Wrapper"),
+                                ["T"]) == set(),
+          "phantom_type_params called a USED parameter phantom")
+
+
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -2234,6 +2534,83 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
         check(got == "11\n17\n14\n",
               f"[{arch}] printed {got!r} for three instantiations whose first "
               f"elements are 1, 7 and 4 over a base of 10")
+
+
+def test_a_bare_literal_value_parameter_instantiates(tmpdir):
+    """`Tagged[Int, 0]` binds a comptime VALUE parameter, on both architectures.
+
+    The end-to-end half of `bugs/FORMAL_an_explicit_parameter_list_naming_a_
+    comptime_value.md` §4.1: a bracket whose element is a comptime ARGUMENT
+    rather than a type spelling.  A display already reached the boundary symbol
+    (`test_a_value_bracket_argument_reaches_the_boundary_symbol` above); a BARE
+    literal did not, because the strict demand walk drops one — it is
+    `tile[2, 3]`'s shape, a specialization the local machinery answers — and it
+    is admitted here only because `Tagged`'s declaration annotates `origin` as
+    `Int`.  The two instantiations read the value in the method body, so a
+    mangling that collapsed them would print `5 0 / 9 0` and this case would
+    catch it; CPython is the oracle, run against the same computation written
+    the way Python has to write it.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_litval", LITERAL_VALUE_LIB,
+                            LITERAL_VALUE_PROG, LITERAL_VALUE_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5 0\n9 7\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, 0]` and "
+              f"`Tagged[Int, 7]`, whose `origin_value()` reads the comptime "
+              f"value the bracket supplied")
+
+
+def test_a_bare_literal_is_only_a_value_when_the_declaration_says_so(tmpdir):
+    """The declaration decides: `Pair[2]` and `widen[3]` are still not demands.
+
+    `all_bracketed_calls` is a SUPERSET of `all_instantiation_calls` — it lets a
+    bare literal be a spelling — so the literal half is turned back off by
+    asking the DECLARATION whether the position is a value (`value_demands_for`,
+    whose admission test is `instantiate`'s kind check):
+
+    * `Tagged[T, origin: Int]` admits `("Int", "0")` — `origin` is a value;
+    * `Pair[T]` does not admit `("2",)` — `T` is a TYPE, and a value in a type's
+      position would substitute `2` for a type in the body;
+    * `widen[x: Int32]` is a FUNCTION template, whose value specialization the
+      local machinery already lowers, so demanding a boundary symbol for it
+      would publish a second copy of a body the build already emits.
+
+    The three answers come from one admission test, and the strict reader is
+    untouched — both pinned behaviours (`test_a_type_argument_that_is_computed_
+    is_not_a_demand`, `test_formal_specialization.py`'s `widen[3]` row) stay.
+    """
+    from formal import monomorph as MM
+    tagged = ("struct Tagged[T, origin: Int]:\n"
+              "    var v: T\n")
+    pair = ("struct Pair[T]:\n"
+            "    var first: T\n")
+    widen = ("def widen[x: Int32](v: Int32) -> Int32:\n"
+             "    return v * x\n")
+    prog = ("from taglib import Tagged\n"
+            "from pairlib import Pair\n"
+            "from wlib import widen\n"
+            "def main():\n"
+            "    var a = Tagged[Int, 0]()\n"
+            "    var b = Pair[2]()\n"
+            "    var c = widen[3](5)\n")
+    check(MM.all_instantiation_calls(prog) == {},
+          f"the strict reader still drops every bare literal: "
+          f"{MM.all_instantiation_calls(prog)}")
+    check(MM.all_bracketed_calls(prog) == {"Tagged": [("Int", "0")],
+                                           "Pair": [("2",)],
+                                           "widen": [("3",)]},
+          f"the permissive reader sees all three: "
+          f"{MM.all_bracketed_calls(prog)}")
+    check(MM.value_demands_for(prog, tagged, ["Tagged"])
+          == {"Tagged": [("Int", "0")]},
+          "a bare literal for a VALUE parameter is not admitted")
+    check(MM.value_demands_for(prog, pair, ["Pair"]) == {},
+          "a bare literal for a TYPE parameter was admitted, which would "
+          "substitute a value for a type")
+    check(MM.value_demands_for(prog, widen, ["widen"]) == {},
+          "a function template's value specialization was demanded as a "
+          "boundary symbol, which the local machinery already answers")
 
 
 # ── the artifact's identity ─────────────────────────────────────────────────
@@ -2994,12 +3371,18 @@ TESTS = [
      test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",
      test_a_struct_template_the_module_declares_can_itself_apply),
+    ("a type argument in a local annotation is a demand",
+     test_a_type_argument_in_a_local_annotation_is_a_demand),
+    ("a bare local construction with no annotation is still refused",
+     test_a_bare_local_construction_with_no_annotation_is_still_refused),
     ("a dotted application says which word is the module",
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
+    ("a library with an annotated construction publishes it",
+     test_a_library_with_an_annotated_construction_publishes_it),
     ("a library that applies another module's template instantiation",
      test_a_library_that_applies_another_modules_template_instantiation),
     ("a package re-export attributes the demand to the defining module",
@@ -3016,6 +3399,8 @@ TESTS = [
      test_a_non_concrete_type_argument_is_still_refused),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
+    ("an annotated construction is a demand only when it can be named",
+     test_an_annotated_construction_is_a_demand_only_when_it_can_be_named),
     ("a source-derived answer is made once per source and never shared",
      test_a_source_derived_answer_is_made_once_per_source_and_never_shared),
     ("a template is located once per source and name",
@@ -3034,6 +3419,10 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a bare literal value parameter instantiates",
+     test_a_bare_literal_value_parameter_instantiates),
+    ("a bare literal is only a value when the declaration says so",
+     test_a_bare_literal_is_only_a_value_when_the_declaration_says_so),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",
@@ -3050,6 +3439,8 @@ TESTS = [
      test_the_same_read_works_in_one_file),
     ("a function template's body is still compiled",
      test_a_function_templates_body_is_still_compiled),
+    ("a phantom struct template is kept",
+     test_a_phantom_struct_template_is_kept),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",

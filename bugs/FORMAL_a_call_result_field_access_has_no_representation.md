@@ -5,7 +5,10 @@ through a value whose binding the image cannot see, `formal/build.py`'s export
 rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 **Status: the ranking is DONE and it says the task's "next 4-6 modules by files
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
-this file is about is NOT built and §5 says what building it takes.**
+this file is about is NOT built and §5 says what building it takes. The dead
+host-import ratchet §3 hands off is now CLEAN (2026-10-08) — every dead host
+import the tree had is deleted, and the importlib.util row it exposed is named
+in full.**
 
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
@@ -136,13 +139,26 @@ answered:
 `jit/arm64.py` (`ctypes`) — none of which the ranking could see, because all four
 import a module that HAS a `formal/hostmods/` model and so is not on the wall at
 all. `tools/formal_host_import_shapes.py --dead` is the mode that walks the
-tree instead of the sweep's 220 files, and `test_formal_host_import_shapes.py`
-ratchets its output to **exactly one file**: `fire_compiler.py`'s dead
-`from abc import abstractmethod`. That one is deliberately not fixed here —
-`fire_compiler.py` is the AST source of truth and every formal change's blast
-radius passes through it, and its line 8401 emits `@abstractmethod` into GENERATED
-source, so a reader of that import would reasonably conclude the node classes are
-declared abstract. **The next step for it is one line in the file that owns it.**
+tree instead of the sweep's 220 files. **The ratchet this paragraph handed off is
+now clean (2026-10-08): the tree has NO dead host import, and `--dead` returns
+`{}`.** The one it named — `fire_compiler.py`'s dead
+`from abc import abstractmethod` — is deleted: the name `abstractmethod` was
+never used (the `@abstractmethod` its generated-source line 8401 emits is a
+STRING, not the import), so the import only made a reader conclude the AST node
+classes are declared abstract. Deleting it exposed two more the stale ratchet
+(`expected == {fire_compiler.py: …}`) had been hiding, both dead
+`import subprocess`: `tools/formal_doc_index.py` and
+`tools/formal_metamorph.py` (whose `# noqa: F401 — re-exported for callers that
+shim this module` named no caller; `test_formal_metamorph.py` imports its own
+`subprocess`). Both are deleted, and
+`test_formal_host_import_shapes.py::test_the_whole_tree_has_no_dead_host_import`
+now asserts `{}` so the state can only shrink.
+
+The same file's `importlib.util` row is also corrected: the corpus now spells a
+THIRD name out of the module — `importlib.util.find_spec(name)` in
+`test_formal_imports.py` and `test_formal_link_accounting.py` — beside
+`spec_from_file_location` and `module_from_spec`, so the row is pinned to the
+three names that ask an embedded CPython to place a module, not to "two".
 
 The `collections` half is the same shape of finding as the `copy` half and was
 found by the same instrument: **`DEAD` is a column, not an absence.** Neither

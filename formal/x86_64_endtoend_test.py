@@ -691,6 +691,13 @@ _SUCCS = {
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
     "alu_rr:xor":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fl).zf, sf := ($fl).sf, cf := ($fl).cf, of_ := ($fl).of_ }",
+    # The shifts are NOT the shape above, and the difference is not that they
+    # leave a flag alone — `x86_shift_post` writes all four (its record update
+    # is an `x86_set_flag4` over the shifted value). The paragraph that stood
+    # here used to claim the opposite ("the shifts write ZF and SF and leave CF
+    # and OF alone"), and that was false: the three rows below had drifted from
+    # the model, which is the drift this whole block records.
+    #
     # `x86_shift_post`, the model's own named successor, and NOT a
     # re-derivation of it. The three rows here each spelled out the shift and
     # then took ZF and SF from `x86_flags_logic`, which was the model as it

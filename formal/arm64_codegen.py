@@ -3649,15 +3649,15 @@ dylib_exports: list = None, globals_base: int = None,
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_frame_slot_element("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
-            tnames = _lbn_target_names(stmt.target) if isinstance(
-                stmt.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of "
-                    f"plain names (got {stmt.target!r})")
             ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else stmt.target
-            if ttree is None:
+                stmt.target, str) else None
+            # The SHAPE's leaves, not `_lbn_target_names`: that reader STRIPS
+            # the star from a `*rest` leaf, so `for a, *b in ...` passed
+            # validation and the emitter stored under a name nothing
+            # allocated, where x86-64 refuses it. Both backends now read the
+            # same `M.for_target_leaves`.
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of "
                     f"plain names (got {stmt.target!r})")
@@ -3744,7 +3744,7 @@ dylib_exports: list = None, globals_base: int = None,
                     # Nested groups are themselves blobs — recurse.
                     self._emit_for_unpack(ttree, f"{fn}_flt{wid}")
                 else:
-                    self._store_var(tnames[0], 0)
+                    self._store_var(leaves[0], 0)
 
                 for s in stmt.body:
                     self._emit_stmt(s)
@@ -3770,124 +3770,41 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_for_unpack(self, tree, tag: str) -> None:
         """Unpack a for-target tree from the blob pointer in X0.
 
-        `tree` is a leaf name (`str`), `'*name'` (trailing star), or a list
-        of children (tuple target). Leaf: move X0 into the name's register.
-        Star leaf: X0 is a blob; build a rest blob of the tail and store its
-        base under `name` (only legal as the last element of a tuple). List:
-        X0 must be a blob `[count][e0…]` with count == len(children) (or
-        >= n_fixed when a trailing star is present); each child recurses
-        with its element in X0. Arity mismatch → exit(1)."""
+        `tree` is a leaf name (`str`) or a list of children (tuple target).
+        Leaf: move X0 into the name's register. List: X0 must be a blob
+        `[count][e0…]` with count == len(children); each child recurses with
+        its element in X0. Arity mismatch → exit(1).
+
+        A starred leaf (`*rest`) never reaches this method: the for- and
+        comprehension-target validation asks `M.for_target_leaves`, whose
+        leaves keep the star, and refuses the target at the identifier check
+        with the one shared sentence the x86-64 site gives it. The rest-blob
+        machinery this method used to own (`_emit_for_unpack_star_rest`) was
+        deleted with that refusal — the option (1) resolution of
+        `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md` —
+        rather than left as dead code that reads as support."""
         if isinstance(tree, str):
-            if tree.startswith("*"):
-                self._store_var(tree[1:], 0)
-                return
             self._store_var(tree, 0)
             return
         n_t = len(tree)
-        star_i = -1
-        for i, child in enumerate(tree):
-            if isinstance(child, str) and child.startswith("*"):
-                if i != n_t - 1:
-                    raise CodegenError(
-                        f"starred for-target {child!r} must be last")
-                star_i = i
-        n_fixed = n_t - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_zr_xn(9, 0))          # X9 = blob base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))   # X1 = count
-        if star_i >= 0:
-            # Need count >= n_fixed. cmp X1, #n_fixed → lt means count short.
-            self.asm.emit(encode_cmp_xn_imm(1, n_fixed))
-        else:
-            self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t))  # count - n_t
-            self.asm.emit(encode_mov_zr_xn(1, 2))           # reuse for test
-            self.asm.emit(encode_cmp_xn_imm(1, 0))
+        self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t))  # count - n_t
+        self.asm.emit(encode_mov_zr_xn(1, 2))           # reuse for test
+        self.asm.emit(encode_cmp_xn_imm(1, 0))
         self._tup_counter += 1
         tid = self._tup_counter
         fail_label = f"{tag}_bad{tid}"
         ok_label = f"{tag}_ok{tid}"
-        if star_i >= 0:
-            self.asm.emit(encode_cset_xd_cond(2, "lt"))
-            self.asm.emit(encode_cbnz_xn(0, 2))
-        else:
-            self.asm.emit(encode_cbnz_xn(0, 1))
+        self.asm.emit(encode_cbnz_xn(0, 1))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self._emit_b_to(ok_label)
         self.asm.label(fail_label)
         self._emit_exit(1)
         self.asm.label(ok_label)
-        # Keep src base and n_fixed across fixed-child unpack (X9/X1 are
-        # clobbered by nested _emit_for_unpack). Push [n_fixed, src_base]:
-        # stp_pre(X6, X9) → [SP+0]=n_fixed, [SP+16]=src_base after adjust?
-        # stp pre-index: SP -= 16; [SP]=X6; [SP+8]=X9. So [0]=n_fixed,
-        # [8]=src. Star helper expects [0]=n_fixed, [16]=src — mismatch.
-        # Push as [0]=n_fixed, [8]=src and read src from [8].
-        if star_i >= 0:
-            self._emit_mov_imm("X6", n_fixed)
-            self.asm.emit(encode_stp_sp_pre(6, 9))
         for i, child in enumerate(tree):
-            if isinstance(child, str) and child.startswith("*"):
-                self._emit_for_unpack_star_rest(child[1:], tag)
-                continue
             self._emit_blob_load(9, 8 * (i + 1))
             self._emit_for_unpack(child, tag)
-
-    def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
-        """Build rest blob under `name` from [src_base, n_fixed] on stack.
-
-        Stack layout on entry (stp_pre X6=n_fixed, X9=src): [SP+0]=n_fixed,
-        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap 64;
-        overflow → exit(1). Pops both slots."""
-        rest_cap = 64
-        nbytes = 8 + 8 * rest_cap
-        if self._list_cursor + nbytes > self._blob_cap:
-            raise CodegenError(M.frame_blob_refusal(
-                "a for-star unpacking buffer", self._list_cursor + nbytes,
-                self._blob_cap))
-        offset = self._list_cursor
-        self._list_cursor += nbytes
-
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
-        self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
-        self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
-
-        self._while_counter += 1
-        loop = f"{tag}_sl{self._while_counter}"
-        done = f"{tag}_sd{self._while_counter}"
-        oob = f"{tag}_so{self._while_counter}"
-        oob_end = f"{tag}_sx{self._while_counter}"
-        self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(4, 3))
-        self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        self.asm.emit_label_rel(done, here_offset=-4)
-        self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
-        self.asm.emit(encode_cset_xd_cond(0, "cs"))
-        self.asm.emit(encode_cbnz_xn(0, 0))
-        self.asm.emit_label_rel(oob, here_offset=-4)
-        # elem = src + 8 + 8*(n_fixed + i)
-        self.asm.emit(encode_add_xd_xn_xm(7, 6, 4))
-        self.asm.emit(encode_add_xd_xn_imm(0, 5, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 7))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
-        self._emit_list_base(offset)
-        self.asm.emit(encode_add_xd_xn_imm(7, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(7, 7, 4))
-        self.asm.emit(encode_str_xt_xn_imm(0, 7, 0))
-        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))
-        self._emit_b_to(loop)
-        self.asm.label(done)
-        self._emit_list_base(offset)
-        self.asm.emit(encode_mov_zr_xn(1, 3))           # rest_count
-        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
-        self.asm.emit(encode_mov_zr_xn(0, 9))
-        self._store_var(name, 0)
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # pop [n_fixed, src]
-        self._emit_b_to(oob_end)
-        self.asm.label(oob)
-        self._emit_exit(1)
-        self.asm.label(oob_end)
 
     def _range_info(self, rargs: list) -> tuple:
         """(start, end, step) expressions for range(): 1/2/3 args."""
@@ -5209,11 +5126,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `container_union_refusal`'s answer rather than this one's.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are — which is what keeps a
-            # nested `(s & t) | u` from being refused as "the left is not
-            # established to be a set".
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False
@@ -9370,8 +9286,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     self._import_aliases, self._extern_decls,
                                     name)
 
-    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """`e`'s arguments in positional form, for a known callee.
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> tuple:
+        """`(slots, dropped)` for `e`, for a known callee.
+
+        `slots` is `e`'s arguments in positional form; `dropped` is the ones
+        with no register home — a variadic callee's positional tail, and any
+        keyword a `**kwargs` swallowed — which the caller MUST still evaluate
+        for their side effects (`M.bind_call_arguments`'s own docstring states
+        why).
 
         A THIN CALL into `M.bind_call_arguments`, which is the one
         implementation of the rule and the reason the two backends cannot
@@ -9400,11 +9322,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 names = [k for k, _v in e.kwargs]
                 raise CodegenError(
                     f"keyword arguments are not supported ({names})")
-            return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+            return list(e.args or []), []
+        slots, dropped, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
-        return slots
+        return slots, dropped
 
     def _emit_type_constructor(self, e: F.CallExpr, name: str,
                                tkind: tuple) -> None:
@@ -10613,12 +10536,16 @@ ctor_field_value=self._ctor_field_value_for(name),
                 name, name in self._dylib_syms
                 or self._aliased_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
+        dropped: list = []
         if is_extern and self._callee_decl(name) is None:
             # Unknown signature: AAPCS has no place for Python kwargs on a
             # raw BL. Drop them (they are almost always literals like
             # flush=True) and pass positional args only — same ABI the
-            # extern path already uses for zero-kwarg calls.
+            # extern path already uses for zero-kwarg calls. The dropped
+            # keyword VALUES are still evaluated for their side effects, the
+            # same rule `bind_call_arguments` applies to a variadic tail.
             args = list(e.args)
+            dropped = [v for _k, v in (e.kwargs or [])]
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
             # obey". `extern_call_count_refusal` is the shared rule and returns
@@ -10654,8 +10581,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `formal/monomorph.py::supplied_bracket_args`, so there is one
             # answer to "what does `f[a, b](x)` pass" rather than one per
             # backend and one per callee kind.
-            args = (monomorph.supplied_bracket_args(e) + list(e.args)
-                    if through_value else self._bind_call_args(name, e))
+            if through_value:
+                args = monomorph.supplied_bracket_args(e) + list(e.args)
+            else:
+                args, dropped = self._bind_call_args(name, e)
         # A comptime specialization `f[a, b](x)` binds the callee's comptime
         # parameters (which are leading arguments on this path), so the bracket
         # expressions are evaluated here, in the caller's scope, and passed
@@ -10848,6 +10777,22 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_frame_base(self._ret_frame_base + sret_site[1])
             self.asm.emit(encode_mov_zr_xn(0, 9))
             self.asm.emit(encode_stp_sp_pre(0, 31))
+        # Arguments with NO register home — a variadic callee's positional tail
+        # and any keyword a `**kwargs` swallowed — are evaluated HERE, after
+        # every fixed argument and before the registers are loaded, because
+        # CPython evaluates EVERY argument expression and their side effects are
+        # observable even though the callee cannot read the values (a body that
+        # reads the variadic parameter is refused earlier). Dropping them
+        # silently built `def f(x, *rest): return x` called as `f(1, g())` into
+        # an image that never ran `g`. Every fixed argument is already on the
+        # stack here, so a dropped expression that itself calls cannot disturb
+        # one. `*`/`**` markers are unwrapped exactly as `side_effects` above
+        # does.
+        for _d in dropped:
+            if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                self._emit_expr(_d.operand)
+            else:
+                self._emit_expr(_d)
         for i in range(min(nargs, _ABI_ARG_REGS) - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
@@ -11081,11 +11026,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         reserved), and on exit holds the per-iteration copy that
         `_compr_append_elem` appends. The two outcomes:
 
-          * a FLAT container literal (`M.comprehension_element_is_flat_container`)
-            gets a `cap`-slot array beside its scratch, and iteration `i`'s copy
-            lands at slot `i` — `i` is the result blob's count word, which is the
-            number of elements appended so far, so the append that follows stores
-            the copy and not the scratch. The copy is `memcpy`, which returns the
+          * an element `M.comprehension_element_is_flat_container` accepts — a
+            container literal with no nested container in it, or a nested
+            comprehension whose produced values are words — gets a `cap`-slot
+            array beside its scratch, and iteration `i`'s copy lands at slot `i`
+            — `i` is the result blob's count word, which is the number of
+            elements appended so far, so the append that follows stores the copy
+            and not the scratch. The copy is `memcpy`, which returns the
             destination in X0 for free.
           * anything else that allocated keeps `_refuse_an_element_blob`, whose
             message names the construct and the explicit-loop remedy.
@@ -11438,22 +11385,21 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(lsl(2, 2, 0))
             self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
 
-            tnames = _lbn_target_names(gen.target) if isinstance(
-                gen.target, str) else []
-            if not tnames or any(not n.isidentifier() for n in tnames):
-                raise CodegenError(
-                    f"comprehension target must be a plain name or tuple "
-                    f"of plain names (got {gen.target!r})")
+            # The SHAPE's leaves, for the same reason the `for` statement uses
+            # them: `_lbn_target_names` strips a `*rest` leaf's star, so a
+            # starred comprehension target would pass validation here and be
+            # refused on x86-64.
             ttree = M.for_target_tree(gen.target) if isinstance(
-                gen.target, str) else gen.target
-            if ttree is None:
+                gen.target, str) else None
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple "
                     f"of plain names (got {gen.target!r})")
             if isinstance(ttree, list):
                 self._emit_for_unpack(ttree, f"{fn}_cgu{wid}")
             else:
-                self._store_var(tnames[0], 0)
+                self._store_var(leaves[0], 0)
 
             # From here down this generator's target is in scope: the
             # conditions, the element/key, and the recursion into the next

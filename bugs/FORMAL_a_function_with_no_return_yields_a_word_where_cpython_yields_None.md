@@ -78,6 +78,23 @@ Rows: `test_formal_value_model.py`'s `REFUSALS` —
 BOTH architectures that must refuse naming `printf() is asked to render the
 value of g(…)`. PASS=124 FAIL=0.
 
+**Folded in from the parallel record, re-measured on the merged tree
+(2026-10-13).** `work/formal195-docs` landed this same fix independently on
+2026-10-08 without seeing this section (its merge base predates
+`returnless_printf_argument_refusal`), and measured the choke point through a
+TEXT conversion: `printf("[%s]\n", g(1, 2))` built and printed **`[(null)]`**
+on both architectures before the fix — the leftover word rendered as a POINTER
+where the NUMBER conversion rendered it as `0`, the same missing value seen
+through `%s`. Its third `REFUSALS` row,
+`a_printf_string_conversion_of_a_return_less_call_is_refused`, pins that
+conversion-class half on both architectures on the merged tree; its other new
+row pinned the same `%d` program as the first row above and so did not land
+(two rows, one behaviour). Its scope sentence stands as-is here: a non-printf
+callee's arguments are not conversions — `h(g(1, 2))` for an ordinary `def h`
+still builds, which is §0c's "argument of a call" position, deliberately out of
+scope. Re-measured 2026-10-13: `test_formal_value_model.py` PASS=125 FAIL=0
+(the two rows above + the one here).
+
 **What is still not fixed is unchanged** — the positions where nothing OBSERVES
 the value are §0c's, and direction (b) is still the only answer for them.
 
@@ -703,3 +720,33 @@ explained ("there is a known bug in here too is not a reason to miss this one"),
 and this is the case that direction is for: **a finding reached through the
 minimiser is a finding about a construct the corpus does not cover, and the
 ledger records it as one.**
+
+## 6. The two `§0c` sections disagree, and the SECOND one is the current census
+## (corrected 2026-10-08, `work/formal156-docs`)
+
+This document carries two sections labelled `§0c`, and the first one's headline
+is superseded. The first (`work/formal28-1`) reads "the `returned` sites, by
+file: 62 `formal/hostmods/argparse.mojo`" and concludes "of the four positions
+item 1 names, none is affordable". The second (`§0a's NUMBER was wrong`, the one
+starting at `§0a's NUMBER was wrong, and the correction unblocks…`) found those
+456 `argparse.mojo` rows were **phantom**: the census's `decided` set was an
+`and` of "returns a value" and "declares a return type", so an undeclared
+function that returns could never be excluded, and the correction changed the
+same-file count from 510 to **17**.
+
+Re-run on `work/formal156-docs` (2026-10-08), the corrected numbers hold exactly:
+`tools/formal_returnless_census.py` reports **17 same-file candidate sites in 7
+files, `argparse.mojo` 0**, split `returned` 8 / `MemberExpr` 3 / `argument of a
+call` 2 / `assigned` 2 / `a subscript index` 2, and every one of the 17 is a
+stdlib `out`-parameter helper (`math.mojo` 6, `_format_float.mojo` 3,
+`itertools.mojo` 2, `_asyncrt.mojo` 2, `_libc_errno.mojo` 2, `python.mojo` 1,
+`simd.mojo` 1). **So the first `§0c`'s conclusion is wrong as stated**: in this
+repository and in `formal/hostmods/` a refusal at the consuming positions costs
+zero builds, and the only thing unmeasured is the stdlib half — the
+`build_stdlib_dylib.py` `skip <module>:` count over at most those seven modules,
+which is the integrator's run and not a light worker's.
+
+That leaves direction (b) as the full answer (item 6 of `The exact next step`),
+but it is no longer the answer *because* the four positions are unaffordable —
+they are affordable; it is because (b) makes every use correct rather than only
+the refused ones.

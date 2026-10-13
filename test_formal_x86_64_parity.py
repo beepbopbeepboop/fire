@@ -1815,6 +1815,51 @@ CASES = [
      "        n = n + 1\n"
      "    sys.stdout.write(\"n=%d\" % n)\n"
      "    return 0\n"),
+    # ── a NESTED for-target group ──
+    #
+    # x86-64's for-list and comprehension emitters flattened the target with
+    # `_lbn_target_names` and handed the flat leaf list to `_emit_for_unpack`,
+    # so a nested group compared the element's own arity against the group's
+    # leaf count: `for a, (b, c) in [(1, (20, 300))]` asked a 2-element blob
+    # for 3 and exited 1 with NOTHING printed, where arm64 and CPython both
+    # answer 21.  The fix is the shared target TREE
+    # (`model.for_target_tree`), which the emitter now recurses through; the
+    # general rows are `test_formal_run.py`'s
+    # `both_arch_a_nested_for_target_unpacks_like_arm64_and_cpython`, and these
+    # two are the same construct checked through this file's both-backends vs
+    # CPython contract.
+    ("nested_for_target_group_unpack",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
+     "        s = s + a + b + c + d\n"
+     "    sys.stdout.write(\"s=%d\\n\" % s)\n"
+     "    return 0\n"),
+    # The same cause in the COMPREHENSION emitter, which shares
+    # `_emit_for_unpack`: a nested generator target flattened the same way.
+    ("nested_comprehension_target_group_unpack",
+     "def main():\n"
+     "    s = 0\n"
+     "    var t = [p + q + r for p, (q, r) in [(1, (2, 3)), (4, (5, 6))]]\n"
+     "    for v in t:\n"
+     "        s = s + v\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    s = 0\n"
+     "    t = [p + q + r for p, (q, r) in [(1, (2, 3)), (4, (5, 6))]]\n"
+     "    for v in t:\n"
+     "        s = s + v\n"
+     "    sys.stdout.write(\"s=%d\\n\" % s)\n"
+     "    return 0\n"),
     ("negative_literal_spelled_with_an_operator",
      "def main():\n"
      "    var a = 17\n"

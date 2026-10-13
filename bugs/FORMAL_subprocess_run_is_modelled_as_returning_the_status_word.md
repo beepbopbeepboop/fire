@@ -125,6 +125,67 @@ docstring is currently silent on whether `run`'s word return is a deliberate
 simplification or an accident of modelling `CompletedProcess` as a word, and
 `version.py` is not the only file that will need to know.
 
+## Status 2026-10-08 (`work/formal165-docs`): option 1's blocker is GONE, and its
+## stated cost was wrong about a one-field struct
+
+**This doc called option 1 ("make the model return a struct") the CPython-
+matching one and priced it at "a frame-allocated struct per `run`". The price is
+wrong for `CompletedProcess`: a ONE-field struct has no frame at all — its value
+IS its only field (`model.struct_is_framed` is False), so `.returncode` lowers to
+the identity and no block is reserved.** That is the same fact
+`_one_word_field_map` states for `var b = Box()`.
+
+**The real blocker was one layer below the model, and it was measured.** The
+backend could not read a field off a name bound from a CALL at all, whatever the
+callee's declared return type named. Both architectures, before this session:
+
+```python
+struct Box:
+    var v: Int = 0
+
+def make_box(n: Int) -> Box:
+    var b = Box()
+    b.v = n
+    return b
+
+def main() -> Int:
+    c = make_box(5)
+    return c.v
+```
+
+    build: main: 'c.v' is a field access through 'c', and this path has no way to
+      say what 'c' holds. … Bind the base from a constructor whose declaration
+      THIS IMAGE can see (`x = S()`)
+
+— a sentence that is false about this program: the image had just compiled the
+constructor the declaration names. So `r = subprocess.run(...); r.returncode`
+fails on the BINDING, not on any of the three options this document costed.
+
+**Fixed this session, as shared infrastructure rather than as this doc's fix.**
+`_call_returns_one_word_struct` is a third source for both
+one-word tables, beside a construction and a declared parameter: a local bound
+from a callee whose declared `-> T` names a one-field struct of this image is
+that struct. Three shapes are refused rather than claimed (a type-constructor
+conversion, a struct that is not one field, and a one-field struct whose sole
+field is itself a FRAME — the holder tables own that word). Pinned by two
+`test_formal_run.py` BOTH_ARCH_CASES rows on both backends:
+`both_arch_one_field_struct_returned_by_a_call_reads_through_its_field` and
+`both_arch_one_field_struct_returned_by_a_call_dispatches_eq`.
+
+**What is left is now a one-line model change and a decision this doc still
+owns.** A `subprocess.run(...) -> CompletedProcess` whose `CompletedProcess` is a
+one-field struct makes `r.returncode` lower; every int-shaped use of `run`'s word
+is unchanged, because the struct's value IS the word (measured: `r != 0` still
+branches as it did; `printf("%d", r)` already took a word). **The one fact the
+decision turns on is which of CPython's four `CompletedProcess` attributes the
+one field is, and the measured answer is `returncode`** — it is the only one of
+the four any of the 547 call sites reads (§5's own census). It is NOT taken here
+because `formal/hostmods/subprocess.mojo` is `@admitted`, and a struct-returning
+admitted function changes the proof obligation the integrator's Lean run has to
+check; a light worker may not run Lean. The three options are now two: option 1
+is cheap and this session removed its blocker, and option 2 (forbid the
+spelling) is the only remaining alternative.
+
 ## Status 2026-10-09 (`formal261-docs-r2-r2`): both cheap options priced by measurement
 
 The three options' cost claims were narrower than the module actually is, and
@@ -172,3 +233,19 @@ contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
 already named; this update is the measurement that makes the boundary concrete.
 `version.py` remains exactly as closed — refused at `r.returncode` — and no
 caller-side substitution was made for the same reason the doc originally gave.
+
+**merged 2026-10-13 (merging `work/formal186-docs`): the branch carried a
+parallel 2026-10-08 section for the same landed fix** (its one-word map read the
+callee's declared return type through `M.call_result_type_name` instead of this
+tree's `_call_returns_one_word_struct`, pinned by its own two rows); deduped
+into the 2026-10-08 Status above. Its unique measurements, re-measured on the
+merged tree: the same-image fix is NOT sufficient for `subprocess.run` because
+`run` is MODULE-QUALIFIED, and both cross-module shapes are still refused at
+the BINDING — `var r = libcp.make(7)` and `var r = make(7)` under
+`from libcp import make`, each with a one-field `CP` whose `make` returns `CP`,
+each refusing on `'r.returncode' is a field access through 'r', and this path
+has no way to say what 'r' holds`. On the branch tree the import-from shape was
+refused at the DYLIB stage instead (`libcp.mojo: make returns a frame address,
+so it cannot be compiled into a dylib`); the merged tree stops earlier, at the
+binding, so the dylib-stage sentence is a branch-tree fact and the binding
+refusal is the merged-tree one.

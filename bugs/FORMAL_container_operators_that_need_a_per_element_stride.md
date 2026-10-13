@@ -5,15 +5,95 @@
 unchanged.** `test_formal_container_methods.py` measures the whole surface
 against CPython on both architectures and is green; this doc is about the rows
 in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+answers. The set-algebra rows are answers on arm64 now (six of them — five
+moved, one added); x86-64 still refuses each by name.
+
+**2026-10-08 (`formal162-docs`), merged 2026-10-12: the x86-64 half of item 3
+was BUILT on the branch, and the merge kept the arm64-only mechanism.** The
+branch lowered `|`, `&`, `-` and `^` between two sets on x86-64 too — a fresh
+x86-64 `_emit_set_union` (the `|` branch had lowered a concatenation and then
+been refused by `model.set_union_refusal`, which the branch deleted with the
+emitter) and `_emit_set_intersection` / `_emit_set_difference` /
+`_emit_set_symmetric_difference`, all dispatched from a syntax-level predicate
+`_try_emit_set_algebra` asked BEFORE the shared gate (a KIND cannot tell a set
+from a list, so set-ness has to be read from the source), with the blob-growth
+guard at every set site and the five `set` rows and the two `operator` rows
+moved to answers on both backends. On the merge into `work/merge-qwen1` the
+master-side arm64 lowering was kept as the canonical mechanism and the branch's
+x86-64 emitters were folded away, so on the merged tree the split is exactly
+the 2026-10-06 paragraph's: **re-measured 2026-10-12 on this tree, arm64
+answers all four** (`{1,2} | {2,3}` → 6, `s & {2}` → 2, `s - {2}` → 1,
+`s ^ {2,3}` → 4, each CPython-agreeing) **and x86-64 refuses all four by name**
+(`set_union_refusal` for `|`; `set_algebra_refusal` for `&`, `-` and `^`). The
+branch's x86-64 emitter is recorded here as a parallel implementation of the
+same fix; the x86-64 half of item 3 is not started on the canonical tree.
+
+**2026-10-12 (`work/formal176-docs`, merged): a THIRD parallel
+implementation of the same fix, folded the same way.** The branch lowered
+`&`, `-` and `^` (the augmented spellings included) on arm64 through its
+own per-element-scan family (`_emit_set_algebra`, `_emit_set_member_scan`,
+`_emit_set_append`), and refused them on x86-64 through
+`model.set_algebra_unsupported_refusal` — a parallel of the
+`set_algebra_refusal` gate above, which it does not replace (the
+canonical gate also words the not-two-sets `TypeError` arm and is shared
+by both backends). The canonical arm64 emitters and the gate are
+unchanged by this merge. What the branch adds and keeps is coverage:
+`test_formal_container_methods.py`'s operator group gains the
+x86-64-only refusal pin of the TWO-SET shape — `o_set_sub`, `o_set_and`,
+`o_set_xor` (the branch's `o_and`/`o_xor`/`o_set_sub`, renamed where the
+`o_and`/`o_xor` names were taken by the non-set-blob rows the 2026-10-06
+section moved there) — the shape the `set` group's `BACKEND_ONLY` answer
+rows are excluded from and therefore cannot pin.
+
+**2026-10-13 (`work/formal197-docs`, merged): a FIFTH parallel
+implementation of the same fix, folded the same way.** The branch lowered
+`&`, `-` and `^` (the augmented spellings included) on BOTH backends through
+`_emit_set_algebra` and its x86-64 twin, beside `_emit_set_select`/
+`_emit_set_append`, and moved the gate from per-operator to per-backend: each
+backend passes `lowered_container_ops=model.SET_ALGEBRA_OPS` into
+`string_binary_refusal`'s new parameter, `container_operator_refusal` stands
+aside for exactly those three, and a new `model.container_setop_refusal`
+keeps refusing a LIST/dict/other operand by name — CPython's `TypeError`
+shape, which the canonical `set_algebra_refusal` already words. On the merge
+into `work/merge-qwen1` the canonical mechanism (the 2026-10-06
+`_emit_set_op` family and the shared gate) is kept unchanged and every code
+file the branch touched is restored byte-identical to the merged tree: its
+five `set`-group answer rows are the canonical six rows with the same
+content probes, and its operator-group `o_xor`/`o_and` answer rows are the
+branch-tree side of the split the `o_set_*` refusal pins record. Its
+measurement of its own tree (both backends, its own emitters) is recorded
+here because the per-backend gate design is not otherwise measured: the
+`set` group answered 8 → 13 on arm64 and 4 → 9 on x86-64, the operator group
+9 → 11 per backend, and the five `s_*_r` rows moved from refusal to answer on
+both. Re-measured 2026-10-13 on this tree, the split is exactly the
+2026-10-13 one: arm64 answers all four and x86-64 refuses all four by name
+(`test_formal_container_methods.py` 6/0 on both backends).
+
+**2026-10-13 (`work/formal189-docs`, merged): a FOURTH parallel
+implementation of the same fix, folded the same way.** The branch lowered
+`&`, `-` and `^` (the augmented spellings included) on arm64 through its own
+`_emit_set_op`, into which it folded the UNION emitter as well — one emitter
+for all four set operators, a `_emit_set_pass` helper, and the dispatch asked
+inline before the shared gate — and normalised the source `//` spelling in
+`formal/contracts.py` through its own `_ARITH_SPELLINGS` table, a parallel of
+the `_ARITH_ALIASES` the canonical reader already has. On the merge into
+`work/merge-qwen1` the canonical mechanism (the 2026-10-06 `_emit_set_op` and
+the untouched `_emit_set_union`) is kept unchanged and every file the branch
+touched is restored byte-identical to the merged tree. Re-measured 2026-10-13
+on this tree, the split is exactly the 2026-10-12 one: arm64 answers all four
+and x86-64 refuses all four by name (`test_formal_container_methods.py` 6/0
+on both backends).
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
-13 answers equal CPython on arm64 (up from 10 — `s_intersection_r`,
-`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r` moved), x86-64
-unchanged at 4 with the same 9 refusals. The five rows were observed through a
+`s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
+`s_andassign_r` moved from refusal to answer on arm64, and a new
+`s_intersection_str` (string elements) joined them — six rows in all, and the
+x86-64 backend refuses each by name. The rows were observed through a
 SUM and a length rather than a length alone, so a result with the right count
-and the wrong element fails. The three emitters are
+and the wrong element fails, and `s_symdiff_r`'s operands give both operands an
+element the other lacks so BOTH passes of the symmetric difference run. The
+three emitters are
 `formal/arm64_codegen.py::_emit_set_op` and `_emit_set_filter_pass`, with the
 union's reservation and growth guard (an intersection or a difference reserves
 `nL`; a symmetric difference `nL + nR`); the augmented `-=`/`&=` desugar onto
@@ -31,15 +111,42 @@ the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
 `[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
 is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
-The five rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
-group's duplicate `o_xor`/`o_and` rows were re-pointed at probes the same way
-(`o_sub`, a LIST difference, stays a refusal on both backends). The structural
-half is pinned by four new `_BLOB_GROWTH_PROBES` rows, so each new site has to
-keep emitting its capacity guard.
+The six rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
+group's `o_xor`/`o_and` rows moved to LIST operands, where they stay refusals on
+both backends the way `o_sub` already was — the `set` group now holds the answer
+coverage and the operator group keeps the gate's coverage of a NON-set blob. The
+structural half is pinned by three new `_BLOB_GROWTH_PROBES` rows (`sin`, `sdf`,
+`ssd`), one for each set-algebra site, so each new site has to keep emitting its
+capacity guard.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
 has a named row in `test_formal_container_methods.py`.
+
+## What landed 2026-10-08: set algebra on arm64 (item 3)
+
+`a & b`, `a - b` and `a ^ b` between two SETS are intersection, difference and
+symmetric difference, and arm64 lowers all three. The union emitter's two
+nested loops are the whole algorithm — an outer walk over one operand and an
+inner membership scan of the other — so the four operators became ONE emitter,
+`_emit_set_op`, parameterised by which elements each pass keeps. The union's
+own reservation and growth guard are reused unchanged; the guard's run-time
+total is the operator's true worst case (`nL + nR` for union and symmetric
+difference, `nL` for intersection and difference).
+
+Measured, on this tree, arm64: `{1,2} & {2}` is `{2}` (sum 2, len 1),
+`{1,2} - {2}` is `{1}` (sum 1, len 1), `{1,2} ^ {2,3}` is `{1,3}` (sum 4, len
+2), and the augmented spellings `s &= {2}`, `s -= {2}`, `s ^= {3}` agree.
+`test_formal_container_methods.py` is 6/6 groups on both backends.
+
+**x86-64 is untouched and still refuses**, so the six rows are
+`BACKEND_ONLY = "x86_64"` — this backend has no set emitter at all (not even
+the union), and adding three more there is the "then x86-64" the next-step list
+did not get to. The arm64 gate is `model.SET_ALGEBRA_OPS`, asked in
+`_emit_binop` (and in the augmented-assignment emitter) before
+`string_binary_refusal`: a blob that is not established to be a set still falls
+through to `container_operator_refusal`, because `[1] - [2]` is a CPython
+`TypeError` and not address arithmetic.
 
 ## What was wrong, and what landed instead
 
@@ -118,7 +225,10 @@ the second reason this is a project rather than a rewrite.
    would send x86-64 into the ALU on two addresses. The backend intercepts
    first, the way `|` already splits `_emit_set_union` from
    `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
-   not started. See the Status at the top for the measurements and the emitters.
+   not started (the `formal162-docs` branch built it in 2026-10-08 and the
+   2026-10-12 merge recorded it in the Status above; its emitter is the
+   blueprint for that half). See the Status at the top for the measurements
+   and the emitters.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and

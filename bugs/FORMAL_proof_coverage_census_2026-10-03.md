@@ -10,9 +10,24 @@ carry one — the stack-floor guard's `getrlimit` (not recorded as a
 `compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
 same regression is why
 `test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is red.
-Both root causes, with the reproduction and the fix, are
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`;
-the code is another claim's, so this census was not edited to absorb it.
+Both root causes, with the reproduction and the fix, were
+`FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition`
+(now deleted: see the re-measurement below); the code is another claim's, so
+this census was not edited to absorb it.
+
+**Re-measured 2026-10-13 (`work/merge-qwen1`): the row is GREEN again, which is
+why the doc above is gone.** Both root causes landed: the walk's
+source-conditional arm now carries whether a condition has been CROSSED per
+path instead of refusing on meeting one (`arm64_proof_gen.py::
+_reached_without_a_condition`, pinned by
+`test_formal_call_proof_gen.py::TestTheReachedWalkIsPerPath`), and the
+stack-floor `getrlimit` moved to the startup stub BELOW `func_offset`
+(`arm64_codegen.py::_emit_stack_floor_init`), where no run test starts, so the
+one-`print` fixture carries one opaque call again. Measured on this tree:
+`test_formal_proof_breadth.py::TestClassifier.test_a_census_that_does_not_ask_
+lean_says_so` is OK and `test_formal_call_proof_gen.py::
+TestTheRecursionFamiliesStillGenerate` is 3 tests OK; the stack-floor half is
+pinned by `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`.
 
 **§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
 of the TREE, and there is now a mode that says what it is in 1.7 seconds instead

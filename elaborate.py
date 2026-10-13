@@ -296,6 +296,64 @@ def type_param_defaults(template_src: str):
     return out
 
 
+#: Bracket-parameter annotations that name a compile-time VALUE rather than a
+#: type.  The classification a bare literal bracket argument turns on: `[T]`
+#: and `[T: AnyType]` are types, `[origin: Int]` and `[n: Bool]` are values.
+#:
+#: Deliberately an ALLOW-LIST of the scalar value types this path spells, not
+#: "annotated and not `AnyType`": a trait-bounded type parameter (`[T: Movable]`,
+#: `[T: Copyable]`) is annotated too, and reading one of those as a value would
+#: let a bare literal bind a TYPE parameter and substitute `0` for `T` in the
+#: body — the fabricated-answer outcome every refusal in this area exists to
+#: prevent.  A value-typed parameter whose annotation is not in this set (an
+#: `AddressSpace`, an `Origin[…]`) is left classified as a type, which refuses a
+#: bare literal for it rather than guessing a substitution.
+_VALUE_BRACKET_ANNOTATIONS = frozenset((
+    "Int", "UInt", "Int8", "Int16", "Int32", "Int64",
+    "UInt8", "UInt16", "UInt32", "UInt64",
+    "Bool", "String", "StringLiteral", "IntLiteral", "FloatLiteral",
+    "Float16", "Float32", "Float64",
+))
+
+
+def type_param_kinds(template_src: str):
+    """`['type' | 'value', …]` per bracket parameter, in declaration order.
+
+    The one question a bare literal bracket argument turns on, and the reason
+    `type_param_names` (which strips the annotation and answers only names) is
+    not enough for it: `Tagged[T, origin: Int]` is `['type', 'value']`, so a
+    literal supplied for `origin` is a comptime VALUE argument, while
+    `Pair[T]` is `['type']` and a literal supplied for `T` is a value in a
+    type's position — `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_
+    value.md` is the wall this exists to tell apart.
+
+    A parameter with NO annotation (`[T]`) is a type, and one annotated with a
+    scalar value type (`origin: Int`, `n: Bool`) is a value.  See
+    `_VALUE_BRACKET_ANNOTATIONS` for why the value half is an allow-list rather
+    than the complement of `AnyType`.
+
+    Same reader (`mm.head_match`, `split_top_level_commas`, `_is_param_marker`)
+    as `type_param_names`/`type_param_defaults`, so the three cannot disagree
+    about which entries are parameters or how many there are.
+    """
+    m = mm.head_match(template_src)
+    if not m:
+        return []
+    out = []
+    for p in split_top_level_commas(m.params):
+        p = p.strip()
+        if not p or _is_param_marker(p):
+            continue
+        head = p.split('=', 1)[0].strip()
+        _name, sep, annot = head.partition(':')
+        # The annotation's own head: `List[T]` -> `List`, `Origin[mut=x]` ->
+        # `Origin`, `Movable where …` -> `Movable`.
+        base = annot.strip().split('[', 1)[0].split('where', 1)[0].strip()
+        out.append("value" if sep and base in _VALUE_BRACKET_ANNOTATIONS
+                   else "type")
+    return out
+
+
 _DEFAULT_INT = re.compile(r'^-?\d+$')
 _DEFAULT_TYPE_ROOT = re.compile(r'^([A-Z]\w*)\s*(?:\.|$)')
 
@@ -635,6 +693,33 @@ def erased_only_params(template_src: str, params) -> set:
         # inside it for the containment test below to mean anything.
         occ = [m.span() for m in re.finditer(rf'\b{re.escape(p)}\b', src)]
         if occ and all(any(a <= s and e <= b for a, b in spans) for s, e in occ):
+            out.add(p)
+    return out
+
+
+def phantom_type_params(template_src: str, params) -> set:
+    """The subset of `params` that occurs NOWHERE outside the generic head.
+
+    A phantom parameter is a type parameter the declaration names but never
+    mentions again — not in a field's type, not in a method's signature, not in
+    a method body, not in a `comptime` alias.  It is a strictly stronger
+    condition than `erased_only_params`' "only in positions `_mojo_type`
+    discards": a phantom parameter has no occurrence to discard, and
+    `erased_only_params` deliberately requires `occ` to be non-empty, so it
+    returns the EMPTY set for one.  That gap is why this is a second predicate
+    rather than a reuse: `struct Marker[T: AnyType]: var v: Int` is exactly the
+    shape `erased_only_params` declines and `formal/monomorph.py`'s
+    `without_template_bodies` needs the answer for (it decides whether such a
+    template's declaration is already a concrete one and must not be dropped).
+
+    COUNTED over `_code_only`, which removes the head's own `[...]`, every
+    docstring and every comment — so the declared name in the head and prose
+    about the parameter are not uses of it, exactly as for
+    `erased_only_params`."""
+    src = _code_only(template_src)
+    out = set()
+    for p in params:
+        if not re.search(rf'\b{re.escape(p)}\b', src):
             out.add(p)
     return out
 

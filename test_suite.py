@@ -1192,15 +1192,20 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                for n, s in suite.REGISTRY.items()
                if getattr(s, 'expect', '')}
     stated = {n: c for n, c in counted.items() if c is not None}
+    # A strict MAJORITY rather than a hard-coded floor: the floor went stale
+    # the moment six count-stating markers were removed for going green
+    # (2026-10-07, the fire-rename link-fix in the async cluster — see
+    # `BUCKETS['coroutine']`), and a floor that has to be edited every time a
+    # known red is fixed is the wrong instrument. "Most" is the property the
+    # check's own name asserts.
     check('expect count: most registered markers state a count',
-          len(stated) >= 12,
+          len(stated) * 2 > len(counted),
           f'only {len(stated)} of {len(counted)} markers state one '
           f'({sorted(stated)}); a rule with nothing to check reports green '
           f'forever')
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
-          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
-                     'async-with-lock-guard': 2,
+          stated == {'async-void-return': 3,
                      'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
@@ -1226,24 +1231,57 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # but it PASSES"). The count was never the problem; the marker was. Its
     # entry is gone here for the reason the two above name: a census that still
     # states a removed marker fails on the registry's own state.
+    #
+    # SIX more dropped on 2026-10-07, all for the same anti-rot reason:
+    # `mutable-async-capture` (2), `transitive-closure-capture` (2),
+    # `taskgroup` (3), `async-with-lock-guard` (2), `nested-async-generic` (2)
+    # and `async-runtime-scaffold` (1 of 2) are GREEN now. The 563ec43a fire
+    # rename had rewritten `import mojo` to `import fire` but left every
+    # `mojo.link_executable(...)` call site and the `mojo_async_runtime.cpp`
+    # path constant behind, so all ten async suites died at link with `name
+    # 'mojo' is not defined`; with that fixed, these six run and pass, and a
+    # marker on a passing test is reported as a FAILURE.
+    #
+    # `formal-os-backing` is an ADDITION rather than a drop: it was registered
+    # with no marker and red 30 of 58 (its own doc), and is now `expect=`-
+    # marked. The branch marked 6 of 70 on 2026-10-07; on the merged tree the
+    # 32-bit pointer-subscript half of that 6 is fixed (the subscript emitters
+    # read at the element's width and signedness on both backends), so the
+    # count is 2 of 70 — `stat_null`'s dev width, both backends. Its harness
+    # had to start printing a `PASS=n FAIL=m` shape for the count to be
+    # checkable at all.
+    #
+    # `bootstrap-stage2-dumps` no longer states a count: its `40 of 46` marker
+    # was removed on master (2026-10-03/04, the stage2 dumps stopped dying the
+    # way the marker described), so it is out of the census here for the same
+    # reason as the six async drops — a census that states a marker the registry
+    # no longer has fails on the registry's own state. The branch's parallel
+    # `formal-x86-64-parity` registration was likewise not taken in the
+    # 2026-10-12 merge; master's `formal-x86-parity` (1) stands in its place.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
-                     'mutable-async-capture': 2, 'nested-async-generic': 2,
-                     'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
-                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
-                     # parity differential was registered in a bucket and given
-                     # a count-checked `expect=`; a census that did not state
-                     # the new marker would fail on the registry's own state,
-                     # which is this check working.
+                     # `formal-os-backing` (2) is the addition from the 2026-
+                     # 10-07 re-measurement, narrowed on the merged tree (above),
+                     # and `formal-x86-parity` (1)
+                     # the 2026-10-06 registration: the parity differential was
+                     # put in a bucket with a count-checked `expect=` for its
+                     # one pre-existing red, and a census that did not state
+                     # either marker would fail on the registry's own state.
+                     # The branch's parallel `formal-x86-64-parity` registration
+                     # (three reds, 2026-10-07) was not taken: its two 32-bit
+                     # pointer-load reds are not rows of this tree's file, and
+                     # master's registration carries the count.
+                     'formal-os-backing': 2,
                      'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
-          f'(40 of its 46 items exit non-zero), and it is checked against the '
-          f'per-item verdicts rather than against a summary line \u2014 see '
-          f'`observed_fanout_failures`. `gimplerunner` is NOT here and that is the '
+          f'is for. A FANOUT states its count the same way — checked against '
+          f'per-item verdicts rather than against a summary line, see '
+          f'`observed_fanout_failures`; the registry no longer carries one '
+          f'(the stage2 dumps stopped failing the way the marker described). '
+          f'`gimplerunner` is NOT here and that is the '
           f'mechanism working: its `expect=` was removed when the last of the '
           f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
@@ -2033,17 +2071,14 @@ STALE_PER_CHILD_BUDGETS = {
     'test_ab_native.py': 2,
     'test_arm64_emission.py': 1,
     'test_async_runtime_scaffold.py': 1,
-    'test_async_void_return.py': 5,
-    'test_async_with_lock_guard.py': 5,
-    'test_closure_capture_comptime_func_params.py': 2,
+            'test_closure_capture_comptime_func_params.py': 2,
     'test_comptime_bracket_params.py': 1,
     'test_container_equality.py': 3,
     'test_container_membership.py': 3,
     'test_container_ordering.py': 3,
     'test_coro_detached_async.py': 4,
     'test_coro_future_await.py': 4,
-    'test_coro_nested_async_capture.py': 5,
-    'test_coro_runtime.py': 1,
+        'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     'test_formal_admitted.py': 7,
@@ -2080,9 +2115,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_link_mode.py': 2,
     'test_metal_codegen.py': 9,
     'test_mixed_cpp_link.py': 1,
-    'test_mutable_async_capture.py': 5,
-    'test_nested_async_generic.py': 5,
-    'test_nonlocal.py': 2,
+            'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
     'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
@@ -2091,8 +2124,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
     'test_taskgroup.py': 4,
-    'test_transitive_closure_capture.py': 5,
-    'test_x86_64_containers.py': 1,
+        'test_x86_64_containers.py': 1,
     'test_x86_64_decode.py': 1,
 }
 
@@ -3899,43 +3931,12 @@ UNREGISTERED = {
         'is listed rather than registered — a registered job that skips its only '
         'substantive case is a green line that says nothing.',
 
-    # A DOCUMENT check, and the cheapest file in this list by a wide margin:
-    # import-and-compare against `runtime_abi()`, `reflect` and three Markdown
-    # files. 0.17 s wall and 81 MB maximum RSS measured three times on
-    # 2026-10-04 (`/usr/bin/time -l`, because at 0.17 s memcap's own poll cannot
-    # see a process that is gone before the first tick), no build and no Lean.
-    #
-    # It is listed rather than registered because its branch's task says not to
-    # touch the registry — NOT because it is expensive. It is the cheapest thing
-    # here, so the cost rule wants it registered rather than excused, and the
-    # only thing standing between it and a registration is the instruction.
-    #
-    # Exact next step, in `check` beside `suite-self-test` and `doc-refs`, which
-    # are the other two files that read the tree's own documents:
-    #
-    #   test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'],
-    #        extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-    #               'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
-    #               'formal/lean.py', 'formal/build.py',
-    #               'formal/arm64_proof_gen.py',
-    #               'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
-    #               'reflect.py'],
-    #        desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-    #             'agrees with the tree')
-    #
-    # `extra` names the runtime headers and `lib/` because two of its six groups
-    # read them, and `doc-refs`'s own key does not: a `formal/hostmods/` edit
-    # that moved a declared `mojo_*` signature would otherwise replay a recorded
-    # PASS.
-    'test_formal_doc_truth.py': (
-        'Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md -- counts, '
-        'function names, limits, refusal messages, ABI signatures, tool flags -- '
-        'out of the documents and compares them with the tree, both directions. '
-        '0.17 s and 81 MB measured, no build and no Lean; it found three wrong '
-        'numbers in FORMAL.md §2.2 (540/219/321 against a real 668/262/406) and '
-        'three `lib/` holes published as live in §7 that had been closed for a '
-        'week. Listed because this branch\'s task says not to register anything; '
-        'the cost argues for the registration above.'),
+    # `test_formal_doc_truth.py` was here (listed rather than registered, its
+    # branch's task said not to touch the registry) and is REGISTERED as
+    # `formal-doc-truth` in `check` as of 2026-10-07: the cost rule always
+    # wanted it (0.17 s, no build, no Lean) and the one file whose job is "does
+    # the document still say what the code says" was a test nobody ran, with
+    # four of its rows drifted.
 
     # ── the formal backend's per-construct suites, run by hand ──
     #

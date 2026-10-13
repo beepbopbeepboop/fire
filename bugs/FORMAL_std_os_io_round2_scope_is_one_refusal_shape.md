@@ -6,21 +6,36 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
-**Status (2026-10-07, `work/formal135-docs`): the §0.4/§6.2 sentence was red on
-`master`, and the RED was a merge, not a missing fix. The `no_public_api_reason`
-constants-only text was reworded by the `work/formal27-5`/`work/merge-formal45`
-merge (`b9174ce1e`) and two phrases its own pin asserts went with it — "nothing
-an importer could bind" became "no address an importer could bind", and "a
-decision about the BACKEND" was dropped — so
-`test_formal_imports.py::test_a_constants_only_module_is_not_told_nothing_could_be_added`
-failed and `formal-imports` (a gate job) was red. The sentence is restored with
-both halves the doc itself states: the refusal is correct ("nothing an importer
-could bind") and what would remove it is "a decision about the BACKEND" beside
-the two things that would answer it. Measured: `test_formal_imports.py`
-PASS=90 FAIL=0 (was 89/1). The §0.4 pin the doc names
+**Status (2026-10-08, `work/formal181-docs`; the same red was measured and
+restored independently by `work/formal135-docs` on 2026-10-07 and
+`work/formal191-docs` on 2026-10-08): the §0.4/§6.2
+guard is GREEN again — a reword had drifted the sentence past two phrases the
+guard asserts, and both are restored. The RED was a merge, not a missing fix:
+the `work/formal27-5`/`work/merge-formal45` merge (`b9174ce1e`) reworded the
+`no_public_api_reason` constants-only text and two phrases its own pin asserts
+went with it — "nothing an importer could bind" became "no address an importer
+could bind", and "a decision about the BACKEND" was dropped — leaving
+`test_formal_imports.py::test_a_constants_only_module_is_not_told_nothing_
+could_be_added` red on `master` (89/1), which took `formal-imports` (a gate
+job) down with it. The guard checks, of the constants-only branch, that it does
+not say the false clause "nothing this backend could add", that it NAMES its
+owner, that it says the missing thing is a rule about the BACKEND rather than
+work on the module, and that it keeps the branch's own judgement that the
+refusal is correct (the pin's own words: "there really is nothing an importer
+could bind", asserted in the current wording "no address an importer could
+bind"). The restored sentence says both halves the doc itself states, in the
+newer wording that cites both owner docs (`FORMAL_module_state_no_storage.md`
+and `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`). Measured on
+the 2026-10-07 tree: `test_formal_imports.py` PASS=90 FAIL=0 (was 89/1). The
+judgement is unchanged and §6 item 2 stays closed. The §0.4 pin the doc names
 (`test_formal_monomorph.py`'s constants-only test) has since become a
 build-and-RUN comparison, so this file's test is the live pin; the doc's §0.4
-sentence is otherwise unchanged.**
+sentence is otherwise unchanged. In the same pass `work/formal191-docs` closed
+§6 item 4 below: the resolver defect it filed (`FORMAL_a_dotted_import_
+resolves_to_a_nearer_leaf`) is FIXED on `master` (`7927b159`, which deleted the
+doc and pinned the self-resolution row in `test_formal_imports.py`), so item 4
+is struck there rather than left citing a file that is not there.**
+
 
 **Status (2026-10-05, `work/formal25-5-r2`): §6 item 2 is CLOSED as a MESSAGE
 (§0.4) — the false clause "nothing this backend could add" is gone and the
@@ -220,11 +235,11 @@ group sizes: 19 + 11 + 4 + 3 + 2 + 2 + 1 + 1 = 43. The five groups whose key is 
 real refusing module for link 1 are 19 + 11 + 2 + 1 + 1 = **34**, and the three
 left over are the `std/_gpu/_utils.mojo` group — so **link 1's feature accounts
 for 37 files, exactly §2's 37, with 3 of them filed under the wrong name.**
-`std.format._utils` resolves to `std/_gpu/_utils.mojo` ITSELF, so the importer is
-named as the refuser; see §6.4 and
-`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`. It is the only group in the
-walk whose key is wrong, and it is wrong because of a defect in the resolver the
-walk and the build share — which is also why §2's table, read off the sweep log
+`std.format._utils` resolved to `std/_gpu/_utils.mojo` ITSELF, so the importer was
+named as the refuser; see §6.4, where that resolver defect is now recorded as
+FIXED (`7927b159`). It was the only group in the
+walk whose key is wrong, and it was wrong because of a defect in the resolver the
+walk and the build shared — which is also why §2's table, read off the sweep log
 rather than off this walk, is the one to use.
 
 **Link 2 HAS a doc and no claim, and it is not monomorphisation**
@@ -524,8 +539,7 @@ puts those 9 files on `std/function.mojo`'s MLIR-attribute template at round 7 a
 `hasher.mojo`. Both of those are the modules the walk had just stubbed, so the
 honest reading is "with the walls in front of them stubbed, these 9 land on the
 MLIR attribute template in `std/reflect.mojo`" — a new link, not a fix, and it
-belongs to `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`
-(`formal19-4`).
+belongs to the MLIR dialect construct's area (`formal19-4`).
 
 Verified: `test_formal_imports.py` **PASS=72 FAIL=3** (the three are pre-existing
 and measured identical with the fix disabled — `_KIND_HOPS = 0`, which is the
@@ -641,14 +655,17 @@ still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
    parenthesised import, and §0.2 names the file, the line and the error. The
    walk now measures 8 links on this scope where it measured 3, on both
    architectures, with 0 files reporting its own damage.
-4. **`formal.imports.resolve_module_path` is wrong for one importer in this
-   scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
-   — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
-   because `_candidates` puts a root's leaf fallback in the same list as its
-   dotted path and the root loop is nearest-first. Measured inside a real build,
-   not only by direct call. It surfaced here because the probe now resolves the
-   module a refusal names with that same function, and it put three files of one
-   round under a group keyed on the IMPORTER.
+4. ~~**`formal.imports.resolve_module_path` is wrong for one importer in this
+   scope.**~~ **CLOSED — the resolver is FIXED on `master` (`7927b159`).** It was
+   `std/_gpu/_utils.mojo` importing `std.format._utils` resolving to ITSELF,
+   because `_candidates` put a root's leaf fallback in the same list as its
+   dotted path and the root loop was nearest-first. The fix asks the name AS
+   SPELLED of every root before any LEAF fallback (`_candidate_shapes` /
+   `first_source`), so a dotted import binds the module it names; the doc that
+   filed it was deleted with the fix and the self-resolution row is pinned in
+   `test_formal_imports.py`. It had surfaced here because the probe resolves the
+   module a refusal names with that same function, and it had put three files of
+   one round under a group keyed on the IMPORTER.
 5. ~~**One link of §0.2's new table has no claim and no doc**:
    `hasher.mojo` re-exports `Span` from `std.collections` and no module it
    imports exports the name, so 9 files of this scope sit behind it. ~~

@@ -1110,56 +1110,6 @@ def test_audit_fires_on_a_real_build():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_raise_flushes_stdout():
-    """A `raise` must not throw away what the program already printed.
-
-    This is the gate-resident half of the class `test_formal_x86_64_parity.py`'s
-    `FAILING_CASES` also carries (that file is in no bucket, so its rows run in
-    no gate): the arm64 backend used to lower a `raise` to the raw Darwin `exit`
-    SYSCALL emitted inline, which enters the kernel directly and runs none of
-    libc's user-space `exit` — so a block-buffered stdout (every pipe and every
-    `subprocess.run(capture_output=True)`) lost every byte the program had
-    written. x86-64 was already right, because its `_emit_call_exit` is a CALL
-    to libc's `exit(3)`, so the same source printed `before` on one machine and
-    NOTHING on the other. `formal/arm64_codegen.py::_emit_exit` now emits
-    `fflush(NULL)` before the trap and all of its call sites share it.
-
-    Both backends, because the defect WAS the divergence between them: a
-    one-sided assertion stays green through the whole class. The control is the
-    same source with `return 1`, which reaches the same exit through libc's
-    `__main` and always flushed.
-    """
-    import subprocess
-    import shutil
-    d = tempfile.mkdtemp(prefix='raiseflush_')
-    try:
-        src = os.path.join(d, 'raise.mojo')
-        open(src, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    raise 7\n')
-        ctl = os.path.join(d, 'return.mojo')
-        open(ctl, 'w').write('def main() -> Int:\n'
-                             '    printf("before@@")\n'
-                             '    return 1\n')
-        for backend in ('arm64', 'x86_64'):
-            for path, what in ((src, 'a raise'), (ctl, 'a return')):
-                out = os.path.join(d, f'{what.split()[-1]}.{backend}')
-                r = subprocess.run(
-                    [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
-                     '--formal', '--no-prove', f'--backend={backend}', '-o', out,
-                     path],
-                    capture_output=True, text=True, timeout=600, cwd=REPO)
-                if not check(r.returncode == 0,
-                             f'{what} builds on {backend}',
-                             (r.stdout + r.stderr)[-300:]):
-                    continue
-                run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=120)
-                check('before@@' in run.stdout,
-                      f'stdout survives {what} on {backend} (the exit flushes)',
-                      f'stdout={run.stdout[:80]!r} exit={run.returncode}')
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_sorry_note():
@@ -1419,6 +1369,62 @@ def test_hostmod_cross_references():
           'every file a host module names exists: a docstring pointing at a '
           'test or a bug doc that is not there is a claim with nothing '
           'behind it', '; '.join(dangling[:8]))
+
+
+def test_raise_flushes_stdout():
+    """A program that printed and then took an error exit keeps its stdout.
+
+    The arm64 `raise` used to leave the process through the raw `SYS_exit`
+    trap, which does not touch stdio, so stdout — block-buffered whenever it is
+    not a terminal, which is every case a harness creates — was discarded and
+    the image printed NOTHING while x86-64 printed everything. `_emit_exit`
+    now flushes through the same `fflush(NULL)` the `flush=True` path already
+    emits, before the trap, and every error stop shares it. This is the
+    gate-resident pin the fix's own write-up asked for: the parity file that
+    already carries the shape (`test_formal_x86_64_parity.py`'s
+    `FAILING_CASES`) is in no bucket.
+
+    Both halves are asserted: the `raise` path (the defect) and the `return`
+    control (the path that always flushed, so a rule that only moved the flush
+    around would still pass the first and fail the second). One source, both
+    backends, so a re-divergence is a diff rather than a discovery.
+    """
+    import shutil
+    import subprocess
+    d = tempfile.mkdtemp(prefix='raiseflush_')
+    try:
+        src = os.path.join(d, 'r.mojo')
+        with open(src, 'w') as f:
+            f.write('def main() -> Int:\n'
+                    '    printf("before@@")\n'
+                    '    raise 7\n')
+        ctl = os.path.join(d, 'c.mojo')
+        with open(ctl, 'w') as f:
+            f.write('def main() -> Int:\n'
+                    '    printf("before@@")\n'
+                    '    return 1\n')
+        for backend in ('arm64', 'x86_64'):
+            for name, program in (('raise', src), ('return', ctl)):
+                out = os.path.join(d, f'{name}.{backend}')
+                r = subprocess.run(
+                    [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
+                     '--formal', '--no-prove', f'--backend={backend}',
+                     '-o', out, program],
+                    capture_output=True, text=True, timeout=600, cwd=REPO)
+                check(r.returncode == 0,
+                      f'{name} builds on {backend}', (r.stdout + r.stderr)[-300:])
+                if r.returncode != 0:
+                    continue
+                run = subprocess.run([out], capture_output=True, text=True,
+                                     timeout=60)
+                check(run.stdout == 'before@@',
+                      f'a `{name}` on {backend} keeps the bytes it printed '
+                      f'(got {run.stdout!r})', run.stdout)
+                check(run.returncode == 1,
+                      f'a `{name}` on {backend} still exits 1',
+                      str(run.returncode))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def main():

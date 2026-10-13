@@ -4,20 +4,49 @@
 
 **RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
 claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
-produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
-its own document now:**
+produced a state the machine never reached — `WRONG`, not `NOSTEP` — and both are
+now FIXED (2026-10-08, `work/formal231-docs`):**
 
-| defect | document |
+| defect | status |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — `arm64_step`'s arm now writes `Rd` (the identity at `Rd = 31` covers the CMN spelling) |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms |
 
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
-which is the generalisable half: this file's §5 is right that "the gap is the
-model is silent", and the two new defects are the OTHER failure — the model is
-*loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
-see. Re-read §6 before using this file's tooling as a coverage claim.
+The fixes landed as a single `lib/ProofLib.lean` change (past a bounded worker's
+8 GB ceiling then, which is why these were written down rather than attempted
+and why they sat open for three days). **Neither was in this file's `NOSTEP`
+table**, which is the generalisable half: this file's §5 is right that "the gap
+is the model is silent", and the two defects were the OTHER failure — the model
+is *loud* and *wrong*, which is worse, and which no NOSTEP tally in this file
+could see. Re-read §6 before using this file's tooling as a coverage claim.
+
+**merged 2026-10-13 (merging `work/formal250-docs`): the two sibling docs are
+DELETED, and this file keeps their surviving records.** The branch landed the
+same two fixes (its `0f62e449`/`5044b5f7`) and `git rm`'d
+`FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` and
+`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`; on the merged
+tree both fixes are the master-side parallel forms (the `ADDS/CMN` `Rd` write
+and the shared `arm64_ext_imm12` reader, pinned in
+`test_formal_call_proof_gen.py`'s `TestGeneratorSource` and the
+`TestUnsignedOffsetAccess` rows), so the branch lands no code and the deletion
+stands — this file, which §3 below prescribed both arms, is where their records
+now live. What survives from the two docs: the isolated verifications a bounded
+worker could run (a scratch `arm64_step` carrying each fix elaborates against
+the served `ProofLib.olean` at rc=0 / 1.3–1.4 GB and `#eval`s `adds
+x11,x1,x15 → 7`, `cmn x1,x15 → destination untouched`, and `add x12,x29,#1675,
+lsl #12 → 6860805` with the unshifted anti-rot at `1680`); the helper's
+`UInt32` type and `rfl`-reducibility checked through `run_lean` (scratch
+`extdef.lean`, rc=0); the 9.8 GB rebuild wall re-measured 2026-10-08 under
+`tools/memslot.py --gb 8`, with the control `lib/Refine.lean` at 1.2 GB from the
+same call; the `_I12` distinction (the RAW 12-bit field stays for the
+unsigned-offset `LDR`/`STR` rows idx 18/19/31, a class with no `sh` field, and
+the five `#imm12` arms call `arm64_ext_imm12 w`); and the helper's `sh ∈ {0, 1}`
+decision (the arm's mask keeps bit 23, so `sh ≥ 2` is reserved in this class
+and never reaches the helper — the merged form masks `0x1`). What remains OWED
+is the `lib/ProofLib.olean` rebuild and the `TestUnsignedOffsetAccess`
+CPU-vs-model run, both past a bounded worker's ceiling (here there is no Lean
+on PATH, so the class skips): a red `prooflib` or a disagreement row is what
+would say a fix is wrong.
 
 **The CMN one is this file's own doing**, and that is worth stating rather than
 burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so

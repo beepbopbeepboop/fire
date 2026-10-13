@@ -5,6 +5,34 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
+**Step 1 LANDED 2026-10-08 (`work/formal152-docs`).** `setUpClass` now records
+`cls.traced[label] = _ADMIT in tail` (and records a generation refusal the same
+way), and the new row `test_the_mechanism_that_prints_the_residual_fired` fails
+when it did not fire — so this class can no longer report a `fdiv64` diagnosis
+about a goal it never traced. `## The exact next step` item 1 is marked done
+below; item 2 (which of the two the class should measure) is the work that
+remains, and this row is what makes it verifiable. **The new row is only
+observable with an integrator's `prooflib` build** — `lib/ProofLib.olean` is
+absent on this worktree, so the class SKIPS there; the file parses and every
+Lean-free class in it is green.
+
+**Step 1 LANDED 2026-10-08 (`work/formal166-docs`).** `setUpClass` now records
+`cls.traced[label] = _ADMIT in tail` (and records a generation refusal the same
+way), `test_the_mechanism_that_prints_the_residual_fired` fails when it did not
+fire, and both existing rows check that flag FIRST so a fixture that stopped
+producing a residual can no longer report the misleading "fdiv64 may have been
+corrected" diagnosis.  **The mechanism check is also pinned Lean-free**, which
+the class itself cannot be: `TestTheZeroDivisorGuardIsAFalseGoal::
+test_the_symbolic_divisor_fixture_still_has_its_subject` asserts, without a
+built library, that the fixture either yields a tail carrying `_ADMIT` or
+refuses with the two-unfollowable-calls message — never a silently empty tail.
+That row is why a light worker can observe this half.  On this tree the class is
+red for the honest reason: `_symbolic_divisor_proof` REFUSES at generation
+because arm64 reads its own stack-guard `getrlimit` and div0-arm `fflush` as
+calls the PROGRAM makes, so no `q_compiles_correctly_universal` is emitted at
+all.  Step 2 (which of the two the class should measure) is the work that
+remains and is blocked on that emitter regression.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
@@ -95,6 +123,65 @@ to the plan below:**
    fixture — and defect 2 is worth fixing on its own before either, because it
    is a false claim in `_program_extern_calls`'s own docstring today.
 
+**Status 2026-10-08 (`work/formal180-docs`): step 1 of "The exact next step"
+below is LANDED — the class now checks its own mechanism, which is what makes
+it fail on "the measurement did not happen" instead of on a diagnosis about the
+div0 arm. And the blocker the doc diagnoses has MOVED: the fixture does not
+generate a file at all on this tree, and BOTH reasons it does not are another
+worker's claim.**
+
+* **The mechanism check is in.** `TestTheZeroDivisorGuardAgainstLean` now
+  catches a fixture refusal, records whether the fixture generated and whether
+  the walk terminal's `all_goals (first | done | sorry)` admission was in the
+  tail it built, and has `test_the_measurement_mechanism_fires` fail naming the
+  refusal. The two goal rows call the same
+  `_assert_the_measurement_happened`, so a missing fixture reports "the fixture
+  produced no proof file, so NO residual was traced" rather than the class's own
+  (wrong) "fdiv64's div0 arm … may have been corrected". That is the doc's own
+  finding: "a check that did not look at what it produced."
+* **What the fixture does today, measured.** `_symbolic_divisor_proof` raises
+  `NotImplementedError` out of `generate_arm64_proof`, which reports **2 calls
+  this walk cannot follow**: `0x100000424 -> 0x10000088c` is **`getrlimit`**,
+  the stack-floor guard's call in every arm64 prologue, and
+  `0x100000514 -> 0x100000880` is the div0 trap's **`fflush`**.
+  `info["compiler_traps"]` is **empty** on this tree, so `_program_extern_calls`
+  subtracts nothing and `_unfollowable_calls` sees both calls; the count rule
+  (`len(_calls) - (1 if _intra else 0) > 1`) then refuses. So §"Why it went
+  blind, and it is not only the fixture" is doubly stale now: the flush is not
+  subtracted **anywhere**, and there is a SECOND opaque call — the guard's
+  `getrlimit` — that the doc's single-call account does not have.
+* **Both halves are another worker's.** The `getrlimit` guard and the dropped
+  `_emit_trap_flush` were
+  `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call`
+  (now deleted: `work/formal163-docs` fixed it — the read moved to the startup
+  stub and `_emit_trap_flush` is restored; the re-measurement below is the
+  measurement), whose own next step 1 was exactly
+  "subtract the compiler's calls from `_calls`". Step 2 below is therefore not
+  this tree's to take and is not taken here. When it lands, the check added here
+  is what makes the resumed measurement trustworthy: the mechanism row passes
+  only if a proof file is produced AND it carries the admission the class
+  dissects, so a future drift of the same kind cannot masquerade as a div0
+  result again.
+
+**Re-measured 2026-10-12 on the merged tree (`work/merge-qwen1`): the
+"2 calls this walk cannot follow" refusal is GONE, and the failure has
+moved one step down the class's own mechanism.** The two opaque calls the
+bullets above measured are fixed on this tree: the trap `fflush` is
+recorded in `info["compiler_traps"]` again (`arm64_codegen`'s
+`_emit_trap_flush`), and the guard's `getrlimit` read moved to the STARTUP
+STUB (`_emit_stack_floor_init`), below `func_offset` and subtracted by
+address. The fixture no longer refuses: it generates, but the generated
+file carries no `q_compiles_correctly_universal` at all, so the tail the
+class partitions is empty and the Lean-free pin
+(`TestTheZeroDivisorGuardIsAFalseGoal::test_the_symbolic_divisor_fixture_
+still_has_its_subject`) is RED on this tree for exactly that reason — a
+documented pre-existing red of this run, not chased here. The step-1
+mechanism check — the `cls.blind` implementation measured in the "Status
+2026-10-07: step 1 landed" section below, this branch's
+`test_the_measurement_mechanism_fires` having merged as a parallel of it —
+is what keeps the class from reporting the fdiv64 diagnosis for that empty
+tail.
+
 ## What I ran
 
     $ python3 tools/memslot.py --gb 8 --label t -- \
@@ -171,9 +258,22 @@ Two independent drifts, and a fix needs both:
 
 ## The exact next step
 
-1. Add the mechanism check first (it is five lines and it is what makes the
-   rest of the work verifiable): `setUpClass` records whether `_ADMIT` occurred
-   in the tail it built, and a row fails when it did not.
+1. ~~Add the mechanism check first~~ **DONE 2026-10-08** — landed in
+   parallel on several branches that day; the implementation in this tree
+   is the `cls.blind` one the "Status 2026-10-07: step 1 landed" section
+   below measures: `setUpClass` records, per spelling, whether the
+   fixture generated and whether `_ADMIT` occurred in the tail it built
+   (a generation refusal is caught into the same flag), and
+   `test_the_measurement_class_can_still_see_what_it_measures` fails by
+   NAME when it did not, with both goal rows checking the same flag
+   before their assertions.  It is pinned Lean-free by
+   `TestTheZeroDivisorGuardIsAFalseGoal::test_the_symbolic_divisor_
+   fixture_still_has_its_subject` — the fixture either produces a tail
+   carrying `_ADMIT` or refuses outright, never a silently empty tail.
+   The 2026-10-08 section above records this branch's parallel landing
+   (`test_the_measurement_mechanism_fires` and the shared
+   `_assert_the_measurement_happened`), whose row names are the ones it
+   measured on its own tree.
 2. Then decide which of the two the class should measure:
    * **subtract `info["compiler_traps"]` in `_unfollowable_calls` too.** This is
      the same fix as
