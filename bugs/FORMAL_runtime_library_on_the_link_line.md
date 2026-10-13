@@ -1,5 +1,18 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-13 (`formal333-docs`): the published surface moved by ONE entry
+point and `FORMAL.md` now says 273/217/177.** `runtime_abi()` gained a
+word-shaped name after the 2026-10-05 sweep below and `runtime/fire_runtime.c`
+grew to 528 KB, so `test_formal_runtime_link.py` read all three of §6 phase 2's
+rows stale on both architectures and `test_formal_doc_truth.py`'s §1 size row
+with them. The document is caught up and both jobs are green. **The ceilings
+did not move**: ceiling 1 is still 56, ceiling 2 still 4, and `273 − 217 = 56`
+with `217 − 177 = 40` are the same two gaps, so nothing here changes what the
+rest of the document says about where the surface stops. `test_formal_doc_truth
+.py` also no longer kept its own hard-coded copy of §6's word-shaped figure —
+the second table its own rule 1 forbids — and now reads the number out of
+`FORMAL.md`, which is one fewer place for this figure to drift.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
