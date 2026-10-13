@@ -220,12 +220,15 @@ group sizes: 19 + 11 + 4 + 3 + 2 + 2 + 1 + 1 = 43. The five groups whose key is 
 real refusing module for link 1 are 19 + 11 + 2 + 1 + 1 = **34**, and the three
 left over are the `std/_gpu/_utils.mojo` group — so **link 1's feature accounts
 for 37 files, exactly §2's 37, with 3 of them filed under the wrong name.**
-`std.format._utils` resolves to `std/_gpu/_utils.mojo` ITSELF, so the importer is
-named as the refuser; see §6.4 and
-`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`. It is the only group in the
-walk whose key is wrong, and it is wrong because of a defect in the resolver the
-walk and the build share — which is also why §2's table, read off the sweep log
-rather than off this walk, is the one to use.
+`std.format._utils` resolved to `std/_gpu/_utils.mojo` ITSELF, so the importer
+was named as the refuser — a defect in the resolver the walk and the build
+share, filed at the time as
+`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md` and **fixed on 2026-10-04
+(`7927b159`, §6.4)**: `std.format._utils` now resolves to
+`std/format/_utils.mojo`, so that group is keyed on the real refuser and this
+was the only group in the walk whose key was wrong. §2's table, read off the
+sweep log rather than off this walk, is the one to use for the COUNTS, and the
+group arithmetic above is the round-0 measurement as the walk then stood.
 
 **Link 2 HAS a doc and no claim, and it is not monomorphisation**
 (`work/formal25-5`): `std/sys/arg.mojo` is outside every package here, and the
@@ -641,14 +644,26 @@ still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
    parenthesised import, and §0.2 names the file, the line and the error. The
    walk now measures 8 links on this scope where it measured 3, on both
    architectures, with 0 files reporting its own damage.
-4. **`formal.imports.resolve_module_path` is wrong for one importer in this
+4. ~~**`formal.imports.resolve_module_path` is wrong for one importer in this
    scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
    — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
    because `_candidates` puts a root's leaf fallback in the same list as its
-   dotted path and the root loop is nearest-first. Measured inside a real build,
-   not only by direct call. It surfaced here because the probe now resolves the
-   module a refusal names with that same function, and it put three files of one
-   round under a group keyed on the IMPORTER.
+   dotted path and the root loop is nearest-first.~~ **CLOSED — the doc that
+   filed it is deleted and the resolver is fixed (`7927b159`, 2026-10-04).**
+   `imports.py` now asks every root for the name AS SPELLED before any root's
+   LEAF fallback (`_candidate_shapes`/`first_source`), so a dotted import binds
+   the module it names; the file's own degenerate case (`_utils.mojo` resolving
+   to the importer because both files share a basename) is a row of
+   `test_formal_imports.py::test_a_dotted_stdlib_import_resolves_to_the_module_
+   it_names`. Measured on this tree: `resolve_module_path("std.format._utils",
+   relative_to="std/_gpu/_utils.mojo")` → `std/format/_utils.mojo`, not the
+   importer. It surfaced here because the probe resolves the module a refusal
+   names with that same function, and it put three files of one round under a
+   group keyed on the IMPORTER — §3's paragraph below is corrected with it.
+   **This was the last item this document owned**, and the two features the
+   scope is behind (`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
+   inferrable`, `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`) are
+   still theirs; the census above is what the doc is kept for.
 5. ~~**One link of §0.2's new table has no claim and no doc**:
    `hasher.mojo` re-exports `Span` from `std.collections` and no module it
    imports exports the name, so 9 files of this scope sit behind it. ~~
