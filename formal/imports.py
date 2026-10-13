@@ -4310,7 +4310,7 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
     wanted = MM.own_demands(consumer_src)
     if not wanted:
         return {}
-    made, _failed = MM.instantiate_all(consumer_src, wanted)
+    made, _failed = MM.instantiate_all(consumer_src, wanted, record=True)
     for key, mangled in MM.demap_from(made).items():
         demap.setdefault(key, mangled)
     out: dict = {}

@@ -1891,6 +1891,13 @@ def compile_formal(source_path: str, output: str = None,
     # relative to the set of classes THIS image can name, so a second image
     # built in one process must not inherit the first one's.
     M.clear_exception_kinds()
+    # …and this image's FAILED INSTANTIATION DEMANDS, the fourth per-image table
+    # and here for the same reason: `monomorph._FAILED_DEMANDS` is read by the
+    # bracketed-callee scan below, so a second program built in one process must
+    # not inherit the first program's failed demands and report them at its own
+    # call sites.
+    from formal import monomorph as _MM          # lazy — pulls the middle tier
+    _MM.clear_failed_demands()
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
@@ -15614,12 +15621,27 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.debug_assert_callee(sub)
                         and not (sub.obj is root_ident
                                  and M.callee_is_a_bound_value(fn, base_name))):
+                    # A demand this unit's own instantiation pass could not
+                    # satisfy leaves its call site with its brackets, and the
+                    # reason it could not is a better answer than the generic
+                    # "a call arriving here asked for none" — which is FALSE of
+                    # a call whose bracket named a type argument and whose
+                    # demand failed for a stated reason (arity, a non-concrete
+                    # argument, or a trait-bound violation). `monomorph` is the
+                    # reader that recorded it (`_FAILED_DEMANDS`, one entry per
+                    # template), and it is asked only for a BARE base: the
+                    # registry is keyed on the template's name, and for a dotted
+                    # base `base_name` is the MODULE, not the template.
+                    from formal import monomorph as MM    # lazy — cycle
+                    failed_reason = (MM.failed_demand_reason(base_name)
+                                     if sub.obj is root_ident else None)
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
                         else (_bracketed_export_gap(
                             base_name, fn.name, link_line, callee_spelling)
+                            or failed_reason
                             or M.specialization_call_refusal(callee_spelling)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer

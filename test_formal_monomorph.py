@@ -1109,6 +1109,100 @@ def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
               f"{text.strip()[-400:]}")
 
 
+# §8 of the doc: a TRAIT BOUND, and the conformance check that was not asked.
+BOUNDED_LIB = """\
+trait Greet:
+    def hello(self) -> Int:
+        ...
+
+struct Dog:
+    def hello(self) -> Int:
+        return 1
+
+struct Cat:
+    var x: Int
+
+struct Box[T: Greet]:
+    var v: T
+"""
+
+
+def test_a_trait_bound_violation_is_refused_by_name(tmpdir):
+    """`Box[Cat]` where `Cat` does not satisfy `Box`'s `T: Greet` is REFUSED.
+
+    §8's hole: `formal/monomorph.py::instantiate` substituted a concrete type
+    without asking whether it CONFORMS, and the substituted body is built from a
+    field whose declared type the framing decision does not read
+    (`formal/model.py::struct_is_framed` counts fields, not types).  So a
+    conformance violation was a program the language rejects, silently accepted:
+    measured on the pre-change tree, `Box[Cat]` BUILT and ran, with `Cat`
+    missing the very method the bound requires.
+
+    The repair is `elaborate.check_bounds` — the ONE conformance reader the
+    compiled path already asks (slice 6) — reached from `instantiate`.  It is
+    conservative: an unknown trait or a type with no source in the defining
+    module ACCEPTS, so it can only turn a build into a refusal.  This case is
+    the one it can decide: the trait, the type and the template are all in the
+    unit's own file.
+
+    Asserted as a refusal that NAMES the trait and the missing method, and that
+    does not reach the generic `specialization_call_refusal` ("a call arriving
+    here asked for none") — which is FALSE of a call whose bracket named a type
+    argument perfectly well.
+    """
+    prog = ("def main() -> Int:\n"
+            "    var b = Box[Cat]()\n"
+            "    b.v.x = 7\n"
+            "    return b.v.x\n")
+    for arch in ARCHES:
+        fresh_cas()
+        _root, _out, result = build_pair_case(
+            tmpdir, arch, "mm_bound_bad", lib=None, prog=BOUNDED_LIB + "\n" + prog)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"[{arch}] `Box[Cat]` with `T: Greet` BUILT: `Cat` does not define "
+              f"`hello`, so the source is one the language rejects, and the "
+              f"formal path accepted it — a build-error traded for a run-time "
+              f"wrong answer. {text.strip()[-300:]}")
+        check("does not conform to trait 'Greet'" in text,
+              f"[{arch}] the refusal does not name the trait the argument "
+              f"violates: {text.strip()[-400:]}")
+        check("missing method 'hello'" in text,
+              f"[{arch}] the refusal does not name the method that is missing: "
+              f"{text.strip()[-400:]}")
+        check("asked for none" not in text,
+              f"[{arch}] fell through to `specialization_call_refusal`, which "
+              f"is FALSE here — the bracket named `Cat` and the demand failed "
+              f"for a stated reason: {text.strip()[-400:]}")
+
+
+def test_a_conforming_type_argument_is_still_instantiated(tmpdir):
+    """The control for the row above: a CONFORMING argument builds and agrees.
+
+    Without this, a check that refused every bounded template would pass the
+    violation row and remove the feature.  `Dog` defines `hello`, so `Box[Dog]`
+    is a program the language accepts, and the differential is CPython's own
+    answer for the same computation.
+    """
+    prog = ("def main():\n"
+            "    var b = Box[Dog]()\n"
+            "    print(b.v.hello())\n")
+    cpython = ("class Dog:\n"
+               "    def hello(self):\n"
+               "        return 1\n"
+               "\n"
+               "class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = Dog()\n"
+               "\n"
+               "def main():\n"
+               "    print(Box().v.hello())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        run_pair_case(tmpdir, arch, "mm_bound_ok", None,
+                      BOUNDED_LIB + "\n" + prog, cpython)
+
+
 # ── the decisions, pinned without an image ──────────────────────────────────
 
 
@@ -3014,6 +3108,10 @@ TESTS = [
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
+    ("a trait bound violation is refused by name",
+     test_a_trait_bound_violation_is_refused_by_name),
+    ("a conforming type argument is still instantiated",
+     test_a_conforming_type_argument_is_still_instantiated),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
     ("a source-derived answer is made once per source and never shared",

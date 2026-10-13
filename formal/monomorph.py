@@ -84,6 +84,51 @@ class MonomorphError(Exception):
     """A demand this module cannot satisfy, with the reason in one sentence."""
 
 
+#: `{template: reason}` for the demands the build in flight could not satisfy —
+#: one entry per template, the FIRST reason it failed with.
+#:
+#: A demand that fails leaves its call site carrying brackets, and the
+#: bracketed-callee scan (`formal/build.py::check_module_symbols`) is what
+#: refuses it. Without this table the scan can only say the generic
+#: `specialization_call_refusal` — "a call arriving here asked for none" — which
+#: is FALSE of a call whose bracket named a type argument perfectly well and
+#: whose demand failed for a stated reason (arity, a non-concrete argument, or a
+#: trait-bound violation). The scan asks this table first and uses the reason
+#: when there is one, so the reader gets the diagnostic the instantiation owes
+#: instead of a sentence about a missing demand.
+#:
+#: Module-level, like `formal/model.py::_MODULE_SYMBOLS` and for its reason: the
+#: consumer (the scan) is in another module and holds no unit of its own. It is
+#: cleared per UNIT (`clear_failed_demands`), because two modules compiled in
+#: one process — a dylib and its dependent — must not answer for each other's
+#: failed demands.
+_FAILED_DEMANDS: dict = {}
+
+
+def clear_failed_demands() -> None:
+    """Forget the previous unit's failed demands. Called at the start of a build."""
+    global _FAILED_DEMANDS
+    _FAILED_DEMANDS = {}
+
+
+def failed_demand_reason(template: str) -> str | None:
+    """The reason `template`'s instantiation failed in this unit, or None.
+
+    Asked by the bracketed-callee scan about the base name of a call it cannot
+    bind; `None` means the failure (if any) is not one this module recorded, and
+    the scan keeps its own generic refusal."""
+    return _FAILED_DEMANDS.get(template)
+
+
+def _record_failed_demands(failed) -> None:
+    """`setdefault` each `(template, args, reason)` into `_FAILED_DEMANDS`.
+
+    First reason wins, so the message is stable across the order the demand set
+    happened to be walked in."""
+    for name, _args, reason in failed or ():
+        _FAILED_DEMANDS.setdefault(name, reason)
+
+
 KIND_STRUCT = "struct"
 KIND_FN = "def"
 
@@ -445,6 +490,23 @@ def instantiate(src: str, name: str, args) -> tuple:
     if variadic is not None:
         targs[variadic[1]] = _variadic_binding(variadic[1],
                                               args[len(fixed):])
+    # §8 of `bugs/FORMAL_generic_monomorph_scope.md`: a bounded template's
+    # concrete argument must CONFORM before anything is substituted.  Without
+    # this the substituted body is built from a type the source never promised —
+    # a field whose declared type the framing decision does not read
+    # (`struct_is_framed` counts fields, not types), so a conformance violation
+    # is a field that compiles and a program the language rejects, silently
+    # accepted.  `elaborate.check_bounds` is the ONE conformance reader the
+    # compiled path already asks (slice 6), and it is conservative in the
+    # direction this needs: an unknown trait or a type with no source in the
+    # defining module ACCEPTS, so wiring it here can only turn a build into a
+    # refusal, and only where both the trait and the concrete type are in the
+    # template's own module.  This is not a second rule — it is the same one,
+    # asked on the one path that was not asking it.
+    try:
+        elaborate.check_bounds(src, template_src, targs)
+    except elaborate.ConformanceError as e:
+        raise MonomorphError(str(e)) from None
     try:
         mangled, concrete = monomorphize.monomorphize_source(
             _fold_self_params(template_src, params), targs)
@@ -824,7 +886,8 @@ def publish_source(mangled: str, concrete: str) -> str:
                        ".mojo", concrete.encode())
 
 
-def instantiate_all(module_src: str, wanted: dict) -> tuple:
+def instantiate_all(module_src: str, wanted: dict,
+                    record: bool = False) -> tuple:
     """`([(template, mangled, args, path), …], [(name, args, reason), …])`.
 
     The whole of what both callers need, in one place, because the two halves of
@@ -845,6 +908,13 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
     and a build that raised here would report a demand's failure in place of
     either of those, which is the "message that is false about the file" defect
     `FORMAL_known_limits.md` exists to prevent.
+
+    `record` publishes the failures in `_FAILED_DEMANDS`, and only the UNIT's own
+    half passes it (`formal/imports.py::_own_instantiations`). A dependency's
+    failed demand is the dependency's problem and its call site belongs to
+    another source, so recording it here would let one module's failure answer
+    for a call in another — the cross-unit confusion `clear_failed_demands`
+    exists to bound.
     """
     made, failed = [], []
     for name in sorted(wanted or {}):
@@ -856,6 +926,8 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
                 continue
             made.append((name, mangled, tuple(args),
                          publish_source(mangled, concrete)))
+    if record:
+        _record_failed_demands(failed)
     return made, failed
 
 
