@@ -10,7 +10,7 @@ its own document now:**
 | defect | document |
 |---|---|
 | the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | fixed by `5361903f` (one `arm64_ext_imm12` helper, all five arms) |
 
 Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
 written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
