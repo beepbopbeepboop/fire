@@ -1,11 +1,24 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64, and so
+is item 4 (a length-changing slice store, arm64); items 1 (container `==`/`!=`)
+and 2 (ordering) are unchanged.** `test_formal_container_methods.py` measures
+the whole surface against CPython on both architectures and is green; this doc
+is about the rows in it that are green *as refusals*, which is a different
+thing from green as answers. The set-algebra rows and the four slice-store rows
+are answers now.
+
+**2026-10-12 (`formal297-docs`): `xs[a:b] = v` now RESIZES on arm64 when
+`len(v) != b - a` — grow, shrink, insert and a backwards range all answer
+CPython.** Measured, `test_formal_container_methods.py list`: the group's total
+went from 63 answers to **67** (`l_slice_store_grow`, `l_slice_store_shrink`,
+`l_slice_store_insert`, `l_slice_store_backwards` — all arm64, and each
+`BACKEND_ONLY` for x86-64, which refuses the whole construct). The
+reservation is `_scan_list_caps`'s, the memmove and the count bump are
+`arm64_codegen._emit_slice_store`'s, and the growth is guarded at run time by
+`_emit_blob_growth_guard` — so a growth past the reservation is a named stop,
+not a frame overrun, and a store whose receiver has no known reservation keeps
+the old same-length lowering and its diagnostic.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -98,8 +111,10 @@ with the element's own width known only at run time
    a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
    primitives are both already here: `_emit_del_list_range` memmoves a tail and
    shrinks the count, and `_emit_list_append` grows it past the count into
-   reserved capacity. arm64's `_emit_slice_store` is a same-length copy loop and
-   x86-64 has no slice store at all.
+   reserved capacity. **arm64 LANDED 2026-10-12** (grow, shrink, insert and a
+   backwards range; see the Status at the top); x86-64 still has no slice store
+   at all, and its refusal is the wide, honest answer for a slice that is a
+   materialized copy.
 
 The stride is the whole of it, and it is not free: `model.blob_elem_stride`
 already answers it for `list:int`, `list:str` and a dict's `list:<value-elem>`
@@ -128,8 +143,13 @@ the second reason this is a project rather than a rewrite.
 3. **Ordering** (item 2). Both backends. Strictly after item 1, and it reuses
    item 1's compare — a three-way element compare is the same inner loop with a
    different exit.
-4. **A length-changing slice store** (item 4). arm64 first (it is the backend
-   that has the store), and only then x86-64, which needs a slice to stop being
+4. **A length-changing slice store** (item 4) — **DONE on arm64
+   (2026-10-12).** `_scan_list_caps` reserves the growth at the receiver's own
+   literal, `_emit_slice_store` moves the tail by `len(v) - (b - a)` and writes
+   the new count, and the grow half is guarded at run time by
+   `_emit_blob_growth_guard`. x86-64 still refuses the whole construct, and
+   `test_formal_container_methods.py` carries the four new arm64 rows in
+   `BACKEND_ONLY` for it. The remaining x86-64 half needs a slice to stop being
    a materialized copy before the store can mean anything.
 
 ## The rows that must not be "fixed" by deleting the case

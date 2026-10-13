@@ -509,6 +509,35 @@ LIST_CASES = [
      "x86-64 does not have. arm64-only, declared in BACKEND_ONLY below rather "
      "than discovered: the group image is one build, so the case is EXCLUDED "
      "from it on x86-64 rather than failing the build"),
+    ("l_slice_store_grow",
+     ["a = [3, 1, 2]", "a[0:1] = [9, 9, 9]"],
+     ("%d %d %d %d %d %d\\n", ["len(a)", "a[0]", "a[1]", "a[2]", "a[3]",
+                               "a[4]"]),
+     "a length-changing slice store that GROWS the blob: CPython replaces "
+     "`[0:1]` with three elements and shifts the tail, so `[3, 1, 2]` becomes "
+     "`[9, 9, 9, 1, 2]`. arm64 resizes (the arm64-only half of the construct); "
+     "x86-64 has no slice store at all and refuses"),
+    ("l_slice_store_shrink",
+     ["a = [3, 1, 2]", "a[0:1] = []"],
+     ("%d %d %d\\n", ["len(a)", "a[0]", "a[1]"]),
+     "a length-changing slice store that SHRINKS: deleting a range by "
+     "assigning an empty list, `[3, 1, 2]` to `[1, 2]`. The memmove direction "
+     "the sign of the length difference picks — an empty replacement moves "
+     "the tail LEFT"),
+    ("l_slice_store_insert",
+     ["a = [3, 1, 2]", "a[1:1] = [7, 8]"],
+     ("%d %d %d %d %d %d\\n", ["len(a)", "a[0]", "a[1]", "a[2]", "a[3]",
+                               "a[4]"]),
+     "an INSERT: an empty range at 1 with a two-element value, `[3, 1, 2]` to "
+     "`[3, 7, 8, 1, 2]`. The range length is zero and the value is not, so "
+     "this is the grow path with nothing to move before the store"),
+    ("l_slice_store_backwards",
+     ["a = [3, 1, 2]", "a[2:1] = [9]"],
+     ("%d %d %d %d %d\\n", ["len(a)", "a[0]", "a[1]", "a[2]", "a[3]"]),
+     "a range whose stop is BELOW its start: CPython treats it as EMPTY and "
+     "inserts at start, so `[3, 1, 2]` with `[2:1] = [9]` is `[3, 1, 9, 2]`. "
+     "The old lowering branched to its diagnostic here — the clamp the resize "
+     "path shares with `del` is what makes this an answer"),
 ]
 
 DICT_CASES = [
@@ -892,6 +921,12 @@ BACKEND_ONLY = {
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
+    # The length-changing slice store is the same split: arm64 resizes (grow,
+    # shrink and insert), x86-64 refuses the construct outright.
+    "l_slice_store_grow": "x86_64",
+    "l_slice_store_shrink": "x86_64",
+    "l_slice_store_insert": "x86_64",
+    "l_slice_store_backwards": "x86_64",
 }
 
 

@@ -12737,23 +12737,27 @@ def slice_store_static_length_refusal(target, value) -> str | None:
     """Why `xs[a:b] = v` cannot keep the blob's length, or None when it can.
 
     **The one question about a slice STORE that can be answered before anything
-    runs, and answering it is the difference between a diagnostic and a silent
-    wrong answer.** This path lowers `xs[a:b] = v` as a SAME-LENGTH in-place
-    replace — it copies `v`'s elements over the range and stops — so a `v` whose
-    length differs from the range's has nowhere to put the difference. CPython
-    resizes: `a = [3, 1, 2]; a[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]`, and
-    `a[0:1] = []` is `[1, 2]`. Measured on this tree, arm64, both of those
-    **exited 1 with no output and no message at all** — and that is the worst
-    outcome class there is, because the program looks like it ran. x86-64
-    refuses the whole construct at build time with a sentence that names the
-    reason, which is the right answer and the wrong SCOPE: a same-length
-    replace is a real lowering, and refusing every slice store would take it
-    away.
+    runs, and answering it is the difference between a diagnostic and a
+    silent stop.** The question is asked only when the RECEIVER ITSELF is a
+    literal — a store into a name-bound list reserves the room to resize at the
+    name's own literal (`slice_store_growth_slots`), so the length may change
+    there and this refusal does not apply. For a literal receiver there is no
+    name to have reserved room under, so the store can only be a SAME-LENGTH
+    in-place replace and a `v` whose length differs has nowhere to put the
+    difference. CPython resizes: `a = [3, 1, 2]; a[0:1] = [9, 9, 9]` is
+    `[9, 9, 9, 1, 2]`, and `a[0:1] = []` is `[1, 2]`. Measured on this tree,
+    arm64, both of those **exited 1 with no output and no message at all** —
+    and that is the worst outcome class there is, because the program looks
+    like it ran. x86-64 refuses the whole construct at build time with a
+    sentence that names the reason, which is the right answer and the wrong
+    SCOPE: a same-length replace is a real lowering, and refusing every slice
+    store would take it away.
 
     So this asks only what is statically decidable, and refuses only then:
 
     * the receiver is a list/tuple/set LITERAL with no `*` splat, so its count
-      is a number this build can see;
+      is a number this build can see (a NAME is `slice_store_growth_slots`'s
+      question instead, and this returns None for it);
     * the bounds are integer literals or absent, and CPython's clamping is
       applied to them the way `_emit_slice_store` applies it (`start` and
       `stop` clamp into `[0, count]`, and `stop` at or below `start` makes an
@@ -12761,41 +12765,17 @@ def slice_store_static_length_refusal(target, value) -> str | None:
     * the value is a LITERAL of known length.
 
     Anything else answers None, which means "this build cannot tell" — not
-    "this build is satisfied". The run-time arm is a diagnostic plus `exit(1)`
-    rather than a bare exit, so the case this cannot see still says something.
-    Both facts are stated in `_emit_slice_store`'s docstring, which is where the
+    "this build is satisfied". For the shape this cannot see, `_emit_slice_
+    store`'s run-time arm is a diagnostic plus `exit(1)` rather than a bare
+    exit when the receiver's reservation is unknown, and a resize when it is
+    known; both are stated in that method's docstring, which is where the
     measurement behind them lives.
     """
-    def literal_len(node):
-        """`len(node)` when the build can read it, else None."""
-        import fire_compiler as F
-        if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return None
-        if any(isinstance(el, F.UnaryOp) and el.op == "*"
-               for el in getattr(node, "elements", []) or []):
-            return None
-        return len(getattr(node, "elements", []) or [])
-
-    def bound(node, default, count):
-        if node is None:
-            return default
-        value = getattr(node, "value", None)
-        if not isinstance(value, int) or isinstance(value, bool):
-            return None
-        return max(0, min(value, count))
-
-    count = literal_len(getattr(target, "obj", None))
-    if count is None:
+    count = slice_static_len(getattr(target, "obj", None))
+    rng = slice_store_static_range(target, value, count)
+    if rng is None:
         return None
-    vlen = literal_len(value)
-    if vlen is None:
-        return None
-    start = bound(getattr(target, "start", None), 0, count)
-    stop = bound(getattr(target, "stop", None), count, count)
-    if start is None or stop is None:
-        return None
-    if stop <= start:
-        stop = start
+    start, stop, vlen = rng
     if stop - start == vlen:
         return None
     return (
@@ -12809,6 +12789,95 @@ def slice_store_static_length_refusal(target, value) -> str | None:
         f"program that looks like it ran. Build the list at its final length "
         f"instead — assign into it, or `append` into a literal sized for what "
         f"the program needs — or split the shift out of this line")
+
+
+def slice_static_len(node):
+    """`len(node)` for a container LITERAL with no `*` splat, else None.
+
+    The one reading of "how many elements does this literal spell", shared by
+    `slice_store_static_length_refusal` (which compares two of them) and
+    `slice_store_growth_slots` (which subtracts one from the other). A second
+    reader would be a second answer to what a literal's length is, and the
+    refusal and the reservation would then disagree about the same site.
+    """
+    if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return None
+    if any(isinstance(el, F.UnaryOp) and el.op == "*"
+           for el in getattr(node, "elements", []) or []):
+        return None
+    return len(getattr(node, "elements", []) or [])
+
+
+def slice_static_bound(node, default, count):
+    """A slice bound clamped into `[0, count]`, or None when not a literal int.
+
+    `node` is `None` for an omitted bound, which is `default`. The clamping is
+    CPython's: a negative bound is not clamped here because
+    `slice_store_static_range` is only asked about the literal shapes this
+    build can read, and a non-literal bound has no static answer at all.
+    """
+    if node is None:
+        return default
+    value = getattr(node, "value", None)
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return max(0, min(value, count))
+
+
+def slice_store_static_range(target, value, count):
+    """`(start, stop, vlen)` for `target[a:b] = value`, or None if not static.
+
+    `count` is the receiver's element count when this build can read it. The
+    three numbers an in-place resize is stated in, read ONCE so the refusal
+    (`slice_store_static_length_refusal`) and the reservation
+    (`arm64_codegen._scan_list_caps`'s caller `slice_store_growth_slots`)
+    cannot clamp a bound differently and make the room one site reserves a
+    different site's range.
+    """
+    if count is None:
+        return None
+    vlen = slice_static_len(value)
+    if vlen is None:
+        return None
+    start = slice_static_bound(getattr(target, "start", None), 0, count)
+    stop = slice_static_bound(getattr(target, "stop", None), count, count)
+    if start is None or stop is None:
+        return None
+    if stop < start:
+        stop = start
+    return start, stop, vlen
+
+
+#: The room a length-changing slice store reserves when its growth is NOT
+#: statically known, mirroring `DYNAMIC_SPLAT_SLOTS`: the value's length is a
+#: word read at run time for a name-bound replacement, so the reservation is a
+#: BUDGET rather than a bound and the run-time guard
+#: (`blob_growth_overflow_message`) turns a bigger growth into a named stop
+#: instead of a frame overrun.  One number in one place, because the two
+#: backends would otherwise pick it separately.
+DYNAMIC_SLICE_GROWTH_SLOTS = DYNAMIC_SPLAT_SLOTS
+
+
+def slice_store_growth_slots(target, value, count) -> int:
+    """Slots `target[a:b] = value` can GROW a `count`-element blob by.
+
+    The reservation half of a length-changing slice store: the extra room has
+    to be carved out where the blob is built, and this is how much. `max(0,
+    vlen - (stop - start))` when the range and the value's length are both
+    statically readable — a same-length or shrinking store reserves nothing —
+    and `DYNAMIC_SLICE_GROWTH_SLOTS` when they are not.
+
+    `count` is the receiver's static element count, read from the literal the
+    name is bound to. It UNDER-states the run-time count for a name that is
+    also appended to, and that direction is the safe one: a smaller range
+    makes a LARGER growth, so the reservation is never short of what an
+    append-then-store program needs.
+    """
+    rng = slice_store_static_range(target, value, count)
+    if rng is None:
+        return DYNAMIC_SLICE_GROWTH_SLOTS
+    start, stop, vlen = rng
+    return max(0, vlen - (stop - start))
 
 
 def container_membership_refusal(spelled_needle: str, spelled_haystack: str,

@@ -4991,10 +4991,26 @@ ctor_field_value=self._ctor_field_value_for(name),
         receiver's NAME. Both must agree on the number, and they are computed
         from one pass so they cannot. A name bound to more than one literal
         takes the smallest of their capacities, so the bound holds whichever
-        blob is live."""
+        blob is live.
+
+        **A length-changing slice store is the second grower**, and it is
+        scanned here for the same reason: `xs[a:b] = v` with `len(v) != b - a`
+        moves the tail and changes the count, so the blob needs room for
+        `len(v) - (b - a)` more elements than the literal spelled. A site whose
+        range and value are static contributes exactly that
+        (`model.slice_store_growth_slots`); one whose value is a name
+        contributes the splat budget, and the run-time guard
+        (`_emit_blob_growth_guard`) answers for a larger one."""
         appends: dict = {}
-        trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
-            getattr(fn, "body", None) or [], self._stmt_loop_trips)}
+        #: name -> the length-changing slice stores that grow it, as
+        #: `(SliceExpr, value, trips)`. Collected here and turned into slots
+        #: below, because the growth is `vlen - (stop - start)` and the bounds
+        #: clamp against the literal's OWN count, which is not known until the
+        #: name's literals are read a few lines down.
+        slices: dict = {}
+        walks = list(M.walk_stmt_trips(
+            getattr(fn, "body", None) or [], self._stmt_loop_trips))
+        trips_by_id = {id(node): trips for node, trips in walks}
         for node, recv, method, _args in _walk_value_methods(fn):
             if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
@@ -5004,13 +5020,32 @@ ctor_field_value=self._ctor_field_value_for(name),
             # why an unbounded loop is not made into a build failure.
             trips = trips_by_id.get(id(node), 1) or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
+        # A length-changing slice store (`xs[a:b] = v` with `len(v) != b - a`)
+        # resizes the blob and needs the same room an append does — and, like
+        # an append, where it runs and how much it grows the blob are visible
+        # to a whole-function scan (`walks` for the loop bound,
+        # `model.slice_store_growth_slots` for the per-site growth). A site
+        # whose range and value length are static reserves exactly its growth;
+        # one whose value is a name-bound blob reserves the splat budget and
+        # the run-time guard answers for anything larger.
+        for node, bound in walks:
+            target = getattr(node, "target", None)
+            if not (isinstance(node, F.AssignStmt)
+                    and isinstance(target, F.SliceExpr)
+                    and isinstance(target.obj, F.IdentExpr)):
+                continue
+            trips = bound if bound is not None else 1
+            slices.setdefault(target.obj.name, []).append(
+                (target, node.value, trips))
         by_node: dict = {}
         by_name: dict = {}
-        for name, count in appends.items():
-            # A list the function appends to must also BE a list: if the name
-            # is bound to something else anywhere, the capacity would be a
-            # promise about the wrong blob, so the entry is dropped and the
-            # append site refuses instead.
+        for name in list(appends) + list(slices):
+            if name in by_name:
+                continue
+            # A list the function appends to (or slice-stores into) must also
+            # BE a list: if the name is bound to something else anywhere, the
+            # capacity would be a promise about the wrong blob, so the entry is
+            # dropped and the append site refuses instead.
             if not M.is_list_kind(vkinds.name_kind(name)):
                 continue
             literals = M.blob_nodes_bound_to(fn, name)
@@ -5025,6 +5060,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             # which is what makes a constructor-built blob appendable. One
             # rule, in the model, read by both backends.
             base = min(M.blob_reserved_slots(lit) for lit in literals)
+            count = appends.get(name, 0)
+            for target, value, trips in slices.get(name, []) or []:
+                count += M.slice_store_growth_slots(target, value, base) * trips
             want = base + count
             for literal in literals:
                 prev = by_node.get(id(literal))
@@ -12385,34 +12423,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
-        """`obj[a:b] = value` — same-length replace of the slice range.
+        """`obj[a:b] = value` — replace the slice range, resizing if needed.
 
-        A formal list blob cannot change length without a compaction pass, so
-        this is a SAME-LENGTH replace and `len(value) != slice_len` stops the
-        program — with a DIAGNOSTIC, which is the second half of what used to
-        be wrong here. step must be 1 (or None).
+        Python's `xs[a:b] = v` RESIZES: `[3, 1, 2]` with `[0:1] = [9, 9, 9]`
+        is `[9, 9, 9, 1, 2]` and with `[0:1] = []` is `[1, 2]`. This lowers that
+        when the receiver is a name whose reservation this build knows, by
+        moving the tail by `len(v) - (b - a)` elements and writing the new
+        count — the memmove direction the sign of that difference picks. A
+        same-length store is the `delta == 0` case of the same code. step must
+        be 1 (or None).
 
-        **The exit was silent, and a silent exit is the worst outcome this path
-        has.** Measured on this tree before the gate: `a = [3, 1, 2]` then
+        **The exit used to be silent, and a silent exit is the worst outcome
+        this path has.** Measured before the gate: `a = [3, 1, 2]` then
         `a[0:1] = [9, 9, 9]` built, ran and **exited 1 with nothing on stdout
-        and nothing on stderr** — a program that looks like it ran and did not,
-        where CPython's answer is `[9, 9, 9, 1, 2]`. The same source's
-        `a[0:1] = [9]` (equal lengths) answered 9 correctly, so the defect only
-        showed on the half of the construct this lowering does not implement.
-        x86-64 refuses the construct outright; that is a refusal at a wider
-        scope than this one, and it names the same reason, so the two are one
-        answer at two depths rather than two answers.
+        and nothing on stderr** — a program that looks like it ran and did not.
+        The same source's `a[0:1] = [9]` (equal lengths) answered 9 correctly,
+        so the defect only showed on the half of the construct that was not
+        implemented. x86-64 refuses the construct outright; that is a refusal
+        at a wider scope than this one, and it names the same reason, so the
+        two are one answer at two depths rather than two answers.
 
-        Two things now, and the second is what covers what the first cannot see:
+        Three things can happen, in order of how much this build knows:
 
         * `model.slice_store_static_length_refusal` refuses AT BUILD TIME when
-          the receiver, the bounds and the value are all literal — the shape a
-          corpus writes, and the shape above;
-        * the run-time arm this method still needs, because the receiver's count
-          is a word read at run time and a store into a name-bound list cannot
-          be decided while emitting, now says WHICH bound it was before it
-          stops, through the same `write(2)` every other bounded stop on this
-          path uses (`_emit_blob_growth_guard`'s half).
+          the RECEIVER ITSELF is a literal and the lengths disagree: there is
+          no name to have reserved room under, so there is nowhere to put the
+          difference;
+        * a name-bound receiver WITH a reservation (`_scan_list_caps` reserved
+          the growth, `_list_caps_by_name` has it) takes the resizing path,
+          with a run-time `_emit_blob_growth_guard` on the grow half, so a
+          growth past the reservation is a named stop and not a frame overrun;
+        * a receiver whose reservation this build does NOT know (a parameter,
+          a global, an expression) keeps the same-length lowering and stops
+          with a diagnostic when the lengths disagree — the wide,
+          conservative answer for the one shape no reservation was ever made
+          for.
         """
         if target.step is not None:
             st = target.step
@@ -12424,11 +12469,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
         obj = target.obj
+        # The room reserved where the receiver's literal was built, when the
+        # receiver is a NAME this scan saw. `_list_caps_by_name[name]` is
+        # `(base, extra)` — the literal's own slots and the append/slice
+        # growth added on top — so the run-time capacity is their sum.
+        recv_name = obj.name if isinstance(obj, F.IdentExpr) else None
+        room = (self._list_caps_by_name.get(recv_name)
+                if recv_name is not None else None)
+        cap = (room[0] + room[1]) if room is not None else None
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
         fail_label = f"{fn}_ss{sid}_fail"
         done_label = f"{fn}_ss{sid}_done"
+        copy_label = f"{fn}_sscp{sid}"
+        grow_loop = f"{fn}_ssgl{sid}"
+        grow_done = f"{fn}_ssgd{sid}"
+        shrink_label = f"{fn}_sssh{sid}"
+        shrink_loop = f"{fn}_sssl{sid}"
+        shrink_done = f"{fn}_sssd{sid}"
 
         self._emit_expr(value)
         self.asm.emit(encode_stp_sp_pre(0, 2))  # [SP]=val base
@@ -12480,46 +12539,117 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_mov_zr_xn(5, 2))
         self.asm.label(c2)
         self.asm.emit(encode_cmp_xn_xm(5, 4))
-        self.asm.emit(encode_cset_xd_cond(0, "cs"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        self.asm.emit_label_rel(fail_label, here_offset=-4)
-        self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))
-        self.asm.emit(encode_cmp_xn_xm(3, 6))
-        self.asm.emit(encode_cset_xd_cond(0, "eq"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        self.asm.emit_label_rel(fail_label, here_offset=-4)
+        self.asm.emit(encode_cset_xd_cond(0, "cs"))       # X0 = (X5 >= X4)
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        cl = f"{fn}_sscl{sid}"
+        self.asm.emit_label_rel(cl, here_offset=-4)        # stop >= start → keep
+        self.asm.emit(encode_mov_zr_xn(5, 4))             # stop < start → stop = start
+        self.asm.label(cl)
+        self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))       # X6 = range length
+        if cap is None:
+            # No reservation is known for this receiver (a parameter, a global,
+            # an expression), so only the SAME-LENGTH replace is safe and a
+            # length change stops with the diagnostic below rather than writing
+            # past the blob.
+            self.asm.emit(encode_cmp_xn_xm(3, 6))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            self.asm.emit_label_rel(fail_label, here_offset=-4)
+        else:
+            self.asm.emit(encode_cmp_xn_xm(3, 6))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(copy_label, here_offset=-4)
+            # delta = len(value) - range length, SIGNED: > 0 grows, < 0 shrinks.
+            self.asm.emit(encode_sub_xd_xn_xm(10, 3, 6))
+            self.asm.emit(encode_cmp_xn_imm(10, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "gt"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            self.asm.emit_label_rel(shrink_label, here_offset=-4)
+            # GROW.  The new count has to fit the reservation the literal made
+            # (`_scan_list_caps`), and the guard is before ANY store — the same
+            # shape and the same ordering `_emit_list_append` uses for the same
+            # bound.
+            self.asm.emit(encode_add_xd_xn_xm(14, 2, 10))  # count + delta
+            self._emit_blob_growth_guard("a slice assignment", 14, cap, "ssg")
+            # Move the tail [stop, count) right by delta, top element first so
+            # no source is overwritten before it is read.
+            self.asm.emit(encode_sub_xd_xn_imm(13, 2, 1))  # j = count - 1
+            self.asm.label(grow_loop)
+            self.asm.emit(encode_cmp_xn_xm(13, 5))
+            self.asm.emit(encode_cset_xd_cond(0, "lt"))    # j < stop → done
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(grow_done, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(11, 13, 10))        # j + delta
+            self.asm.emit(encode_add_xd_xn_imm(12, 9, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 11))   # &obj[j+delta]
+            self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 13))   # &obj[j]
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 11, 0))
+            self.asm.emit(encode_str_xt_xn_imm(0, 12, 0))
+            self.asm.emit(encode_sub_xd_xn_imm(13, 13, 1))
+            self._emit_b_to(grow_loop)
+            self.asm.label(grow_done)
+            self.asm.emit(encode_add_xd_xn_xm(2, 2, 10))   # count += delta
+            self.asm.emit(encode_str_xt_xn_imm(2, 9, 0))
+            self._emit_b_to(copy_label)
+            # SHRINK.  No guard: removing elements can never outgrow the blob.
+            self.asm.label(shrink_label)
+            self.asm.emit(encode_mov_zr_xn(13, 5))         # j = stop
+            self.asm.label(shrink_loop)
+            self.asm.emit(encode_cmp_xn_xm(13, 2))
+            self.asm.emit(encode_cset_xd_cond(0, "ge"))    # j >= count → done
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(shrink_done, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(11, 13, 10))        # j + delta (<0)
+            self.asm.emit(encode_add_xd_xn_imm(12, 9, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 11))
+            self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 13))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 11, 0))
+            self.asm.emit(encode_str_xt_xn_imm(0, 12, 0))
+            self.asm.emit(encode_add_xd_xn_imm(13, 13, 1))
+            self._emit_b_to(shrink_loop)
+            self.asm.label(shrink_done)
+            self.asm.emit(encode_add_xd_xn_xm(2, 2, 10))   # count += delta
+            self.asm.emit(encode_str_xt_xn_imm(2, 9, 0))
+        self.asm.label(copy_label)
+        # Copy value[0..len(value)) into obj[start..start+len(value)).  The
+        # same loop serves the same-length case, where X3 == X6.
         self.asm.emit(encode_movz_wd_imm(7, 0))
         loop = f"{fn}_ssl{sid}"
         self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(7, 6))
-        self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 0))           # i >= len → done
+        self.asm.emit(encode_cmp_xn_xm(7, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))        # i >= len(value)
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done_label, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_xm(10, 4, 7))
-        self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 10))
+        self.asm.emit(encode_add_xd_xn_xm(11, 4, 7))       # start + i
         self.asm.emit(encode_add_xd_xn_imm(12, 8, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 7))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 7))  # &value[i]
         self.asm.emit(encode_ldr_xt_xn_imm(0, 12, 0))
-        self.asm.emit(encode_str_xt_xn_imm(0, 11, 0))
+        self.asm.emit(encode_add_xd_xn_imm(10, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 11))  # &obj[start+i]
+        self.asm.emit(encode_str_xt_xn_imm(0, 10, 0))
         self.asm.emit(encode_add_xd_xn_imm(7, 7, 1))
         self._emit_b_to(loop)
-        self.asm.emit(encode_b(0))
-        self.asm.emit_label_rel(done_label, here_offset=-4)
-        self.asm.label(fail_label)
-        # SAY WHY before stopping.  A bare `exit(1)` here is what made
-        # `a[0:1] = [9, 9, 9]` look like a program that ran and did not, so the
-        # run-time arm gets the same `write(2)` every other bounded stop on this
-        # path uses.  The message names the CONSTRUCT and not the two counts,
-        # because turning X3 and X6 into decimal text is a division loop this
-        # emitter does not otherwise have, and a wrong-but-plausible pair of
-        # numbers in a diagnostic would be worse than none.
-        self._emit_stop_diagnostic(
-            "slice assignment: this path replaces the range IN PLACE, so the "
-            "replacement has to have exactly as many elements as the range; "
-            "this one does not.  Python resizes instead - xs[0:1] = [9, 9, 9] "
-            "on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
-        self._emit_exit(1)
+        if cap is None:
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(done_label, here_offset=-4)
+            self.asm.label(fail_label)
+            # SAY WHY before stopping.  A bare `exit(1)` here is what made
+            # `a[0:1] = [9, 9, 9]` look like a program that ran and did not, so
+            # the run-time arm gets the same `write(2)` every other bounded
+            # stop on this path uses.  The message names the CONSTRUCT and not
+            # the two counts, because turning X3 and X6 into decimal text is a
+            # division loop this emitter does not otherwise have, and a
+            # wrong-but-plausible pair of numbers in a diagnostic would be
+            # worse than none.
+            self._emit_stop_diagnostic(
+                "slice assignment: this path replaces the range IN PLACE, so "
+                "the replacement has to have exactly as many elements as the "
+                "range; this one does not.  Python resizes instead - "
+                "xs[0:1] = [9, 9, 9] on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
+            self._emit_exit(1)
         self.asm.label(done_label)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
