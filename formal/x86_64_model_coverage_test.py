@@ -320,8 +320,8 @@ def samples():
     # `formal/x86_64_codegen.py` emits all of these, and until now `samples()`
     # named NONE of them, so `x86_step` was never asked the one question this
     # list exists to ask — `tools/formal_isa_census.py`'s LEAN column for x86-64
-    # IS this list, and it read `no` for each: the SSE2 scalar-double coverage
-    # gap, closed 2026-10-08.
+    # IS this list, and it read `no` for each.  See
+    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
     #
     # A HIGH XMM index is not available (SysV AMD64 names only XMM0-XMM7, and
     # every encoder asserts it), so unlike the GPR rows there is no r8-r15 pair
@@ -787,13 +787,6 @@ def _memory_samples():
 #: difference VISIBLE.  `probe` is a fact about the instruction, not a copy of
 #: the successor, so the check stays non-circular: it compares the model's step
 #: against the emitter's successor on the fields the instruction is ABOUT.
-#:
-#: A fourth element is an INITIAL STATE template (`%d` is the address) and is
-#: the reason `setcc`'s row is worth having: `X86State.init` leaves every
-#: register but `rdi` at 0, and an instruction whose whole output is 0 or 1 has
-#: nothing to say at a state where its destination is already 0 — the check
-#: passes on a row that states the wrong WIDTH of write, which is the mistake it
-#: exists to catch.  Omitted, it is `X86State.init 10 <address>`.
 #:
 #: `RDI` and not `R12` for the `movq` source, and that is the whole reason the
 #: row has teeth.  `X86State.init 10 _` sets `rdi := 10` and every other general

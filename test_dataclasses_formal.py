@@ -523,17 +523,12 @@ def main(n):
     return 0
 """
 
-# The residue, and the shape that makes it a residue: the operator's
+# The residue, and the two shapes that make it a residue: the operator's
 # dispatch lowers a comparison only when BOTH operands are bare names this image
 # can say are values of the same class.  `a == 5` is a word against a frame and
-# cannot be classified, so it would answer 0 through the address compare the
-# dispatch exists to replace — which is why it stays in `REFUSE_CASES`.
-#
-# `Always(3, 4) == Always(9, 9)` WAS the second residue and no longer is: both
-# operands are constructions, and they are now bound to locals
-# (`formal/build.py`'s `_hoist_value_type_construction_operands`) before the
-# dispatch runs, so the row moved to `EXEC_CASES` as
-# `a_user_declared_eq_reaches_the_method_through_two_constructions`.
+# `Always(3, 4) == Always(9, 9)` compares two temporaries — neither can be
+# classified, and both would answer 0 through the address compare the dispatch
+# exists to replace.
 OWN_EQ_WORD_OPERAND = """
 from dataclasses import dataclass
 
@@ -712,22 +707,6 @@ EXEC_CASES = [
     # direction, and this one was a wrong answer with nothing on stderr.
     ("a_user_declared_eq_reaches_the_method_through_two_call_operands",
      OWN_EQ_TWO_CALL_OPERANDS),
-    # …and the DIRECT-construction operand, which used to sit in `REFUSE_CASES`
-    # as `a_user_declared_eq_between_two_constructions_is_refused_by_the_shape`.
-    # It is an EXECUTION row now because the refusal it asserted was true only
-    # of the shape, and the shape is no longer refused: `Always(3, 4) ==
-    # Always(9, 9)` binds each construction to a local
-    # (`formal/build.py`'s `_hoist_value_type_construction_operands`) and the
-    # dispatch then reaches the user's `__eq__` — so the image answers 1, which
-    # is what CPython answers, where before the hoist it answered 0 (two
-    # temporaries, two addresses) on both architectures.
-    #
-    # A row that stops being true is moved rather than deleted, and the pairing
-    # is what matters: `OWN_EQ_TWO_CALL_OPERANDS` above is the same question
-    # asked through a CALL and this one through a CONSTRUCTION, so a rewrite
-    # that fixes one and not the other shows up as one of the two going red.
-    ("a_user_declared_eq_reaches_the_method_through_two_constructions",
-     OWN_EQ_CONSTRUCTION_OPERAND),
 ]
 
 
@@ -989,6 +968,9 @@ REFUSE_CASES = [
     ("a_user_declared_eq_against_a_word_is_refused_by_the_shape",
      OWN_EQ_WORD_OPERAND,
      ["__eq__", "5 is not a plain name"]),
+    ("a_user_declared_eq_between_two_constructions_is_refused_by_the_shape",
+     OWN_EQ_CONSTRUCTION_OPERAND,
+     ["__eq__", "ADDRESSES"]),
     # A call operand the dispatch CAN resolve, so the gap is the other operand.
     # The forbidden half is the point: naming `mk(...)` as "a construction" is
     # false (it is a function) and sends the reader to the wrong line, and a

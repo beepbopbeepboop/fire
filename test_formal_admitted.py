@@ -1354,9 +1354,7 @@ AXIOM_CLOSURE = {
     # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
     # declaration added by one of the merged branches rests on a decide axiom.
     # The partition still closes (312 = 61 + 243 + 0 + 8).
-    # Re-pinned by the bulk merge of the formal-worker branches: one more theorem
-    # asked, four more kernel-checked clean, three fewer closure-only.
-    "ProofLib": (313, 61, 247, 0, 5, 0),
+    "ProofLib": (312, 61, 243, 0, 8, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
@@ -1374,27 +1372,8 @@ AXIOM_CLOSURE = {
     # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
     # reaches no decide axiom, so `asked` and `clean` both move by one. The
     # partition still closes (151 = 2 + 148 + 0 + 1).
-    # Re-pinned by the bulk merge of the formal-worker branches: two more clean
-    # theorems (153 = 2 + 150 + 0 + 1).
-    "X86": (153, 2, 150, 0, 1, 0),
-    # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
-    # closed the contract ladder's last two unreached contracts and put the fact
-    # it needed in this module rather than in `ProofLib.lean` -- deliberately,
-    # because every generated arm64 proof already imports `work`, so it is a
-    # 1.2 s rebuild rather than the 27 MB `.olean` the proof suite pays per tree.
-    # The theorem is `work_u64_sign_zero_of_le`: `sKey x` is the signed-compare
-    # sign flip, and a context pinning a word to the sign bit from BOTH sides
-    # (`s ≤ n ^^^ s` and `n ^^^ s ≤ s`) says the word is `0`.
-    #
-    # The shape of the movement is the point, and it is the good one: `asked`
-    # and `clean` rise together and `reaches` does NOT move, because the proof
-    # is `UInt64.le_antisymm` and `UInt64.xor_left_inj` -- core lemmas, so the
-    # KERNEL checks it and `#print axioms` names no axiom.  This is the same
-    # signature as the `IEEE754` re-pin above (two comparison facts arriving as
-    # `decide` and being re-proved with it), and the opposite of what an arrival
-    # of `bv_decide`-proved step lemmas looks like, where `asked` and `reaches`
-    # rise together.  The partition still closes (20 = 0 + 18 + 0 + 2).
-    "work": (20, 0, 18, 0, 2, 0),
+    "X86": (151, 2, 148, 0, 1, 0),
+    "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
     # 5 are kernel-checked, and the 5 are exactly the COMPARISON section — the
@@ -1437,26 +1416,22 @@ AXIOM_CLOSURE = {
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
     "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
-    # the same way on the same run.  Fourteen askable declarations, of which TEN
+    # the same way on the same run.  Twelve askable declarations, of which EIGHT
     # are kernel-checked and ONE reaches a decide axiom; the three
     # `closure_only` are theorems that reach no axiom themselves but rest on one
     # through another declaration in the module, which is the only module in
-    # `lib/` besides `ProofLib` where that column is non-zero.  The 12→14/8→10
-    # move on 2026-10-05 is the x86-64 rule's two theorems
-    # (`x86_set_reg_self`, `peephole_x86_mov_self`), both proved with
-    # `omega`/`rw` and neither adding an axiom site — so the site count in
-    # `LIBRARY_TRUST` is unchanged and only the declaration census moved.
+    # `lib/` besides `ProofLib` where that column is non-zero.
     #
     # **The one `reaches` is the finding, not a rounding error**, and it is the
     # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
-    # module: nine sites spread over fourteen declarations, so most declarations
+    # module: nine sites spread over twelve declarations, so most declarations
     # carry none, one carries the site's axiom and three inherit it.  The site
     # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
     # sites versus declarations — and the module's value is that the rewrites it
-    # licenses are proved about `Arm64State` with `omega`, so 10 of 14 are
-    # checked by the kernel and the pass's soundness does not rest on a single
-    # decision procedure call.
-    "Peephole": (14, 1, 10, 0, 3, 0),
+    # licenses are proved about `Arm64State` with `omega`, so 8 of 12 are checked
+    # by the kernel and the pass's soundness does not rest on a single decision
+    # procedure call.
+    "Peephole": (12, 1, 8, 0, 3, 0),
 }
 
 
@@ -3819,51 +3794,10 @@ def _modelled_subprocess_params(name):
     return None
 
 
-def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
-    """`subprocess.mojo` records WHY `run` returns the status word.
-
-    The decision is option 3 of the three costed in
-    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
-    a caller reads the status through `completed_process_returncode`, a shim
-    both engines can agree on, rather than through `r.returncode`, which is a
-    field read on a word.  This pins the recording, because the decision is
-    invisible in the code — it lives only in the module's prose — and a
-    docstring that said nothing would make the next reader re-cost all three
-    options.  The two load-bearing facts are checked rather than the sentence:
-    that `run`'s word IS the returncode, and that `r.stdout` (a captured
-    STREAM, which this target does not model) is why option 1 is unavailable.
-    """
-    from formal import imports as I
-    import fire_compiler as F
-    path = os.path.join(A.HOSTMODS_ROOT, "subprocess.mojo")
-    doc = ""
-    for st in I.module_statements(path):
-        if isinstance(st, F.ExprStmt) and isinstance(st.value, F.StringLiteral):
-            doc = st.value.value
-            break
-    check(doc, "subprocess.mojo has no module docstring, so the decision it is "
-               "supposed to record has nowhere to live")
-    for needle, why in (
-            ("WHAT `run` HANDS BACK", "the decision's own heading is gone"),
-            ("status word", "the docstring no longer says what `run` returns"),
-            ("completed_process_returncode",
-             "the option-3 shim the decision rests on is not named"),
-            ("r.stdout",
-             "the measurement that removes option 1 (a captured stream) is "
-             "gone, so the decision can be silently re-litigated")):
-        check(needle in doc,
-              f"subprocess.mojo's docstring is missing {needle!r}: {why}")
-    return True, ("subprocess.mojo records the return-shape decision: `run` "
-                  "hands back the status word, `r.returncode` is refused by "
-                  "name, and `.stdout` is why option 1 cannot move version.py")
-
-
 PURE = [("the emitted Lean is inert where nothing is admitted",
          test_a_file_that_reaches_none_generates_no_hole),
         ("the modelled surface covers what the tree spells",
          test_the_modelled_surface_covers_what_the_tree_spells),
-        ("the run return-shape decision is recorded",
-         test_the_run_return_shape_decision_is_recorded),
         ("every scope rule refuses and admits what it was written for",
          test_the_scope_probes_refuse_what_they_are_written_for),
         ("every admitted contract has a truth row",

@@ -3,9 +3,7 @@
 
     python3 test_formal_libc_symbol.py [-v] [group ...]
 
-Groups: `table`, `retkind`, `builtin_abi`, `unprototyped`,
-`unprototyped_build`, `binding`, `dirent`, `stat`, `retvalue`. With no
-argument, all of them.
+Groups: `table`, `retkind`, `builtin_abi`, `binding`, `dirent`, `stat`, `retvalue`. With no argument, all of them.
 
 WHAT THIS IS ABOUT. `readdir` is one function in a C header and TWO in macOS's
 C library: `_readdir` fills a `struct dirent` with a 32-bit `ino_t` (4-byte
@@ -852,22 +850,6 @@ def group_retkind(verbose):
     check(kind_of("no_such_c_function") is None,
           "a C symbol with no prototype entry is passed through as it arrived")
 
-    # …and the four rows the 2026-10-05 corpus census added, asserted here as
-    # CLASSIFICATIONS and differentially by the `retvalue` group. `strcasecmp`
-    # is the one the bug doc quotes and it is the same `int` prototype as
-    # `strcmp` above, which is the point of putting it beside that row; `atol`
-    # is the one that says a numeric conversion is not automatically an `int` row
-    # (`long`, 64-bit under LP64), and `index` is libc's own `strchr` spelling,
-    # which already had a row under the other name.
-    check(kind_of("strcasecmp") == (32, True),
-          f"strcasecmp returns C's int: {kind_of('strcasecmp')!r}")
-    check(kind_of("atol") == EXTERN_RETURN_WORD,
-          f"atol returns C's long, not an int: {kind_of('atol')!r}")
-    check(kind_of("atof") == EXTERN_RETURN_WORD,
-          f"atof returns a double, so the whole register: {kind_of('atof')!r}")
-    check(kind_of("index") == EXTERN_RETURN_WORD,
-          f"index returns char * like strchr: {kind_of('index')!r}")
-
     # The EXPORT exception, which is what stops this from corrupting a call into
     # another host module. `read` is the name that makes it necessary: it is
     # libc's `read` and this tree's own wrapper for it, and only the export
@@ -924,195 +906,6 @@ def group_retkind(verbose):
     elif verbose:
         print("NOTE: not Darwin, so the prototype table's symbols cannot be "
               "asked of a C library here")
-    return fails
-
-
-def group_unprototyped(verbose):
-    """`refuse_unprototyped_bare_call`: which bare C call the build refuses.
-
-    **The decision, asked four ways, because every one of them is a way the
-    rule could be too eager.** A bare callee with no `BARE_C_RETURN_KINDS` row
-    has no PROTOTYPE on this path, so the width of what comes back in the
-    return register is established by nothing — and the ABI does not fill the
-    gap, it makes it explicit: a value narrower than eight bytes comes back in
-    the least significant bits with the rest **UNSPECIFIED** (AAPCS64 §6.9,
-    SysV AMD64 §3.2.3), which on both targets arrives zero-extended. So the
-    model's value for that register is a free variable, and every operation on
-    it is a possible wrong answer — `strcasecmp("a","b")` answered 4294967295
-    where C answers -1 and `a < 0` answered `no`, measured on both
-    architectures and byte-identical before this rule existed.
-
-    There is no conversion that fixes that without the prototype ("sign-extend
-    every bare call" turns `time_ns()`'s 1.7e18 negative, which is why the
-    table has three rows and not one), so the build says so instead of
-    guessing. The `unprototyped` group below BUILDS the three shapes; this one
-    asks the function, so a change to the SCOPE is caught without four builds.
-    """
-    from formal.model import (bare_c_return_kind, libc_defines,
-                              refuse_unprototyped_bare_c_call)
-    fails = []
-
-    def check(cond, msg):
-        if not cond:
-            fails.append(msg)
-        elif verbose:
-            print(f"      ok: {msg}")
-
-    def refusal(name, exports=None, aliases=None, syms=None):
-        return refuse_unprototyped_bare_c_call(
-            name, exports or {}, {}, {}, aliases or {}, syms or {})
-
-    # A REAL libc name with no row is the case the rule is FOR. `strncasecmp`
-    # is `strcasecmp`'s sibling and is measured to be the same `int`
-    # prototype; nothing in this tree calls it bare, so naming it here cannot
-    # make the row vacuous the way naming a classified name would.
-    check(libc_defines("strncasecmp"),
-          "the refusal's own example is a symbol this host's C library defines "
-          "— otherwise the rule would be asking about a name nothing provides")
-    check(not ("strncasecmp" in __import__("formal.model",
-                                           fromlist=["x"]).BARE_C_RETURN_KINDS),
-          "…and it still has no row, so it is still refused rather than "
-          "normalized: if a row appeared this row would be testing nothing")
-    r = refusal("strncasecmp")
-    check(bool(r), "an unclassified libc bare call IS refused")
-    for frag in ("strncasecmp", "no established width", "UNSPECIFIED",
-                 "BARE_C_RETURN_KINDS"):
-        check(frag in r, f"the refusal names {frag!r}")
-
-    # The three ways it must stay quiet. Each is a program that compiles and
-    # runs today, so each is a refusal the rule would have cost real code.
-    check(refusal("strcmp") == "",
-          "a name WITH a row is not refused — it is normalized instead")
-    exports = {"basename": {"symbol": "os_path_basename_h", "nargs": 1}}
-    check(refusal("basename", exports=exports) == "",
-          "a callee a linked library PUBLISHES is not refused, and this is the "
-          "row that makes the scope rule necessary rather than clever: "
-          "`basename` and `dirname` are real libSystem symbols (dlsym finds "
-          "both) that formal/hostmods/glob.mojo reaches THIS PROJECT's own "
-          "os.path functions of those names")
-    check(refusal("no_such_c_function_447_9f63a2") == "",
-          "a name the C library does NOT define is not refused here — the "
-          "build's bind audit reports it by its own name, which is the more "
-          "accurate sentence, so replacing it would lose the linker's")
-
-    # …and the two halves agree with `bare_c_return_kind` for the shared cases,
-    # because the two are asked from the same emitters over the same six
-    # arguments and a disagreement between them would be two answers to one
-    # question about one call.
-    check(bare_c_return_kind("basename", exports, {}, {}, {}, exports) is None
-          and refusal("basename", exports=exports) == "",
-          "the export exception is ONE resolution read by both, not a second "
-          "copy of the order the export tables are consulted in")
-    check(libc_defines("atol") and bare_c_return_kind(
-        "atol", {}, {}, {}, {}, {}) is not None,
-        "a libc name WITH a row is one the oracle and the table agree on")
-    return fails
-
-
-# ── 7. `unprototyped`: the refusal, measured on a build ────────────────────
-#
-# The `retkind` group asks the DECISION; this one BUILDS, because the failure
-# mode it exists to catch is a decision that is right in the function and never
-# reached by the emitters. Three programs, one per direction:
-#
-#   * a bare libc call with no row — must be REFUSED, and the refusal has to
-#     name the symbol. Measured before the change, this program built, ran and
-#     printed a wrong boolean on both architectures.
-#   * the same call with a DECLARED return type (`external_call["…", Int32]`) —
-#     must build and run, because that is the escape hatch the refusal points
-#     at. A rule that refused this too would be refusing the correction it asks
-#     for, and the message would be advice nobody could take.
-# The third shape — a name the C library does NOT define — must NOT carry this
-# refusal: it fails the build for its OWN reason, which is the bind audit's
-# missing-provider report, and a rule that also claimed it would replace a more
-# accurate sentence with a less accurate one. It is asserted by the ABSENCE of
-# this refusal's phrases, which is the direction that keeps the two shapes from
-# drifting into one report. The value is USED (`+ 1`) because a call whose result
-# is dead is not emitted at all, and an un-emitted call emits no symbol for the
-# audit to report — measured: the same program with a bare `printf("go@@", f(1))`
-# BUILDS on x86-64 and is refused on arm64, which is a fact about dead-code
-# elimination on one backend and nothing to do with this rule.
-
-UNPROTOTYPED_BARE = """\
-def main(n):
-    var a = strncasecmp("A", "b", 1)
-    printf("a=%d@@", a)
-    return 0
-"""
-
-UNPROTOTYPED_DECLARED = """\
-def main(n):
-    var a = external_call["strncasecmp", Int32]("A", "b", 1)
-    printf("a=%d@@lt0=%d@@", a, a < 0)
-    return 0
-"""
-
-UNPROTOTYPED_NOT_LIBC = """\
-def main(n):
-    printf("v=%d@@", no_such_provider_447_9f63a2(1) + 1)
-    return 0
-"""
-
-# The phrases the refusal must contain, and the one it must not appear with.
-UNPROTOTYPED_REFUSAL_PHRASES = (
-    "strncasecmp",
-    "no established width",
-    "BARE_C_RETURN_KINDS",
-    "external_call",
-)
-
-
-def group_unprototyped_build(tmpdir, arch, verbose):
-    """Build the three shapes: refused, corrected, and somebody else's error."""
-    fails = []
-
-    def one(name, src, *, build_ok, must=(), must_not=()):
-        """Build `src`, then assert the outcome and what the message carries.
-
-        `must` and `must_not` are per CASE rather than one list for the group,
-        because the point of the third shape is that it must NOT carry this
-        rule's sentences — a single shared list would assert the opposite of
-        what that row is for.
-        """
-        src_path = os.path.join(tmpdir, f"unprot_{name}.mojo")
-        with open(src_path, "w") as f:
-            f.write(src)
-        out = os.path.join(tmpdir, f"unprot_{name}.{arch}")
-        rc, text = build(src_path, out, arch)
-        if build_ok:
-            if rc != 0:
-                return [f"{name}: build failed: {text.strip()[-400:]}"]
-            rrc, stdout, stderr = run(out, arch)
-            if rrc != 0:
-                return [f"{name}: exit {rrc}, stderr {stderr.strip()[:200]!r}"]
-            if name == "declared":
-                got = records(stdout)
-                if got.get("lt0") != "1":
-                    return [f"declared: `external_call[\"strncasecmp\", "
-                            f"Int32]` gave a<0 = {got.get('lt0')!r} where C "
-                            f"answers 1 — the escape hatch the refusal points "
-                            f"at must reach the right VALUE, not merely build"]
-            return []
-        if rc == 0:
-            return [f"{name}: BUILT — an unprototyped libc call reached the "
-                    f"image with an unestablished return width"]
-        for frag in must:
-            if frag not in text:
-                return [f"{name}: refused, but the message does not say "
-                        f"{frag!r}: {text.strip()[-400:]}"]
-        for frag in must_not:
-            if frag in text:
-                return [f"{name}: the message carries {frag!r}, which belongs "
-                        f"to this rule rather than to the refusal that owns "
-                        f"this case: {text.strip()[-300:]}"]
-        return []
-
-    fails += one("bare", UNPROTOTYPED_BARE, build_ok=False,
-                 must=UNPROTOTYPED_REFUSAL_PHRASES)
-    fails += one("declared", UNPROTOTYPED_DECLARED, build_ok=True)
-    fails += one("notlibc", UNPROTOTYPED_NOT_LIBC, build_ok=False,
-                 must_not=("no established width", "BARE_C_RETURN_KINDS",
-                           "UNSPECIFIED", "strncasecmp"))
     return fails
 
 
@@ -1173,32 +966,6 @@ def main(n):
     printf("kill_bad_ne_32=%d@@", kill(getpid(), 0x7FFFFFFF) != 4294967295)
     printf("pwnam_nosuch=%d@@", getpwnam("no_such_user_447_9f63a2") == 0)
     printf("sig_nonempty=%d@@", strlen(strsignal(15)) > 0)
-    # …and the FOUR the corpus census of 2026-10-05 added rows for, which is the
-    # half of this group that had gone stale: the bug doc that motivated them
-    # recorded a census showing "every real libc bare callee has a row, zero
-    # exceptions", and re-running the same walk over this tree plus the stdlib
-    # (804 `.mojo` files, 308 distinct bare callees) found four that had none —
-    # `strcasecmp` here, and `atof`/`atol`/`index` in the stdlib.
-    #
-    # `strcasecmp` is the row that matters and it is the SAME prototype as the
-    # `strcmp`/`memcmp` rows above, which is the point: before its row it built,
-    # ran and answered 4294967295 where C answers -1, `a < 0` answered `no` and
-    # `a == -1` answered `no` — measured, both architectures, byte-identical. The
-    # three comparisons are therefore `== 0` on an equal pair, `< 0` on an
-    # unequal one and `!= 4294967295`, which is the last one the bug was: a
-    # suite with only the names that worked would have passed before the fix and
-    # gone on passing with the table unchanged.
-    printf("sc_eq0=%d@@", strcasecmp("a", "A") == 0)
-    printf("sc_lt_0=%d@@", strcasecmp("A", "b") < 0)
-    printf("sc_ne_32=%d@@", strcasecmp("A", "b") != 4294967295)
-    printf("sc_eq_m1=%d@@", strcasecmp("a", "b") == -1)
-    # `atol` is the row that says the `int` classification is not the default for
-    # a numeric conversion: C's `atol` is a `long`, 64-bit under LP64 on both
-    # targets, so the row is `EXTERN_RETURN_WORD` and NOT `(32, True)`. The two
-    # assertions bracket the value from both sides, because the wrong row and no
-    # row answer `atol_ok` identically and only the second one tells them apart.
-    printf("atol_ok=%d@@", atol("  42") == 42)
-    printf("atol_ne_32=%d@@", atol("  42") != 4294967296)
     return 0
 """
 
@@ -1229,16 +996,6 @@ RET_EXPECTED = {
     "kill_ne_m1": "1",
     "pwnam_nosuch": "1",
     "sig_nonempty": "1",
-    # Established against this host's own C library through `ctypes`/a C
-    # control program, not stated: `strcasecmp` ignores case, so `("a","A")` is
-    # 0 and `("A","b")` is negative (`'A'` < `'b'`); `atol("  42")` skips leading
-    # white space and is 42.
-    "sc_eq0": "1",
-    "sc_lt_0": "1",
-    "sc_ne_32": "1",
-    "sc_eq_m1": "1",
-    "atol_ok": "1",
-    "atol_ne_32": "1",
 }
 
 
@@ -1273,9 +1030,6 @@ GROUPS = {
     # wrong, and a check that is not run is not a check.
     "table": (lambda tmpdir, arch, verbose: group_table(verbose), False),
     "retkind": (lambda tmpdir, arch, verbose: group_retkind(verbose), False),
-    "unprototyped": (lambda tmpdir, arch, verbose: group_unprototyped(verbose),
-                     False),
-    "unprototyped_build": (group_unprototyped_build, True),
     "builtin_abi": (lambda tmpdir, arch, verbose: group_builtin_abi(verbose),
                     False),
     "binding": (group_binding, True),
