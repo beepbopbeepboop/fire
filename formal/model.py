@@ -14036,15 +14036,12 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
-SET_ALGEBRA_OPS = ("-", "&", "^")
-CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
-                            if op not in SET_ALGEBRA_OPS)
-
-#: The three operators that are SET ALGEBRA, and the ones a backend may lower
-#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
-#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
-#: operand shape EXCEPT two blobs the gate's message is the right answer — but
-#: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
+#:
+#: **The three operators that are SET ALGEBRA**, and the ones a backend may
+#: lower once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
+#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS` below, because for
+#: every operand shape EXCEPT two blobs the gate's message is the right answer —
+#: but for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
 #: backend decides, because whether the pair is a set algebra this path lowers
 #: is a fact about the backend and not about the operator.  arm64 lowers the
 #: three for two sets (see `_emit_set_algebra`); x86-64 has no emitter and
