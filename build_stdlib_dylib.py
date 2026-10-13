@@ -935,12 +935,49 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     verification — see the architecture section at the top of this file for why
     each of those is separately necessary and why the verification is not
     optional."""
+
+    # The staging DIRECTORY every module's object, the generated reflection C
+    # and object, and the staged dylib live in is removed on EVERY exit path.
+    # Only the finished dylib leaves (`os.replace(staged, out)` inside
+    # `_build_impl`), and without this `finally` the whole build's intermediate
+    # files sit in `$TMPDIR` for the life of the machine: 324 kB for ONE module
+    # measured, and a full build is 249 modules plus the runtime and the
+    # reflection table. It is per COLD CAS (a cache hit returns from `_build_impl`
+    # before this dir has anything in it, but it is created unconditionally), and
+    # this tree's tests each use a fresh `GMOJO_HOME`, which makes it routine.
+    #
+    # The body is a separate function rather than an indented `try` block for the
+    # reason `_OutputLock`'s own docstring gives: `with`/generator-based teardown
+    # lowers through a code path the self-hosted backend mishandles for this
+    # module (it is in `mojoc`'s own compile closure), while a plain
+    # `try`/`finally` around a call lowers correctly — the same shape
+    # `runtime_dylib` below and `_driver_targets` already use. `ignore_errors=True`
+    # because the failure worth raising is the build's, not the cleanup's.
+    workdir = tempfile.mkdtemp(prefix='mojostdlib_')
+    try:
+        return _build_impl(workdir, modules, out, use_cache=use_cache,
+                           link_runtime=link_runtime,
+                           extra_exports=extra_exports, jobs=jobs,
+                           opt_flag=opt_flag,
+                           track_local_deps=track_local_deps, arch=arch)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _build_impl(workdir: str, modules: list, out: str, use_cache: bool = True,
+                link_runtime: bool = False, extra_exports: list = None,
+                jobs: int = 1, opt_flag: str = None,
+                track_local_deps: bool = True, arch: str = None) -> str:
+    """`build`'s body, split out so its staging directory is removed on every
+    exit path — the `try`/`finally` is in `build`, around the call to here.
+    See `build`'s docstring for the parameters; `workdir` is the caller's
+    freshly-made `mojostdlib_*` directory, which this function fills and never
+    removes."""
     gcc = find_gcc()
     gxx = find_gxx()
     arch = normalize_arch(arch)
     objflags = _OBJ_FLAGS + arch_flags(arch) + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
 
     # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass

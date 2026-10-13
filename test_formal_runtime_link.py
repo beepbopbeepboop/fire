@@ -594,9 +594,9 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
     shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    half a megabyte each; the stdlib build's `mojostdlib_*` workdir is the third
+    instance of the same shape and is asserted just below
+    (`test_a_cold_stdlib_build_leaves_no_workdir`).
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
@@ -617,6 +617,50 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
               str(left))
+
+
+# ── 4c. a cold STDLIB build leaves no work directory ────────────────────────
+
+def test_a_cold_stdlib_build_leaves_no_workdir():
+    """`build()`'s `mojostdlib_*` work directory is removed with the build.
+
+    The third instance of the `mkdtemp`-and-forget shape in this module
+    (`runtime_dylib`'s `mojo_rt_*` and `_driver_targets`' `mojo_archprobe_*`
+    are the other two, both pinned above). `build()` creates the directory
+    unconditionally and the whole build's intermediate objects, generated
+    reflection C and object, and staged dylib live in it; only the finished
+    dylib is `os.replace`d out, so nothing else ever removes it. 324 kB for ONE
+    module was measured, and a full stdlib build is 249 modules plus the
+    runtime and the reflection table, per cold cas.
+
+    ONE module and a COLD cas, in a subprocess with its own `GMOJO_HOME` and
+    `TMPDIR`, for the same two reasons the runtime row gives: a warm cas
+    returns before the directory has anything in it, and a shared cas would be
+    perturbed by this build. The module is chosen by name (`floatable.mojo`)
+    rather than by index so a change in `stdlib_modules()`' order cannot make
+    this row build a different — and possibly much heavier — subject.
+    """
+    home = tempfile.mkdtemp(prefix='stdstage_home_')
+    tmp = tempfile.mkdtemp(prefix='stdstage_tmp_')
+    env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+    code = ('import os\n'
+            'from build_stdlib_dylib import build, stdlib_modules\n'
+            'm = [x for x in stdlib_modules() if x.endswith("floatable.mojo")][0]\n'
+            'out = os.path.join(os.environ["TMPDIR"], "x.dylib")\n'
+            'print(build([m], out, use_cache=False, link_runtime=False,\n'
+            '            jobs=1, track_local_deps=False, arch="arm64"))\n')
+    proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                          capture_output=True, text=True)
+    check(proc.returncode == 0,
+          'a cold one-module stdlib build succeeds',
+          (proc.stderr or proc.stdout)[-600:])
+    check('.dylib' in proc.stdout,
+          '…and it produced a dylib', proc.stdout[-200:])
+    left = sorted(os.path.basename(p)
+                  for p in glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+    check(not left,
+          'no `mojostdlib_*` work directory is left behind in $TMPDIR',
+          str(left))
 
 
 # ── 5. the audit still fires ────────────────────────────────────────────────
@@ -1026,6 +1070,7 @@ def main():
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
     test_a_cold_runtime_build_leaves_no_staging_directory()
+    test_a_cold_stdlib_build_leaves_no_workdir()
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()
