@@ -2106,8 +2106,14 @@ def instantiation_demands(module_path: str, consumer_src: str,
     makes this a keyword a caller can leave alone.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
+    # The TYPE-argument demands, and the permissive superset that also sees a
+    # bare literal (`Tagged[Int, 0]`).  `all_bracketed_calls` is a superset of
+    # `all_instantiation_calls`, so this ONE walk serves both and the early
+    # "no type args" return has to key on the superset — keying it on `found`
+    # alone would drop a consumer whose only bracket is a literal.
     found = MM.all_instantiation_calls(consumer_src)
-    if not found:
+    loose = MM.all_bracketed_calls(consumer_src)
+    if not loose:
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2115,9 +2121,20 @@ def instantiation_demands(module_path: str, consumer_src: str,
         templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
     for p, names in templates.items():
-        got = MM.demands_from_calls(found, names, own=own_templates
-                                    if os.path.abspath(p) ==
-                                    os.path.abspath(module_path) else ())
+        own_here = (own_templates
+                    if os.path.abspath(p) == os.path.abspath(module_path) else ())
+        got = MM.demands_from_calls(found, names, own=own_here)
+        value_names = {n for n in names
+                       if any(a not in set(found.get(n, ()))
+                              for a in loose.get(n, ()))}
+        if value_names:
+            for name, args in MM.value_demands_for(
+                    consumer_src, module_source_text(p), names,
+                    own=own_here).items():
+                got.setdefault(name, [])
+                for a in args:
+                    if a not in got[name]:
+                        got[name].append(a)
         if got:
             out[p] = got
     return out

@@ -2,9 +2,54 @@
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
-MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
-wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
-`7ac78995`, with every claim below measured on that tree.
+MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); **§4.1's LITERAL
+comptime-VALUE argument is LANDED (2026-10-08, `work/formal183-docs`), and the
+ALIAS half of the wall is still OPEN** — see "What landed" immediately below.
+Filed 2026-10-05 on `work/formal27-5` at `7ac78995`, with every claim below
+measured on that tree.
+
+## What landed 2026-10-08 (`work/formal183-docs`): a bare LITERAL comptime
+## argument now instantiates
+
+`Tagged[T, origin: Int]` applied as `Tagged[Int, 0]()` builds and runs on
+**both** architectures and prints the value the bracket supplied, on the
+imported path and the one-file (`own_demands`) path. Before this the demand walk
+DROPPED the literal (`type_arg_text` answers `""` for a bare literal by design,
+because `tile[2, 3]` is the local-specialization shape) and the call fell
+through to the multi-index refusal of §1.
+
+The fix is declaration-aware and keeps every existing non-demand a non-demand:
+
+* `all_bracketed_calls` / `_bracket_all_args` (`formal/monomorph.py`) is a
+  permissive SUPERSET of `all_instantiation_calls` that lets a bare literal be a
+  spelling — nothing else changes, so all six pinned `all_instantiation_calls`
+  answers are byte-for-byte what they were;
+* `elaborate.type_param_kinds` reads the DECLARATION's annotations
+  (`['type', 'value']` for `Tagged[T, origin: Int]`);
+* `instantiate` refuses a bare literal in a **type** position (`Pair[2]`) and
+  refuses a value specialization of a FUNCTION template (`widen[3]`, already
+  lowered locally), and admits it for a value parameter;
+* `value_demands_for` is the pipeline's admission test (asks `instantiate`),
+  wired into `formal/imports.py::instantiation_demands` and
+  `monomorph.own_demands`, and `rewrite_instantiation_calls` spells the literal
+  the same way so the call site is rewritten to the mangled symbol the library
+  emitted.
+
+Pinned by `test_formal_monomorph.py::test_a_bare_literal_value_parameter_
+instantiates` (end to end, both arches, CPython as oracle, two distinct values
+so a collapsed mangling prints one twice) and `::test_a_bare_literal_is_only_a_
+value_when_the_declaration_says_so` (the superset, and the three admission
+answers).
+
+**What is still NOT fixed, and it is this doc's §1 standing instance.** The
+literal half is one shape of a comptime argument; `Span[StaticString,
+ImmStaticOrigin]`'s second element is a NAME bound to a `comptime` ALIAS
+(`std/origin/__init__.mojo`'s `ImmStaticOrigin = Origin[_mlir_attr[…]]()`),
+whose initializer does not fold because a module it names does not build. That
+is a value substitution of a *resolved alias*, and it is the CPython-vs-source
+half of `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
+(claimed elsewhere), not this one. So this doc stays open with §4.1's literal
+half closed.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
@@ -85,7 +130,7 @@ built with `fire.py build --formal --no-prove` and RUN where they build:
 | 1 | `Box[Int]()` — one **type** argument, explicit, on a constructor | **builds and runs** (exit 10 = the startup stub's integer) |
 | 2 | `unbox(b)` — the same instantiation, **inferred** | **builds and runs** |
 | 3 | `unbox[Int](b)` — an explicit type argument on a plain generic **function** | **refused**, and see §3: the repair it names is the spelling the source already uses |
-| 4 | `Tagged[Int, 0]()` — a **type and a comptime value**, on a constructor | **refused**: the explicit-parameter-list message above |
+| 4 | `Tagged[Int, 0]()` — a **type and a comptime value**, on a constructor | **builds and runs** (2026-10-08; was refused with the explicit-parameter-list message above) |
 | 5 | `mylib.Box[Int]()` — case 1 spelled **dotted** | **refused as a call to `mylib`**, and see §3: the source never calls `mylib` |
 
 **So the TYPE half is not missing and the comptime half is the whole of it.**
@@ -160,7 +205,13 @@ written down.
    `origin`-typed positions. That is a value substitution, not a text
    substitution, and the mangler needs the argument's **text** — which is why
    `type_arg_text` returning `""` for a non-type is right and insufficient
-   rather than a bug to widen.
+   rather than a bug to widen. **The LITERAL half is LANDED** (2026-10-08,
+   `work/formal183-docs`): a bare literal is read by `all_bracketed_calls` and
+   admitted by `value_demands_for` when `elaborate.type_param_kinds` says the
+   declared position is a value, so `Tagged[Int, 0]` substitutes and mangles as
+   the text the source wrote. **What remains is the non-literal half** — an
+   element that is a NAME bound to a `comptime` alias (`ImmStaticOrigin`),
+   which needs the alias RESOLVED before a spelling exists at all.
 2. ~~**The two messages**, which are independent of (1) and can be landed
    first.~~ **DONE.** Row 5's dotted sentence landed on `94b29b12`
    (`dotted_specialization_refusal`); row 3's advice landed 2026-10-07 in
