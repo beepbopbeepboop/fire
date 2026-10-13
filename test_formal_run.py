@@ -21133,6 +21133,28 @@ ORIGIN_OF_CASES = [
      "    g.a = 7\n"
      "    g.b = 8\n"
      "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
+    # THE ROOT CAUSE the row above only sees the SYMPTOM of, and the row that
+    # would catch a "fix" that guessed a home without instantiating anything: a
+    # BARE call to a generic struct's template (`Marker(b.a)`, type arguments
+    # inferred) writes no bracket anywhere, so `formal/monomorph.py`'s demand
+    # walk (`all_instantiation_calls` -> `demands` -> `own_demands`) asks for no
+    # instantiation and no `Marker` declaration is generated. There is NO field
+    # access here on purpose: the call itself is left as a symbol nothing
+    # provides, which is what says the defect is the CONSTRUCTION and not the
+    # classification of a binding's home
+    # (bugs/FORMAL_generic_local_binding_has_no_home.md's 2026-10-12 Status).
+    # The annotated spelling (`var m: Marker[Int] = Marker(7)`) fails the same
+    # way, because the type arguments are on the ANNOTATION and the call is
+    # still bracket-free. Both flip to a build-and-run row only when the demand
+    # pipeline learns to infer the arguments, which is
+    # bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md.
+    ("a_bare_generic_construction_demands_no_instantiation",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Marker(7)\n"
+     "    return 0\n",
+     "refuse:that nothing provides", None),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that
