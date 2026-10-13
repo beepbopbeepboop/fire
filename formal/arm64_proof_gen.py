@@ -5112,14 +5112,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(step_facts[:k]))
         if k == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"(by simp only [{S}_qS0, {S}_qT0, arm64_set_reg]),")
             A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
             A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
-              f"{code_name} 0 hs{k - 1} rfl,")
+              f"{code_name} 0 hs{k - 1} "
+              f"(by simp only [{S}_qS{k - 1}, {S}_qT{k - 1}, arm64_set_reg]),")
             A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
               f"from by rw [hpc{k - 1}]]")
             A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
@@ -5142,14 +5144,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(step_facts))
         if m == 1:
             A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
-            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat from rfl]; exact hjump)]")
+            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
+              f"from by simp only [{S}_qT0, {S}_qS0, arm64_set_reg]]; exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
               f"{code_name} 0 hs{m - 1}")
-            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat from rfl]; "
+            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
+              f"from by simp only [{S}_qT{m - 1}, {S}_qS{m - 1}, arm64_set_reg]]; "
               f"exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         exit_expr = f"({S}_qT{m - 1} st)"
@@ -5159,14 +5163,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts))
         A("\n".join(step_facts))
         if m == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"(by simp only [{S}_qS0, {S}_qT0, arm64_set_reg]),")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{code_name} 0 hs{m - 1} rfl,")
+              f"{code_name} 0 hs{m - 1} "
+              f"(by simp only [{S}_qS{m - 1}, {S}_qT{m - 1}, arm64_set_reg]),")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
             A(f"  exact runs_zero {code_name} "

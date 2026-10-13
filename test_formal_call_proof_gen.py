@@ -1879,11 +1879,14 @@ class TestNestedConditionFactSharing(unittest.TestCase):
     scope, each of them by unfolding a block's whole composed state.
 
     The emission was `branches x prior-blocks-on-the-path x variables x PATHS`,
-    and the paths are the multiplier: at four conditional branches the four
-    programs below carried 48 / 144 / 384 / 960 facts, growing x3.0, x2.67 and
-    x2.5 per branch, against a distinct-statement count of 6 / 8 / 10 / 12.
-    With the memo it is 24 / 48 / 96 / 192 — x2.0 per branch, which is the
-    number of PATHS and therefore the part that is not re-derivation.
+    and the paths are the multiplier: before the memo, four conditional
+    branches carried 48 / 144 / 384 / 960 facts, growing x3.0, x2.67 and x2.5
+    per branch, against a distinct-statement count of 6 / 8 / 10 / 12.  With
+    the memo the counts are `c_k = 2 * c_{k-1} + C` — x2 per condition, the
+    number of PATHS, plus one fixed startup constant `C` (measured 3 here, so
+    `3 * (2**k - 1)`), which is the part that is not re-derivation.  The
+    growth check below reads that RESIDUAL rather than a ratio, because at
+    these counts the startup offset dominates the ratio for small `k`.
 
     **Sharing is per path and never across one, because `s_{pb}` is rebound per
     path**: `hsid_{pb}` is emitted once per visit, measured 1 / 2 / 4 / 8 / 16
@@ -1900,7 +1903,8 @@ class TestNestedConditionFactSharing(unittest.TestCase):
     CONDS = ("    if n & 8:\n        x = x + 1\n",
              "    if not (n & 4):\n        x = x + 2\n",
              "    if 16 & n:\n        x = x + 4\n",
-             "    if n & 32:\n        x = x + 8\n")
+             "    if n & 32:\n        x = x + 8\n",
+             "    if n & 64:\n        x = x + 16\n")
 
     def _proof(self, tmp, k):
         src = "def f(n):\n    x = 0\n" + "".join(self.CONDS[:k]) + "    return x\n"
@@ -1997,23 +2001,28 @@ class TestNestedConditionFactSharing(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="hprior_growth_")
         try:
             counts = {}
-            for k in (2, 3, 4):
+            for k in (2, 3, 4, 5):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
-            # x2 per condition, which is the path count. The pre-memo growth was
-            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
-            # bound of 2.2 is below the old one and above the new one — and it
-            # is a bound rather than a count because the exact number moves with
-            # the block layout, while the growth rate is the thing that was wrong.
-            for k in (3, 4):
-                ratio = counts[k] / counts[k - 1]
-                self.assertLessEqual(
-                    ratio, 2.2,
-                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
-                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
-                    f"this x2 (the number of paths) and anything above 2.2 is "
-                    f"the exponential back")
+            # `c_k = 2 * c_{k-1} + C` with ONE constant `C`: the total is the
+            # PATH count (k conditions make 2**k paths, each owing one fact per
+            # prior block on it) plus a fixed startup, not a per-branch
+            # multiplier. The RESIDUAL is the thing to read, not the ratio: at
+            # these counts (`c_2 = 9`) the startup alone puts the k=2 -> 3 ratio
+            # at 2.33 while the ratio falls back to 2.07 by k=5, so a ratio
+            # bound anchored on the old, larger counts (`c_k = 3 * 2**(k+1)`,
+            # x2 exactly) fails here for a reason that has nothing to do with
+            # the shape. A generator that HAD gone exponential would show a
+            # GROWING residual, and that is what this requires to stay constant
+            # across three independent steps.
+            residuals = [counts[k] - 2 * counts[k - 1] for k in (3, 4, 5)]
+            self.assertEqual(
+                len(set(residuals)), 1,
+                f"the facts grew by x2 plus a CHANGING startup "
+                f"(residuals={residuals}, counts={counts}); the per-path memo "
+                f"makes c_k = 2*c_(k-1) + a single constant, so a growing "
+                f"residual is the exponential back")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2415,6 +2424,53 @@ class TestACorpusExampleKeepsItsUniversalTheorem(unittest.TestCase):
                                  self.error.get(name, ""))
                 self.assertIn("_compiles_correctly_universal",
                               self.text.get(name, ""))
+
+
+class TestARunsSideConditionUnfoldsItsBlocks(unittest.TestCase):
+    """A block run theorem's pc side condition is discharged by unfolding the
+    two block states, NOT by `rfl`.
+
+    `rfl` on `(qT st).pc = (qS st).pc` reaches the kernel's recursion limit once
+    the block's `sp` adjust is a `UInt64` literal at or above 512: an
+    `ADD sp, sp, #32, lsl #12` (`+131072`, which the div0 guard arm inserts) made
+    `mod_by_var_b6_self1` fail to elaborate with "maximum recursion depth has
+    been reached" at the `runs_cons_seq` argument, with no `sorry` anywhere — so
+    the program generated a proof no kernel would accept.  The emission now
+    unfolds `qS`, `qT` AND `arm64_set_reg` (the register-setting transition
+    `rfl` DID handle), and `simp only` closes both shapes.  Generation only, no
+    Lean: the Lean rows that prove it end to end are
+    `TestExternCallTheRunDoesNotReach.test_the_corpus_example_that_was_false_is_
+    proved` and `TestSameImageCallLean.test_the_followed_call_proves_with_no_
+    admission`.
+    """
+
+    # The div0 guard arm reserves `#32, lsl #12` bytes of stack, which is the
+    # large adjust that exposed the loop.
+    PROGRAM = "def f(n):\n    d = 4\n    return n % d\n"
+
+    def test_the_side_condition_unfolds_and_is_not_a_bare_rfl(self):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-runs-pc-")
+        try:
+            src = os.path.join(tmp, "f.mojo")
+            with open(src, "w") as fh:
+                fh.write(self.PROGRAM)
+            r = fb.compile_formal(src, arch="arm64",
+                                  output=os.path.join(tmp, "f.aout"),
+                                  prove=True, check=False)
+            with open(r["proof_path"], encoding="utf-8") as fh:
+                text = fh.read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        seq_lines = [ln for ln in text.split("\n") if "runs_cons_seq" in ln]
+        self.assertTrue(seq_lines, "no `runs_cons_seq` side condition emitted")
+        for line in seq_lines:
+            self.assertNotIn(
+                " rfl,", line,
+                f"the pc side condition is a bare `rfl`, which loops once the "
+                f"sp adjust is large: {line}")
+        self.assertIn("arm64_set_reg]", text,
+                      "the side condition does not unfold `arm64_set_reg`")
 
 
 class TestCallProofs(unittest.TestCase):
