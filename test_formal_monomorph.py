@@ -369,6 +369,110 @@ def test_a_generic_function_template_is_instantiated_too(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
 
 
+# §2 of the doc: the ALIASED import, `from pairlib import Pair as P` then
+# `P[Int]()`. The same program as `test_a_generic_struct_template_…` with four
+# characters of spelling changed, and the two must not disagree about it.
+ALIASED_PROG = """\
+from pairlib import Pair as P
+
+
+def main():
+    var a = P[Int]()
+    var b = P[Bool]()
+    a.first = 7
+    a.second = 3
+    b.first = True
+    print(a.get_first())
+    print(b.get_first())
+    a.swap()
+    print(a.get_first())
+"""
+
+
+def test_an_aliased_import_of_a_template_is_instantiated(tmpdir):
+    """`from pairlib import Pair as P` then `P[Int]()` is the same construct.
+
+    Before this the build refused it with `specialization_call_refusal` naming
+    `P`, because the demand walk keys a bracketed callee on the name AS SPELLED
+    (`formal/monomorph.py::all_instantiation_calls`) while the module's
+    templates are the DEFINING names — so the demand for `Pair` was never
+    computed, the library published nothing, and the call kept its brackets.
+
+    TWO instantiations through the alias, for the same reason the unaliased
+    case uses two: the failure this feature must not have is two
+    instantiations collapsing onto one symbol, and a program that prints
+    7, 1, 3 has bound both.
+    """
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, ALIASED_PROG,
+                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] an aliased application printed {got!r}, which is "
+              f"neither CPython's answer nor anything this case wrote down — "
+              f"the unaliased twin is the same program and prints 7, 1, 3")
+
+
+def test_an_aliased_bracket_is_attributed_to_the_template(tmpdir):
+    """The DECISION both readers have to make, without a build.
+
+    `_import_aliases` maps a `from … import … as …` local spelling to the
+    defining name, and the guard is the half that matters: a name the reading
+    scope binds by VALUE is not an alias, so `var P = 5` beside `P[Int]()` must
+    not be attributed to the template `Pair` — that would rewrite a subscript
+    of an integer into a constructor of a struct, which is the fabricated-call
+    outcome this whole module refuses. An `import m as n` binds a MODULE, so it
+    is not a template spelling either.
+    """
+    from formal import monomorph as MM
+    from formal.build import parse_module
+    prog = ("from pairlib import Pair as P\n"
+            "\n"
+            "def main():\n"
+            "    var a = P[Int]()\n")
+    found = MM.all_instantiation_calls(prog)
+    check(found.get("Pair") == [("Int",)],
+          f"an aliased application is a demand for the DEFINING template, not "
+          f"for the local spelling: {found}")
+    check("P" not in found,
+          f"the demand must not also be keyed on the alias, or the library "
+          f"would be asked for a template nothing declares: {found}")
+
+    stmts = parse_module(prog)
+    n = MM.rewrite_instantiation_calls(stmts, {("Pair", ("Int",)):
+                                               "Pair_1_T_3_Int"})
+    check(n == 1,
+          f"the aliased call site has to be rewritten to the mangled boundary "
+          f"symbol the library published; {n} were rewritten")
+    callee = stmts[-1].body[0].value.func
+    check(getattr(callee, "name", None) == "Pair_1_T_3_Int",
+          f"the constructor call's callee is {callee!r}, not the mangled name")
+
+    shadow = ("from pairlib import Pair as P\n"
+              "\n"
+              "def main():\n"
+              "    var P = 5\n"
+              "    var a = P[Int]()\n")
+    sfound = MM.all_instantiation_calls(shadow)
+    check("Pair" not in sfound,
+          f"a local `P = 5` shadows the import, so `P[Int]()` is a subscript "
+          f"of a value and not an application of `Pair`: {sfound}")
+    check(MM.rewrite_instantiation_calls(parse_module(shadow),
+                                         {("Pair", ("Int",)):
+                                          "Pair_1_T_3_Int"}) == 0,
+          "the shadowed local must keep its brackets; rewriting it would bind "
+          "a struct constructor to a name the source bound to an integer")
+
+    check(MM._import_aliases(parse_module("import m as n\ndef main():\n"
+                                          "    pass\n")) == {},
+          "`import m as n` binds a MODULE, which is not a template spelling, "
+          "so it is not an alias of one")
+    check(MM._import_aliases(parse_module("from m import x as y\ndef main():\n"
+                                          "    pass\n")) == {"y": "x"},
+          "`from m import x as y` is the one shape that renames a DEFINED "
+          "name, so it is the one shape the reader keeps")
+
+
 def test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call(
         tmpdir):
     """`unbox[Int](b)` is refused with a repair that is NOT the line it is on.
@@ -2990,6 +3094,10 @@ TESTS = [
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
     ("a generic function template is instantiated too",
      test_a_generic_function_template_is_instantiated_too),
+    ("an aliased import of a template is instantiated",
+     test_an_aliased_import_of_a_template_is_instantiated),
+    ("an aliased bracket is attributed to the template",
+     test_an_aliased_bracket_is_attributed_to_the_template),
     ("a bracket on an implicitly generic function recommends the bare call",
      test_a_bracket_on_an_implicitly_generic_function_recommends_the_bare_call),
     ("a struct template the module declares can itself apply",

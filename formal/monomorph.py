@@ -668,11 +668,18 @@ def all_instantiation_calls(consumer_src: str) -> dict:
         from formal import model as M                  # lazy — cycle
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
-        module_level = set(M.collect_module_symbols(stmts) or {})
+        module_syms = M.collect_module_symbols(stmts) or {}
+        module_level = set(module_syms)
+        module_shadowed = _shadowed_here(module_syms)
+        aliases = _import_aliases(stmts)
         found: dict = {}
         for st in stmts:
-            values = _names_bound_in(st) \
-                if isinstance(st, F.FunctionDef) else module_level
+            if isinstance(st, F.FunctionDef):
+                values = _names_bound_in(st)
+                shadowed = values
+            else:
+                values = module_level
+                shadowed = module_shadowed
             for node in M.iter_nodes(st):
                 if not isinstance(node, F.CallExpr):
                     continue
@@ -681,7 +688,14 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                     continue
                 args = _bracket_type_args(node.func, values)
                 if args:
-                    found.setdefault(base, set()).add(tuple(args))
+                    # Attribute the call to the TEMPLATE, not to the local
+                    # spelling: `from pairlib import Pair as P` then `P[Int]()`
+                    # and `Pair[Int]()` are one construct, and the demand walk's
+                    # `templates` are the DEFINING names. An imported name is not
+                    # a shadow (`_shadowed_here`), so the alias maps; a local
+                    # `P = 5` does shadow it and is left as written.
+                    key = base if base in shadowed else aliases.get(base, base)
+                    found.setdefault(key, set()).add(tuple(args))
         return {k: tuple(sorted(v)) for k, v in found.items()}
     return {k: list(v) for k, v in _derived_from_source(
         "all_instantiation_calls", consumer_src, derive).items()}
@@ -932,6 +946,7 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
+    aliases = _import_aliases(stmts)
     n = 0
     for st in stmts:
         if isinstance(st, F.FunctionDef):
@@ -957,7 +972,13 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             if base is None:
                 continue
             args = tuple(_bracket_type_args(node.func, values))
-            mangled = demap.get((base, args))
+            # The SAME alias mapping `all_instantiation_calls` keys the demand
+            # with, so the call site and the `demap` entry cannot disagree: an
+            # imported alias resolves to the DEFINING name here (`P` → `Pair`),
+            # while a name the scope binds by value keeps its spelling and is
+            # left exactly as it was.
+            spelled = base if base in shadowed else aliases.get(base, base)
+            mangled = demap.get((spelled, args))
             if mangled is None:
                 continue
             node.func = F.IdentExpr(name=mangled,
@@ -999,6 +1020,42 @@ def _shadowed_here(syms: dict) -> set:
     """
     return {n for n, sym in (syms or {}).items()
             if getattr(sym, "site", None) != "imported"}
+
+
+def _import_aliases(stmts) -> dict:
+    """`{local spelling: defining name}` for every `from … import … as …` in
+    `stmts` whose two names differ.
+
+    The ONE reader of "this bracket's base is an imported alias of a different
+    spelling", asked by BOTH the demand walk and the call-site rewrite so that
+    `from pairlib import Pair as P` then `P[Int]()` is attributed to the
+    template `Pair` exactly as its unaliased twin is. Without it the two
+    spellings of one construct disagree: the demand walk keys the call on `P`
+    while the module's templates are named `Pair` (so no demand is computed),
+    and the rewrite looks `('P', args)` up in a `demap` the demand never filled
+    (so the call keeps its brackets and the bracketed-callee scan refuses the
+    program).
+
+    **`FromImportStmt` only.** `import m as n` binds a MODULE, and a module is
+    not a template spelling: folding its `(bound, module, module)` triple in
+    would map the alias `n` to the module name `m`, and a subscript of a module
+    object (`n[Int]()`) is the storage-less construct
+    `bugs/FORMAL_module_state_no_storage.md` owns rather than a specialization.
+    `model.import_bindings` is the per-statement reader the rest of the tree
+    already uses for this question; this is it folded over the module's top
+    level, with no second spelling rule.
+    """
+    from formal import model as M                  # lazy — cycle
+    out: dict = {}
+    for st in (stmts or ()):
+        if type(st).__name__ != "FromImportStmt":
+            continue
+        for bound, _module, defining in M.import_bindings(st):
+            if bound and defining and bound != defining:
+                out.setdefault(bound, defining)
+    return out
+
+
 def _consumer_statements(consumer_src: str) -> list:
     """`consumer_src`'s top-level statements, from ONE parse.
 
