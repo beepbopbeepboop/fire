@@ -4,6 +4,60 @@
 
 `bugs/FORMAL_fuzz_ledger.md` is the differential fuzzer's ledger and the two read together: `formal_fuzz` asks "does the image answer what CPython answers", this one asks "do two builds of the same meaning answer the same". See §3 for why the second question reaches a class the first cannot.
 
+## 0b. Status 2026-10-13 (`work/formal370-docs`): §6 item 4's measurement
+## was taken, and it found a DECIDABLE gap rather than the honest end — a sound
+## widening of `swap_add`'s operand predicate and of the unpacking store
+
+§6 item 4 asked the next session to MEASURE the remaining `swap_add` declines
+rather than guess at them. Measured on seed `mm-r3`, 20 programs per mix,
+`swap_add` reached 10/20 of `environ`, 9/20 of `unpack`, 5/20 of `strfmt`, 7/20
+of `limits`, 7/20 of `slicing` — and the `unpack` declines were NOT the honest
+end the section supposed. Two decidable reasons, both sound to close:
+
+* **an operand shaped `(u15 * 1)`.** The `unpack` mix writes its every `+` as
+  `(u15 * 1) + (u16 * 2) + …`, and `_operand_ok` accepted only an int literal or
+  a bare `Name` in `Analysis.int_only`, so a COMPOSITE expression was declined
+  however provably integer it was.
+* **a name bound by an unpacking assignment.** `u15, u16, u17 = U14` gives the
+  `Name` node the target `Tuple` as its parent, not the `Assign`, so
+  `_store_is_int` had no arm for it and answered False for every element — the
+  names the composite expression above is built from. This is the same shape as
+  the `for`-target rule §2a's predecessor added, one assignment form over.
+
+**What landed.** `_operand_ok` now recurses through the pure, non-raising
+operators (`EXTRACT_OPS`: `+ - * & | ^`, plus unary `+ - ~`), so a composite
+operand is swappable exactly when every leaf of it is an int literal or a name
+`int_only` proved an int. That recursion is a TYPE rule and a PURITY rule at
+once, which is why it is a small grammar rather than `Analysis._int_expr`:
+`_int_expr` also answers for CALLS to int-returning functions, and swapping the
+two operands of a `BinOp` swaps their EVALUATION ORDER, so a call operand (which
+may print) must stay declined — `test_a_call_operand_is_not_swappable` pins
+exactly the row where `_int_expr` and `_operand_ok` must disagree.
+`_store_is_int` gained the unpacking arm, `_unpack_binds_int`, which asks the
+SAME reader the `for`-target rule asks (`_int_iterable`), so a dict RHS
+(`k6, k7 = D5`, whose elements are the KEYS) and a string RHS are declined by the
+one predicate that already declined them for `for`.
+
+**Reach, measured (seed `mm-r3`, 20 programs): `unpack` 9 → 20, `strmeth` 9 → 12,
+`strings` 11 → 12, `strfmt` 5 → 6.** `environ`, `limits` and `slicing` do not
+move: their declined operands are `os.environ` subscripts and slice results,
+which are not extent-typed here — the honest end this section names, unchanged.
+
+**Soundness.** No `transform-invalid` anywhere, and the checks are the two the
+ledger already uses: `test_formal_metamorph.py` **69/69** (six new rows: the
+unpacked-int sequence and its three negative controls — a dict RHS, a string
+RHS, a starred target — plus the composite operand and the call-operand control
+that keeps the purity half honest), and a metamorphic sweep of **13 mixes × 200
+pairs each**, both architectures, `--stmts 8 20`, all `0 findings`:
+`unpack`, `strmeth`, `strings`, `strfmt`, `core`, `calls`, `containers`, `refs`,
+`lists`, `globals`, `closures`, `sets`, `objs`. Every run was under
+`tools/memslot.py --gb 8` at 0.3 GB peak.
+
+**What this does NOT close** is §6's items 1–3 (the `struct` decision, the
+stdlib sweep, `inline_helper`/`def_order`'s thin reach) and the two arms of item
+4 above. It closes the `unpack` half of item 4, which is the half a measurement
+could answer.
+
 ## 0. Status 2026-10-07 (`formal126-docs`): the tool's own suite was RED in five
 ## places on `master`, and the two that are the TOOL's are fixed at the root
 
@@ -361,6 +415,13 @@ first three items of the previous session's list are now DONE and are recorded i
    and `slicing` (7/20), which are now the mixes to look at. A future session
    should MEASURE the remaining decline reasons as §2a did rather than guess at
    them; that is the one piece of advice here this file has to earn twice.
+   **The measurement was taken 2026-10-13 (§0b): the `unpack` declines were two
+   decidable reasons and are closed, taking `unpack` to 20/20; `environ`,
+   `limits` and `slicing` did not move and are the honest remainder. The
+   "6/20, 4/20, …" figures here are the APPLY counts as a fraction of 20, and the
+   re-measurement found `environ` 10/20, `unpack` 9/20, `strfmt` 5/20,
+   `limits` 7/20, `slicing` 7/20 on seed `mm-r3` — a different seed from this
+   row's, which is why the raw numbers differ and the mixes do not.**
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 

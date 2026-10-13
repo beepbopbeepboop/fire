@@ -575,6 +575,29 @@ def _plain_names(target):
     return [target] if isinstance(target, ast.Name) else []
 
 
+def _unpack_target_names(target):
+    """The `Name` elements of a FLAT unpacking target, else `None`.
+
+    `a, b, c = …` binds each name to one element, so a name here is an int
+    exactly when the right-hand side is an int sequence (see
+    `Analysis._unpack_binds_int`).  `None` is the answer for every other shape:
+
+    * a `Starred` element (`a, *rest = …`) collects the REST into a list, so it
+      is not one element;
+    * a nested `Tuple`/`List` element needs its own arity analysis, and the
+      right-hand side would have to be a sequence of sequences — the flat case
+      is the whole of the measured corpus, and the conservative answer is the
+      sound one;
+    * an `Attribute`/`Subscript` element stores into something else rather than
+      binding a name at all.
+    """
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    if not all(isinstance(e, ast.Name) for e in target.elts):
+        return None
+    return list(target.elts)
+
+
 def _own_returns(fn):
     """The `return` statements of `fn` ITSELF, not of a function defined inside it.
 
@@ -973,7 +996,42 @@ class Analysis:
             return self._iter_binds_int(parent.target, parent.iter, known)
         if isinstance(parent, ast.comprehension):
             return self._iter_binds_int(parent.target, parent.iter, known)
+        if isinstance(parent, (ast.Tuple, ast.List)):
+            # An UNPACKING assignment `u15, u16, u17 = U14`.  The `Name` node's
+            # parent is the target `Tuple`, not the `Assign`, so none of the
+            # arms above ever saw it — which is why the `unpack` mix's operands
+            # were unclassifiable.
+            return self._unpack_binds_int(node, known)
         return False
+
+    def _unpack_binds_int(self, node, known):
+        """Whether an unpacking assignment binds `node` to an integer.
+
+        `u15, u16, u17 = U14`, where `U14` holds nothing but integers, is the
+        `unpack` mix's shape.  Measured on seed `mm-r3`, 20 programs: `swap_add`
+        reached 9 of the mix's 20 before this rule and 20 after, because every
+        declined `+` had an operand bound this way.
+
+        The target's elements are the iterable's elements, so this is the same
+        question `_iter_binds_int` asks of a `for` target and it is answered by
+        the SAME reader, `_int_iterable`: a name qualifies when it holds a
+        list/tuple literal of int expressions, or is a `range(...)` of int
+        arguments.  A dict is not an `_int_iterable` (iterating one yields its
+        KEYS, which is the `k6, k7 = D5` shape in the same mix and is a string),
+        and a string is not either — both are declined, which is what keeps this
+        widening from classifying `k6`/`k7` as ints.
+        """
+        tree, up = node, self.parent_of(node)
+        while isinstance(up, (ast.Tuple, ast.List)):
+            tree, up = up, self.parent_of(up)
+        if not isinstance(up, ast.Assign) or len(up.targets) != 1:
+            return False
+        if up.targets[0] is not tree:
+            return False
+        names = _unpack_target_names(tree)
+        if names is None or node not in names:
+            return False
+        return self._int_iterable(up.value, known)
 
     def _iter_binds_int(self, target, it, known):
         """Whether iterating `it` binds `target` to integers.
@@ -1493,8 +1551,10 @@ def t_swap_add(module, an, rng):
     `a + b mod 2^64`, and modular addition is commutative too.  The predicate
     is not "any `+`": `a + b` is NOT commutative for lists, tuples or dicts
     (`[1] + [2]` and `[2] + [1]` are different values), so both operands must be
-    integer literals or names in `Analysis.int_only`, and `int_only` requires
-    every store of the name to be an integer literal in one scope.
+    side-effect-free integer expressions — an int literal, a name in
+    `Analysis.int_only`, or `+ - * & | ^` / unary `+ - ~` over those
+    (`_operand_ok`).  The purity half is what keeps a CALL operand out however
+    provably integer it is, because swapping moves its evaluation order.
     """
     cands = [n for n in ast.walk(module)
              if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)
@@ -1507,8 +1567,37 @@ def t_swap_add(module, an, rng):
 
 
 def _operand_ok(node, an):
-    return (_is_int_literal(node)
-            or (isinstance(node, ast.Name) and node.id in an.int_only))
+    """Whether swapping `node` with its sibling `+` operand preserves meaning.
+
+    Two conditions, and BOTH are load-bearing:
+
+    * the operand must provably be an INTEGER, because `a + b` commutes for
+      integers and does NOT for lists, tuples or dicts (`[1] + [2]` and
+      `[2] + [1]` are different values);
+    * it must be SIDE-EFFECT-FREE and non-raising, because swapping the two
+      operands of one `BinOp` swaps their EVALUATION ORDER, and an operand that
+      prints, calls a function or can raise makes that order observable.
+
+    It is therefore a small grammar — an int literal, a name `int_only` proved
+    an int, and `+ - * & | ^` / unary `+ - ~` over those — rather than
+    `Analysis._int_expr`, which also answers for CALLS to int-returning
+    functions and would license reordering two calls.  The operators are
+    `EXTRACT_OPS` for the same reason `t_extract` uses them: they are pure and
+    they change nothing but the low 64 bits.  The MEASUREMENT that widened this
+    from "literals and names" is in the `unpack`/`strmeth` mixes, where every
+    declined `+` had an operand shaped like `(u15 * 1)`.
+    """
+    if _is_int_literal(node):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in an.int_only
+    if isinstance(node, ast.BinOp) and isinstance(node.op, EXTRACT_OPS):
+        return _operand_ok(node.left, an) and _operand_ok(node.right, an)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub,
+                                                              ast.UAdd,
+                                                              ast.Invert)):
+        return _operand_ok(node.operand, an)
+    return False
 
 
 # -- 7. `x = e` + uses -> the expression -------------------------------------

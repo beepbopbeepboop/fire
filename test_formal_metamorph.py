@@ -668,6 +668,117 @@ class ScopeResolution(unittest.TestCase):
         self.assertNotIn("ch", an.int_only)
         self.assertNotIn("t", an._int_sequences)
 
+    def test_an_unpacked_int_sequence_element_is_an_int(self):
+        """`u15, u16, u17 = U14` is the `unpack` mix's whole shape.
+
+        A `Name` bound by an unpacking assignment has the target `Tuple` as its
+        parent, not the `Assign`, so `_store_is_int` saw a shape it had no arm
+        for and answered False for every element.  Measured on seed `mm-r3`,
+        `swap_add` reached 9 of the mix's 20 programs before this rule and 20
+        after, because every declined `+` had an operand bound this way.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    U14 = (28, 17, 3)\n"
+                      "    u15, u16, u17 = U14\n"
+                      "    print((u15 * 1) + (u16 * 2) + (u17 * 3))\n"
+                      "    return 0\n")
+        self.assertTrue({"u15", "u16", "u17"} <= an.int_only)
+        self.assertIn("U14", an._int_sequences)
+
+    def test_an_unpacked_dict_key_is_not_an_int(self):
+        """`k6, k7 = D5` unpacks a dict's KEYS, which are strings.
+
+        The sibling shape to the row above and from the SAME mix: the widening
+        must not read "the right-hand side is a sequence" as "its elements are
+        integers".  `_int_iterable` is the shared reader and it says no to a
+        dict, which is what keeps this row's names out of `int_only`.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    D5 = {'cd': 0, 'a': 0}\n"
+                      "    k6, k7 = D5\n"
+                      "    print(k6, len(k7))\n"
+                      "    return 0\n")
+        self.assertNotIn("k6", an.int_only)
+        self.assertNotIn("k7", an.int_only)
+
+    def test_an_unpacked_string_element_is_not_an_int(self):
+        an = self._an("def main() -> Int32:\n"
+                      "    s = 'ab'\n"
+                      "    a, b = s\n"
+                      "    print(a, b)\n"
+                      "    return 0\n")
+        self.assertNotIn("a", an.int_only)
+        self.assertNotIn("b", an.int_only)
+
+    def test_a_starred_unpacking_target_is_not_an_int(self):
+        """`a, *rest = (1, 2, 3)` binds `rest` to a LIST, and `a` is not decided.
+
+        The target is refused whole rather than per element: the arity is not
+        one-per-name, so the same question cannot be asked of it.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    a, *rest = (1, 2, 3)\n"
+                      "    print(a, len(rest))\n"
+                      "    return 0\n")
+        self.assertNotIn("a", an.int_only)
+        self.assertNotIn("rest", an.int_only)
+
+    def test_a_composite_integer_operand_of_a_plus_is_swappable(self):
+        """`(u15 * 1) + (u16 * 2)` has a COMPOSITE expression on each side.
+
+        `swap_add` accepted only int literals and names, so the `unpack` mix's
+        every `+` was out of reach even after the names were classified.
+        `_operand_ok` recurses through the pure, non-raising operators, which is
+        sound because swapping the operands of a `+` over side-effect-free
+        subexpressions cannot move a value.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    u = 0\n"
+                      "    v = 0\n"
+                      "    print((u * 1) + (v * 2))\n"
+                      "    return 0\n")
+        plus = [n for n in ast.walk(an.module)
+                if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)][0]
+        self.assertTrue(M._operand_ok(plus.left, an))
+        self.assertTrue(M._operand_ok(plus.right, an))
+
+    def test_a_call_operand_is_not_swappable(self):
+        """A call may print or raise, and a swap moves its EVALUATION ORDER.
+
+        `_int_expr` classifies `g()` here — `g` returns only integers — which is
+        exactly why `_operand_ok` is a grammar of literals, classified names and
+        pure operators rather than `Analysis._int_expr`.
+        """
+        an = self._an("def g():\n"
+                      "    print('side effect')\n"
+                      "    return 1\n"
+                      "def main() -> Int32:\n"
+                      "    print(g() + 2)\n"
+                      "    return 0\n")
+        plus = [n for n in ast.walk(an.module)
+                if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)][0]
+        self.assertFalse(M._operand_ok(plus.left, an),
+                         "the call operand must not be swappable")
+        self.assertTrue(M._operand_ok(plus.right, an),
+                        "the literal on the other side still is")
+        self.assertIn("g", an._int_returns)
+
+    def test_a_composite_operand_of_a_string_name_is_not_swappable(self):
+        """The type half one level down: `('x' * 1)` is not an integer.
+
+        The composite rule must not call a subexpression an int because its
+        SHAPE is arithmetic — `_operand_ok`'s recursion bottoms out at
+        `int_only`, and `s` is not in it.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    s = 'x'\n"
+                      "    print((s * 1) + 2)\n"
+                      "    return 0\n")
+        plus = [n for n in ast.walk(an.module)
+                if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)][0]
+        self.assertFalse(M._operand_ok(plus.left, an))
+        self.assertTrue(M._operand_ok(plus.right, an))
+
     def test_a_self_referential_store_is_int_when_something_anchors_it(self):
         """`s2 = (s2 + 1)` beside `s2 = 0`, which is the `core` mix's arithmetic.
 
