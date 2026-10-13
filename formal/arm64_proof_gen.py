@@ -3276,6 +3276,26 @@ def _step_branch_index(w: int):
     return None
 
 
+def _imm12_shifted(w: int) -> int:
+    """An `ADD`/`SUB`/`CMP` (immediate) `#imm12` operand, WITH its `sh` field.
+
+    `lib/ProofLib.lean`'s `arm64_ext_imm12` is the model's one decoder for this
+    class, and every Python site that tracks `sp` or an address through these
+    arms must read what it reads: `sh` (bits 23:22) selects `LSL #0` or `#12`,
+    so `sub sp, sp, #32, lsl #12` reserves **131072** bytes and a tracker that
+    reads only `imm12` places every address 131040 bytes away from the one the
+    emitted state has.  That is
+    `bugs/FORMAL_arm64_the_proof_generators_sp_trackers_drop_the_imm12_shift.md`.
+    `& 0x1` is the helper's own reading of the field (the encoder only emits
+    `sh ∈ {0, 1}`).
+
+    One reader, because the defect it fixes was the same dropped bits copied
+    into five decoders: `_step_rhs`, `_frame_ldp_addrs`, `_frame_read_addrs`,
+    `_hcond_mem_rws` and `_sp_stores`.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _step_rhs(w: int, idx: int):
     """Return the Lean `some ...` result the model produces for word w.
 
@@ -3406,13 +3426,13 @@ def _step_rhs(w: int, idx: int):
         # `sh` (bits 23:22) is `LSL #0` at 0 and `LSL #12` at 1; the arm's mask
         # keeps bit 23, so a word reaching here has `sh ∈ {0, 1}`. `& 0x1` makes
         # the shift total without ever computing a reserved immediate.
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm = _imm12_shifted(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm = _imm12_shifted(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3993,10 +4013,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_imm12_shifted(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_imm12_shifted(w)})"
     return addrs
 
 
@@ -4493,10 +4513,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_shifted(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_shifted(w)})"
     return out
 
 
@@ -4530,10 +4550,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_shifted(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_shifted(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4593,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _imm12_shifted(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _imm12_shifted(w)
     return sp_off
 
 
