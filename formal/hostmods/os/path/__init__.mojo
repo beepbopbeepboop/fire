@@ -615,13 +615,27 @@ def stat_ino(p, follow) -> int:
 
 
 def stat_dev(p, follow) -> int:
-    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+    """`st_dev` — the device the inode lives on, a SIGNED 32-bit field at offset 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+
+    SIGN-EXTENDED, and this is the one 32-bit field here that is. The layout
+    table in `_syscalls.mojo` declares `st_dev` an `int32` and CPython reads it
+    as one: `os.stat("/dev/null").st_dev` on this host is `0xffffffffa8fb1a80`,
+    the sign extension of `0xa8fb1a80` — not the zero-extended `0xa8fb1a80` a
+    width-only read produces (`2835028608`, which is what this function used to
+    answer for that path). `st_uid` and `st_gid` are the other 32-bit fields
+    this module reads; both are `uint32` and keep the plain width-only read.
+
+    The `-1` a missing path gets stays `-1`, because `-1` is below the sign
+    bit's threshold and the subtraction is skipped.
     """
-    return fs_stat_field32(p, follow, 0)
+    v = fs_stat_field32(p, follow, 0)
+    if v >= 2147483648:
+        v = v - 4294967296
+    return v
 
 
 def stat_nlink(p, follow) -> int:

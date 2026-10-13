@@ -786,11 +786,28 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def dev(st):
+        """`st_dev` as the 64-bit WORD both sides hold, not as CPython renders it.
+
+        CPython builds `st_dev` from an UNSIGNED 64-bit conversion of the
+        signed 32-bit field, so `/dev/null`'s is `0xffffffffa8fb1a80`. The
+        module's `int` is a signed 64-bit word holding the SAME eight bytes,
+        and `%d` on this path is `%lld`, which renders that word signed
+        (`-1459938688`). So the two sides are the same word in two renderings,
+        and comparing `str(st.st_dev)` against the image's `%d` would compare
+        CPython's unsigned rendering against the image's signed rendering of
+        equal bits. Stating the oracle's value in the signed form the image
+        prints is the comparison of the WORD, which is what the module is
+        being asked to reproduce.
+        """
+        v = field(st, "st_dev")
+        return v - 2 ** 64 if v >= 2 ** 63 else v
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), dev(s),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

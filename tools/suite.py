@@ -3293,6 +3293,7 @@ test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
 test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
+            'formal/hostmods/os/path/__init__.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='the syscalls under the os host module, through real images')
 
