@@ -326,8 +326,9 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
 
         `importlib.util` is the same capability reached one step in:
         `importlib.util.spec_from_file_location(path)` and
-        `module_from_spec(spec)` load a module BY PATH, so the row is a
-        `FIELD` read of a module-level name rather than a `DEAD` one. An
+        `module_from_spec(spec)` load a module BY PATH, and `find_spec` is the
+        same search one step earlier, so the row is a `FIELD` read of a
+        module-level name rather than a `DEAD` one. An
         earlier version of this test asserted `DEAD` for both and was wrong,
         because the reader it was checking had `import a.b` binding `a.b` — a
         false `DEAD` about a live file, which is the one answer this tool must
@@ -347,12 +348,13 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         self.assertTrue(loader["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(loader["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is blocked on two names, and "
-                         "they are the two that load a module by PATH — an "
-                         "embedded CPython, which is why the row is tiered "
-                         "`unreachable` and not `modelled`")
+                         "the importlib.util row is blocked on the names that "
+                         "load or find a module BY PATH — an embedded CPython, "
+                         "which is why the row is tiered `unreachable` and not "
+                         "`modelled`")
 
     def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
         """`--dead` is the set the ranking CANNOT see, so its ratchet is the

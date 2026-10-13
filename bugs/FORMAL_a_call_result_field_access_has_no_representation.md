@@ -31,7 +31,7 @@ the shapes are defined in the tool's docstring and pinned by
 | `copy` | modelled | 13 | 4 | `WORD` | `copy.copy`, `copy.deepcopy` |
 | `random` | unclassified, model written | 8 | 8 | `WORD` | `Random`, `randrange`, `seed` |
 | `types` | modelled | 6 | 5 | `BARE` `MODULE` `WORD` | `ModuleType`, `SimpleNamespace` |
-| `importlib.util` | unreachable | 5 | 5 | `FIELD` `WORD` | `spec_from_file_location`, `module_from_spec` — load a module BY PATH |
+| `importlib.util` | unreachable | 6 | 6 | `FIELD` `WORD` | `find_spec`, `spec_from_file_location`, `module_from_spec` — find/load a module BY PATH |
 | `inspect` | modelled | 5 | 5 | `FIELD` `WORD` | `getsource`, `getsourcelines`, `signature` |
 | `builtins` | unreachable | 3 | 3 | `MODULE` | `dir(builtins)` — the module AS A VALUE |
 | `datetime` | modelled | 2 | **0** | — | **CLOSED** |
@@ -143,6 +143,23 @@ ratchets its output to **exactly one file**: `fire_compiler.py`'s dead
 radius passes through it, and its line 8401 emits `@abstractmethod` into GENERATED
 source, so a reader of that import would reasonably conclude the node classes are
 declared abstract. **The next step for it is one line in the file that owns it.**
+
+**2026-10-13: two more dead `subprocess` imports had appeared and the ratchet was
+RED, not one file.** `tools/formal_doc_index.py` imported `subprocess` and read
+nothing through it — an unused survivor of the tool's authoring — and
+`tools/formal_metamorph.py` carried `import subprocess  # noqa: F401 — re-exported
+for callers that shim this module`, whose comment is measured FALSE: the shim it
+describes lives in `test_module_cache.py` and patches `monomorphize`'s
+`subprocess` (`import monomorphize as mm; mm.subprocess = …`), and nothing in the
+tree reads `formal_metamorph.subprocess`. Both imports are deleted, so
+`--dead`'s ratchet is back to the single `fire_compiler.py` file above and
+`test_the_whole_tree_has_one_dead_host_import_and_it_is_named` is green. The same
+walk also found a **third `importlib.util` name**: `test_formal_imports.py`
+spells `find_spec` (added 2026-10-07 by the commit that claimed the five stdlib
+names it decides), which §0's row and
+`test_a_row_that_wants_the_MODULE_reads_as_such` now record alongside
+`spec_from_file_location`/`module_from_spec` — it is the same search the row is
+about, one step before the load.
 
 The `collections` half is the same shape of finding as the `copy` half and was
 found by the same instrument: **`DEAD` is a column, not an absence.** Neither
