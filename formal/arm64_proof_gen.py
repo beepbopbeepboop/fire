@@ -3972,6 +3972,22 @@ def _work_step_lemma_text() -> str:
 # A program is represented by its control-flow graph.  The proof then works
 # for ANY code the codegen emits, not just a fixed set of shapes.
 
+def _addsub_imm(w: int) -> int:
+    """The byte immediate of an `ADD`/`SUB` (immediate) word, `sh` applied.
+
+    Bits 21:10 are `imm12` and bit 22 is the shift selector (`sh = 0` is
+    `LSL #0`, `sh = 1` is `LSL #12`), so `sub sp, sp, #131072` — the frame
+    scratch, emitted as `32 << 12` — is `imm12 = 32, sh = 1`.  A reader that
+    takes bits 21:10 alone answers **32** for it, which is the whole of a
+    stack-frame offset bug: every `sp` tracker below builds the same expression
+    `arm64_step` does (`_expr_go`'s ADD/SUB arm, which applies the shift), so
+    they have to read the immediate the same way or the expression they build
+    is not the one in the composed state.  One reader, because the alternative
+    is the five copies that existed and disagreed.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _frame_ldp_addrs(blocks_path, words: dict, state: str):
     """SP expression at each LDP along a path of blocks (tracked from `state`)."""
     sp = f"({state}).sp"
@@ -3993,10 +4009,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_addsub_imm(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_addsub_imm(w)})"
     return addrs
 
 
@@ -4493,10 +4509,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm(w)})"
     return out
 
 
@@ -4530,10 +4546,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4589,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _addsub_imm(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _addsub_imm(w)
     return sp_off
 
 

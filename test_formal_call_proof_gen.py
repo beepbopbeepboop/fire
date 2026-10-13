@@ -1867,6 +1867,60 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestTheAddSubImmediateShiftBit(unittest.TestCase):
+    """An `ADD`/`SUB` (immediate) word's byte value includes its `sh` bit.
+
+    `sub sp, sp, #131072` — the 128 KiB frame scratch — is `imm12 = 32` with
+    `sh = 1` (`32 << 12`), and `arm64_step` reads it that way (`_expr_go`'s
+    ADD/SUB arm applies the shift, and `arm64_ext_imm12` in `lib/Peephole.lean`
+    is the model's reader). The proof generator's `sp` trackers read bits 21:10
+    alone, so they built `s_0.sp - 32` for it while the composed state held
+    `s_0.sp - 131072`: the address in the rewrite did not occur in the goal and
+    Lean rejected the `hcond` obligation of every arm64 conditional branch in a
+    function whose frame is that big. Measured on
+    `test_formal_eval_eq_mojo_bridge.py`'s `ifonly` / `condassign` / `elif3`,
+    each of which failed `rewrite` with `s_0.sp - 32 - 16` against a target
+    holding `s_0.sp - 131072 - 16`.
+    """
+
+    def test_the_immediate_includes_the_shift_bit(self):
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import (encode_sub_xd_xn_imm_sh,
+                                  encode_add_xd_xn_imm_sh)
+        for enc, unshifted, shifted in ((encode_sub_xd_xn_imm_sh, 32, 131072),
+                                        (encode_add_xd_xn_imm_sh, 32, 131072)):
+            w0 = _struct.unpack("<I", enc(31, 31, 32, 0))[0]
+            w1 = _struct.unpack("<I", enc(31, 31, 32, 1))[0]
+            self.assertEqual(G._addsub_imm(w0), unshifted,
+                             f"{enc.__name__} sh=0 decoded wrong")
+            self.assertEqual(
+                G._addsub_imm(w1), shifted,
+                f"{enc.__name__} sh=1 is {G._addsub_imm(w1)}, not {shifted}: "
+                f"the shift selector (bit 22) is not applied, so a 128 KiB "
+                f"frame adjust reads as 32")
+
+    def test_the_sp_tracker_builds_the_shifted_frame_address(self):
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import (encode_sub_xd_xn_imm_sh, encode_stp_sp_pre,
+                                  encode_ldp_sp_post)
+        words = {
+            0x1000: _struct.unpack(
+                "<I", encode_sub_xd_xn_imm_sh(31, 31, 32, 1))[0],
+            0x1004: _struct.unpack("<I", encode_stp_sp_pre(0, 1))[0],
+            0x1008: _struct.unpack("<I", encode_ldp_sp_post(0, 1))[0],
+        }
+        block = {"instrs": [0x1000, 0x1004, 0x1008]}
+        addrs = G._frame_read_addrs(block, words, "s_0")
+        self.assertTrue(addrs, "no LDP read address was tracked")
+        self.assertIn(
+            "UInt64.ofNat 131072", addrs[-1],
+            f"the tracked sp omits the shift bit ({addrs[-1]}); the paired "
+            f"spill's store is at sp - 131072, so the read address has to say "
+            f"so")
+
+
 class TestNestedConditionFactSharing(unittest.TestCase):
     """The `hprior_*` value-flow facts are emitted ONCE per (path, block).
 
