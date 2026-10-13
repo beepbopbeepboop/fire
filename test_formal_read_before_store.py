@@ -326,6 +326,37 @@ CASES = [
      "    for c in \"\":\n        pass\n    return c\n", "refuse"),
     ("nonempty_literal_list_target_is_still_a_definition",
      "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
+    # ── …and the same emptiness through a NAME the preheader decides is such a
+    # literal, which is the gap `_preheader_facts`' second table closes ──
+    #
+    # `_preheader_literals` gave the preheader ONE table, "definitely this
+    # integer", so the sequence half of `_for_emptiness` read only a literal
+    # written at the `for`. `xs = []` then `for i in xs` was therefore
+    # `'maybe'`: the header's definition survived and the read after the loop
+    # returned whatever the caller left in the register, where CPython raises
+    # `UnboundLocalError` — measured on both architectures as `6159200192`
+    # before this table existed. The preheader is one region, so the two facts
+    # are one walk (`_preheader_facts`) with two tables.
+    ("preheader_empty_list_target_is_not_a_definition",
+     "    xs = []\n    for i in xs:\n        pass\n    return i\n", "refuse"),
+    ("preheader_nonempty_list_target_is_still_a_definition",
+     "    xs = [4, 5]\n    for i in xs:\n        pass\n    return i\n", "ok"),
+    ("preheader_empty_tuple_target_is_not_a_definition",
+     "    xs = ()\n    for i in xs:\n        pass\n    return i\n", "refuse"),
+    # The body's store, decided the other way round by the same table: a
+    # non-empty named literal binds and runs, an empty one does neither.
+    ("preheader_nonempty_list_body_store_ok",
+     "    xs = [1, 2]\n    for i in xs:\n        t = i\n    return t\n", "ok"),
+    ("preheader_empty_list_body_store_refused",
+     "    xs = []\n    for i in xs:\n        t = i\n    return t\n", "refuse"),
+    # THE SOUNDNESS ROW: the name must be such a literal on EVERY path, so a
+    # later binding that is not a literal removes it and the target stays
+    # defined — the `preheader_range_bound_from_a_parameter_keeps_the_target`
+    # rule, applied to the sequence table. Without the removal a program whose
+    # `xs` may be non-empty would be refused.
+    ("a_named_literal_reassigned_off_a_literal_keeps_the_target",
+     "    xs = []\n    xs = n\n    for i in xs:\n        pass\n    return i\n", "ok",
+     "the sequence table must not survive a rebinding it cannot see"),
     # THE RESIDUAL, pinned as a case so it cannot rot: the preheader has to
     # STATE the value, and a parameter is not a literal it can state — which is
     # the same limit `while_body_store_from_a_parameter_refused` records for the
