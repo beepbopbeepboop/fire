@@ -199,7 +199,7 @@ class RewriteRule:
 # dispatch. Only covers the node classes any *pattern* actually references
 # today (P.ident/member/call/subscript/binop) — extend this list when a new
 # pattern constructor needs to match on a node type not listed here.
-def _node_type_name(node):
+def _node_type_name(node: object):
     if isinstance(node, IdentExpr):
         return 'IdentExpr'
     if isinstance(node, MemberExpr):
@@ -238,7 +238,9 @@ _NODE_TYPE_CODES = {
 }
 
 
-def _node_type_code(node):
+def _node_type_code(node: object):
+    # `node: object` -- any value; see `match_pattern`'s `term` for why the
+    # annotation and not call-site inference must say so.
     if isinstance(node, IdentExpr):
         return _NODE_TYPE_IDENT
     if isinstance(node, MemberExpr):
@@ -510,6 +512,13 @@ def _term_discriminator(term, path) -> list:
     (os.environ.get(...), sys.stdin.read(), subprocess.run(...), ...).
     A list return, like this codebase's other `_as_X`-cast fixes for
     multi-return-path functions, keeps element types intact."""
+    # The walk holds NODES; the final hop's value -- a node, or a leaf
+    # string/int -- gets its OWN local (`leaf`). One local for both used to
+    # make the compiled `node` a `char *` (an `_as_str` assignment joined
+    # with the node it started as), which typed `_node_type_code`'s parameter
+    # `char *` from this call site and folded every `isinstance(node, <AST
+    # node>)` in it to False -- so the self-hosted compiler's pattern matcher
+    # never recognised a node and no rewrite rule ever fired.
     node = term
     _last_i = len(path) - 1
     for _pi in range(len(path)):
@@ -518,27 +527,17 @@ def _term_discriminator(term, path) -> list:
             return ['MISS', '']
         if not hasattr(node, fname):
             return ['MISS', '']
-        # `_as_str` on ONLY the final hop's result, not every hop: an
-        # intermediate hop's result must stay a real (dataclass-checkable)
-        # struct pointer for the NEXT loop iteration's `dataclasses.
-        # is_dataclass(node)` test, but the LAST hop, when it lands on a
-        # scalar field (IdentExpr.name, MemberExpr.member, ...), goes
-        # through the same generic/dynamic `getattr` dispatch as every
-        # other boxed field read in this codebase — its result needs the
-        # explicit static-view cast right here, at the point of the
-        # `getattr` call itself, the same way `discs[_di][n]`-style
-        # element extraction needed it (a later `isinstance(node, str)`
-        # check on the ALREADY-erased value did not recover it: e.g.
-        # IdentExpr.name == "os" printed as a decimal address even after
-        # that isinstance guard).
         if _pi == _last_i:
-            node = _as_str(getattr(node, fname))
-        else:
-            node = getattr(node, fname)
+            leaf = getattr(node, fname)
+            if dataclasses.is_dataclass(leaf):
+                return ['TYPE', str(_node_type_code(leaf))]
+            # `str()` of an untyped attribute read is the runtime's own
+            # string-or-int answer in the compiled compiler, and `str` of a
+            # str is itself under CPython.
+            return ['LIT', str(leaf)]
+        node = getattr(node, fname)
     if dataclasses.is_dataclass(node):
         return ['TYPE', str(_node_type_code(node))]
-    if isinstance(node, str):
-        return ['LIT', node]
     return ['LIT', str(node)]
 
 

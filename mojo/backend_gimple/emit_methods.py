@@ -1320,6 +1320,27 @@ def _uncompiled_module_marker(gen, node) -> str:
     return cache[name]
 
 
+def _is_callable_field_name(gen, member: str) -> bool:
+    """`member` names a FIELD of some struct this program defines and a METHOD
+    of none: `obj.<member>(...)` on an untyped box can then only be a call
+    through the field's value (see the callable-field arm in
+    `_lower_method_call`). A name that is a method anywhere keeps the method
+    paths, which is the conservative direction."""
+    _m = _as_str(member)
+    _seen = False
+    for _sn in gen.struct_field_types:
+        _fm: dict = gen.struct_field_types[_as_str(_sn)]
+        if _m in _fm:
+            _seen = True
+            break
+    if not _seen:
+        return False
+    for _sn2 in gen._struct_method_names:
+        if _m in _as_set(gen._struct_method_names[_as_str(_sn2)]):
+            return False
+    return True
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -3856,6 +3877,32 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_call('void', '', 'free', [('char *', ov)])
             gen._fresh_vals.discard(ov)
         return _sres
+
+    # `obj.f(args)` where `obj` is an untyped box and `f` is a FIELD holding a
+    # callable (`rule.build(bindings)` over `self.build = build`), not a
+    # method: read the field and call through it, whatever it holds (a plain
+    # function pointer, a bound method, a variadic). The scalar-receiver
+    # stub below answered the RECEIVER instead -- the self-hosted compiler's
+    # `ast_rewriter.try_rewrite` then spliced a RewriteRule into the AST in
+    # place of every rewrite it had just matched. Python sources only: a
+    # Mojo `Int`'s methods are real scalar methods, and a field-name
+    # coincidence there must not redirect them.
+    if (ot in ('int', 'int64_t') and len(node.args) <= 8 and not node.kwargs
+            and _as_str(getattr(gen, '_current_filename', '') or '').endswith('.py')
+            and _is_callable_field_name(gen, method)):
+        _cf_obj = gen._to_int64(ot, ov)
+        _cf_vp = gen._new_val('void *', f'(void *){_cf_obj}')
+        _cf_fn = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                [('void *', _cf_vp), ('char *', f'"{method}"')])
+        _cf_fp = gen._new_val('void *', f'(void *){_cf_fn}')
+        _cf_args = [('void *', _cf_fp)]
+        for _cf_a in node.args:
+            _cf_at, _cf_av = gen.lower_expr(_cf_a)
+            _cf_args.append(('int64_t', gen._to_int64(_cf_at, _cf_av)))
+        _cf_res = gen._call_expr('int64_t', f'mojo_maybe_bound_call_{len(node.args)}', _cf_args)
+        # Whatever the callable returns is a word of unknown kind.
+        gen._dyn_word_vals.add(_cf_res)
+        return 'int64_t', _cf_res
 
     # File handle operations (int64_t handles from mojo_open_file)
     if ot in ('int', 'int64_t'):

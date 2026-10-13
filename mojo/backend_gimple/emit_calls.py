@@ -2124,7 +2124,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # (They did: at module scope all but `repr` said `1`.)
         if gimple_exprtypes.is_python_bool_expr(gen, node.args[0]):
             et = '_Bool'
-        return 'char *', gen._stringify_value(et, ev)
+        # The operand node rides along, as it does for f-strings: an
+        # unknown-kind LOCAL is recognised by its name (`_dyn_word_locals`).
+        return 'char *', gen._stringify_value(et, ev, node.args[0])
 
     # str(bytes_obj, encoding[, errors]): real Python's bytes-decode
     # form. This codegen has no real `bytes` type (bytes-like values are
@@ -2476,13 +2478,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _missed = gen._new_val('int', '_mojo_getattr_missed')
             cond = gen._new_val('_Bool', f'{_missed} != 0')
             if _res == 'int64_t':
-                return 'int64_t', gen._new_val('int64_t', f'{cond} ? {raw_dt} : {raw}')
+                _gres = gen._new_val('int64_t', f'{cond} ? {raw_dt} : {raw}')
+                # An untyped attribute read: a word of unknown kind (see
+                # `_dyn_word_vals`), exactly like `obj.<untyped member>`.
+                gen._dyn_word_vals.add(_gres)
+                return 'int64_t', _gres
             # `raw` is the dispatch's own int64_t word; in a `char *` result it
             # is either a borrowed string pointer (a hit) or 0 (the miss, which
             # the conditional never selects).
             hit = gen._new_val(_res, f'({_res}){raw}')
             return _res, gen._new_val(_res, f'{cond} ? {raw_dt} : {hit}')
-        return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
+        _gw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
+        gen._dyn_word_vals.add(_gw)   # see the identical note above
+        return 'int64_t', _gw
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])
         # Read the struct's real leading __mojo_type_id field (see

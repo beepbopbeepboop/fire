@@ -1050,6 +1050,11 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A word of unknown kind bound to a local makes the LOCAL one too
+        # (`leaf = getattr(node, fname)`): its later `str()` / `==` have to ask
+        # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
+        if v in gen._dyn_word_vals:
+            gen._dyn_word_locals.add(_as_str(tname))
         # Rebinding a genexp-materialised local to a non-genexp value (the
         # RHS was just lowered above, still seeing the list-typed window)
         # ends that window — later reads use the slot's own declared type.
