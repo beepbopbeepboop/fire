@@ -347,12 +347,20 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         self.assertTrue(loader["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(loader["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is blocked on two names, and "
-                         "they are the two that load a module by PATH — an "
-                         "embedded CPython, which is why the row is tiered "
-                         "`unreachable` and not `modelled`")
+                         "the importlib.util row is blocked on three names, all "
+                         "of them wanting a value this path cannot place: "
+                         "`find_spec` answers with a `ModuleSpec`, and "
+                         "`spec_from_file_location`/`module_from_spec` load a "
+                         "module BY PATH — an embedded CPython, which is why "
+                         "the row is tiered `unreachable` and not `modelled`. "
+                         "`find_spec` is name three because "
+                         "`test_formal_imports.py` asks CPython's own loader the "
+                         "question (its `test_the_find_spec_decided_names_are_"
+                         "unreachable`), the same reader the synthetic case in "
+                         "`TestTheThreeBindings` pins at `FIELD, WORD`")
 
     def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
         """`--dead` is the set the ranking CANNOT see, so its ratchet is the
