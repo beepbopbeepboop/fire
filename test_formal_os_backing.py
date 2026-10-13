@@ -760,6 +760,24 @@ def main(n):
 '''
 
 
+def _dev_word(v):
+    """CPython's `st_dev` in the one signed 64-bit word this path holds.
+
+    `struct stat`'s `st_dev` is an `int32` (the offset table in
+    `formal/hostmods/os/_syscalls.mojo` spells it out), and on macOS CPython
+    exposes the sign-EXTENDED field as an UNSIGNED 64-bit int: `/dev/null`'s
+    `0xA8FB1A80` arrives as `18446744072249612928`. The formal value model is
+    one SIGNED 64-bit word, so the module's `stat_dev` holds the same bit
+    pattern and renders it as `-1459938688`; the oracle has to name the same
+    number, or the comparison is between a value and one of its renderings. The
+    transform is the field's own sign interpretation and applies to every path
+    (a small positive `st_dev` is unchanged), not to `/dev/null` in particular.
+    """
+    if v >= (1 << 63):
+        return v - (1 << 64)
+    return v
+
+
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 
@@ -790,7 +808,7 @@ def _stat_oracle(p):
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), _dev_word(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

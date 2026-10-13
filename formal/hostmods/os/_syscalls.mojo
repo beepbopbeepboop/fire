@@ -1242,6 +1242,28 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `st_dev` is declared `int32` in the layout above (`st_rdev` too), so a field
+    whose top bit is set is NEGATIVE and the 64-bit word this path hands on has
+    to carry that sign. `le32` zero-extends, so `/dev/null`'s `0xA8FB1A80`
+    answered `2835028608` where the field is `-1459938688` — measured against
+    CPython, whose own `st_dev` is the SAME field sign-extended and exposed as
+    an unsigned 64-bit int (`18446744072249612928`): one bit pattern, two
+    renderings, and the model here is the signed one.
+
+    The subtraction rather than a shift, because `int` is a 64-bit word with no
+    wrap: subtracting `2**32` from a value whose bit 31 is set is the two's
+    complement the word must hold, and it is the one spelling `le16`'s signed
+    sibling would use.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1593,16 +1615,32 @@ def fs_stat_field16(p, follow, at) -> int:
 
 
 def fs_stat_field32(p, follow, at) -> int:
-    """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+    """The UNSIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
-    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
-    and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    `st_uid` and `st_gid` — both `uint32` in the layout above. The field is 32
+    bits and reading it as 64 would take the four bytes of padding after it, so
+    the width is the field's and not the alignment's. A SIGNED `int32` field
+    (`st_dev`) goes through `fs_stat_field32s` instead, or a device whose top
+    bit is set would answer a positive number the C library never had.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_dev` and `st_rdev`, both `int32`. The width and the sign are one
+    question — `le32s` has the measurement — and reading the field zero-extended
+    is what left `stat_dev("/dev/null")` a red case in
+    `test_formal_os_backing.py` on both architectures.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
