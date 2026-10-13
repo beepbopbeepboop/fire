@@ -4562,6 +4562,42 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
 
+    def test_the_startup_stubs_getrlimit_is_not_a_program_call(self):
+        """A program with ONE real call must not be read as having TWO.
+
+        `_emit_stack_floor_init` reads `RLIMIT_STACK` once in the startup stub
+        (`formal/arm64_codegen.py`), and that `BL getrlimit` is in
+        `extern_calls` but BELOW `func_offset`, where no run test starts. A
+        program that also prints therefore has two opaque calls in its image
+        and one the PROGRAM makes. Before the below-the-entry subtraction
+        `_program_extern_calls` reported both, and the universal walk refused
+        the program with "2 calls this walk cannot follow … ONE halt address
+        cannot discharge them" — measured on a one-`print` program, and the
+        reason ten of the twelve recursion-family examples stopped generating.
+        The `plain` row above has no program call at all, so it cannot tell
+        the two apart; this row is the doc's own reproducer and does.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self._info("arm64", "prints")
+        calls = _program_extern_calls(info)
+        self.assertEqual([c["sym"] for c in calls], ["printf"],
+                         "the startup stub's `getrlimit` is being read as a "
+                         "call the PROGRAM makes; the program's own call is "
+                         "the only one a run test can be about")
+        below = [e for e in (info.get("extern_calls") or [])
+                 if e["addr"] < info["func_offset"]]
+        self.assertIn("getrlimit", [e["sym"] for e in below],
+                      "this row is only measuring the subtraction if the "
+                      "startup stub's `getrlimit` really is in the image "
+                      "below the entry point")
+        # …and the program still gets its universal theorem: the refusal the
+        # subtraction removes is the point, not merely a shorter call list.
+        self.assertIn("_compiles_correctly_universal",
+                      self._text("arm64", "prints"),
+                      "a one-call program no longer reaches its value theorem, "
+                      "so something other than the startup stub is being read "
+                      "as an unfollowable call")
+
     def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
         """arm64's own trap is a `BL fflush`, and it must be published as one.
 

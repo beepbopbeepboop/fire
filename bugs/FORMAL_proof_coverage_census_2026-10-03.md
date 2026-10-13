@@ -1,18 +1,20 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
 **§0.9c is new (2026-10-07, `work/formal119-docs`): the INSTRUMENT's own test
-`test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` is
-RED on this tree, and it is a generator regression rather than a defect in the
-census.** The fixture is `def main(x): y = x * 3; print(y); return y`, which the
-test expects to report `proof-emitted` under `--no-check`; it now reports
-`proof-refused` because the program carries TWO opaque calls where it used to
-carry one — the stack-floor guard's `getrlimit` (not recorded as a
-`compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
-same regression is why
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is red.
-Both root causes, with the reproduction and the fix, are
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`;
-the code is another claim's, so this census was not edited to absorb it.
+`test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` was
+RED on that tree, and it was a generator regression rather than a defect in the
+census. FIXED.** The fixture is `def main(x): y = x * 3; print(y); return y`,
+which the test expects to report `proof-emitted` under `--no-check`; it reported
+`proof-refused` because the program carried TWO opaque calls where it used to
+carry one — the stack-floor guard's `getrlimit` plus the program's `printf` — so
+the two-call rule fired, and
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` was red
+with it. Both root causes are fixed and both tests are green now: the walk asks
+about the HALT's path rather than about any reachable conditional (`caa3d1a7`,
+pinned by `TestTheReachedWalkIsPerPath`), and the guard's `getrlimit` is read in
+the startup stub, below the entry point, so it is not a call the program makes
+(`70b76755`, pinned by
+`TestCompilerTrapIsNotAProgramCall::test_the_startup_stubs_getrlimit_is_not_a_program_call`).
 
 **§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
 of the TREE, and there is now a mode that says what it is in 1.7 seconds instead

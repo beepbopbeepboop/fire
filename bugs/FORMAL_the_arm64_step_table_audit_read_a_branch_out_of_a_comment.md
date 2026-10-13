@@ -30,19 +30,22 @@ by a merge. Both are filed as
 `wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
 row).
 
-**Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
+**Status 2026-10-07 (`work/formal119-docs`): the PIN below was RED, and it was
 not this doc's fix that regressed.** The census this doc pins — "all twelve
-generate" — is measured green when written, and on this tree
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 12
+generate" — was measured green when written, and on that tree
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` was 12
 failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
-`both`, `either` and `wdiff` now REFUSE at
+`both`, `either` and `wdiff` refused at
 `formal/arm64_proof_gen.py::_reached_without_a_condition` (the
 conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
-`sum_range` refuses there instead of at its owned loop-contract refusal. The
-cause is a logic bug in that check, not a reopened gap, and it is filed with
-the reproduction and the fix as
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`.
-That doc is another claim's code, so nothing here was edited.
+`sum_range` refused there instead of at its owned loop-contract refusal. The
+cause was a logic bug in that check, not a reopened gap, and it is FIXED:
+`caa3d1a7` made the walk ask about the HALT's path rather than about any
+reachable conditional, and `70b76755` moved the stack-floor guard's `getrlimit`
+into the startup stub (below the entry point) so it is not read as a program
+call. `TestTheRecursionFamiliesStillGenerate` is green again, and the fixes are
+pinned by `TestTheReachedWalkIsPerPath` and
+`TestCompilerTrapIsNotAProgramCall::test_the_startup_stubs_getrlimit_is_not_a_program_call`.
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
