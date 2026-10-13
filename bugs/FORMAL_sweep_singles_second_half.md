@@ -1,5 +1,33 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
+**Status (2026-10-07, `work/formal383-docs`): §1's and §3's FILE rows have
+MOVED one refusal deeper, behind the string-composition wall, measured on BOTH
+architectures; the analysis is unchanged and §5 is the only row left.** The
+doc's own command, `python3 fire.py build --formal --no-prove --backend=<a> -o
+.tmp/x <file>`, run for `arm64` and `x86_64`, byte-identical text:
+
+* **§1 — `formal/x86_64_decode.py`.** `field(default_factory=F)` is now GONE
+  from the file, and from the repository: `grep -rn default_factory --include=*.py
+  .` names only `formal/dataclass_transform.py`'s refusal, `formal/build.py`'s
+  comment and the tests. The build stops at an f-string on **line 133**
+  (`f"SIB with index {index} is not emitted"`), which is
+  `FORMAL_string_composition_has_no_buffer`'s row and not this one;
+  `test_x86_64_decode.py` pins the same fact from the file's side ("`Insn.extra`
+  was `field(default_factory=dict)` and is read and written"). The refusal §1
+  analyses is still CORRECT and still a project; the file simply stopped
+  exercising it.
+* **§3 — `regex_compile.py`.** The rebind refusal is behind an f-string too: the
+  build stops at **line 116** (`f"regex parse error at {self.i} in {self.p!r}"`),
+  same text on both architectures. Same wall as §1.
+* **§5 — `std/format/repr.mojo`, `std/utils/_serialize.mojo` — is UNCHANGED** and
+  is the only row still terminal, and it is a `repr` model for a non-string
+  receiver (both files are stdlib, so the probe is a stdlib edit).
+
+So the title's finding holds — four of §3.2's eight were not patches, and three
+are not — but two of the three are now one layer further from a build. The
+string-composition wall is not this doc's, so nothing here was edited to reach
+past it.
+
 **Status: filed 2026-10-03 from the sweep map
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
