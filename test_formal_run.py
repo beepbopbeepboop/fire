@@ -17413,8 +17413,15 @@ COMPREHENSION_ELEMENT_CASES = [
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
-    # The rows after them are the shapes whose per-iteration materialisation
-    # needs a runtime blob base and is still refused (see
+    # A NESTED COMPREHENSION element is now materialised the same way when its
+    # own RESULT carries no container built in this element's scratch
+    # (`model._comprehension_result_is_a_flat_container`), which is the same
+    # shallow-copy question one level in: `[[x + y for x in [1, 2]] for y in [10,
+    # 20, 30]]` answers `11 21 31` per element. The rows that remain refused are
+    # the shapes where the copy would carry an address into the element's own
+    # overwritten scratch — a list of lists, a nested comprehension whose inner
+    # ITERABLE builds the containers its target binds, a slice, and a construct
+    # whose per-iteration materialisation would need a runtime blob base (see
     # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
     # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
     # anything else fails the case.
@@ -17445,13 +17452,31 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which was the reproducer and is now per-iteration
+    # too: `model.comprehension_element_is_flat_container` accepts a
+    # comprehension element whose RESULT carries no scratch container (its inner
+    # iterable `[1, 2]` holds no container), so the same byte copy stores each
+    # outer iteration's inner list. Measured against CPython 3.14: `r[i][0]` is
+    # `11 21 31` where the shared scratch answered `31 31 31` and then exited 1.
+    # This row is in `both_arch_names` because the aliasing was the two backends'
+    # shared decision (`model`), so a one-sided run could not see a divergence.
+    ("a_nested_comprehension_as_the_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[x + y for x in [1, 2]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "11 21 31"),
+    # The shallow-copy boundary the acceptance above does NOT cross: here the
+    # inner comprehension's ITERABLE builds the containers its target binds
+    # (`[[y], [y + 1]]`), so the copy would carry an address into the outer
+    # element's own overwritten scratch and every slot would show the last outer
+    # iteration's `y`. Still refused, and the shape a later change gets wrong by
+    # widening the accepted set past "the result carries no scratch container".
+    ("a_nested_comprehension_over_scratch_containers_is_refused",
      "def main() -> Int:\n"
      "    var s = 0\n"
-     "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
-     "        s = s + v[0]\n"
+     "    for v in [[x for x in [[y], [y + 1]]] for y in [10, 20]]:\n"
+     "        s = s + v[0][0]\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      "refuse:the element `[…] for …` opens a container", None),
@@ -25152,8 +25177,14 @@ def main():
     # the opposite of what the row says. `PRINT_KWARG_CASES` is the group
     # that made that worth stating: three of its five rows are refusals and
     # two are answered.
+    # `a_nested_comprehension_as_the_element_is_per_iteration` is added by name
+    # rather than by group: the comprehension-element group's other answered rows
+    # are host-only, and the aliasing it now does NOT have is one shared decision
+    # in `model.comprehension_element_is_flat_container`, so the two backends
+    # have to be seen to agree about it.
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
                       | {c[0] for c in PRINT_KWARG_CASES}
+                      | {"a_nested_comprehension_as_the_element_is_per_iteration"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
                                              "deref_a_binary64_pointee"))}) - {

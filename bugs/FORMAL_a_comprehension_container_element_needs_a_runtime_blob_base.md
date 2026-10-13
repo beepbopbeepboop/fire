@@ -6,7 +6,10 @@
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
 **Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
+BOTH backends, AND the NESTED-COMPREHENSION half of it landed 2026-10-12 (§B),
+because the byte copy the flat half already does answers a comprehension element
+whose own RESULT carries no scratch container. The general runtime-blob-base
+relocation has still not been written.** A comprehension whose
 element is a list / tuple / set / dict LITERAL with no nested container-building
 sub-expression is now materialised per iteration: the element's blob is copied
 into a slot of a `cap`-sized array indexed by the result count, so the aliasing
@@ -14,12 +17,17 @@ is gone AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
 the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
 is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+copy (see "What landed 2026-10-06" below). **§B extends that predicate to a
+comprehension element whose result carries no container built in this element's
+scratch, so the document's own reproducer
+`[[x + y for x in [1, 2]] for y in [10, 20, 30]]` now answers `63` on both
+backends instead of being refused.** What is STILL refused is every element whose
+per-iteration materialisation needs a RUNTIME blob base — a list of lists, a
+comprehension whose inner ITERABLE builds the containers its target binds, a
+slice, a constructor call — which is the relocation the rest of this document
+describes, and it is unchanged. Read "What landed" first; the paragraphs under it
+price the refusal, which is now the shapes whose copy would carry a scratch
+address rather than the whole class.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
@@ -40,7 +48,8 @@ about which elements are representable; the message stays
 | `[[y, y + 1] for y in [10, 20, 30]]`, `r[i][1]` | `11 21 31` | refused | **`11 21 31`** |
 | `[(y, y + 1) for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
 | `[{y, y + 1} for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
-| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | refused (runtime base) |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | **`63`** (§B) |
+| `[[x for x in [[y], [y + 1]]] for y in [10, 20]]` | `62` | refused | refused (scratch address in the copy, §B) |
 | `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused (shallow copy) |
 | `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
 | `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
@@ -52,10 +61,12 @@ defect one level down. A NAME is deliberately not a container: `[a, b]` over two
 outer lists copies the outer list and shares `a`/`b`, which is what CPython does.
 That is why the predicate recurses rather than keying on the element's node type.
 
-**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): three
-build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because three
+**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): build-and-run
+rows that read `r[i][j]` (the CONTENT, not `len`, because three
 copies of the last iteration and one element per iteration have the same count),
-the nested / dict-value / list-of-lists refusals, and the one-iteration guard.
+the dict-value / list-of-lists / scratch-container refusals, and the
+one-iteration guard. §B adds the nested-comprehension acceptance and the refusal
+row that bounds it.
 
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
@@ -63,6 +74,70 @@ comprehension's element site reserves through the ONE sequential frame ledger
 (`_reserve_blob` against `_list_cursor`), and it runs once at COMPILE time while
 running N times at RUN time — so any reservation it makes is one allocation for
 N iterations. Measured on both architectures.
+
+## §B. What landed 2026-10-12: the NESTED-COMPREHENSION element is per-iteration too
+
+**The document's own reproducer is no longer refused, and the acceptance is the
+same byte copy the flat half already does.** §"What the obvious fix actually is"
+measured that the array-and-index fix "does not work for a NESTED COMPREHENSION
+element", because it relocated each element's blob by rewriting the construct
+that BUILT it (`_emit_list` places its literal at `frame + array_base + count ·
+stride`) and the inner comprehension's own `_emit_comprehension` reserved its
+result somewhere else. **The copy the flat half landed does not have that
+limitation**: `_materialize_compr_element` copies `bytes_` bytes out of the
+element site's whole footprint, whatever built it, into slot `i` of a `cap`-slot
+array. An inner comprehension's result is exactly such a footprint, so
+`[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63` (CPython's answer)
+on BOTH backends where it was refused, and `[[x for x in a] for y in …]` over an
+outer list `a` answers CPython too.
+
+**What decides whether the copy is sound, stated once.** The copy carries the
+element blob's WORDS, so it is sound exactly when none of those words is an
+address into THIS element's own scratch (which the next outer iteration
+overwrites). For a literal element that is
+`model.comprehension_element_is_flat_container`'s "no container is built inside
+it". For a comprehension element it is
+`model._comprehension_result_is_a_flat_container`: the result stores the values
+of the inner `element`/`value`, so it is flat when
+(a) those build no container, and (b) any of this comprehension's own generator
+TARGETS they mention has an iterable that cannot hand it a container this element
+built (`model._iterable_yields_a_scratch_container` — a literal whose elements
+build one, a call, a slice, a nested comprehension). A generator target whose
+iterable is an outer name/subscript yields an OUTER object, and sharing that is
+what CPython does, so `[[x for x in a] for y in …]` stays accepted.
+
+**The boundary is pinned by a case, and it is the shape a later widening gets
+wrong.** `[[x for x in [[y], [y + 1]]] for y in [10, 20]]` is the inner iterable
+BUILDING the containers its target binds: the copy would carry an address into
+the element's scratch, and every outer slot would show the last iteration's `y`.
+It is refused (`a_nested_comprehension_over_scratch_containers_is_refused`). This
+is the measured defect the first cut of this change shipped — it BUILT and
+SIGSEGV'd on both backends (`rc=-11`) — which is why (b) above is a rule and not
+a convenience.
+
+**Measured, both backends, after**, through `test_formal_run.py`'s runner
+(`--backend=arm64` / `--backend=x86_64`, image run):
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, `r[i][0]` | `11 21 31` | refused | **`11 21 31`** |
+| `[[x + y for x in [1, 2, 3]] for y in [10, 20]]`, sum of all | `102` | refused | **`102`** |
+| `[[x for x in a] for y in [10, 20]]`, `a = [[1], [2]]` | `2` | refused | **`2`** |
+| `[[x for x in [[y], [y + 1]]] for y in [10, 20]]` | `62` | refused | **refused** (scratch address) |
+| `[[[z] for z in [1, 2]] for y in [10, 20]]` (inner element builds) | `2` | refused | refused |
+| `[[x + y for x in [1, 2]] for y in [10]]` (one iteration) | `11` | `11` | `11` |
+
+**What this does NOT do.** It does not write the runtime blob base, and the
+shapes that genuinely need it are unchanged: a list of lists and a slice/
+constructor-call element inside a comprehension are still refused by
+`comprehension_element_blob_refusal`, and a comprehension element whose result
+carries a scratch address is refused for the same reason. The relocation in
+"The exact next step" is what would accept those, and it is still the open half.
+
+**What was run for §B.**
+`python3 tools/memslot.py --gb 8 --label frun -- python3 test_formal_run.py`
+→ `PASS=1210 FAIL=0`, and the new row is in `both_arch_names` so both backends
+build and RUN it.
 
 ## What landed (2026-10-05): the refusal, and the ledger measurement that asks it
 
@@ -243,22 +318,36 @@ it affordable is the measured 0 above.
 ## Reproducing
 
     $ export PATH=/opt/homebrew/bin:$PATH
-    $ cat .tmp/ds/alias.mojo      # the program above
+    $ mkdir -p .tmp/ds && cat > .tmp/ds/alias.mojo <<'EOF'
+    def main():
+        s = 0
+        for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:
+            s = s + v[0]
+        print(s)
+        return 0
+    main()
+    EOF
     $ python3 .tmp/ds/alias.mojo                        # 63
-    $ python3 tools/memslot.py --gb 8 --label t -- \
-          python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
-    build: a comprehension in main: the element `[…] for …` opens a container, …
+    $ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label t -- \
+          python3 fire.py build --formal --no-prove -o .tmp/al_$a --backend=$a \
+          .tmp/ds/alias.mojo && .tmp/al_$a; done        # 63 on both (was refused)
+    # the refusal that bounds it: the inner ITERABLE builds the containers
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
-    $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
-    $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
+    $ grep -n "def _materialize_compr_element" formal/arm64_codegen.py
+    $ grep -n "def _comprehension_result_is_a_flat_container" formal/model.py
+    $ grep -n "def _iterable_yields_a_scratch_container" formal/model.py
 
 and the tests, no builds for the census:
 
 ```sh
-python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_refused \
-  a_nested_comprehension_as_the_element_is_refused \
+python3 test_formal_run.py \
+  a_comprehension_element_that_is_a_list_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_tuple_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_set_literal_is_per_iteration \
+  a_nested_comprehension_as_the_element_is_per_iteration \
+  a_nested_comprehension_over_scratch_containers_is_refused \
   a_dict_comprehension_whose_value_opens_a_container_is_refused \
-  a_comprehension_element_that_is_a_set_literal_is_refused \
+  a_list_of_lists_as_the_element_is_refused \
   a_one_iteration_comprehension_element_container_still_builds \
   nested_comprehension_in_a_generator_iterable \
   comprehension_body_is_not_a_container_position

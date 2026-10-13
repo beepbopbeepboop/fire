@@ -30729,6 +30729,69 @@ def _expr_builds_a_container(e) -> bool:
     return False
 
 
+def _iterable_yields_a_scratch_container(it) -> bool:
+    """True when iterating `it` can put a container BUILT in this element's own
+    scratch into a generator target.
+
+    The comprehension-element half of the aliasing question. A generator target
+    can be a container only when the thing it iterates yields one, and only a
+    container the element position itself BUILDS is the defect — a container the
+    iterable READS out of an outer name (`for x in a`, `for x in a[i]`) is the
+    same shared object CPython hands every iteration, and sharing it is correct.
+
+    So a literal iterable yields a scratch container exactly when one of its
+    ELEMENTS builds one (`[[y], [y + 1]]` does; `[1, 2]` and `[a, b]` do not).
+    A slice reads its elements out of the sliced container, which is an outer
+    object, so it does not — `a[0:2]` yields `a`'s own elements. Everything the
+    answer is not syntactically closed over — a call, a nested comprehension, a
+    dict display — is treated as yielding one, which is the conservative
+    direction: a wrong refusal is a missing feature, a wrong acceptance is a
+    silent shared object the program cannot observe.
+    """
+    if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return any(_expr_builds_a_container(e) for e in (it.elements or ()))
+    if isinstance(it, (F.DictExpr, F.Comprehension, F.CallExpr, F.SliceExpr)):
+        return True
+    return False
+
+
+def _comprehension_result_is_a_flat_container(comp) -> bool:
+    """True when a comprehension ELEMENT's own result holds no scratch container.
+
+    The recursion `comprehension_element_is_flat_container` does for a literal,
+    one level in: the element position BUILDS a container here (the
+    comprehension's result), so the question is whether anything the result
+    STORES is a container built inside the element. The result stores the values
+    of `comp.element` (`comp.value` for a dict comprehension), evaluated once per
+    inner iteration, so:
+
+      * a body that builds a container is the defect — its blob lives in the
+        element's scratch, and the copy would carry the ADDRESS (`[[[z] for z in
+        [1, 2]] for y in …]` is refused for exactly this, as `[[[y]] for y in …]`
+        is for a literal);
+      * a generator target the body MENTIONS is safe only when its iterable
+        cannot hand it a container built in this scratch — `[[x for x in [[y],
+        [y + 1]]] for y in …]` is the measured defect, where the copied outer
+        element points at the inner iterable's `[y]`/`[y + 1]` blobs and every
+        slot shows the last outer iteration's `y`;
+      * every other name is an OUTER object (a name, a field, a subscript of
+        one), and sharing it is what CPython does.
+    """
+    bodies = [comp.element]
+    if comp.kind == "dict" and comp.value is not None:
+        bodies.append(comp.value)
+    if any(_expr_builds_a_container(b) for b in bodies):
+        return False
+    used: set = set()
+    for b in bodies:
+        used |= blob_names_read(b)
+    for g in (comp.generators or ()):
+        if _store_names(g.target) & used \
+                and _iterable_yields_a_scratch_container(g.iterable):
+            return False
+    return True
+
+
 def comprehension_element_is_flat_container(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
@@ -30753,12 +30816,23 @@ def comprehension_element_is_flat_container(element) -> bool:
     distinct outer lists over the same elements. Only a container the element
     position itself BUILDS is the defect.
 
+    **A nested COMPREHENSION element is accepted when its RESULT carries no
+    scratch container** (`_comprehension_result_is_a_flat_container`), which is
+    the same byte copy applied one level in: `[[x + y for x in [1, 2]] for y in
+    [10, 20, 30]]` now answers `63` on both backends, where the runtime-blob-base
+    refusal had replaced it. The shape whose inner iterable BUILDS the containers
+    its target binds (`[[x for x in [[y], [y + 1]]] for y in …]`) is still
+    refused, because there the copy would carry an address into this element's
+    own overwritten scratch.
+
     The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    a list of lists, a slice, a constructor call, a comprehension whose result
+    carries a scratch container, and every non-literal expression. A slice and a
+    constructor call are among the cases whose per-iteration materialisation
+    would need the runtime blob base the refusal's own document describes.
     """
+    if isinstance(element, F.Comprehension):
+        return _comprehension_result_is_a_flat_container(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
