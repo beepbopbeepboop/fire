@@ -189,13 +189,17 @@ def parse_macho(data):
                 segname = data[sect + 16:sect + 32].rstrip(b"\0").decode("ascii")
                 addr, size = struct.unpack_from("<2Q", data, sect + 32)
                 offset, = struct.unpack_from("<I", data, sect + 48)
+                sflags, = struct.unpack_from("<I", data, sect + 64)
+                reserved1, reserved2 = struct.unpack_from("<2I", data, sect + 68)
                 sections.append({"sectname": sname, "segname": segname,
-                                 "addr": addr, "size": size, "offset": offset})
+                                 "addr": addr, "size": size, "offset": offset,
+                                 "flags": sflags, "reserved1": reserved1,
+                                 "reserved2": reserved2})
                 sect += 80
             info["segments"][name] = {
                 "vmaddr": vmaddr, "vmsize": vmsize, "fileoff": fileoff,
                 "filesize": filesize, "maxprot": maxprot, "initprot": initprot,
-                "sections": sections,
+                "segflags": segflags, "sections": sections,
             }
         elif cmd == LC_ID_DYLIB:
             name_offset, = struct.unpack_from("<I", data, pos + 8)
@@ -1691,6 +1695,67 @@ def test_dylib_calls_out_to_libSystem(tmpdir, shared):
     check(r.returncode == 42, f"returned {r.returncode}, expected 42")
 
 
+def test_macho_header_and_stub_metadata_match_ld(tmpdir, shared):
+    """Three latent Mach-O spec details, read at the byte level.
+
+    Each is invisible to a loader that does not consult an indirect symbol
+    table, so nothing else in this tree could see a wrong one, and the expected
+    values are the ones `ld` writes for the same shape (`otool -hv` / `-l` on a
+    `clang -dynamiclib` output):
+
+      * the header flags are MH_DYLIB_FLAGS =
+        MH_NOUNDEFS|MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS =
+        0x100085, not the literal 0x800005 — which is missing MH_TWOLEVEL and
+        sets MH_HAS_TLV_DESCRIPTORS on a library that has none;
+      * a `S_SYMBOL_STUBS` section carries its stub SIZE in `reserved2`, not
+        `reserved1` (which is the indirect-symbol-table index: 0 here);
+      * a GOT-carrying __DATA_CONST is `SG_READ_ONLY` (0x10), so dyld remaps it
+        read-only after applying the bind fixups.
+    """
+    lib = os.path.join(tmpdir, "specs.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("hi\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libspecs.dylib")
+    rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out, lib]).returncode
+    check(rc == 0, f"the extern-calling dylib failed to build: {rc}")
+    with open(out, "rb") as f:
+        info = parse_macho(f.read())
+
+    MH_TWOLEVEL = 0x80
+    MH_HAS_TLV_DESCRIPTORS = 0x800000
+    MH_NO_REEXPORTED_DYLIBS = 0x100000
+    MH_DYLIB_FLAGS = 0x1 | 0x4 | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS
+    check(info["flags"] == MH_DYLIB_FLAGS,
+          f"dylib header flags {info['flags']:#x}, expected "
+          f"{MH_DYLIB_FLAGS:#x} (ld's NOUNDEFS|DYLDLINK|TWOLEVEL|"
+          f"NO_REEXPORTED_DYLIBS)")
+    check(info["flags"] & MH_TWOLEVEL, "MH_TWOLEVEL is not set")
+    check(not (info["flags"] & MH_HAS_TLV_DESCRIPTORS),
+          "MH_HAS_TLV_DESCRIPTORS is set on a library with no thread-local "
+          "descriptors — the old 0x800005 literal")
+
+    stubs = [s for s in info["segments"]["__TEXT"]["sections"]
+             if s["sectname"] == "__stubs"]
+    check(stubs, "the extern-calling dylib has no __TEXT,__stubs")
+    st = stubs[0]
+    check(st["reserved1"] == 0,
+          f"__stubs reserved1 is {st['reserved1']}, expected 0 (the "
+          f"indirect-symbol-table index; the stub SIZE goes in reserved2)")
+    check(st["reserved2"] == 12,
+          f"__stubs reserved2 is {st['reserved2']}, expected 12 (the arm64 stub "
+          f"size, which is the field <mach-o/loader.h> defines it in)")
+
+    check(info["segments"]["__DATA_CONST"]["segflags"] == 0x10,
+          f"__DATA_CONST segflags "
+          f"{info['segments']['__DATA_CONST']['segflags']:#x}, expected "
+          f"SG_READ_ONLY (0x10)")
+    for s in info["segments"]["__TEXT"]["sections"]:
+        if s["sectname"] == "__text":
+            check(s["reserved1"] == 0 and s["reserved2"] == 0,
+                  f"__text reserved fields are {s['reserved1']}/"
+                  f"{s['reserved2']}, expected 0/0")
+
+
 def test_frame_params_are_published_not_empty(tmpdir, shared):
     """A module that takes a FRAME publishes a per-parameter frame contract.
 
@@ -2291,6 +2356,8 @@ TESTS = [
      test_a_proved_dylib_is_an_arm64_artifact_and_says_so),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
+    ("Mach-O header and stub metadata match ld",
+     test_macho_header_and_stub_metadata_match_ld),
     ("a frame parameter's contract is published, not empty",
      test_frame_params_are_published_not_empty),
 ("no module under lib/ admits a sorry or an admit",
