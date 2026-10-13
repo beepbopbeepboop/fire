@@ -53,12 +53,23 @@ one of them is a premise rather than a feature.**
   is the one `STACK_FLOOR_BUDGET_BYTES` already states, the wide frame spends none
   of it, and the failure mode is a status a caller can read rather than a SIGSEGV.
 
-Still open, unchanged: no method is proved end to end by the generator (step 6),
-no loop contract for a method, the `work_step_*` aliases are still misnamed
-pending the `_WORK_STEP` rename, and the x86-64 model has still not been re-audited
-for arm64's class of mis-modelled memory form (`bugs/FORMAL_x86_64_model_has_no_
+Still open: no method is proved end to end by the generator (step 6, boundary
+re-measured 2026-10-13 — see step 6), no loop contract for a method, the
+`work_step_*` aliases are now UNUSED but not yet deleted (see step 0 and the
+"Not done" list), and the x86-64 model has still not been re-audited for
+arm64's class of mis-modelled memory form (`bugs/FORMAL_x86_64_model_has_no_
 step_for_a_gpr_to_xmm_move.md` and its siblings, claimed elsewhere). The first
 three are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs.
+
+**Update 2026-10-13 (`work/formal357-docs`).** Two stale claims above are
+corrected, from the code rather than from a re-run: the "two one-line fixes"
+step 6 named (`_stmts_go_t` rejecting `VarDecl`, `_expr_go_t` reading
+`e.args[0]`) have LANDED, so the generator no longer stops there — it stops at
+the missing struct DOMAIN, which is `FORMAL_wide_recv_model_has_no_domain_for_a_
+struct.md`'s subject; and the `_WORK_STEP` rename landed, so the two `work_step_*`
+aliases are referenced by nothing and are a `lib/ProofLib.lean` rebuild away
+from deletion. Nothing here is a code change; it is where the next reader
+should look.
 
 ## Is the one-word value a true invariant?
 
@@ -262,11 +273,15 @@ STR X0, [X5, #8]  modelled as  mem[sp+8] := x0  -- …at SP, not at X5
 
 All three are now false and their negations are proved (`by decide`, in the
 landing commit's verification). `work_step_ldr_uoff` and `work_step_str_uoff`
-are the corrected statements; `work_step_ldr_pre` and `work_step_str_off` are
+are the corrected statements; `work_step_ldr_pre` and `work_step_str_off` were
 kept as aliases because `formal/arm64_proof_gen.py`'s `_WORK_STEP` table
-(`:1578`, `:1589`) dispatches on those names. **Renaming the generator's two
-table entries and deleting the aliases is a one-line follow-up that owns
-`formal/arm64_proof_gen.py`; it is not in my lane and is not done.**
+dispatched on those names. **The generator's two table entries now name
+`work_step_ldr_uoff` (idx 18) and `work_step_str_uoff` (idx 31)**, so the aliases
+are unused: nothing outside `lib/ProofLib.lean` mentions
+`work_step_ldr_pre`/`work_step_str_off` any more, and the two alias comments in
+that file still claim the generator asks for the historical names, which is no
+longer true. Deleting the two aliases is the last step of this item and it is a
+`lib/ProofLib.lean` rebuild rather than a code change.
 
 **Blast radius measured, not assumed:** `0xF9400000` and `0xF9000000` appear in
 **zero** of the 43 `formal/examples/*_proof.lean` images, so no existing proof
@@ -538,15 +553,24 @@ instead of `MojoStmt`/`MojoExpr`, plus the per-block value flow for frame
 accesses, plus `FrameOk_except` in place of `FrameOk` in the method's contract.
 Its `_gen_go` (`:878`) is the place where the one-argument model is assumed.
 
-**Measured, so the next person does not have to rediscover it:** a two-field
-struct with methods does not reach the generator's *frame* problem at all. It
-stops two steps earlier, in `_stmts_go_t` (`formal/arm64_proof_gen.py:608`),
-which handles `Return`, `Pass`, `ExprStmt`, `Assign`, `AugAssign` and `IfStmt`
-and raises on everything else — so `var p = Point()` (a `VarDecl`) fails, and
-without the `var` a zero-argument constructor fails one line lower, in
-`_expr_go_t`, which reads `e.args[0]` unconditionally. Both are one-line fixes
-in that file and neither is about the receiver. What is genuinely open after
-them is the receiver's own per-block value flow, which is this step.
+**Update 2026-10-13 (`work/formal357-docs`): the two "one-line fixes" this
+section named have LANDED, so the boundary it measured is no longer where the
+generator stops, and the next reader should not go looking for them.** The
+binder in `_stmts_go_t` takes `VarDecl` (`isinstance(st, (Assign, AugAssign,
+VarDecl))` — the same walk `Assign` and `AugAssign` take), so `var p = Point()`
+binds; and `_expr_go_t`'s call arm is `_call_go`, which renders EVERY argument
+(`f_go` for a zero-argument call, SPACE-separated) rather than reading
+`e.args[0]`. So a two-field struct with methods no longer stops at either of
+those arms — it stops at the same place
+`formal/examples/{struct_point,struct_method,wide_recv}.mojo` do, which is the
+semantic model's missing struct DOMAIN: `Point()` is a call to a callee with no
+`_go` (`_call_go` refuses rather than guessing) and `p.x` is a `MemberExpr`
+whose value the model has no domain for (`_expr_go_t`'s `_no_value_model`
+arm). Both are `test_formal.py::EXPECTED_FAILURES` rows for that reason, and
+that domain is `bugs/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s
+subject — a representation project, not a step in this one. What remains this
+step's own is the receiver's per-block value flow, which is downstream of the
+struct domain and not reachable before it.
 
 ## The 14 remaining receivers, by band
 
@@ -823,8 +847,11 @@ than dressed up as demonstrations.
   code is correct without it (the frame is below the callee's own blobs, and
   the per-block value flow for a frame access is a load or a store to a fixed
   `sp + 8k`), which is a fact about the emitter and not a proof.
-* **The `work_step_*` aliases are still misnamed** pending the `_WORK_STEP`
-  rename.
+* **The `work_step_*` aliases are unused but not yet deleted.** The `_WORK_STEP`
+  rename landed (the table names `work_step_ldr_uoff` idx 18 and
+  `work_step_str_uoff` idx 31), so `work_step_ldr_pre`/`work_step_str_off` are
+  referenced by nothing but their own definitions and their now-stale comments
+  in `lib/ProofLib.lean`; removing them is a library rebuild, not a code change.
 * **The x86-64 side of the model was not re-audited** for the same class of
   mis-modelled memory form. `X86.x86_mem_addr` looks correct on inspection and
   the 43-example model test passes against the hardware, but arm64 is the proof
