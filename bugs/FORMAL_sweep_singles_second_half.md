@@ -22,6 +22,25 @@ static `__DATA` frame this file said was "not started", so the section is retire
 below (`work/formal115-docs`, 2026-10-07). **Three rows remain, none of them a
 patch.**
 
+**Status 2026-10-13 (`work/formal368-docs`): §1's and §3's example files no
+longer REACH the rows they name, so the messages quoted below are stale.**
+Measured, one build each, arm64:
+
+```
+$ python3 fire.py build --formal --no-prove -o .tmp/x formal/x86_64_decode.py
+build: an f-string literal on line 133 is refused on this path: …
+$ python3 fire.py build --formal --no-prove -o .tmp/x regex_compile.py
+build: an f-string literal on line 116 is refused on this path: …
+```
+
+Both files now stop at `FORMAL_string_composition_has_no_buffer`'s row — an
+f-string with a run-time field — which sits IN FRONT of the
+`field(default_factory=F)` and frame-rebind rows this doc describes. So §1's and
+§3's READINGS stand (each refusal is still correct and its remedies are still
+projects, not patches), but a reader who probes the files named there will see
+the string-composition refusal rather than the one quoted. §5's files are stdlib
+and were not probed.
+
 The measurement is one build per row with the row's own file, arm64, and the
 x86-64 build where the row could plausibly differ:
 

@@ -1,5 +1,33 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
+**Status 2026-10-13 (`work/formal368-docs`): the REPRESENTATION this doc asks
+for EXISTS, so its premise is answered — and the chain's first arrow is now a
+DIFFERENT doc's.** The model states it and pins it: an `Optional[T]` is one word
+holding the payload and `None` is a word `T` cannot produce (`formal/model.py`'s
+`optional_none_word` — 0 for a reference-shaped payload, 2 for `Bool`, `1 << w`
+for a narrow integer or a `Float32`), with `is None`, `== None`, `or_else`,
+`value_or`, `or` and `unsafe_value` all lowering from it
+(`optional_unwrap_lowering`), measured by `test_formal_optional.py` (25 cases, 0
+failed) on both backends. That is option 1's SOUND form — a per-type niche —
+rather than this doc's recommended option 2 (read `Variant`'s tag without the
+MLIR intrinsic); what this doc was written to settle (does the backend have a
+representation for `Optional` at all) is settled.
+
+Measured on this tree, `builtin_slice.mojo`'s terminal cause is no longer the
+`self.step.or_else()` unwrap at all:
+
+```
+build: Slice.write_to: `FormatStruct` is called, and it is imported from
+`std.format._utils`, so the call has to bind a symbol `std.format._utils`
+exports. …
+```
+
+so the 13-file row is blocked on
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+(a bare generic call's type arguments are not inferred on this path), not on
+this doc. **This section does not retract the chain revisions below; it records
+that the arrow they end at has been taken and the next one is another doc's.**
+
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
 Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
 value-model decision, and it is the last thing between the `builtin_slice` row
