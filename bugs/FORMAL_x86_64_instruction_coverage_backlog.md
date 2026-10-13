@@ -1,12 +1,53 @@
 # FORMAL_x86_64_instruction_coverage_backlog: the x86-64 half of the ISA census, form by form
 
+**Status 2026-10-12 (`work/formal285-docs`): THE BACKLOG IS EMPTY — the x86-64
+form of the census is CLOSED, and what is left in this file is a TOOL defect
+rather than a coverage gap.**
+
+`tools/formal_isa_census.py --arch x86_64` now reads **`0 form(s) with no
+LEAN/FUZZ/AS and no exemption; 6 exempt (6 harness, 0 backlog)`** — there is no
+x86-64 `BACKLOG` row at all, and the five that were the subject of this file left
+in the two ways §1.6 named:
+
+* `encode_and_r8_r8` / `encode_or_r8_r8` were **OVER-COVERED** — the byte-wise
+  ALU class was fixed by `_byte_rex_required` and the fuzz pool draws every
+  `rm`/`reg` pair, so their LEAN, FUZZ and AS columns all read `yes`. They were
+  removed from `BACKLOG`: an entry that exempts a row missing nothing is exactly
+  the stale-exemption failure `test_formal_isa_census.py`'s anti-rot half exists
+  to catch, and it was red on both.
+* `encode_call_r64` is a **LIMIT OF THE HARNESS**, not a gap — `FF /2` with
+  mod=11, a call through a function VALUE, whose target a random 64-bit register
+  cannot place inside the harness's one `MAP_FIXED` region. It moved to
+  `HARNESS_LIMITS` with that reason (its FUZZ column stays `NO`; LEAN and AS are
+  `yes`). `encode_imul_r64_r64_imm`, `encode_lea_r64_rip`, `encode_jcc_rel32`,
+  `encode_jmp_rel32` and `encode_call_rel32` had left earlier (§1.6, §1.8).
+
+**`test_formal_isa_census.py` was red on the two stale entries and is green
+now**, and its own `main()` had a second defect the census fix surfaced: it
+returned `result.wasSuccessful() and 0 or 1`, which is `1` either way (`0` is
+falsy, so the `or` always wins), so a PASSING census printed `OK` and exited 1 —
+and `tools/memslot.py` reports the child's exit, so the one tool that verifies
+this file read a green run as a failure. It is `0 if … else 1` now, as in every
+other `test_formal_*.py`.
+
+**What is still open here is the §"CENSUS-INSTRUMENT defects" list below, and
+one of its two entries is already fixed** — `call_sites` is an AST walk now
+(2026-10-05), so it no longer counts a docstring mention and
+`encode_cmov_r64_r64` no longer reads as an unexplained emitted gap. That leaves
+the **EX column**, which matches a form by DISASSEMBLY MNEMONIC alone and so
+cannot separate two encodings of one instruction; it is a defect of the optional
+`--examples` column and needs the `--examples` cache re-measured for both
+architectures to close.
+
+---
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census, which prints the matrix for BOTH backends. arm64 is closed: every one
-of its 77 emitted forms has a model arm, a fuzz case and an `as` differential,
-with the exceptions named in `formal_isa_census.HARNESS_LIMITS` (eight, each a
-property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
-file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
-have no fuzz case, no model sample, or no decoder arm.
+of its emitted forms has a model arm, a fuzz case and an `as` differential,
+with the exceptions named in `formal_isa_census.HARNESS_LIMITS` and `.BACKLOG`.
+This file is the x86-64 answer, and at the time it was written it was **not**
+closed: 18 of the 85 emitted forms had no fuzz case, no model sample, or no
+decoder arm. The Status above is that backlog's close.
 
 ## Status 2026-10-08 (`work/formal170-docs`): the x86-64 ROWS are effectively closed; the two things left are both in the census tool, which another claim holds
 

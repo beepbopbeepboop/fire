@@ -238,9 +238,9 @@ Twenty-two rows. Against them:
 
 **Nothing is left in the "write a `.mojo` module" column.** The task's "next
 4-6 modules by files blocked" does not exist as stated, and this is the second
-wave to measure that
-(`bugs/FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`
-§2 said it and had no column to say it with; §0 is the column).
+wave to measure that: the `glob` wave's ranking reached the same conclusion by
+counting what each row's callers actually spell, and this file's §0 is the
+column it did not have to say it with.
 
 ### 4.1 Nine of those files want CPython ON PURPOSE, and that is a third answer
 

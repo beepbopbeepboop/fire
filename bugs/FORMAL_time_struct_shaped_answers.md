@@ -1,5 +1,13 @@
 # FORMAL_time_struct_shaped_answers: five `time` names are absent because their answer is a struct
 
+**Status 2026-10-12 (`work/formal285-docs`): the LIMIT is unchanged — the five
+names still stay absent — and this pass only removes the two citations of
+DELETED docs.** The store-through-a-declared-pointee capability landed in
+`bc3e5638` and the caller-owned returned frame for one image in `9ca853c7`, so
+both `bugs/` paths this document cited are gone; they are named by their fix
+now. `test_formal_time.py` is the standing measurement and is 5/5 groups on
+arm64 (`PASS limits`, `PASS structroute read yes / store yes`).
+
 **Status: UPDATED 2026-10-03 (`work/formal16-8`). Item 1 is CLOSED and item 2 is
 RESOLVED AS A LIMIT, so what is left here is a FACT rather than work: the five
 names are absent because their answer is a STRUCT, a struct cannot cross a module
@@ -14,10 +22,11 @@ used to name.** It is the reason `localtime`, `gmtime`, `mktime`, `strftime` and
 approximate. Found while writing `time` (2026-09-29, the `module:time` claim).
 **Re-measured 2026-10-02: the struct LAYOUT is not what is missing — a module can
 read a C library's struct field-wise today, and what it cannot do is STORE
-through a pointer. That capability is filed as
-`FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`, and
-`test_formal_time.py`'s `structroute` group is the standing measurement behind
-it. What remains here is that capability plus an API-shape judgement.** The
+through a pointer. That capability LANDED (`bc3e5638`, "a module can STORE
+through a pointer with a declared pointee"; the doc that asked for it was
+deleted with the fix), and `test_formal_time.py`'s `structroute` group is the
+standing measurement behind it — `read yes / store yes`, 5/5 groups on each
+backend. What remains here is the API-shape judgement.** The
 struct rule is the same on both backends, so no file is claimed here; the
 container capacity rule is a separate, already-filed limit
 (`FORMAL_listdir_no_run_time_sequence.md`).
@@ -165,9 +174,9 @@ cannot do is WRITE, and that is what the five names are waiting on:
 * `get_clock_info` is a different absence (a host-object type) and is not
   waiting on this.
 
-The capability is filed, with the exact next step and the reason the analysis
-belongs in one place for both backends, as
-`FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee`.
+The capability was filed as "a module cannot store through a pointer with a
+declared pointee", with the exact next step and the reason the analysis belongs
+in one place for both backends; it landed in `bc3e5638` and its doc is gone.
 
 That leaves two open items here, and neither is a defect in this tree:
 
@@ -182,9 +191,9 @@ That leaves two open items here, and neither is a defect in this tree:
    by name: a store whose width would be a CHOICE rather than a fact (no recorded
    pointee, a float/blob/struct pointee, a `p + k` whose element width the
    declaration does not fix, a read-only page).
-   `FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md` is
-   already gone from `bugs/`, so its capability landed and this group is its
-   standing guard. One repair was needed to make the measurement readable: the
+   the store-through-a-declared-pointee capability landed in `bc3e5638`, so its
+   doc is gone and this group is its standing guard. One repair was needed to
+   make the measurement readable: the
    `unscaled` row's needle was pinned to the refusal's old FRAMING while the
    refusal is intact on both machines, so `structroute` was red on master for a
    wording change. The needle is now the sentence's operative clause, with both
@@ -211,7 +220,7 @@ That leaves two open items here, and neither is a defect in this tree:
    **So the five names STAY absent**, and `test_formal_time.py`'s `limits` group
    is the standing statement of that ("5 absent names refused, each naming
    itself", on both architectures). What would actually answer them is a
-   struct-RETURNING export — the same capability
-   `FORMAL_returned_frame_caller_owned_block.md` gives a function inside one
-   image, and which a dylib boundary does not have — and that is a project rather
-   than a judgement call about five names.
+   struct-RETURNING export — the caller-owned returned frame that
+   `9ca853c7` landed for a function inside one image (its doc is deleted with
+   the fix), and which a dylib boundary does not have — and that is a project
+   rather than a judgement call about five names.
