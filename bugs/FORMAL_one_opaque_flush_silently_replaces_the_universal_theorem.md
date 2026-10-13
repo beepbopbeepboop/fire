@@ -284,3 +284,36 @@ The three rows in `TestTheZeroDivisorGuardAgainstLean` stay RED and unmarked:
 they fail with messages that say what stopped happening, and item 2 does not
 change what they measure. `formal/arm64_proof_gen.py` is gate-owing; this is a
 comment string only, no emitted Lean changed.
+
+## 2026-10-13 (`work/formal361-docs`): the premise is CURRENT again — the div0
+## class is red for the ORIGINAL reason, not a build error
+
+Re-measured on this tree, and it moved back:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- \
+      python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean
+Ran 3 tests in 71.677s … FAILED (failures=5)
+```
+
+Five failures, and every one is the class's OWN mechanism check — *"the fixture
+generates no `q_compiles_correctly_universal` carrying `all_goals (first | done |
+sorry)`, so `tail.replace(_ADMIT, _TRACE)` is a no-op …"*. That is this
+document's finding and not a refusal: `setUpClass` now SUCCEEDS and dissects a
+file that has no value theorem. Measured directly,
+`compile_formal("def q(a, b):\n    return a // b\n", prove=True, check=False)`
+returns a proof whose only `q` theorem is `q_reaches_call_at_0x100000504`, with
+the announcement item 2 added; `extern_calls` is `[getrlimit, fflush]` and
+`compiler_traps` is `[0x100000504]` (the div0 arm's `BL fflush`).
+
+**So the 2026-10-07 Status in
+`bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` —
+"the class can no longer build its fixture … `FormalBuildError` in `setUpClass`
+… 2 calls this walk cannot follow (getrlimit, fflush)" — no longer holds on
+`master`:** the two-call refusal it quotes is gone, because the prologue's
+`getrlimit` stopped being a call (the stack limit is read in the startup stub).
+This document's ORIGINAL premise — a generated file with no
+`q_compiles_correctly_universal` — is the current state, which is why item 1
+(what ONE opaque call should say) is the live question and item 3 is blocked on
+it, exactly as written above. Nothing here changes the design question; it
+re-grounds this document rather than the div0 one, which is not this batch's.
