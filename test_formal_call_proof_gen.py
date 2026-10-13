@@ -2104,19 +2104,30 @@ class TestNestedConditionFactSharing(unittest.TestCase):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
-            # x2 per condition, which is the path count. The pre-memo growth was
-            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
-            # bound of 2.2 is below the old one and above the new one — and it
-            # is a bound rather than a count because the exact number moves with
-            # the block layout, while the growth rate is the thing that was wrong.
-            for k in (3, 4):
-                ratio = counts[k] / counts[k - 1]
+            # x2 per condition, which is the path count — and the quantity that
+            # doubles is the INCREMENT, not the total.
+            #
+            # `counts[k] - counts[k-1]` is the facts that exist ONLY because
+            # the k-th condition doubled the path count, and it doubles exactly
+            # with each condition. The total also carries a CONSTANT (the
+            # prologue's own facts, which every path repeats), so the ratio of
+            # totals is noisy when the total is small: since the stack-floor
+            # guard's branches were decided and its `getrlimit` moved to the
+            # startup stub, the totals fell from 95/155/275 to 9/21/45 and
+            # `9 -> 21` reads as x2.33 while the per-path increment is still
+            # exactly x2. The pre-memo growth was x2.0 / x2.67 / x2.5 on the
+            # totals; what this pins is the per-path rate, which the memo makes
+            # x2 and which anything above 2.2 would show as the exponential back.
+            inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
+            self.assertTrue(all(v > 0 for v in inc.values()), (counts, inc))
+            for k in (4,):
+                ratio = inc[k] / inc[k - 1]
                 self.assertLessEqual(
                     ratio, 2.2,
-                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
-                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
-                    f"this x2 (the number of paths) and anything above 2.2 is "
-                    f"the exponential back")
+                    f"the per-path facts grew by x{ratio:.2f} "
+                    f"({inc[k - 1]} -> {inc[k]}) from {k - 2} to {k} "
+                    f"conditions; the per-path memo makes this x2 (the number "
+                    f"of paths) and anything above 2.2 is the exponential back")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3683,6 +3694,53 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                           f"presence check cannot see")
 
 
+class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
+    """The arm64 stack-floor guard must contain NO call.
+
+    The guard used to read `RLIMIT_STACK` with a `getrlimit` `BL` in the first
+    guarded prologue, behind a `CBNZ` cache test.  A call on a path a
+    conditional selects is exactly what the universal theorem refuses, so no
+    program with a source `if` had a value theorem, and the cached word held
+    `getrlimit`'s RETURN CODE (a status) rather than `rlim_cur`, so the budget
+    clamped to the compile-time constant and the guard never fired under a
+    reduced `ulimit -s`.  Both are fixed by moving the read to the startup stub
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), and this pins the two
+    halves the bug docs name as the anti-rot: `formal/examples/either.mojo`
+    (a source conditional) regenerates its value theorem, and
+    `formal/examples/mod_by_var.mojo` still takes the ordinary run-test path
+    (its div0 `fflush` is a compiler trap, not a program call).
+    """
+
+    def _proof(self, filename):
+        src = os.path.join(HERE, "formal", "examples", filename)
+        if not os.path.isfile(src):
+            raise unittest.SkipTest(f"{src} is not in this checkout")
+        tmp = tempfile.mkdtemp(prefix="a2-guardpath-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with open(src, encoding="utf-8") as fh:
+            source = fh.read()
+        path, err = _generate(tmp, source, filename[:-5])
+        self.assertIsNone(err, f"{filename} refused: {err}")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_a_source_conditional_gets_the_value_theorem(self):
+        text = self._proof("either.mojo")
+        self.assertIn(
+            "theorem either_compiles_correctly_universal", text,
+            "the guard's `getrlimit` is back on the walked path, so a program "
+            "with a source conditional has no value theorem")
+
+    def test_the_div0_example_still_takes_the_run_test_path(self):
+        text = self._proof("mod_by_var.mojo")
+        self.assertNotIn(
+            "theorem mod_by_var_compiles_correctly_universal", text,
+            "the div0 guard's `fflush` is being followed, which is the "
+            "opaque-call boundary the run test exists to stop at")
+        self.assertRegex(text, r"theorem mod_by_var_runs_\d+",
+                         "the example's ordinary run test is gone")
+
+
 class TestLoopContractBlocks(unittest.TestCase):
     """Which block is a loop's TEST, asked once and asked right.
 
@@ -4655,6 +4713,15 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         """
         from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
+        entry = info.get("func_offset")
+        calls = info.get("extern_calls") or []
+        self.assertEqual([e["sym"] for e in calls], ["getrlimit"],
+                         "a plain arm64 image carries exactly the startup "
+                         "stub's `getrlimit`, and nothing else — the guard "
+                         "itself must have no call in it")
+        self.assertLess(calls[0]["addr"], entry,
+                        "the stub's `getrlimit` must be BELOW the entry, or no "
+                        "run test can subtract it by address")
         self.assertEqual(_program_extern_calls(info), [],
                          "the startup stub's `getrlimit` is being read as a "
                          "call the PROGRAM makes")
