@@ -156,7 +156,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_x86_64_a_dylib_extern_call_segfaults.md` | **unclaimed** | FORMAL/x86_64: a dylib's outbound call goes through the bound `__got` slot and dies under Rosetta |
 
-### `formal/model` — 24 documents, 5 claimed
+### `formal/model` — 25 documents, 6 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -165,6 +165,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` | `formal294-docs` | `__mlir_op`: 259 sites over 104 dialect operations were refused as "there is no MLIR on this path", and for a quarter of the arithmetic ones that is false |
 | `FORMAL_std_builtin_sys_time_slice_2026-10-04.md` | `formal294-docs` | FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's |
 | `FORMAL_string_composition_has_no_buffer.md` | `formal295-docs` | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
+| `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | `formal295-docs` | `.returncode` is a field access on an integer |
 | `CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md` | **unclaimed** | The parser DISCARDS a `comptime` FUNCTION-TYPE alias, and silently erases a `comptime` call whose bracket mixes a keyword with a later positional |
 | `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | **unclaimed** | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | **unclaimed** | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
@@ -245,11 +246,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_one_field_mutator_has_no_method_contract.md` | **unclaimed** | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
 
-### `unclassified` — 2 documents, 1 claimed
+### `unclassified` — 1 document, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | `formal295-docs` | `.returncode` is a field access on an integer |
 | `FORMAL_a_starred_for_target_is_broken_on_both_backends.md` | **unclaimed** | `for a, *rest in …` builds and then exits 1 with nothing printed |
 
 ---

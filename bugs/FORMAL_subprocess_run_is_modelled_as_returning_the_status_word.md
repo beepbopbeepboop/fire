@@ -172,3 +172,56 @@ contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
 already named; this update is the measurement that makes the boundary concrete.
 `version.py` remains exactly as closed — refused at `r.returncode` — and no
 caller-side substitution was made for the same reason the doc originally gave.
+
+## Status 2026-10-13 (`work/formal295-docs`): option 1 has a second blocker, measured
+
+Two measurements, neither a re-read of the doc.
+
+* **The "Next step, exactly" (record the decision in `formal/hostmods/subprocess.mojo`'s
+  module docstring either way) is now satisfied — by the module stating the word
+  reading as DELIBERATE.** The section "THE ONE WORD, AND WHY A KEYWORD ARGUMENT
+  DOES NOT BREAK IT" and the `CompletedProcess` comment ("A function and not a
+  `struct`, and the difference is the whole reason this is here: a struct on this
+  path is a frame blob, so a caller could construct one and could not read a
+  field out of it across the boundary") both say what the docstring the doc
+  opened against did not. So the docstring half is closed even though the
+  spelling question is not.
+
+* **Option 1's cost is not a frame blob; it is a second, independent gap.** The
+  option list priced option 1 as "a frame-allocated struct per `run`". A
+  ONE-field struct is one word on this path — the receiver IS its field — so a
+  one-field `CompletedProcess` would cost no frame at all. What actually blocks
+  it is that a struct value coming back from a FUNCTION CALL does not propagate
+  into the base's binding, so `.field` on a returned struct refuses for a reason
+  that has nothing to do with `subprocess`. Minimal reproducer, arm64, `.tmp/`:
+
+      struct CompletedProcess:
+          var returncode: Int = 0
+
+      def maker(n: Int) -> CompletedProcess:
+          var c = CompletedProcess()
+          c.returncode = n
+          return c
+
+      def main(x: Int) -> Int:
+          var r = maker(x + 1)
+          return r.returncode
+
+  → `build: main: 'r.returncode' is a field access through 'r', and this path
+  has no way to say what 'r' holds … Bind the base from a constructor whose
+  declaration THIS IMAGE can see (x = S())`. The SAME program with the
+  constructor inline (`var r = CompletedProcess()` then `r.returncode = x + 1`)
+  builds and runs. So option 1 needs the field-access binding to read a callee's
+  declared return type — a change to `formal/model.py` and the emitters that
+  reaches every struct-returning function, not just `subprocess` — which is why
+  it is not the one-file change the option list implied.
+
+* Options 2 and 3 are unchanged: option 2 still rejects correct-under-CPython
+  source, and option 3 still needs its shim name to exist where the Python side
+  resolves it (a tree-owned name, i.e. a capability change rather than the free
+  option the first draft called it).
+
+**So the decision this doc asks for is unchanged and still not a bug-fix
+session's to make**; what is new is that option 1's real cost is the
+return-type binding for every struct-returning function, measured rather than
+assumed. `version.py` remains refused at `r.returncode`.
