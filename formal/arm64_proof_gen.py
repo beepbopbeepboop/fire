@@ -6765,9 +6765,11 @@ def _unmodelled_instruction(word: int):
         12-bit-offset access cannot express, which in practice means a NEGATIVE
         frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
         `#-0x58` is exactly what a spill below the frame base needs).
-        `bugs/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
-        instruction whose emission carried a real bug, and the step table still
-        has no arm for it.
+        **`_STEP_CONDS` rows 64/65 now have both arms** (`work_step_ldur` /
+        `work_step_stur` in `lib/ProofLib.lean`), so a 64-bit word of this shape
+        no longer reaches this function at all; the branch stays because this
+        reads an ENCODING and not the table, and it keeps the name for a caller
+        that asks directly.
       * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
         set, which is a different CLASS from the shifted-register rows the step
         table has (`0x8b000000`, `0xcb000000`) and not a spelling of them: it is
@@ -6810,10 +6812,10 @@ def _unmodelled_instruction(word: int):
         which = "STUR" if top == 0xf8000000 else "LDUR"
         return (which,
                 f"the unscaled (9-bit displacement) form, which is how a "
-                f"frame access at a NEGATIVE offset is reached; the step table "
-                f"has arms for the scaled `STR`/`LDR` and not for these, and "
-                f"`bugs/FORMAL_arm64_instruction_coverage.md` lists the pair "
-                f"as uncovered.")
+                f"frame access at a NEGATIVE offset is reached. `_STEP_CONDS` "
+                f"rows 64/65 are its arms now, so a 64-bit word of this shape "
+                f"is stepped rather than refused; this branch is the encoding "
+                f"classifier, kept for a caller that asks about a word directly.")
     return (None, "")
 
 

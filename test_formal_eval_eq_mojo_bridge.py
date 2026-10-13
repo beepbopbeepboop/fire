@@ -715,16 +715,20 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_spill_is_not_attributed_to_the_conditional_expression(self):
-        """The other unmodelled word is a spill, and it says so.
+        """`STUR`/`LDUR` was the other unmodelled word; the step table has it.
 
-        `STUR`/`LDUR` is the 9-bit-displacement form a frame access at a
-        NEGATIVE offset needs, and the step table has arms for the scaled
-        `STR`/`LDR` and not for these — so a function with enough spilled
-        locals to reach below the entry `sp` gets no arm64 proof either, and has
-        nothing to do with a conditional expression. This row is why the refusal
-        names the instruction off its encoding instead of assuming the one
-        construct this file is about: a message that blamed the ternary for a
-        spill would send a reader to fix the wrong thing.
+        A frame access at a NEGATIVE offset needs the unscaled 9-bit form, which
+        `bugs/FORMAL_arm64_instruction_coverage.md` listed as uncovered, and this
+        row named it off its encoding so a reader would not be sent to fix the
+        ternary for a spill. **The twelve narrower/unscaled memory forms are
+        modelled now** (`_STEP_CONDS` rows 64/65; `work_step_ldur` /
+        `work_step_stur` in `lib/ProofLib.lean`), so the classifier still names
+        the encoding, the step table now HAS the two rows, and a function with
+        twelve spilled locals GENERATES an arm64 proof that steps both forms.
+        That is this row re-measured rather than deleted: the property it
+        protects — a spill is nothing to do with the conditional expression — is
+        kept, and the "gets no proof" half is what moved. Nothing here runs Lean;
+        `test_formal.py` typechecks the corpus.
 
         Measured: twelve spilled locals is enough, and the words are
         `stur x0, [x29, #-0x58]` (`0xf81a83a0`) and `ldur` of the same shape.
@@ -735,28 +739,33 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         import formal.arm64_proof_gen as G
         import struct
         from formal.arm64 import encode_stur_xt_xn_imm, encode_ldur_xt_xn_imm
-        for enc, want in ((encode_stur_xt_xn_imm, "STUR"),
-                          (encode_ldur_xt_xn_imm, "LDUR")):
+        for enc, want, idx in ((encode_stur_xt_xn_imm, "STUR", 65),
+                               (encode_ldur_xt_xn_imm, "LDUR", 64)):
             word = struct.unpack("<I", enc(0, 29, -0x58))[0]
             self.assertEqual(G._unmodelled_instruction(word)[0], want,
-                             f"{want} is not what the refusal names for "
+                             f"{want} is not what the classifier names for "
                              f"{word:#010x}")
+            self.assertEqual(
+                G._step_branch_index(word), idx,
+                f"the step table has no arm for {want} ({word:#010x}), so the "
+                f"refusal is back and `bugs/FORMAL_arm64_instruction_coverage."
+                f"md`'s row must be re-read before this row is trusted")
 
         tmp = tempfile.mkdtemp(prefix="spill-arm64-")
         try:
             path, err = _generate(tmp, spill, "spill_arm64", arch="arm64")
-            self.assertIsNone(path, "a spilling function now generates an arm64 "
-                                    "proof, so `bugs/FORMAL_arm64_instruction_"
-                                    "coverage.md`'s LDUR/STUR row is stale and "
-                                    "this row should be re-measured")
-            self.assertNotIn("_ternary_go", err,
-                             f"a spill is being blamed on the conditional "
-                             f"expression:\n{err}")
-            self.assertIn("STUR", err,
-                          f"the refusal does not name the spill:\n{err}")
-            self.assertIn("NEGATIVE offset", err,
-                          f"the refusal does not say why the emitter reached "
-                          f"for the unscaled form:\n{err}")
+            self.assertIsNone(err,
+                              f"a spilled function is refused again now that "
+                              f"`STUR`/`LDUR` are modelled: {err}")
+            text = _read(path)
+            self.assertNotIn("_ternary_go", text,
+                             "a spill is being blamed on the conditional "
+                             "expression")
+            self.assertIn("work_step_stur", text,
+                          "the proof does not step the `STUR` a spilled frame "
+                          "access needs")
+            self.assertIn("work_step_ldur", text,
+                          "the proof does not step the `LDUR` its reload needs")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -488,7 +488,13 @@ was one of them until 2026-10-03 and no longer is; `CSEL`'s three neighbours
 - **`LDUR` / `STUR`** (~45k) — unscaled access, which in practice means the
   NEGATIVE displacement a scaled-offset load cannot express. This is the
   instruction whose emission carried a real bug; the sign writeup is in the
-  companion doc.
+  companion doc. **WIRED as of 2026-10-05**, with the other ten narrower and
+  unscaled memory forms and the two flag-setting compares
+  (`formal/arm64_proof_gen.py`'s `_STEP_CONDS` rows 64/65,
+  `lib/ProofLib.lean`'s `work_step_ldur` / `work_step_stur`), so a spilled
+  function now GENERATES an arm64 proof that steps both — the re-measurement
+  `test_formal_eval_eq_mojo_bridge.py`'s
+  `a_spill_is_not_attributed_to_the_conditional_expression` pins.
 - **`TST` / `CMN`** (~27k) — a flag-setting test of two WORDS with no result:
   `if x & y:` and `(x + y) == 0`. **BOTH EMITTED as of 2026-10-05** — the † is
   gone, and §"Re-measured 2026-10-05 (later)" above is what replaced it: the

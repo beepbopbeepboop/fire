@@ -73,13 +73,16 @@ Four pieces, in `formal/arm64_proof_gen.py`, plus the test class
 **And the "4 CFG decomposition unsupported" family in the table below was never
 this bug.** Re-measured per record, all three of the four are a `STUR`: a
 function with enough spilled locals reaches a frame offset a scaled 12-bit
-displacement cannot express, the emitter uses the unscaled 9-bit form, and
-`arm64_step` has no arm for it — twelve spilled locals is enough to reproduce,
-and `bugs/FORMAL_arm64_instruction_coverage.md` already lists `LDUR`/`STUR` as
-the one uncovered instruction whose emission carried a real bug. That is a
-separate wall with its own row, and a message that blamed the ternary for it
-would send a reader to fix the wrong thing, which is what row
-`a_spill_is_not_attributed_to_the_conditional_expression` pins.
+displacement cannot express, and the emitter uses the unscaled 9-bit form —
+twelve spilled locals is enough to reproduce. **`LDUR`/`STUR` were modelled on
+2026-10-05** (`_STEP_CONDS` rows 64/65, `work_step_ldur`/`work_step_stur`; the
+other ten narrower/unscaled memory forms came with them), so a spilled function
+now GENERATES a proof instead of being refused, and row
+`a_spill_is_not_attributed_to_the_conditional_expression` is RE-MEASURED to say
+so — the property it was written to protect (a spill is nothing to do with the
+ternary; a reader must not be sent to fix `_ternary_go`) is kept, and the "gets
+no proof" half is what moved. `bugs/FORMAL_arm64_instruction_coverage.md`'s
+`LDUR`/`STUR` entry carries the wiring.
 
 **Verified with Lean**, which is the half the text rows cannot reach:
 `test_formal_eval_eq_mojo_bridge.py::TestTheConditionalExpressionModelTypechecks`
