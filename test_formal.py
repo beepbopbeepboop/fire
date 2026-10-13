@@ -213,43 +213,43 @@ EXPECTED_FAILURES = {
                  "both backends and by the Lean proof",
 
     # `count(n) = count(n-1)` and `pow2(n) = 2 * pow2(n-1)`: TREE RECURSION,
-    # like `fib` above, and both were UNDECLARED reds until 2026-10-04 -- three
+    # like `fib` above, and both were UNDECLARED reds until 2026-10-04 -- two
     # of the corpus's heaviest examples with no proving case and no marker,
     # which is the shape of hole the `expect=`-marker discipline exists to
-    # close.  Measured, arm64, byte-identical on both:
+    # close.  When they were declared, the site was the return frame's `x30`
+    # read at an ADRP/ADD-materialised address.
     #
-    #   count_proof.lean:5330  Tactic `rfl` failed: mem_read_u64
-    #     (mem_write_u64 … (UInt64.ofNat 4294968008 -
-    #       (UInt64.ofNat 4294968008 % 4096 -
-    #         ((if False then UInt64.ofNat 1024 - UInt64.ofNat (2 ^ 21)
-    #           else UInt64.ofNat 1024) * 4096 + UInt64.ofNat 8))).toNat
-    #       (st.sp - UInt64.ofNat 1984))
-    #     (st.sp - UInt64.ofNat 8).toNat is not definitionally equal to st.x30
+    # **`pow2` now PASSES (2026-10-13) and its entry is removed rather than
+    # left to go stale.** The three examples that were still failing on the
+    # `arm64_ext_imm12` address mismatch (`fact`, `sqsum`, `sum`, and `pow2`
+    # with them) were fixed at the SOURCE: `formal/arm64_proof_gen.py`'s
+    # `sp`-tracking helpers read the `ADD/SUB (immediate)` displacement raw, so
+    # the frame setup `sub sp, sp, #32, lsl #12` was tracked as `sp - 32` while
+    # `arm64_step` carried `sp - 131072`, and the emitted peel named a slot the
+    # state did not have (`fact_proof.lean:5169`, "Did not find an occurrence of
+    # the pattern" for `s_0.sp - 32 - 16` against `s_0.sp - 131072 - 16`).
+    # `_ext_imm12` is the Python twin of the model's `arm64_ext_imm12`, all four
+    # helpers call it, and
+    # `test_formal_call_proof_gen.py::TestTheImmediateShiftReachesTheAddressTrackers`
+    # pins it.  Measured: `fact`, `sqsum`, `sum` and `pow2` all PASS.
     #
-    # which is the return frame's `x30` read, and the ADDRESS is the whole of
-    # it: the slot was written through an ADRP/ADD-materialised pointer (the
-    # `arm64_set_reg 17 s (page(pc) + 1024 * 4096)` successor two hundred lines
-    # above), so the read is at a LITERAL rather than at `sp - K` and the
-    # `mem_read_after_write_u64_slot` peel in the `simp only` set has nothing to
-    # match.  The emitter chose that address because it IS `sp - 1984`; nothing
-    # emitted says so.  (The `if False` in the middle is a dead arm, not the
-    # cause: `simp` normalises it and the tactic that fails is `rfl`.)
+    # **`count` still fails, and NOT for the reason its entry used to state.**
+    # It is no longer the `x30` read: the run now reaches a block certificate
+    # whose step-lemma application does not close --
     #
-    # The obligation is a canonicalisation from a materialised address back to
-    # the frame slot, and the frame-address machinery that owns it is claimed
-    # (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
-    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
-    # the declaration, not the fix.  `pow2` is the same goal: same address, same
-    # two error sites, and its example is the multiplication rather than the
-    # bare tail call.
-    "count": "tree recursion whose return frame reads x30 back through an "
-             "ADRP/ADD-materialised address, so the read is at a literal rather "
-             "than at sp - K and mem_read_after_write_u64_slot cannot peel it; "
-             "the address is sp - 1984 and nothing emitted says so",
-    "pow2": "the same return-frame read as count, on the multiplication's "
-            "example: the epilogue reads x30 from a slot whose address was "
-            "materialised by adrp/add, so the read is at a literal rather than "
-            "at sp - K and the slot peel cannot match it",
+    #   count_proof.lean:4305  maximum recursion depth has been reached
+    #
+    # applying `count_sr_81` (an `ADD/SUB #imm12, lsl #12`) -- and that is the
+    # `arm64_ext_imm12` term in `work_step_*`'s statement, not the return frame.
+    # The owning document, with the exact next step, is
+    # `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`.
+    "count": "a block certificate's step-lemma application does not close: "
+             "`count_proof.lean:4305` reports `maximum recursion depth has been "
+             "reached` applying `count_sr_81` (an ADD/SUB `#imm12, lsl #12`), "
+             "because `work_step_*` states the step through `arm64_ext_imm12` "
+             "and the unifier reduces without closing; the `x30` return-frame "
+             "read this row used to name is no longer the site. Owned by "
+             "bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md",
 
     # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
     #

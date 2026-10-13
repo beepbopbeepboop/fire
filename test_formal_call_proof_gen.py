@@ -4025,6 +4025,16 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     """`count` and `pow2`, declared rather than discovered, with the address
     named.
 
+    **2026-10-13: only `count` is declared any more, and NOT for this
+    address.**  The generator's `sp`-tracking helpers read the `ADD/SUB
+    (immediate)` displacement raw (`sub sp, sp, #32, lsl #12` tracked as
+    `sp - 32` against the model's `sp - 131072`), which is what made `pow2`,
+    `fact`, `sqsum` and `sum` fail here; `_ext_imm12` is the fix, and `pow2`
+    now PASSES.  `count` still fails, but at `arm64_ext_imm12` in
+    `work_step_*` (`count_proof.lean:4305`), so the marker check below reads
+    THAT site.  The x30 read this class was written for is still EMITTED (the
+    last test says so) — it is simply no longer the fact that fails.
+
     Two `formal/examples/*.mojo` files were UNDECLARED reds of the `formal` job
     until 2026-10-04: they are in neither `test_formal.py::EXPECTED_FAILURES` nor
     its x86-64 table, so nothing was expected, nothing was reported, and two of
@@ -4073,7 +4083,10 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     X30_READ = "hx30fr_"
     ADRP = "arm64_set_reg 17"
 
-    STEMS = ("count", "pow2")
+    #: `pow2` PASSES as of 2026-10-13 (the address-tracker shift fix), so only
+    #: `count` is still declared — and for a different site, which
+    #: `test_count_is_marked_with_its_current_site` states.
+    STEMS = ("count",)
 
     @classmethod
     def setUpClass(cls):
@@ -4102,29 +4115,41 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_both_are_marked_with_the_address_in_the_reason(self):
+    def test_count_is_marked_with_its_current_site(self):
+        """The declared red is still declared, and its reason names the SITE.
+
+        **The site moved on 2026-10-13 and this row moved with it.**  The `x30`
+        return-frame read is no longer where `count` fails — the address-tracker
+        shift fix removed it — and the run now stops at a block certificate
+        whose step-lemma application does not close (`count_proof.lean:4305`,
+        `maximum recursion depth`), which is the `arm64_ext_imm12` term in
+        `work_step_*`'s statement.  A marker is the only record the next session
+        reads, so a marker naming the OLD site is the same defect as an absent
+        one.
+        """
         import test_formal as T
-        for stem in self.STEMS:
-            self.assertIn(stem, T.EXPECTED_FAILURES,
-                          "%s is an UNMARKED failure of the `formal` suite job: "
-                          "the next session reads the marker list, does not "
-                          "find it, and re-derives this" % stem)
-            reason = T.EXPECTED_FAILURES[stem]
-            self.assertIn("sp -", reason,
-                          "%s: the marker does not say the read is at a frame "
-                          "slot, which is what makes it unpeelable: %r"
-                          % (stem, reason))
-            self.assertIn("materialis", reason,
-                          "%s: the marker does not say the address is "
-                          "materialised (adrp/add), which is the whole of the "
-                          "gap: %r" % (stem, reason))
+        self.assertIn("count", T.EXPECTED_FAILURES,
+                      "`count` is an UNMARKED failure of the `formal` suite "
+                      "job: the next session reads the marker list, does not "
+                      "find it, and re-derives this")
+        reason = T.EXPECTED_FAILURES["count"]
+        self.assertIn("count_proof.lean:4305", reason,
+                      "the marker does not name the site the run stops at: %r"
+                      % reason)
+        self.assertIn("maximum recursion depth", reason,
+                      "the marker does not name the failure Lean reports: %r"
+                      % reason)
 
     def test_the_generated_proof_carries_the_materialised_address(self):
-        """The measurement the markers state, read off the generated text.
+        """The emitter's half, read off the generated text.
 
-        If the emitter ever stops materialising that address — a frame-slot
-        store it can canonicalise, say — the markers go stale, `test_formal.py`
-        reports them, and this fails first with the reason spelled out."""
+        `count` writes `x30` through an ADRP/ADD-materialised pointer, so the
+        read is at a LITERAL and not `sp - K`.  On 2026-10-13 the read stopped
+        being the FAILING fact (the address-tracker shift fix removed it), but
+        the EMITTER did not change — this pins that, so a reader who finds the
+        x30 read still present does not read it as the marker naming the wrong
+        site.  If the emitter ever stops materialising the address, the text
+        changes and this fails with the reason spelled out."""
         for stem in self.STEMS:
             path = self.proofs[stem]
             self.assertIsNotNone(
@@ -4135,13 +4160,13 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
                 text = f.read()
             self.assertIn(self.X30_READ, text,
                           "%s: the proof carries no %s, so the epilogue's x30 "
-                          "read is not the fact that fails any more and this "
-                          "class is measuring something else"
+                          "read is not in the image any more and this class is "
+                          "measuring something else"
                           % (stem, self.X30_READ))
             self.assertIn(self.ADRP, text,
                           "%s: no adrp-materialised register write in the "
                           "proof, so the address is no longer a literal and "
-                          "the gap this names has moved" % stem)
+                          "the emitter change this pins has happened" % stem)
 
     def test_both_programs_build_on_both_backends(self):
         """Which side of the boundary each example is on: the program is
@@ -4869,6 +4894,75 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                 f"(looked for {declared!r} and any FORMAL_{stem}*); either "
                 f"the refusal is fixed (delete the row) or the doc that owns "
                 f"the repair is missing, and this row is what found that")
+
+
+class TestTheImmediateShiftReachesTheAddressTrackers(unittest.TestCase):
+    """`ADD/SUB SP, SP, #imm12, lsl #12` moves SP by `imm12 << 12`, and every
+    proof-generator helper that TRACKS `sp` to build an address must use it.
+
+    The MODEL applies the `sh` field (bits 23:22) through `lib/ProofLib.lean`'s
+    `arm64_ext_imm12`, and `formal/arm64_proof_gen.py`'s `_step_rhs` mirrors it
+    (`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`).
+    The helpers that walk the instruction stream and rebuild the `sp` EXPRESSION
+    an emitted read names did not, so the rewrite and the state disagreed.
+    Measured on `formal/examples/fact.mojo`: the frame setup
+    `sub sp, sp, #32, lsl #12` (= 131072 bytes) was tracked as `sp - 32`, and
+    the proof failed at `fact_proof.lean:5169` with
+
+        Did not find an occurrence of the pattern
+          ... ((s_0).sp - UInt64.ofNat 32 - UInt64.ofNat 16) ...
+        in the target expression
+          ... (s_0.sp - UInt64.ofNat 131072 - UInt64.ofNat 16) ...
+
+    Three assertions, cheapest first: the Python twin against the assembler's
+    own encoding, the offset tracker's return value, and a real corpus
+    program's emitted TEXT -- because a helper that is right and NOT CALLED is
+    this project's own "an encoder with no caller is not an instruction", one
+    layer up.
+    """
+
+    def test_the_python_twin_matches_the_assembler(self):
+        import struct
+        from formal import arm64 as A
+        from formal.arm64_proof_gen import _ext_imm12
+        for imm12, sh in ((32, 1), (16, 0), (4095, 1), (1, 0), (2047, 1)):
+            word = struct.unpack(
+                "<I", A.encode_sub_xd_xn_imm_sh(31, 31, imm12, sh))[0]
+            delta = imm12 << (12 * sh)
+            self.assertEqual(
+                _ext_imm12(word), delta,
+                f"`sub sp, sp, #{imm12}, lsl #{12 * sh}` decodes as "
+                f"{_ext_imm12(word)}, not {delta}; the Python twin of "
+                f"`arm64_ext_imm12` is what keeps an address tracker and "
+                f"`arm64_step` naming the same slot")
+
+    def test_the_sp_offset_tracker_applies_it(self):
+        import struct
+        from formal import arm64 as A
+        from formal.arm64_proof_gen import _sp_stores
+        word = struct.unpack(
+            "<I", A.encode_sub_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        self.assertEqual(
+            _sp_stores({0x1000: word}, [0x1000], 0, []), -131072,
+            "the frame reservation `sub sp, sp, #32, lsl #12` was tracked as "
+            "sp - 32, not sp - 131072, so every slot address below it is wrong")
+
+    def test_the_generated_address_is_the_state_s(self):
+        tmp = tempfile.mkdtemp(prefix="shshift-")
+        try:
+            r = _compile(os.path.join(HERE, "formal", "examples", "fact.mojo"),
+                         os.path.join(tmp, "fact.aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                text = f.read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn(
+            "sp - UInt64.ofNat 131072) - UInt64.ofNat 16", text,
+            "the emitted read address does not carry the frame's shift, so "
+            "the rewrite cannot match the state `arm64_step` produces")
+        self.assertNotIn(
+            "sp - UInt64.ofNat 32) - UInt64.ofNat 16", text,
+            "an address tracker still reads `imm12` raw")
 
 
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):

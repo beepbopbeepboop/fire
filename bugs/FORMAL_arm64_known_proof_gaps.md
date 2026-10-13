@@ -8,6 +8,33 @@ had gone stale in three separate ways, and a census that is stale in the
 direction of "more broken than it says" is as wrong as one that is stale the
 other way.**
 
+**Status update 2026-10-13 (`work/formal393-docs`): the three UNDECLARED
+failures this file was about are FIXED, and `pow2` with them.** `fact`,
+`sqsum`, `sum` and `pow2` now PASS — measured with
+`python3 test_formal.py -j 1 count pow2 fact sqsum sum`, which reports
+`PASS=4 KNOWN-GAP=1 FAIL=0` — and the fix is in the GENERATOR, not here:
+`formal/arm64_proof_gen.py`'s `sp`-tracking helpers read the `ADD/SUB
+(immediate)` displacement raw, so the frame reservation
+`sub sp, sp, #32, lsl #12` was tracked as `sp - 32` while `arm64_step` carried
+`sp - 131072`, and the emitted peel named a slot the state did not have
+(`fact_proof.lean:5169`, "Did not find an occurrence of the pattern" for
+`s_0.sp - 32 - 16` against `s_0.sp - 131072 - 16`).  The Python twin
+`_ext_imm12` — the generator's `arm64_ext_imm12` — is now called by all four
+helpers and pinned by
+`test_formal_call_proof_gen.py::TestTheImmediateShiftReachesTheAddressTrackers`;
+`pow2`'s `EXPECTED_FAILURES` entry is removed in the same change.  So the
+"three undeclared" below are no longer undeclared OR failing — they are green,
+which is the outcome the argument for declaring them was pointing at.
+
+**`count` is the one that still fails, and its SITE MOVED.**  Its `x30`
+return-frame read is no longer the failing fact: the run now reaches a block
+certificate whose step-lemma application does not close
+(`count_proof.lean:4305`, `maximum recursion depth has been reached`, applying
+`count_sr_81`, an `ADD/SUB #imm12, lsl #12`), which is the `arm64_ext_imm12`
+term in `work_step_*`'s own statement and not the frame.  That is
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`'s subject, and
+`test_formal.py`'s `count` row now names it.
+
 **Measured, `python3 test_formal.py -j 1 <stem>`, one at a time (each is a
 150-300 s Lean run, which is why this is a sample of the corpus and not all of
 it — the full sweep is a heavy run and belongs to the integrator):**
@@ -18,9 +45,9 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `countdown` | known gap | **KNOWN-GAP** (declared) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
 | `wge` | known gap | **KNOWN-GAP** (declared) | same |
 | `subscript_var` | known gap | **KNOWN-GAP** (declared) | `FORMAL_wide_receiver_by_reference.md` |
-| `count` | one of the five UNEXPECTED | **KNOWN-GAP** — it is in `EXPECTED_FAILURES` now, with the return-frame read as its reason | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` |
-| `pow2` | one of the five UNEXPECTED | **KNOWN-GAP** for the same reason (measured in `EXPECTED_FAILURES`; not re-run) | same |
-| `fact`, `sqsum`, `sum` | the other three of the five | **FAIL** — one at a time, all three with the identical obligation, a read of the stack-floor word at `4294968008` | same |
+| `count` | one of the five UNEXPECTED | **KNOWN-GAP** — still declared, but for a DIFFERENT site now: the `arm64_ext_imm12` term in `work_step_*`'s statement, `count_proof.lean:4305` `maximum recursion depth` | `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` |
+| `pow2` | one of the five UNEXPECTED | **PASS** (2026-10-13) — its `EXPECTED_FAILURES` entry is removed with the address-tracker fix | — |
+| `fact`, `sqsum`, `sum` | the other three of the five | **PASS** (2026-10-13) — were **FAIL** on the `arm64_ext_imm12` address mismatch, fixed in `formal/arm64_proof_gen.py`'s `sp`-tracking helpers | — |
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
 | `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
 | `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
@@ -39,6 +66,10 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    not a fixed one, and the doc's own argument (a gap nobody revisits is a bug
    quietly reintroduced) applies to `EXPECTED_FAILURES` exactly as it does to a
    bug doc.
+   **(SUPERSEDED 2026-10-13: `fact`, `sqsum`, `sum` and `pow2` now PASS, and
+   `pow2` is undeclared again; `count` is still declared, but for the
+   `arm64_ext_imm12` site rather than the return-frame read.  See the Status
+   update at the top and `test_formal.py`'s `count` row.)**
 2. **`sum_range` does not pass with two `sorry`s.** It FAILS, with the
    `arm64_go_exit … = none` disjunct unproved — and it fails the same way with no
    change of mine applied, so this is not a regression from anything on this
@@ -77,6 +108,11 @@ worked from as one.
 
 
 ## The count, corrected (2026-10-03)
+
+**SUPERSEDED 2026-10-13: `fact`, `pow2`, `sqsum` and `sum` now PASS, and
+`count`'s failure has moved off the `x30` read.  The measurement below is kept
+because it is what the family looked like on 2026-10-03, not because it still
+describes the tree — see the Status update at the top.**
 
 `41 pass / 4 known-gap / 0 fail` was measured 2026-10-01 and the "0 fail" has
 not been true since. On this tree:
@@ -207,10 +243,10 @@ distinct problems, and the counts should not be conflated:
 
 | | count | owner |
 |---|---|---|
-| declared in `EXPECTED_FAILURES` | **7** | read on this tree 2026-10-04: `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count`, `pow2` |
-| **UNEXPECTED failures among the 13 stems measured here** | **5** | `fact`, `sqsum`, `sum` are one fact (`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`); `sum_range` is another (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
+| declared in `EXPECTED_FAILURES` | **6** (2026-10-13; was 7) | `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count` — `pow2` now PASSES and its entry is removed; `count`'s reason moved to the `arm64_ext_imm12` site |
+| **UNEXPECTED failures among the 13 stems measured here** | **1** (2026-10-13; was 5) | `sum_range` only (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order); `fact`, `sqsum`, `sum` now PASS |
 | **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **0** | was `2` (`sgt8`, `sle8`); both PASS as of 2026-10-05 and `ug8` with them, so the row is empty rather than moved |
-| sorries in passing proofs | **0 measured**, and the "2 in `sum_range`" row is superseded — `sum_range` does not pass at all, on this tree or on master | — |
+| sorries in a passing arm64 proof | **1 each** (2026-10-13) | `fact`, `pow2`, `sqsum` and `sum` each PASS with ONE admitted `sorry` (`test_formal.py` prints the per-file census: "1 declaration(s) admitted a `sorry`"); the hole is the stack-floor guard's branch, owned by `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` — so "PASS" here is "the obligations it can close are closed", not "no hole" |
 
 **The second row is the one this file was missing, and it is why the "0 fail"
 in the header was wrong.** A gap that is not in `EXPECTED_FAILURES` is

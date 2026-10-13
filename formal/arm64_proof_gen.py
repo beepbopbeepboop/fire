@@ -3972,6 +3972,25 @@ def _work_step_lemma_text() -> str:
 # A program is represented by its control-flow graph.  The proof then works
 # for ANY code the codegen emits, not just a fixed set of shapes.
 
+def _ext_imm12(w: int) -> int:
+    """The `ADD/SUB/CMP (immediate)` displacement, with its `sh` field applied.
+
+    ARCHITECTURAL value, `imm12 << (12 * sh)` with `sh` at bits 23:22, and the
+    Python twin of `lib/ProofLib.lean`'s `arm64_ext_imm12`.  Every helper below
+    that tracks `sp` through an `ADD/SUB SP, SP, #imm12` MUST use this rather
+    than the raw `(w >> 10) & 0xfff`, or the address it builds is the one the
+    model does NOT have: `arm64_step` applies the shift now
+    (`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`), so
+    the frame setup `sub sp, sp, #32, lsl #12` (= 131072 bytes) was tracked as
+    `sp - 32` here while the model's state carried `sp - 131072`, and the emitted
+    `rw [mem_read_two_writes_adj_uint _ ((s_0.sp - 32) - 16) _ _]` matched
+    nothing.  Measured on `formal/examples/fact.mojo` before this helper:
+    `fact_proof.lean:5169` "Did not find an occurrence of the pattern" naming
+    `s_0.sp - 32 - 16` against a target of `s_0.sp - 131072 - 16`.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x3))
+
+
 def _frame_ldp_addrs(blocks_path, words: dict, state: str):
     """SP expression at each LDP along a path of blocks (tracked from `state`)."""
     sp = f"({state}).sp"
@@ -3993,10 +4012,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     return addrs
 
 
@@ -4493,10 +4512,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     return out
 
 
@@ -4530,10 +4549,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4592,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _ext_imm12(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _ext_imm12(w)
     return sp_off
 
 
