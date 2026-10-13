@@ -9,6 +9,29 @@ failures the narrow `test_formal_call_proof_gen.py` run still shows after every
 whose `setUpClass` never populated `cls.infos`, and so on — all fixed and
 committed on that branch).
 
+**2026-10-13 (`work/formal346-docs`): two of the reds this doc lists are FIXED,
+and `test_formal_call_proof_gen.py` is 7 red, not 10.**
+
+* **`TestNestedConditionFactSharing.test_the_fact_count_grows…` is green** — it
+  bounded the TOTAL fact count's ratio, and the per-path memo makes the total
+  `3*(2**k - 1)` (3 / 9 / 21 / 45), whose ratio is 3.00 / 2.33 / 2.14, so the
+  additive `-3` read as growth. It now bounds the per-condition INCREMENT
+  (6 / 12 / 24, x2.0; x2.67 with the memo disabled), which is the quantity the
+  layout does not shift.
+* **`TestANarrowTypedParameterGetsItsRange.test_lean_accepts_the_three_examples`
+  is green** — it was not pre-existing after all. The `ADD`/`SUB` immediate's
+  `sh` bit (bit 22) was dropped by the proof generator's byte-level `sp`
+  trackers, so `sub sp, sp, #131072` was built as `sp - 32` and the `rewrite`
+  could not find its pattern. `_addsub_imm` is now the one reader; the same fix
+  made `test_formal_eval_eq_mojo_bridge.py`'s arm64 `ifonly` / `condassign` /
+  `elif3` typecheck. See
+  `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` §0b.
+* The `maximum recursion depth` pair (`TestExternCallTheRunDoesNotReach`,
+  `TestSameImageCallLean`) and the four `TestTheZeroDivisorGuardAgainstLean`
+  rows are unchanged, and the "most likely cause" below still owns them. A
+  related, still-unfixed decode defect in the CONTRACT-slot trackers is filed as
+  `bugs/FORMAL_the_contract_slot_trackers_scale_the_addsub_immediate_by_eight.md`.
+
 ## What was run
 
     python3 tools/memslot.py --gb 8 --label t -- \
