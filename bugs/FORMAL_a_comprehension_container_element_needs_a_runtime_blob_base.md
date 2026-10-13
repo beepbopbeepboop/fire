@@ -14,12 +14,17 @@ is gone AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
 the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
 is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+copy (see "What landed 2026-10-06" below). **2026-10-13: the same copy now covers
+a NESTED COMPREHENSION whose own element builds nothing** — the doc's own
+reproducer `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63` on both
+backends where it answered `93` and exited 1, because the inner result stores its
+words INLINE and a shallow copy carries content rather than an address (see "What
+landed 2026-10-13" below). What is STILL refused is every element whose
+per-iteration materialisation needs a RUNTIME blob base — a nested comprehension
+whose own element opens a container, a comprehension-of-a-comprehension, a list
+of lists, a slice, a constructor call — which is the relocation the rest of this
+document describes, and it is unchanged. Read "What landed" first; the paragraphs
+under it price the refusal, which is now narrower than the whole class.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
@@ -63,6 +68,55 @@ comprehension's element site reserves through the ONE sequential frame ledger
 (`_reserve_blob` against `_list_cursor`), and it runs once at COMPILE time while
 running N times at RUN time — so any reservation it makes is one allocation for
 N iterations. Measured on both architectures.
+
+## What landed 2026-10-13: a nested comprehension whose element is a scalar
+
+**The copy above already handles one shape the 2026-10-06 landing left refused,
+and it was excluded by the PREDICATE rather than by the copy.** The landed
+`_materialize_compr_element` copies the element's own blob into a per-iteration
+slot, and it measures the element's footprint on the ledger — so a nested
+comprehension (which reserves its RESULT blob) reaches the same site with a
+non-zero `bytes_`. It was refused only because
+`model.comprehension_element_is_flat_container` returned False for every
+`F.Comprehension`. But a comprehension's result blob is a flat array of its own
+elements (`[count, e0, e1, …]`), so the shallow copy is sound exactly when no
+element IN it is an address the copy would share — i.e. when the inner element
+builds nothing. `[x + y for x in [1, 2]]` stores its results inline and is
+therefore flat; `[[x] for x in [1, 2]]` stores addresses to its own
+per-iteration array and is not. The predicate now asks the INNER element with
+the same `_expr_builds_a_container` it already uses for literal children.
+
+**The need for the runtime blob base is real for the rest, and the reason it is
+not needed here is measurable.** The doc's own argument was that the inner
+comprehension's result offset is a compile-time constant, so "relocating it"
+means making it a run-time address. That is true of a RELOCATION (build the
+inner result where the outer wants it, so it is never overwritten). It is NOT
+true of the copy: the inner result is built in its own scratch, and the copy
+happens before the NEXT outer iteration overwrites that scratch, so the outer
+slot holds a self-contained array of words. `[[x] for x in [1, 2]]` as the outer
+element is the boundary — its inner result holds ADDRESSES to a per-iteration
+array that the next outer iteration reuses, so a shallow copy would share them,
+and that shape still needs the relocation.
+
+Measured, both architectures, `python3 fire.py build --formal --no-prove` and
+run:
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, `r[0][0] r[1][0] r[2][0]` | `11 21 31` | refused | **`11 21 31`** |
+| `[[x * y for x in [1, 2, 3]] for y in [10, 20, 30]]`, all nine | `10 20 30 / 20 40 60 / 30 60 90` | refused | **as CPython** |
+| `[[z for z in [1, 2]] for x in [1] for y in [10, 20]]`, sum of both | `6` | refused | **`6`** |
+| `[[[x] for x in [1, 2]] for y in [10, 20]]` (inner element opens a container) | — | refused | refused (shallow copy) |
+| `[[[z for z in [1, 2]] for x in [1]] for y in [10, 20]]` (comprehension-of-a-comprehension) | — | refused | refused (`_expr_builds_a_container`) |
+| `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
+
+**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`):
+`a_nested_comprehension_as_the_element_is_per_iteration` reads `r[0][0]`,
+`r[1][0]`, `r[2][0]` and requires them to DIFFER (`11 21 31`; three copies of the
+last inner list would print `21 21 21`), plus the two boundary refusals
+(`a_nested_comprehension_with_a_container_element_is_refused`,
+`a_doubly_nested_comprehension_as_the_element_is_refused`) and the unchanged
+one-iteration guard.
 
 ## What landed (2026-10-05): the refusal, and the ledger measurement that asks it
 

@@ -17413,6 +17413,13 @@ COMPREHENSION_ELEMENT_CASES = [
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
+    # A NESTED COMPREHENSION whose own element builds nothing is the fourth
+    # shape the same copy makes per-iteration: its result blob is a flat array
+    # of inline words, so copying it per iteration is the shallow copy the
+    # predicate already accepts for a literal. A nested comprehension whose
+    # element DOES build a container, and a doubly-nested comprehension, keep
+    # the refusal below.
+    #
     # The rows after them are the shapes whose per-iteration materialisation
     # needs a runtime blob base and is still refused (see
     # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
@@ -17445,14 +17452,32 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which is the doc's reproducer. Its own element is
+    # `x + y`, an integer, so the inner result stores its words inline and the
+    # outer copy carries content rather than an address. Read per-index rather
+    # than summed so three copies of the last inner list (`21 21 21`, the
+    # pre-copy answer) cannot pass: the three rows must DIFFER.
+    ("a_nested_comprehension_as_the_element_is_per_iteration",
      "def main() -> Int:\n"
-     "    var s = 0\n"
-     "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
-     "        s = s + v[0]\n"
-     "    printf(\"%d\", s)\n"
+     "    var r = [[x + y for x in [1, 2]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "11 21 31"),
+    # …and the boundary of the row above: a nested comprehension whose OWN
+    # element opens a container stores an ADDRESS to its per-iteration array,
+    # which the outer copy would share across iterations, so it stays refused.
+    ("a_nested_comprehension_with_a_container_element_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[x] for x in [1, 2]] for y in [10, 20]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:the element `[…] for …` opens a container", None),
+    # …and a comprehension-of-a-comprehension, which `_expr_builds_a_container`
+    # reads as building a container one level deeper and so also refuses.
+    ("a_doubly_nested_comprehension_as_the_element_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[z for z in [1, 2]] for x in [1]] for y in [10, 20]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
      "refuse:the element `[…] for …` opens a container", None),
     # The DICT half: the VALUE opens the container, and it is the shape the

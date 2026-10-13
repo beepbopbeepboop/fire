@@ -30754,11 +30754,26 @@ def comprehension_element_is_flat_container(element) -> bool:
     position itself BUILDS is the defect.
 
     The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    a list of lists, a slice, a constructor call, and every non-literal
+    expression. Those are the cases whose per-iteration materialisation needs
+    the runtime blob base the refusal's own document describes.
+
+    A NESTED COMPREHENSION is a fourth case, and it is representable exactly
+    when its own element builds nothing. A comprehension's result blob is a
+    flat array of its elements (`[count, e0, e1, …]`, or key/value pairs for a
+    dict), so copying that blob per-iteration is the same shallow copy as for a
+    literal — sound exactly when no element in it is an ADDRESS the copy would
+    share. `[x + y for x in [1, 2]]` stores its results inline and is therefore
+    flat; `[[x] for x in [1, 2]]` stores addresses to a per-iteration array and
+    is not. That is `_expr_builds_a_container` on the INNER element, which is
+    also True for a doubly-nested comprehension, so a comprehension-of-a-
+    comprehension is left to the refusal.
     """
+    if isinstance(element, F.Comprehension):
+        inner = ([element.element, element.value]
+                 if element.kind == "dict" else [element.element])
+        return all(x is not None and not _expr_builds_a_container(x)
+                   for x in inner)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
