@@ -263,6 +263,56 @@ def type_param_names(template_src: str):
             if p.strip() and not _is_param_marker(p.strip())]
 
 
+#: Annotated bracket-parameter types whose value a bare LITERAL can spell, with
+#: the literal kind that supplies it. Deliberately a WHITELIST of scalars rather
+#: than a rule ("has an annotation ⇒ is a value parameter"): a type parameter is
+#: spelled `T` or `T: AnyType` or `T: SomeTrait`, and no trait name is in this
+#: table, so a number can never be bound to a type. The three spellings of a
+#: value parameter all land here: `origin: Int`, `n: Int = 8192` (the default is
+#: stripped) and a value unpacking `*sizes: Int` (`_is_param_marker` keeps the
+#: `*` out of the name list, so `*sizes: Int` still yields the scalar `int`).
+_LITERAL_PARAM_KINDS = {
+    "Int": "int", "UInt": "int", "Int8": "int", "UInt8": "int",
+    "Int16": "int", "UInt16": "int", "Int32": "int", "UInt32": "int",
+    "Int64": "int", "UInt64": "int",
+    "Float32": "float", "Float64": "float",
+    "Bool": "bool",
+    "String": "str", "StaticString": "str",
+}
+
+
+def bracket_param_kinds(template_src: str):
+    """Per bracket POSITION, the scalar kind a bare literal may spell, or None.
+
+    The positions line up with `type_param_names` (both skip the `/`/`//`/`*`
+    markers) and therefore with a call site's comma list. The answer is the kind
+    `_LITERAL_PARAM_KINDS` gives for the parameter's annotation, and `None` for
+    every parameter whose annotation is absent or is not one of those scalars —
+    a TYPE parameter (`T`, `T: AnyType`, `T: Copyable`) and a value parameter
+    whose annotation is a non-scalar (`keys: List[T]`, `target:
+    CompilationTarget`) alike.
+
+    ONE reader of "which bracket argument may be a bare literal", because the
+    call-site demand walk (`formal/monomorph.py::type_arg_text`'s caller) and a
+    future proof-side reader have to agree about `Pair[2]` (a bare literal at a
+    TYPE position, which is the comptime-specialization shape and never a
+    boundary symbol) versus `Tagged[Int, 0]` (a bare literal at a VALUE
+    position, which is a value the instantiation substitutes).
+    """
+    m = mm.head_match(template_src)
+    if not m:
+        return []
+    kinds = []
+    for p in split_top_level_commas(m.params):
+        p = p.strip()
+        if not p or _is_param_marker(p):
+            continue
+        head = p.split('=', 1)[0]
+        ann = head.split(':', 1)[1].strip() if ':' in head else ''
+        kinds.append(_LITERAL_PARAM_KINDS.get(ann))
+    return kinds
+
+
 def type_param_defaults(template_src: str):
     """Map each bracket-parameter name that has a DEFAULT to that default's
     source text: `def size_of[type: AnyType, target: CompilationTarget =

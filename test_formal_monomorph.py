@@ -2205,6 +2205,110 @@ def test_a_function_templates_body_is_still_compiled(_tmpdir):
           "one reader of that question is gone")
 
 
+# `Tagged[T, origin: Int]` is a struct template whose SECOND parameter is a
+# scalar VALUE, so `Tagged[Int, 5]()` is a comptime specialization — the shape
+# `Formal_an_explicit_parameter_list_naming_a_comptime_value` §4.1 records as
+# refused. The one-file form is what `_own_instantiations` covers, and the VALUE
+# is read in the instantiated body, so a body that answered a plausible constant
+# for both instantiations would print the same number twice.
+VALUE_LITERAL_ONE_FILE = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+    def raw(self) -> Int:
+        return origin
+
+def main():
+    var a = Tagged[Int, 5]()
+    var b = Tagged[Int, -3]()
+    print(a.raw())
+    print(b.raw())
+"""
+
+VALUE_LITERAL_ONE_FILE_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.origin = origin
+        self.v = 0
+    def raw(self):
+        return self.origin
+
+def main():
+    a = Tagged(5)
+    b = Tagged(-3)
+    print(a.raw())
+    print(b.raw())
+"""
+
+
+def test_a_scalar_value_parameter_takes_a_bare_literal(tmpdir):
+    """`Tagged[Int, 5]()` builds and RUNS, and the value reaches the body.
+
+    §4.1 of `FORMAL_an_explicit_parameter_list_naming_a_comptime_value`: a
+    bracket whose argument is a comptime VALUE. The type half already worked
+    (`Tagged[Int]`-shaped); what was missing is a bare literal at a position the
+    declaration annotates with a scalar, which the demand walk dropped because
+    `type_arg_text` answers "" for every bare literal (the `Pair[2]`/`tile[2, 3]`
+    shape, deliberately not a demand).
+
+    The two rows below are the whole design, and the second is the one that keeps
+    the first safe:
+
+    * `Tagged[Int, 5]` and `Tagged[Int, -3]` are demands, the value is
+      substituted into the body, and the program prints the two values — so a
+      lowering that answered a constant, or one value for both, fails;
+    * `Pair[2]` on a template whose one parameter is a TYPE is still NOT a
+      demand: a number bound to a type parameter is the fabricated instantiation
+      the refusal exists to prevent, and `_own_struct_literal_param_kinds` is
+      what tells the two positions apart (the declaration's annotation).
+
+    Both architectures, and CPython is the oracle rather than a hand-written
+    constant.
+    """
+    from formal import monomorph as MM
+    from formal.build import parse_module
+    import elaborate
+
+    src = ("struct Tagged[T, origin: Int]:\n"
+           "    var v: T\n\n"
+           "struct Pair[T]:\n"
+           "    var a: T\n\n"
+           "def main():\n"
+           "    var t = Tagged[Int, 0]()\n"
+           "    var p = Pair[2]()\n")
+    kinds = MM.struct_literal_param_kinds(src)
+    check(kinds.get("Tagged") == [None, "int"],
+          f"`origin: Int` is the scalar-as-value position and `T` is not, but "
+          f"the kinds are {kinds!r}: the declaration's annotation is what has to "
+          f"be read here, because the same node is a value at one and a type at "
+          f"the other")
+    check("Pair" not in kinds,
+          f"`struct Pair[T]` has no scalar-as-value position, so it must not be "
+          f"in the kinds table: {kinds!r}")
+    found = MM.all_instantiation_calls(src)
+    check(found.get("Tagged") == [("Int", "0")],
+          f"`Tagged[Int, 0]` is a demand whose second argument is the value "
+          f"`0`: {found}")
+    check("Pair" not in found,
+          f"`Pair[2]` is a bare literal at a TYPE position and must stay a "
+          f"non-demand — a number bound to a type parameter is exactly the "
+          f"fabricated instantiation this refuses: {found}")
+    check(elaborate.bracket_param_kinds(
+              "struct T2[T, n: Int, keys: List[T], b: Bool]:\n    var v: T\n")
+          == [None, "int", None, "bool"],
+          "the per-position kinds must read the VALUE scalars and refuse both "
+          "the type parameter and the non-scalar value parameter")
+
+    # …and the lowering is a differential against CPython on both machines.
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_valueliteral", None,
+                            VALUE_LITERAL_ONE_FILE,
+                            VALUE_LITERAL_ONE_FILE_CPYTHON)
+        check(got == "5\n-3\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, 5]` and "
+              f"`Tagged[Int, -3]` whose `raw` reads the value parameter")
+
+
 def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
 
@@ -3032,6 +3136,8 @@ TESTS = [
      test_two_demand_sets_are_two_libraries),
     ("a literal display is a bracket argument and a bare literal is not",
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
+    ("a scalar value parameter takes a bare literal",
+     test_a_scalar_value_parameter_takes_a_bare_literal),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
     ("a struct template's body is not the body that runs",

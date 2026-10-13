@@ -663,12 +663,27 @@ def all_instantiation_calls(consumer_src: str) -> dict:
     it is derived once per distinct text (`_derived_from_source`, whose key and
     bound are documented above `_DERIVED`) and handed back as a fresh dict of
     fresh lists on every call.
+
+    **The bare-literal half is the templates THIS source DECLARES.**  A struct
+    template the consumer also declares (`Tagged[Int, 0]()` beside
+    `struct Tagged[T, origin: Int]`) takes a bare literal at a scalar-as-value
+    position; `struct_literal_param_kinds` supplies that per-position table from
+    the declarations here, so the walk turns the call into a demand.  An
+    IMPORTED template's scalar positions are not classified here — that needs
+    the defining module's source, which this function does not hold — so an
+    imported `Tagged[Int, 0]()` keeps the type-only read and is refused as
+    before, and the per-source memo stays a function of the source alone.
     """
     def derive():
         from formal import model as M                  # lazy — cycle
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
         module_level = set(M.collect_module_symbols(stmts) or {})
+        # Which struct templates take a bare literal at which bracket position —
+        # the one thing the call site cannot see, because the same node is a
+        # value here and a type-parameter spelling only when the declaration
+        # says so.
+        struct_kinds = struct_literal_param_kinds(consumer_src)
         found: dict = {}
         for st in stmts:
             values = _names_bound_in(st) \
@@ -679,7 +694,8 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                 base = _callee_base(node)
                 if base is None:
                     continue
-                args = _bracket_type_args(node.func, values)
+                args = _bracket_type_args(node.func, values,
+                                          struct_kinds.get(base))
                 if args:
                     found.setdefault(base, set()).add(tuple(args))
         return {k: tuple(sorted(v)) for k, v in found.items()}
@@ -956,7 +972,8 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             base = _callee_base(node)
             if base is None:
                 continue
-            args = tuple(_bracket_type_args(node.func, values))
+            args = tuple(_bracket_type_args(node.func, values,
+                                            literal_kinds="any"))
             mangled = demap.get((base, args))
             if mangled is None:
                 continue
@@ -1029,7 +1046,77 @@ def _callee_base(call):
     return comptime_eval.specialization_name(getattr(call, "func", None))
 
 
-def _bracket_type_args(sub, values=()) -> list:
+def _literal_value_text(expr, kind) -> str:
+    """The source spelling of a bracket LITERAL whose declared kind is `kind`.
+
+    `kind` is a scalar name from `elaborate._LITERAL_PARAM_KINDS` (`"int"`,
+    `"bool"`, `"float"`, `"str"`), or `None` to accept any literal.  The kind
+    gate is the whole safety property: a `Tagged[T, origin: Int]` may take a
+    bare `0` at `origin`'s position, and a `Pair[T]` may NOT take one at `T`'s —
+    a number bound to a type parameter is exactly the fabricated instantiation
+    `type_arg_text` refuses at the top level.
+
+    The rendering mirrors `_display_element_text`'s literal arms node for node,
+    because this text is SUBSTITUTED into the instantiated body (`0`, `True`,
+    `repr("x")`) and that body has to be the same program.  A name or a call is
+    never read: the set is closed on the literal node types, so a `[1, 2]` at an
+    `Int` position and a `t` bound to a value both answer "".
+    """
+    if isinstance(expr, F.IntLiteral):
+        return str(expr.value) if kind in (None, "int") else ""
+    if isinstance(expr, F.BoolLiteral):
+        return ("True" if expr.value else "False") \
+            if kind in (None, "bool") else ""
+    if isinstance(expr, F.FloatLiteral):
+        return repr(expr.value) if kind in (None, "float") else ""
+    if isinstance(expr, F.StringLiteral):
+        return repr(expr.value) if kind in (None, "str") else ""
+    if isinstance(expr, F.UnaryOp) and expr.op in ("-", "+"):
+        inner = _literal_value_text(expr.operand, kind)
+        return f"{expr.op}{inner}" if inner else ""
+    return ""
+
+
+def struct_literal_param_kinds(src: str) -> dict:
+    """`{struct template name: per-position literal kind or None}` for `src`.
+
+    Every STRUCT template `src` declares, but only the ones with at least one
+    scalar-as-value parameter.  This is what turns `Tagged[Int, 0]()` into a
+    demand while leaving `Pair[2]()` a non-demand, and the restriction to STRUCT
+    templates is half of it: a bare literal at a FUNCTION template's bracket
+    (`tile[2, 3](…)`) is the comptime-specialization shape both backends already
+    answer through `comptime.specialization_args`, and demanding `tile_2_3` for
+    it would publish a second body for a specialization the build already emits
+    under its own name.
+
+    Read from `elaborate.bracket_param_kinds` on the template's own declaration,
+    so the arity and the ordering are the ones `instantiate` will use, and a
+    template the extractors cannot pull out is simply absent (its call keeps its
+    brackets and is refused by the bracketed scan, as before).
+
+    Asked of a module's OWN source, which is the only source the call-site walk
+    holds.  A name the consumer IMPORTS is not classified here — that needs the
+    defining module's source, which `all_instantiation_calls` does not read (the
+    per-source memo is a function of the source alone) — so an imported
+    `Tagged[Int, 0]()` still keeps its brackets and is refused, which is the next
+    step and not a regression.
+    """
+    import elaborate                                # lazy — module docstring
+    out = {}
+    for name in template_names(src):
+        try:
+            if template_kind(src, name) != KIND_STRUCT:
+                continue
+            kinds = elaborate.bracket_param_kinds(
+                _template_source(src, name, KIND_STRUCT))
+        except MonomorphError:
+            continue
+        if any(kinds):
+            out[name] = kinds
+    return out
+
+
+def _bracket_type_args(sub, values=(), literal_kinds=None) -> list:
     """The bracket's items as concrete type-argument spellings, or [].
 
     A COMMA LIST is several arguments and not one: `Pair[Int, Bool]` is `Pair`
@@ -1048,8 +1135,27 @@ def _bracket_type_args(sub, values=()) -> list:
     docstring warns against, and an unrecognised item here would be mangled into
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
+
+    **`literal_kinds` is the VALUE half, and `None` is its default.**  It is a
+    per-POSITION list (an `elaborate._LITERAL_PARAM_KINDS` entry at each
+    declared parameter, `None` where the parameter is not a scalar), or the
+    string `"any"` for the READ side that only has to agree with the write side.
+    `None` — every non-struct callee, by default — reads no literal at all, so
+    `Pair[2]` and `tile[2, 3]` are not demands, exactly as before.  A position
+    whose declared parameter IS a scalar takes the literal's own spelling, which
+    is the text `instantiate` substitutes into the body, so `Tagged[Int, 0]`
+    becomes the instantiation `Tagged_…_0`.
     """
-    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    items = bracket_items(sub)
+    spelled = []
+    for i, item in enumerate(items):
+        text = type_arg_text(item, values)
+        if not text and literal_kinds is not None:
+            if literal_kinds == "any":
+                text = _literal_value_text(item, None)
+            elif i < len(literal_kinds):
+                text = _literal_value_text(item, literal_kinds[i])
+        spelled.append(text)
     return spelled if spelled and all(spelled) else []
 
 
