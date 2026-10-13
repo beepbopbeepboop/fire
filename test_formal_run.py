@@ -21106,19 +21106,17 @@ ORIGIN_OF_CASES = [
      "    o.a = 9\n"
      "    printf(\"%d\", t.a * 1000 + t.b * 10 + o.a)\n"
      "    return 0\n", 0, "9069"),
-    # A control, and it is reported as one: this built BEFORE the change and
-    # still builds, on both architectures. A type ANNOTATION is not a runtime
-    # expression, so nothing is emitted for the `origin_of` in it and the
-    # escape check — which walks `fn.body` for statements — never saw it.
-    # This row's premise — a generic `Marker[...]` constructed from a ref
-    # parameter's field — is now refused at the BINDING, before the
-    # annotation is ever relevant: any annotated (or inferred-type-arg)
-    # construction of a generic struct in this position loses its home
-    # classification on both architectures (filed as
-    # bugs/FORMAL_generic_local_binding_has_no_home.md). The row pins the
-    # refusal that actually fires, so a re-point at the annotation itself is
-    # possible only after that defect is fixed — with `Marker[Int](b.a)`,
-    # the explicit-type-argument spelling, it builds.
+    # A type ANNOTATION is not a runtime expression, so nothing is emitted for
+    # the `origin_of` in it and the escape check — which walks `fn.body` for
+    # statements — never saw it. This row's premise is a generic `Marker[...]`
+    # constructed from a ref parameter's field, annotated with
+    # `Marker[origin_of(b)]`: the construction's type argument is INFERRED and
+    # the annotation's is not a runtime spelling, and both used to come out as
+    # the same refusal at the BINDING — a bare-name construction of a struct
+    # template got no home, so the annotation was never reached. The row is
+    # therefore a BUILD-AND-RUN comparison now: the binding keeps the layout its
+    # declaration states and `main` returns `tag(g)` = 7 on both architectures,
+    # which is only possible if the annotation was read as a type.
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -21132,7 +21130,25 @@ ORIGIN_OF_CASES = [
      "    var g = Bag()\n"
      "    g.a = 7\n"
      "    g.b = 8\n"
-     "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
+     "    return tag(g)\n", 7, None),
+    # …and the plain INFERRED spelling of the same construction, which is the
+    # shape the filed doc measured. The generic is a ONE-FIELD struct, so the
+    # binding is the field and `m.v` is `m`; the program returns `b.a` = 7. The
+    # sibling above pins the annotation being a type; this pins that the
+    # construction needs no bracket to get a home — before the fix both were
+    # refused with "nothing this image can see about 'm' establishes which".
+    ("a_generic_struct_constructed_by_inferred_type_args_has_a_home",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: T\n\n"
+     "struct Bag:\n"
+     "    var a: Int\n\n"
+     "def tag(b: Bag) -> Int:\n"
+     "    var m = Marker(b.a)\n"
+     "    return m.v\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = Bag()\n"
+     "    g.a = 7\n"
+     "    return tag(g)\n", 7, None),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that

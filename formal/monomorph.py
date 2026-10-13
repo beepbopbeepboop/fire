@@ -245,11 +245,61 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     import fire_compiler as F                        # lazy — the AST classes
     drop = {n for n in template_names(src)
             if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
+    # …MINUS the struct templates this source CONSTRUCTS BY BARE NAME.  A bare
+    # `S(...)` writes no type arguments, so `all_instantiation_calls` sees no
+    # bracket and no instantiation is published — and dropping `S` on top of that
+    # leaves the construction a call to a name that is not a struct of this image:
+    # the binding it builds, `var x = S(...)`, then has NO home, and every field
+    # read through `x` is refused with `model.field_access_refusal`'s "nothing
+    # this image can see about `x`'s binding establishes which".  Keeping the
+    # declared template gives the binding the layout the declaration states (a
+    # one-field `S` is its field, exactly as a non-generic one-field struct is),
+    # which is the home the explicit `S[Int](...)` spelling already gets from its
+    # own instantiation.
+    #
+    # Only a BARE call keeps a template: an `S[Int](...)` is already an
+    # instantiation (`own_demands`/`_own_instantiations`), so keeping `S` for it
+    # would put two declarations of one type in `structs_by_name`.  The walk does
+    # not descend into a template that is still dropped, because a bare `S(...)`
+    # written inside `T`'s own body is code no image compiles once `T` is
+    # dropped, and keeping `S` for it would analyse a template body for a
+    # consumer that has none — the very refusal this function exists to prevent.
+    drop -= _bare_constructed_struct_templates(stmts, drop)
     if not drop:
         return stmts
     return [s for s in stmts
             if not (isinstance(s, F.StructDef)
                     and getattr(s, "name", None) in drop)]
+
+
+def _bare_constructed_struct_templates(stmts: list, candidates: set) -> set:
+    """The names in `candidates` a call in `stmts` names with NO bracket.
+
+    The recognition `all_instantiation_calls` makes for a demand, one shape
+    wider: that walk keeps a call whose callee is a SUBSCRIPT (`Pair[Int]()`),
+    because a bracket is where the type arguments are written; this keeps the
+    call whose callee is a bare `IdentExpr` whose name is one of the struct
+    templates the caller is deciding whether to drop.  It is the same AST node
+    and the same `iter_nodes` walk, so the two cannot disagree about what the
+    source wrote.
+
+    A statement that is itself a dropped `StructDef` is SKIPPED, and that is
+    load-bearing rather than an optimisation: a bare construction inside a
+    template body is compiled by no image once the template is dropped, so
+    counting it here would keep a template the source never uses at top level.
+    """
+    import fire_compiler as F                        # lazy — the AST classes
+    from formal import model as M                    # lazy — cycle
+    found = set()
+    for st in stmts:
+        if isinstance(st, F.StructDef) and getattr(st, "name", None) in candidates:
+            continue
+        for node in M.iter_nodes(st):
+            if isinstance(node, F.CallExpr) \
+                    and isinstance(node.func, F.IdentExpr) \
+                    and node.func.name in candidates:
+                found.add(node.func.name)
+    return found
 
 
 def template_kind(src: str, name: str) -> str:
