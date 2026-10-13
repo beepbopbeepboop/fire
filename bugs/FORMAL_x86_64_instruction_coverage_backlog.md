@@ -1,12 +1,60 @@
 # FORMAL_x86_64_instruction_coverage_backlog: the x86-64 half of the ISA census, form by form
 
+**Status 2026-10-08 (`work/formal255-docs`): the BACKLOG is EMPTY and the
+EMITTED column is a call site — the doc's named subject is closed. Two
+instrument notes below are still open and are the reason this file is kept.**
+
+What landed this pass, all measured against `tools/formal_isa_census.py` and
+`test_formal_isa_census.py` (Lean-free, no image built):
+
+* **`encode_call_r64` moved from `BACKLOG` to `HARNESS_LIMITS`.** Its FUZZ
+  column is `NO` and always will be: `FF /2` with `mod=11` jumps to a
+  REGISTER's contents, outside the harness's one `MAP_FIXED` region — the
+  same fact as arm64's `encode_br_xn`, not a gap. Its decoder arm, model arm
+  (`x86_step_call_r64`) and `as` check are all present.
+* **`encode_and_r8_r8` / `encode_or_r8_r8` removed from `BACKLOG`.** Both read
+  `yes yes yes`; the byte-wise ALU class was this tree's own REX-prefix
+  omission (`_byte_rex_required`), and the anti-rot half of
+  `test_formal_isa_census.py` is what caught the entries outliving their gap.
+  So `BACKLOG` now has no x86-64 row at all — the census prints
+  `0 form(s) with no LEAN/FUZZ/AS and no exemption; 6 exempt (6 harness, 0
+  backlog)`.
+* **The EMITTED column reads AST call sites, not a regex over the file TEXT.**
+  `encode_cmov_r64_r64` was named exactly once, in `formal/x86_64_codegen.py`'s
+  prose explaining why this emitter does NOT use it, and the regex counted
+  that sentence as emission — so the census carried a row for a form no image
+  can contain and reported an unexplained `NO NO NO`. `call_sites` now walks
+  `ast.Name`/`ast.Attribute`, and the row is gone (pinned by
+  `test_formal_isa_census.py::TestTheInstrument`).
+* **`encode_tst_xn_xm`'s FUZZ column is `yes`**: the arm64 flagged pool now
+  draws `tst` (`tools/formal_model_fuzz.py::gen_flagged_alu`), which closed the
+  separately-filed `FORMAL_the_flagged_fuzz_pool_does_not_draw_tst.md` (that
+  doc is deleted with the fix). `test_formal_isa_census.py` is green, 9 tests.
+
+**Still open, and each is a different tool:**
+
+1. **The EX column separates two encodings of one instruction by MNEMONIC
+   only** (`_forms_in_image` intersects `otool`'s mnemonic set), so
+   `encode_imul_r64_r64_imm` (`6B /r ib`) is credited to an image that contains
+   only `0F AF`. The fix is to key on (mnemonic, operand shape) and report
+   `ambiguous` where that does not separate two encodings, then re-measure
+   `--examples` for both backends. Not attempted here: the operand-shape
+   normalisation is a heuristic and a wrong one would move the column in the
+   direction that reads as coverage.
+2. **`formal/x86_64_model_fuzz.py`'s `_impossible_on_hardware` explains a flag
+   difference only when the LAST flag-writing instruction is a multiply or
+   divide**, so a flag set by an `and` whose operand was an anomalous `setcc`
+   destination is reported `WRONG`. That file is another claim's area; measured
+   `-n 16 --ninstr 6 --seed 5` reports 1 such row.
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census, which prints the matrix for BOTH backends. arm64 is closed: every one
 of its 77 emitted forms has a model arm, a fuzz case and an `as` differential,
 with the exceptions named in `formal_isa_census.HARNESS_LIMITS` (eight, each a
 property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
-file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
-have no fuzz case, no model sample, or no decoder arm.
+file is the x86-64 answer, and it WAS **not** closed: 18 of the 85 emitted
+forms had no fuzz case, no model sample, or no decoder arm. Everything below
+this line is the history of closing them.
 
 ## Status 2026-10-08 (`work/formal170-docs`): the x86-64 ROWS are effectively closed; the two things left are both in the census tool, which another claim holds
 

@@ -1,4 +1,4 @@
-# `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES`
+# `count` and `pow2` fail their generated proofs on master, and both are now DECLARED
 
 **Area:** FORMAL, arm64 — `formal/arm64_proof_gen.py`'s frame-address goals and
 `lib/ProofLib.lean`'s address canonicalisation lemmas. **Status: the THREE reds
@@ -8,13 +8,18 @@ cases are still red, and the fix is in a write set another worker holds. Found
 2026-10-04 on `work/formal21-4` while landing the floor correction for `//` and
 `%`, and it is PRE-EXISTING: it reproduces on the base commit.**
 
-## Status 2026-10-08 (`work/formal170-docs`): the failure has MOVED — the frame-address `rfl` site is gone, and the true blocker is the emitter's base branch
+## Status 2026-10-08 (`work/formal170-docs`; re-measured in parallel by
+`work/formal255-docs`, merged 2026-10-13): the failure has MOVED — the frame-
+address `rfl` site is gone, and the true blocker is the emitter's base branch
 
 **The `count_proof.lean:5330` `rfl` failure this file diagnoses below no longer
 appears.** Re-measured on master
 (`python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py -j 1 count
-pow2`, 7.0 GB peak, both rows `KNOWN-GAP`, `PASS=0 KNOWN-GAP=2`), the generated
-`count_proof.lean` now dies at three OTHER sites:
+pow2`, 7.0 GB peak, both rows `KNOWN-GAP`, `PASS=0 KNOWN-GAP=2 FAIL=0`), the
+generated proofs now die at the recursion contract's BASE case replaying the
+STEP walk: `count_proof.lean:5939` and `pow2_proof.lean:6232` report `Unknown
+identifier ih`, the `frameBound_descend_le` application does not typecheck
+against the bound in scope, and each proof ends in a kernel OOM:
 
     count_proof.lean:5939:19: error(lean.unknownIdentifier): Unknown identifier `ih`
     count_proof.lean:6435:8: error: (kernel) excessive memory consumption detected
@@ -27,16 +32,21 @@ this doc's*. It is not a proof gap: the emitted `count_contract` refines
 `count_proof.lean:5824` (`· intro fuel st hb …`, whose binder list has no `ih`,
 per `lib/Refine.lean:746`), and then emits `hsub_2 := ih ({…}) (fuel - 83) …` at
 5939 with `ih` unbound (the only `ih`-introducing branch opens 250 lines later,
-at 6178). That is an emitter defect in `formal/arm64_proof_gen.py`, not a missing
-`ProofLib` lemma. The 6435 kernel OOM is new here.
+at 6178). That is an emitter defect in `formal/arm64_proof_gen.py`'s recursion-
+contract emit (the base bullet is emitted with the step body), not a missing
+`ProofLib` lemma. The 6435 kernel OOM is new here, and the x30 materialised-
+address read this file was written about (`count_proof.lean:5909`) is still one
+of the sites.
 
-count and pow2 stay declared (`EXPECTED_FAILURES`) and pinned, so the *bug this
-file was filed for* — an undeclared red — is still closed. What changed is the
-root cause: the frame-address canonicalisation this file's body is about is no
-longer what stops these two. **The fix is in `formal/arm64_proof_gen.py`, which
-live formal workers hold (`formal178-docs`'s arm64 proof-gap rows,
-`formal166-docs`'s arm64 proof-time row), so it is reported and not edited
-here.**
+count and pow2 stay declared — the `EXPECTED_FAILURES` reason is the return-
+frame read this doc is about — and pinned by
+`test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`,
+so the *bug this file was filed for* — an undeclared red — is still closed.
+What changed is the root cause: the frame-address canonicalisation this file's
+body is about is no longer what stops these two. **The fix is in
+`formal/arm64_proof_gen.py`, which live formal workers hold (`formal178-docs`'s
+arm64 proof-gap rows, `formal166-docs`'s arm64 proof-time row), so it is
+reported and not edited here.**
 
 ## Status 2026-10-04 (`work/formal25-6`): declared, pinned, and the cause is not the dead `if`
 
