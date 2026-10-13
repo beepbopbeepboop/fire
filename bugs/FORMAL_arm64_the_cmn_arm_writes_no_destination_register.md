@@ -62,6 +62,8 @@ that checks the register, which the existing `cmn x7, x4` row could not — it
 writes none).  The second needs the rebuilt library, so it is the integrator's
 to run.
 
+**merged 2026-10-13 (merging `work/formal184-docs`): the branch carried a parallel record of this same fix (its 2026-10-08 Status section); deduped into this entry. Its one unique measurement: the 9.8 GB rebuild wall re-measured 2026-10-08 for this fix under `tools/memslot.py --gb 8`, with the control `lib/Refine.lean` at 1.2 GB from the same call. The branch's own hand-written pin (its `TestTheModelArmAndItsMirrorsAgree` class) is the weaker parallel of the 164 section's `test_adds_writes_its_destination_ and_cmn_is_the_same_class` and was dropped in the merge; the branch lands no code on the merged tree (both model fixes are the master-side parallel forms, resolved take-OURS).
+
 (The measurement has a trap: `run_lean`'s `heartbeats=0` becomes `-T 0` =
 `maxHeartbeats 0`, and a build under it fails with a `bv_decide` "unknown join
 point" cascade at 7.1 GB that looks exactly like an unbuildable library.

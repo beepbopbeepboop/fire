@@ -1,5 +1,58 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
+**Status 2026-10-08 (`work/formal184-docs`): MEASURED, and the fix is LARGER than
+"one more binder on the universal theorem" — this doc's own step 0 needs a
+`lib/Refine.lean` signature change, not only a generator one.  Two findings, both
+new here.**
+
+**(1) The five programs no longer reach this goal, so the doc's measurement is
+masked.**  On this tree `count`, `pow2`, `sqsum`, `sum` and `fact` all emit a
+REACHABILITY theorem (`f_reaches_call_at_…`) and **no**
+`f_compiles_correctly_universal`, because the stack-floor guard's `getrlimit`
+(`bfeec991`, 2026-10-05) is an out-of-image `BL` in every prologue and the walk
+halts at it.  Measured generation-only:
+
+    formal/examples/pow2.mojo   NO VALUE THEOREM reach
+
+That is the getrlimit subject of
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` on the merged tree (the branch's branch named
+the same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
+every_function.md`, owned by `formal163-docs`, branch `dfb40ce7`), and the
+`hx30fr_N` obligation this doc is about should reappear when that merges.  Until
+then the five are not testable.
+
+**(2) The premise is NOT preserved by a fixed lower bound, which is why step 0 is
+a `Refine.lean` change and not a theorem binder.**  The recursive call's state is
+`call_state.sp = st.sp - _P` (`formal/arm64_proof_gen.py`'s `hsp_{n}`/`hcur`,
+emitted at the recursion step), where `_P` is the per-level stack cost.  So a
+premise of the fixed form `<floor> + C ≤ st.sp` is FALSE for the callee the IH is
+applied to whenever `st.sp - _P < floor + C`.  The premise has to be RELATIVE to
+the frame bound the induction already carries — e.g.
+`floor + C + stride * (arg.toNat + 1) ≤ st.sp.toNat`, which descends by one
+application of `frameBound_descend_le` exactly as `FrameBound` does — and that
+means `contract_sound` and `contract_sound_tree` (`lib/Refine.lean:745`/`:792`)
+gain a hypothesis threaded through `hbase`/`hstep`/the IH, and the generator's
+`{name}_contract` header and `refine contract_sound …` call move with them.
+`lib/Refine.lean` builds in 1.2 GB (affordable), so this is not the ProofLib
+wall — it is the design decision this doc's §"What this costs the fix" item 1
+called "the smaller and more honest one" and it is bigger than it reads: three
+signatures, the induction, and every generated contract.  The `sp` fact the
+`hx30fr` peel needs (`mem_read_after_write_u64_ne` for the stack-floor store) is
+then `omega` from that relative premise.
+
+**merged 2026-10-13 (merging `work/formal184-docs`): finding (1) is a
+branch-tree fact, and the merged tree has moved past it — re-measured
+generation-only here, all five programs (`count`, `fact`, `pow2`, `sqsum`,
+`sum`) emit the value theorem (`f_compiles_correctly_universal`); the
+`getrlimit` is no longer a prologue `BL` (`70b76755` reads `RLIMIT_STACK` in
+the startup stub), and the `hx30fr` obligation has reappeared in the
+generated proofs — discharged, per the 164 section below (neither
+`hx30fr_12` nor `hx30fr_17` is in `count`'s error list). Finding (2), the
+`Refine.lean` relative-premise design, is this section's unique record and
+stands as written: the merged `lib/Refine.lean` is byte-identical to the
+branch's. The branch lands no code on the merged tree.
+
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
 **Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
 CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is

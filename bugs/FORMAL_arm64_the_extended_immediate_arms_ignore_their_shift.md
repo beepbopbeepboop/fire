@@ -40,13 +40,6 @@ change adds; the `lib/ProofLib.olean` rebuild measures `memcap: BREACH 8.0 GB`,
 so `prooflib` and the test row are the integrator's to run.
 
 **Area:** FORMAL (the arm64 machine model's extended-immediate arms).
-**Status: OPEN, MEASURED on the CPU, and a SOUNDNESS defect — `arm64_step`
-returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and
-that build peaks at **9.8 GB** measured with `formal/lean.py::ensure_library`'s
-own invocation — over a bounded worker's 8 GB ceiling, under the tree's
-`LIBRARY_MEMORY_MB = 12288`, so the blocker is memory alone and the library is
-not broken. (The `-T 0` trap that measurement has is written up in
-`bugs/FORMAL_contract_ladder_reach.md`.)
 
 **Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
 verification is what is still owed.** One helper,
@@ -64,6 +57,22 @@ measured on this tree 2026-10-07 it still breaches a bounded worker's 8 GB
 ceiling (`memcap: BREACH 8.0 GB`, `-j 4` and `-j 1` alike), so `prooflib` and
 `formal-call-proofgen` are the integrator's to run. The doc is kept until that
 run rather than `git rm`'d.
+
+**merged 2026-10-13 (merging `work/formal184-docs`): the branch carried a
+fourth parallel record of this same fix (its 2026-10-08 Status section,
+quoting the 125 section's `0x3` helper form); deduped into these entries.
+Its unique content, folded in: (1) the helper's `UInt32` type and
+`rfl`-reducibility checked directly through `formal/lean.py::run_lean`
+(a scratch `extdef.lean`, rc=0); (2) the 9.8 GB rebuild wall re-measured
+2026-10-08 for this fix under `tools/memslot.py --gb 8`, with the control
+`lib/Refine.lean` at 1.2 GB from the same call; (3) the `_I12` distinction —
+the merged tree keeps the RAW 12-bit field for the unsigned-offset
+`LDR`/`STR` rows (idx 18/19/31, a class with no `sh` field) and calls
+`arm64_ext_imm12 w` in the five `#imm12` arms (the branch's separate
+`_arm64_ext_imm12`/`_EI12` twins are the parallel form and were dropped in
+the merge). The merged tree's helper is the 108 section's `0x1` form — the
+code's own docstring states why: the arm's mask keeps bit 23, so `sh >= 2`
+is reserved in this class and never reaches the helper.
 
 ## 1. What I ran
 
