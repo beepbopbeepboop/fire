@@ -78,6 +78,23 @@ Rows: `test_formal_value_model.py`'s `REFUSALS` —
 BOTH architectures that must refuse naming `printf() is asked to render the
 value of g(…)`. PASS=124 FAIL=0.
 
+**Folded in from the parallel record, re-measured on the merged tree
+(2026-10-13).** `work/formal195-docs` landed this same fix independently on
+2026-10-08 without seeing this section (its merge base predates
+`returnless_printf_argument_refusal`), and measured the choke point through a
+TEXT conversion: `printf("[%s]\n", g(1, 2))` built and printed **`[(null)]`**
+on both architectures before the fix — the leftover word rendered as a POINTER
+where the NUMBER conversion rendered it as `0`, the same missing value seen
+through `%s`. Its third `REFUSALS` row,
+`a_printf_string_conversion_of_a_return_less_call_is_refused`, pins that
+conversion-class half on both architectures on the merged tree; its other new
+row pinned the same `%d` program as the first row above and so did not land
+(two rows, one behaviour). Its scope sentence stands as-is here: a non-printf
+callee's arguments are not conversions — `h(g(1, 2))` for an ordinary `def h`
+still builds, which is §0c's "argument of a call" position, deliberately out of
+scope. Re-measured 2026-10-13: `test_formal_value_model.py` PASS=125 FAIL=0
+(the two rows above + the one here).
+
 **What is still not fixed is unchanged** — the positions where nothing OBSERVES
 the value are §0c's, and direction (b) is still the only answer for them.
 
