@@ -3778,12 +3778,19 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
      desc='the proof-regression ratchet: ranked statuses, no phantom timings, '
           'an honest committed baseline')
+# The `prooflib` dep is not decoration: this job does not itself run Lean, but
+# `test_library_state_agrees_with_the_question_it_asks` asserts `lib/*.olean`
+# exists (`library_state` reports it ABSENT otherwise), so on a machine that has
+# not built the shared library it goes red for a fact about the machine. It is
+# in the `proofs` bucket, where `prooflib` is a dep of every proof-driving
+# sibling but NOT of a job that forgets to declare it, and the bucket runs jobs
+# in parallel — so without this the job can start before the `.olean` is built.
 # `doc/ABI.md` §Generics on the formal path: a module declaring only
 # `struct Pair[T]` has no boundary symbol, and each INSTANTIATION is one. The
 # estate check named this file on `work/formal15-generic-monomorph`, and it is
