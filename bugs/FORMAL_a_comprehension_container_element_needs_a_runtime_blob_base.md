@@ -18,7 +18,7 @@ nested COMPREHENSION whose whole reserved region holds no pointer to another blo
 in that region, so the document's own reproducer
 `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63`
 (`[[x * y for x in [1, 2]] for y in [10, 20, 30]]` summed → `180`) instead of
-`93`/exit 1. `model.comprehension_element_is_copy_safe` is the shared predicate
+the refusal that replaced the measured aliased `93`/exit 1. `model.comprehension_element_is_copy_safe` is the shared predicate
 and each emitter's `_materialize_compr_element` is the copy (see "What landed
 2026-10-12" below). What is STILL refused is every element whose region holds an
 in-region pointer — a list of lists, a slice, a constructor call, and a nested
