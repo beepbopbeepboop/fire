@@ -23500,11 +23500,10 @@ def returnless_return_refusal(callee: str, containing: str) -> str:
     """Why `return callee(…)` from `containing`, when `callee` returns nothing.
 
     The `returned` position of `bugs/FORMAL_a_function_with_no_return_yields_a_
-    word_where_cpython_yields_None.md` §0c, and the second of the two positions
-    where a word this path cannot carry LEAVES the function that computed it.
-    `returnless_value_refusal` is the same question at the position where the
-    word becomes TEXT; this is the position where it becomes the caller's
-    RESULT. CPython's `return g()` for a `g` with no `return` returns `None`, and
+    word_where_cpython_yields_None.md` §0c: the position where a word this path
+    cannot carry becomes the caller's RESULT, where `returnless_value_refusal`
+    is the same word becoming TEXT. CPython's `return g()` for a `g` with no
+    `return` returns `None`, and
     a value here is one 64-bit word with no way to say `no value` — `g`'s
     epilogue writes no return register, so the word `containing` hands back is
     whatever `g`'s last instruction left behind, which is a number nothing in the
