@@ -549,6 +549,28 @@ FIXED_CASES = [
      "    printf(\"%d%d\", a, b)\n"
      "    return 0\n",
      "11"),
+    # THE RESIDUE OF §3, and the ONE row here that pins a KNOWN WRONG answer
+    # rather than a deliberate language difference. An UNSTATED payload — a
+    # parameter nothing annotates — also folds `is None` to `== 0`, so `f(0)`
+    # takes the "no value" arm where CPython's `0 is None` is False. It is
+    # deliberate (`bugs/FORMAL_optional_needs_a_niche.md` §3: refusing the
+    # comparison would refuse every unannotated predicate in a corpus that
+    # annotates almost nothing, and the UNWRAP on the same receiver IS refused),
+    # but the consequence is a wrong ANSWER and not merely an unavailable one,
+    # which the doc did not measure. CPython prints `1\n2`; the image prints
+    # `1\n1` on both architectures, and this row reds the day the type inference
+    # that would close it lands (`unstated_payload_cannot_be_unwrapped` is the
+    # refused sibling and stays a refusal).
+    ("unstated_payload_comparison_folds_0_as_none",
+     "def f(x) -> Int:\n"
+     "    if x is None:\n"
+     "        return 1\n"
+     "    return 2\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d\\n%d\\n\", f(None), f(0))\n"
+     "    return 0\n",
+     "1\n1\n"),
 ]
 
 # (name, source, a substring the REFUSAL must name)
