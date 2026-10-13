@@ -585,18 +585,21 @@ def test_manifest_round_trips():
 # ── 4b. a cold runtime build leaves no staging directory ────────────────────
 
 def test_a_cold_runtime_build_leaves_no_staging_directory():
-    """`runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
+    """Every `mkdtemp` a cold build makes is removed before it returns.
+
+    `runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
     directory under `$TMPDIR`, links the dylib there and moves ONLY the dylib
     out; the directory has to go with the build. Same shape in
-    `_driver_targets`, which stages its arch probe in `mojo_archprobe_*`.
+    `_driver_targets` (`mojo_archprobe_*`) and in `build()` itself
+    (`mojostdlib_*`, which holds every module's `.c`/`.o` and the staged
+    dylib — tens to hundreds of MB on a full stdlib build).
 
     Measured on a COLD cas, because a warm one returns before any staging
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
-    shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    shared cas the other groups use. The `build()` case writes its own one-line
+    module so it does not reach outside the tree for a subject, and its
+    `mojostdlib_*` glob is checked after the same cold-subprocess shape.
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
@@ -617,6 +620,31 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
               str(left))
+
+    # …and `build()`'s own `mojostdlib_*` workdir is removed the same way. A
+    # module of this test's own, so the subject stays inside the tree.
+    home = tempfile.mkdtemp(prefix='rtstage_home_')
+    tmp = tempfile.mkdtemp(prefix='rtstage_tmp_')
+    mod = os.path.join(tmp, 'stagedir_probe.mojo')
+    with open(mod, 'w') as f:
+        f.write('def width(x: Int) -> Int:\n    return x * 2\n')
+    env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+    code = ('import os\n'
+            'from build_stdlib_dylib import build\n'
+            f'build([{mod!r}], os.path.join(os.environ["TMPDIR"], "out.dylib"),\n'
+            '      use_cache=False, link_runtime=False, jobs=1,\n'
+            '      track_local_deps=False, arch="arm64")\n'
+            'print("built")\n')
+    proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                          capture_output=True, text=True)
+    check(proc.returncode == 0,
+          'a cold one-module stdlib build succeeds',
+          (proc.stderr or proc.stdout)[-400:])
+    left = sorted(os.path.basename(p) for p in
+                  glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+    check(not left,
+          'no mojostdlib_* work directory is left behind in $TMPDIR',
+          str(left))
 
 
 # ── 5. the audit still fires ────────────────────────────────────────────────
