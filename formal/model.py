@@ -14036,13 +14036,10 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
-SET_ALGEBRA_OPS = ("-", "&", "^")
-CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
-                            if op not in SET_ALGEBRA_OPS)
-
-#: The three operators that are SET ALGEBRA, and the ones a backend may lower
+#:
+#: **The three operators that are SET ALGEBRA, and the ones a backend may lower
 #: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
-#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
+#: SYMMETRIC DIFFERENCE.**  They stay in `CONTAINER_GATED_OPS`, because for every
 #: operand shape EXCEPT two blobs the gate's message is the right answer — but
 #: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
 #: backend decides, because whether the pair is a set algebra this path lowers
@@ -14052,6 +14049,8 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
 SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,

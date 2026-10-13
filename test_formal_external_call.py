@@ -65,6 +65,18 @@ CASES = [
     # on this path (a String IS a bare `char *`). Everything else is the
     # source's own text, including the `Int32(1 if overwrite else 0)` and the
     # `_CPointer[UInt8, UntrackedOrigin[mut=False]]` return type.
+    #
+    # `ptr.value()` and NOT bare `ptr`: `_CPointer[UInt8, …]` is
+    # `Optional[UnsafePointer[UInt8, …]]`, so the value is a NULLABLE pointer and
+    # `String(unsafe_from_utf8_ptr=…)` takes the UNWRAP, which is what the
+    # source writes and what `model.nullable_pointer_unwrap` exists for. This
+    # case wrote bare `ptr` until 2026-10-13, when the string-constructor refusal
+    # (`c8d877e9`) turned that into a build error: the string check classifies a
+    # bare pointer value as `'int'`, so it refused an operand that is in fact a
+    # pointer — the false refusal is filed as
+    # `bugs/FORMAL_string_constructor_refuses_a_pointer_typed_value.md`, and this
+    # transcription is corrected to the shape the source actually has rather than
+    # left as a second, unrelated red in the suite.
     ("env_round_trip",
      "def setenv(var name: String, var value: String,\n"
      "           overwrite: Bool = True) -> Bool:\n"
@@ -84,7 +96,7 @@ CASES = [
      "    ](name)\n"
      "    if not ptr:\n"
      "        return default\n"
-     "    return String(unsafe_from_utf8_ptr=ptr)\n"
+     "    return String(unsafe_from_utf8_ptr=ptr.value())\n"
      "\n"
      "def main() -> Int32:\n"
      f"    if not setenv(\"{VAR}\", \"hello\", True):\n"

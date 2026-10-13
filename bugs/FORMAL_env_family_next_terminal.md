@@ -1,5 +1,34 @@
 # FORMAL_env_family_next_terminal: where the 55-file family stands, and what the next reader needs
 
+**Status 2026-10-13 (`work/formal348-docs`): the family's TERMINAL is unchanged
+(the two *present* surfaces below, still another worker's claimed
+`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`), but the
+suite that pins this family's own shape was RED on master for an unrelated
+second reason, and it is green again.**
+
+`test_formal_external_call.py` was 50 passed / 2 failed on this tree:
+
+* `no_module_level_name_is_bound_twice_in_model` — `formal/model.py` bound
+  `SET_ALGEBRA_OPS` twice (`14039` and `14054`), the second after a long
+  docstring. The value was identical, so it was a duplicate and not a drift, and
+  the file's own self-check is what noticed. Merged to one definition with the
+  docstring, above `CONTAINER_GATED_OPS`; `52 passed / 0 failed` now.
+* `env_round_trip` — the case transcribed `std/os/env.mojo` with a BARE `ptr`
+  where the source writes `ptr.value()` (the `_CPointer`/`OptionalPointer` value
+  is a NULLABLE pointer, so `String(unsafe_from_utf8_ptr=…)` takes the unwrap).
+  It now matches the source and builds and RUNS the round trip on both
+  architectures. **The reason it was rejected is a separate, still-open false
+  refusal**, filed and measured in
+  `bugs/FORMAL_string_constructor_refuses_a_pointer_typed_value.md`: the
+  string-constructor check reads the value-kind DEFAULT (`'int'` for a word it
+  could not classify) as positive evidence, so `String(unsafe_from_utf8_ptr=p)`
+  on an annotated `Pointer[UInt8]` parameter, and on a local bound from
+  `malloc`, are both refused on both architectures today. That is a value-model
+  change and not this document's subject.
+
+The rest of this document is the measurement record it has been since
+2026-10-05.
+
 **Status: SUPERSEDED IN PART (2026-10-05, `formal37-2`).** The terminal recorded
 below has **moved**: `binary_heap.mojo` is no longer in `env.mojo`'s refusal at
 all, and the family now stops on two *present* surfaces rather than on an absence.
