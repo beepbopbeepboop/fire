@@ -11353,8 +11353,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `len(str(n))` built, ran and died of SIGSEGV on this architecture
             # too, `strlen` walking the bytes at address 10.
             if name in M.STRING_TYPE_CTORS:
+                kw = (e.kwargs[0][0]
+                      if not e.args and len(e.kwargs or ()) == 1 else None)
                 refusal = M.string_conversion_refusal(
-                    name, operands[0], self._expr_str_kind(operands[0]))
+                    name, operands[0], self._expr_str_kind(operands[0]),
+                    keyword=kw)
                 if refusal:
                     raise CodegenError(refusal)
             return

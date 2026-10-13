@@ -14036,12 +14036,9 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
-SET_ALGEBRA_OPS = ("-", "&", "^")
-CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
-                            if op not in SET_ALGEBRA_OPS)
-
-#: The three operators that are SET ALGEBRA, and the ones a backend may lower
-#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
+#:
+#: The three operators are SET ALGEBRA, and the ones a backend may lower once
+#: it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
 #: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
 #: operand shape EXCEPT two blobs the gate's message is the right answer — but
 #: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
@@ -14052,6 +14049,8 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
 SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
@@ -27163,6 +27162,18 @@ IDENTITY_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice",
 # does not have to import types to say it.
 STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 
+# The KEYWORD spellings of a string type constructor whose operand is, by the
+# caller's own assertion, already a `char *` — `String(unsafe_from_utf8_ptr=p)`
+# is `std/os/env.mojo`'s `getenv` shape and the whole of what the `unsafe_` in
+# the name means.  `string_conversion_refusal` refuses a string construction
+# whose operand is KNOWN not to be text, and that rule is about a CONVERSION
+# (`str(n)` on a number); the keyword form is not a conversion at all — the
+# caller states the operand is a pointer — so the kind of the operand is the
+# one fact the spelling has already settled, and the refusal must not fire on
+# it.  The operand's kind is still what the lowering uses; only the refusal is
+# skipped.
+POINTER_ASSERTING_STRING_KEYWORDS = frozenset({"unsafe_from_utf8_ptr"})
+
 # Type names that are real types with NO representation on this path. Calling
 # one used to emit a BL against a symbol named e.g. `Error` — an extern nothing
 # defines, so the image built and then died in dyld. Naming them here turns
@@ -27373,7 +27384,8 @@ def narrow_float_ctor_refusal(callee_name: str) -> str:
         f"rather than this one. {tail}")
 
 
-def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
+def string_conversion_refusal(callee_name: str, operand, operand_kind,
+                              keyword=None) -> str:
     """Why `String(x)` / `str(x)` is refused when `x` is KNOWN not to be text.
 
     `IDENTITY_TYPE_CTORS` above makes `str(x)` the IDENTITY on the operand,
@@ -27414,6 +27426,16 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
     and `int`'s parse asks the same question and reads the same direction
     permissively for the same reason (`_conversion_operand_is_text`).
 
+    `keyword` is the NAME the operand was passed under, when it was passed as a
+    keyword, and a `POINTER_ASSERTING_STRING_KEYWORDS` name settles the question
+    the refusal is about: the spelling has already stated the operand is a
+    `char *`, so `String(unsafe_from_utf8_ptr=p)` is not a conversion to judge.
+    `std/os/env.mojo`'s `getenv` is the shape this exists for — it builds its
+    string from a `_CPointer[UInt8, …]` result with no `.value()`, and the kind
+    that result carries is `INT_KIND`, "a word is an integer", which is not
+    positive evidence that it holds a NUMBER. The `deref_receiver` exemption
+    below covers the `.value()` spelling; this covers the bare pointer.
+
     **The residual hole is named rather than papered over**: an operand this
     build cannot classify that turns out to hold a number at run time —
     `str(<call>)` whose result kind is unknown — is still the identity, and
@@ -27421,6 +27443,8 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
     the value model to classify call results, which is
     `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
+    if keyword in POINTER_ASSERTING_STRING_KEYWORDS:
+        return None
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
         return None

@@ -517,6 +517,21 @@ REFUSALS = [
      "    printf(\"%d\", p)\n"
      "    return 0\n",
      "converts a string to a `char *`, and its receiver"),
+
+    # A string type constructor over a NUMBER is still refused, and this is the
+    # control for the one spelling that is exempt: `String(unsafe_from_utf8_ptr=…)`
+    # STATES the operand is a `char *` (that is what the `unsafe_` means, and
+    # `env_round_trip` above is the positive pin — it is `std/os/env.mojo`'s
+    # `getenv` shape, whose `_CPointer` result carries the "a word is an integer"
+    # default and is not a number). A positional operand says no such thing, so
+    # `String(n)` on an integer keeps the refusal `str(n)` has: the identity
+    # would hand a C callee the number 10 as a pointer.
+    ("refuse_a_positional_string_conversion_of_a_number",
+     "def main() -> Int32:\n"
+     "    var n = 10\n"
+     "    var s = String(n)\n"
+     "    return 0\n",
+     "String(n) is refused on this path"),
 ]
 
 

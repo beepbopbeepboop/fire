@@ -9538,8 +9538,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             # identity type constructor and NOT a string one, which is the
             # distinction `STRING_TYPE_CTORS` exists to keep.
             if name in M.STRING_TYPE_CTORS:
+                kw = (e.kwargs[0][0]
+                      if not e.args and len(e.kwargs or ()) == 1 else None)
                 refusal = M.string_conversion_refusal(
-                    name, operands[0], self._expr_str_kind(operands[0]))
+                    name, operands[0], self._expr_str_kind(operands[0]),
+                    keyword=kw)
                 if refusal:
                     raise CodegenError(refusal)
             return
