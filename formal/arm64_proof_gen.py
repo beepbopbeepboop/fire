@@ -9521,7 +9521,8 @@ def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
     return sorted(out)
 
 
-def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
+def _gen_step_lemmas(name: str, code: bytes, base: int,
+                     exec_len: int | None = None) -> str:
     """Generate real per-instruction coverage lemmas.
 
     For every instruction word the machine model handles, a lemma proves
@@ -9545,9 +9546,10 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     cover (a word the model recognises but has no right-hand side for), where
     there is nothing to derive from.
     """
-    plan = _step_result_plan(code)
+    plan = _step_result_plan(code, exec_len)
+    n = len(code) if exec_len is None else max(0, min(exec_len, len(code)))
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, n - n % 4, 4)]
     blocks = []
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9614,7 +9616,31 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
-def _step_result_plan(code: bytes) -> dict:
+def _exec_code_end(code: bytes, info, base_addr: int) -> int:
+    """The byte length of `code` that is EXECUTABLE, not interned data.
+
+    `__TEXT` carries every function body and THEN every interned string
+    (`arm64_codegen.compile`'s string-emission loop, which includes
+    `model.stack_trap_message`), and the step-lemma walk reads every 4-byte
+    word.  A string byte pattern that decodes as an instruction the step table
+    knows is therefore planned a lemma for a word no execution reaches, and
+    that lemma's discriminator fact is FALSE — measured, the trap message
+    carries `909189220` (`TBZ w4, #…`), which every guarded image contains.  So
+    the plan is derived from the executable range, not from `len(code)`.
+
+    `info["str_addrs"]` is the published string table, so the first string's
+    address is the end of the code.  No table — a hand-built `code` in a test,
+    or an image that interns nothing — means the whole of `code`.
+    """
+    if not info:
+        return len(code)
+    addrs = list((info.get("str_addrs") or {}).values())
+    if not addrs:
+        return len(code)
+    return max(0, min(min(addrs) - base_addr, len(code)))
+
+
+def _step_result_plan(code: bytes, exec_len: int | None = None) -> dict:
     """Which instruction indices get a step-RESULT lemma, and with what.
 
     `{index: (word, model branch, right-hand side text)}`, derived ONCE and read
@@ -9626,9 +9652,15 @@ def _step_result_plan(code: bytes) -> dict:
     fact about the model but an accident of two agreeing filters.  One
     derivation is what makes "the `sr` exists" a checkable consequence of the
     plan rather than a second guess at it.
+
+    `exec_len` bounds the walk to the executable region (`_exec_code_end`): an
+    index past it is interned data that happens to decode, and a lemma for it
+    is false.  `None` means the whole of `code`, which is what a caller holding
+    raw bytes with no string table wants.
     """
+    n = len(code) if exec_len is None else max(0, min(exec_len, len(code)))
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, n - n % 4, 4)]
     plan = {}
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9672,10 +9704,18 @@ def _sign_extend_mask(idx: int) -> int:
     return bit if idx == 14 else bit << 5
 
 
-def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
-    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
+def _gen_step_result_lemmas(name: str, code: bytes, base: int,
+                            exec_len: int | None = None) -> str:
+    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>).
+
+    `exec_len` limits the walk to the executable region (`_exec_code_end`); an
+    index past it is interned data that happens to decode the step table, and a
+    step lemma for it states a FALSE discriminator fact.  `None` is the whole of
+    `code`, for a caller holding raw bytes with no string table.
+    """
     blocks = []
-    for i, (w, idx, rhs) in sorted(_step_result_plan(code).items()):
+    for i, (w, idx, rhs) in sorted(
+            _step_result_plan(code, exec_len).items()):
         pc = base + i * 4
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
@@ -11206,18 +11246,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
     # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
     # which every guarded image carries, so EVERY arm64 proof was red on it.
-    # `info["str_addrs"]` is the published string table, so the first string's
-    # address is the end of the code.  The run tests still read the whole
-    # `code` (`{name}_code` is unchanged), so nothing else moves.
-    _str_addrs = list((info.get("str_addrs") or {}).values())
-    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
-    code_end = max(0, min(code_end, len(code)))
-    step_code = code[:code_end]
+    # `_exec_code_end` reads the published string table, and the SAME bound is
+    # passed to every emitter (this path, the frame proof and the dylib proof),
+    # so no path can plan a lemma past the code.  The run tests still read the
+    # whole `code` (`{name}_code` is unchanged), so nothing else moves.
+    _exec_len = _exec_code_end(code, info, base_addr)
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
-    step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
+    step_lemmas = (_gen_step_result_lemmas(func_name, code, base_addr, _exec_len)
                    + "\n\n"
-                   + _gen_step_lemmas(func_name, step_code, base_addr)
+                   + _gen_step_lemmas(func_name, code, base_addr, _exec_len)
                    + ("\n\n" + step_tests if step_tests else ""))
 
     # Fuel for the concrete closed correctness proof. Large enough to let the
@@ -12357,9 +12395,14 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
     decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
+    # The step lemmas cover the EXECUTABLE region only, so a string byte pattern
+    # that decodes as an instruction gets no false lemma; see
+    # `generate_arm64_proof` and `_exec_code_end`.
+    _exec_len = _exec_code_end(code, info, base_addr)
     # step-OK derives from step-RESULT, so the results come first.
-    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(stem, code, base_addr))
+    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr, _exec_len)
+                   + "\n\n"
+                   + _gen_step_lemmas(stem, code, base_addr, _exec_len))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -13358,6 +13401,13 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
                                for i, e in enumerate(exports))
     export_defs_text = "\n\n".join(export_defs)
     proofs_text = "\n\n".join(proofs)
+    # The step lemmas cover the EXECUTABLE region only, so a string byte pattern
+    # that decodes as an instruction gets no false lemma; see
+    # `generate_arm64_proof` and `_exec_code_end`.
+    _exec_len = _exec_code_end(code, info, base)
+    _step_lemmas = (_gen_step_result_lemmas("dylib", code, base, _exec_len)
+                    + "\n\n"
+                    + _gen_step_lemmas("dylib", code, base, _exec_len))
     return f"""import ProofLib
 import work
 import Refine
@@ -13372,7 +13422,7 @@ set_option linter.unusedVariables false
 
 {_gen_decode_lemmas("dylib", code, base)}
 
-{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
+{_step_lemmas}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new

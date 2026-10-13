@@ -2254,6 +2254,121 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                 self.assertIn("rw [syn_sr_0 s h]",
                               G._gen_step_lemmas("syn", code, 0x1000))
 
+    def _compile_bytes(self, name, source):
+        """`(code, info, exec_len)` for `source`, generation only, no Lean."""
+        import formal.build as fb
+        import formal.arm64_proof_gen as G
+        src = os.path.join(self.tmp, name + ".mojo")
+        with open(src, "w") as f:
+            f.write(source)
+        r = fb.compile_formal(src, output=src[:-5] + ".aout",
+                              prove=False, check=False)
+        code = r["code"]
+        info = r["info"]
+        return code, info, G._exec_code_end(code, info, info["base_addr"])
+
+    def test_a_data_word_past_the_code_gets_no_step_lemma(self):
+        """The step walk covers the EXECUTABLE region, not the interned strings.
+
+        `__TEXT` carries every function body and THEN every interned string
+        (`arm64_codegen.compile`'s string-emission loop, which includes
+        `model.stack_trap_message`).  A string byte pattern that decodes as an
+        instruction the step table knows is a word no execution reaches, and a
+        step lemma for it states a discriminator fact that is FALSE -- measured,
+        the trap message carries `909189220` (`TBZ w4, #...`), which every
+        guarded image has -- so the whole proof fails to typecheck while every
+        program in it is correct.
+
+        The plan is now derived from `_exec_code_end`'s bound at ONE place
+        (`_step_result_plan`, threaded through both generators), so no caller
+        can plan a lemma past the code.  The row is NOT vacuous: the same bytes
+        DO decode past the bound, which is what the un-bounded walk
+        (`exec_len=None`, the pre-fix behaviour and still the default for a
+        caller holding raw bytes) plans -- asserted here so the guard reads as
+        load-bearing rather than as a filter that happens to match nothing."""
+        import formal.arm64_proof_gen as G
+        code, _info, exec_len = self._compile_bytes("datawords", self.PROGRAM)
+        self.assertLess(exec_len, len(code),
+                        "this program interns a string after the code (the "
+                        "trap message), so the bound is inside `code`")
+        beyond = [i // 4 for i in range(0, len(code) - len(code) % 4, 4)
+                  if i >= exec_len
+                  and G._step_branch_index(
+                      int.from_bytes(code[i:i + 4], "little")) is not None]
+        self.assertTrue(
+            beyond, "no word past the code decodes, so this row would not "
+                    "catch the bug it exists for")
+        # ...the UNBOUNDED walk plans them all (the pre-fix behaviour)...
+        self.assertTrue([i for i in G._step_result_plan(code)
+                         if i * 4 >= exec_len])
+        # ...and the BOUNDED walk plans none of them.
+        self.assertEqual(
+            [i for i in G._step_result_plan(code, exec_len)
+             if i * 4 >= exec_len], [])
+        for text in (G._gen_step_result_lemmas("dw", code, 0x1000, exec_len),
+                     G._gen_step_lemmas("dw", code, 0x1000, exec_len)):
+            idxs = [int(m) for m in
+                    re.findall(r"_(\d+) \(s : Arm64State\)", text)]
+            self.assertEqual([i for i in idxs if i * 4 >= exec_len], [])
+
+    # The FRAME path (`_generate_frame_proof`) is the one that passed the whole
+    # `code` to both generators before this fix, so it is the path the row below
+    # reads end to end rather than a second reading of the ordinary one (which
+    # already truncated and would stay green with the fix reverted).  A
+    # multi-field struct with a mutating `self` method is what makes
+    # `_frame_methods` route here.
+    FRAME_PROGRAM = (
+        "struct P:\n"
+        "    var a: Int\n"
+        "    var b: Int\n"
+        "\n"
+        "    def fill(mut self, v: Int):\n"
+        "        self.a = v\n"
+        "        self.b = v + 1\n"
+        "\n"
+        "def main(n: Int) -> Int:\n"
+        "    return n\n")
+
+    def test_the_frame_proof_plans_no_data_word(self):
+        """The frame proof carries no step lemma for an interned-string word.
+
+        `_generate_frame_proof` is a separate caller of both generators, and it
+        passed the WHOLE `code`; so on this path the trap message's decodable
+        words each got a step-RESULT and a step-OK lemma whose fact is false,
+        and the frame proof did not typecheck.  Measured on this program:
+        `len(code) = 1252`, the code ends at `412`, and five words past it
+        decode (`0x79622034` among them).  Both generators now take the bound,
+        so the emitted `_sr_`/`_step_ok_` indices all land inside the code."""
+        import formal.build as fb
+        import formal.arm64_proof_gen as G
+        src = os.path.join(self.tmp, "framedw.mojo")
+        with open(src, "w") as f:
+            f.write(self.FRAME_PROGRAM)
+        r = fb.compile_formal(src, output=src[:-5] + ".aout",
+                              prove=True, check=False)
+        code = r["code"]
+        info = r["info"]
+        exec_len = G._exec_code_end(code, info, info["base_addr"])
+        self.assertLess(exec_len, len(code),
+                        "the frame image interns a string after the code")
+        with open(r["proof_path"]) as f:
+            text = f.read()
+        sr = [int(m) for m in
+              re.findall(r"_sr_(\d+) \(s : Arm64State\)", text)]
+        ok = [int(m) for m in
+              re.findall(r"_step_ok_(\d+) \(s : Arm64State\)", text)]
+        self.assertTrue(sr, "the frame proof emits step lemmas to check")
+        self.assertEqual([i for i in sr if i * 4 >= exec_len], [],
+                         "a step-RESULT lemma past the code states a FALSE "
+                         "discriminator fact")
+        self.assertEqual([i for i in ok if i * 4 >= exec_len], [],
+                         "a step-OK lemma past the code is the same defect")
+        # The same bytes still decode past the bound, which is what the
+        # un-bounded walk would plan -- the measurement that says the fix, and
+        # not a filter that matches nothing, is what removed the lemmas above.
+        self.assertTrue([i for i in G._step_result_plan(code)
+                         if i * 4 >= exec_len])
+
 
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
