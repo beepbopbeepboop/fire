@@ -1,5 +1,29 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
+**Status updated 2026-10-13 (`work/formal332-docs`): "The exact next step"'s
+option 2 — "track a spread's key set when it is a literal, directly or through a
+local that is only ever bound such a literal" — is LANDED.** `formal/model.py`'s
+`ValueKinds.dict_literal_of` is the reader (the `_dict_inits` evidence
+`dict_literal_key_value_kind` already keeps, so a name bound twice is tombstones
+to undecidable), `_unspread_keyword_mappings` takes it as `literal_of`, and both
+`struct_construction_plan` and `bind_call_arguments` pass it through — so
+`var d = {'b': 2}` then `P(a=1, **d)` (and `f(a=1, **d)`) builds and answers
+CPython on both architectures, through the same duplicate check a literal
+spread uses. Both emitters ask `ValueKinds.dict_literal_of` (`_spread_literal_of`),
+and `formal/build.py`'s `check_construction_shapes` asks the same reader so the
+build pass and the emitters cannot disagree. **This answers a shape the corpus
+does not write (the three `**` spreads it holds are all `**`-parameters), so it
+has no corpus witness — it is the capability option 2 named, and the witness
+that would exercise it is real code, not this repository.** The rest of this
+Status still holds: what remains refused is a mapping whose keys are not in the
+source (a computed dict, a rebound name) and the `**`-PARAMETER, which is the
+variadic ABI (`FORMAL_a_variadic_parameter_read_has_no_abi.md`) and is the only
+corpus-reachable blocker left. `test_formal_run.py`'s `SPREAD_CONSTRUCTION_CASES`
+grew the two `dict_literal_of` rows (construction and call, CPython-differential,
+both architectures) and `SPREAD_REFUSALS` grew `a_rebound_mapping_name_spread_is
+_still_refused`, `a_computed_mapping_spread_is_still_refused` and
+`…_at_a_call`, so the boundary the tombstone draws is pinned on both backends.
+
 **Status: PARTIAL — the false half is fixed and the real blocker is now
 measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
 repository, `formal/hostmods/` and 252 stdlib files the corpus holds THREE `**`

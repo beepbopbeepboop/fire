@@ -11843,6 +11843,50 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+    # The SAME fact one hop out, and the reason `ValueKinds.dict_literal_of`
+    # exists: the spread goes through a NAME whose every binding in the function
+    # is a dict literal, so the keys are in the source after all (`_dict_inits`
+    # is the evidence `dict_literal_key_value_kind` already keeps, and it
+    # tombstones the name on a second binding — see the rebinding refusals
+    # below). Before this, `var d = {'b': 2}` then `P(a=1, **d)` was refused "a
+    # spread's KEYS are not knowable", which was false about a mapping the
+    # source wrote three lines up.
+    ("a_spread_through_a_mapping_name_fills_the_fields_it_names",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    p = P(a=1, **d)\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # …and the same on a CALL, so the two readers of `args` cannot drift: both
+    # go through `_unspread_keyword_mappings`, so a name resolves for both or
+    # for neither.
+    ("a_spread_through_a_mapping_name_fills_a_calls_keywords",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **d))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -11860,19 +11904,39 @@ SPREAD_REFUSALS = [
      "    printf(\"%d\", p.a)\n"
      "    return 0\n",
      "refuse:more than one value", None),
-    # A spread whose keys are NOT in the source, at a construction — refused by
-    # name, with the reason and the way out.
-    ("a_spread_through_a_mapping_name_is_refused_by_name",
+    # A NAME whose bindings DISAGREE is still refused, and it is the row that
+    # keeps `dict_literal_of`'s tombstone honest: `d = {'b': 2}` then
+    # `d = {'b': 3}` leaves one name with two mappings, and the keys of the
+    # first are a claim about one instruction rather than about the operand. The
+    # refusal names the name, because the reader cannot.
+    ("a_rebound_mapping_name_spread_is_still_refused",
      "struct P:\n"
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var d = {'b': 2}\n"
+     "    d = {'b': 3}\n"
      "    var p = P(a=1, **d)\n"
      "    printf(\"%d\", p.a)\n"
      "    return 0\n",
      "refuse:constructing P spreads `d` with `**`", None),
+    # A mapping that is COMPUTED rather than written — the keys are not in the
+    # source, so there is nothing to un-spread. A call is the shape that says so
+    # most plainly.
+    ("a_computed_mapping_spread_is_still_refused",
+     "def d():\n"
+     "    return {'b': 2}\n"
+     "\n"
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **d())\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:constructing P spreads `d(...)` with `**`", None),
     # …and through a `**`-PARAMETER, which is the corpus case
     # (`formal/x86_64_decode.py`'s `insn()` helper forwards `**kw`) and the shape
     # the refusal names as the real blocker: a formal value is one 64-bit word
@@ -11894,15 +11958,17 @@ SPREAD_REFUSALS = [
      "refuse:constructing Insn spreads `kw` with `**`", None),
     # The same on a call, so the two readers cannot drift: one message, one
     # cause, and the subject spelled by the construct it is about.
-    ("a_spread_through_a_mapping_name_is_refused_by_name_at_a_call",
+    ("a_computed_mapping_spread_is_still_refused_at_a_call",
      "def f(a: Int, b: Int) -> Int:\n"
      "    return a * 10 + b\n"
      "\n"
+     "def d():\n"
+     "    return {'b': 2}\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
-     "    var d = {'b': 2}\n"
-     "    printf(\"%d\", f(a=1, **d))\n"
+     "    printf(\"%d\", f(a=1, **d()))\n"
      "    return 0\n",
-     "refuse:call f() spreads `d` with `**`", None),
+     "refuse:call f() spreads `d(...)` with `**`", None),
 ]
 
 CONSTRUCTION_REFUSALS = [

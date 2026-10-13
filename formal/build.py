@@ -8638,6 +8638,23 @@ def check_construction_shapes(functions, structs_by_name,
                if lib.get("source")}
     rets = M.CalleeReturnTable(functions, int_names=FT.TYPE_NAMES,
                                string_names=FT.STRING_TYPE_NAMES)
+    # A `**` spread through a NAME whose every binding in the function is a
+    # dict literal has its keys in the source after all, so this pass must
+    # agree with the emitters or it refuses the very construct they answer.
+    # The reader is `model.ValueKinds.dict_literal_of`; a bare `ValueKinds` is
+    # enough because only `_dict_inits` is asked (a statement scan, not a kind
+    # question), and it is built on first use — for a function whose body
+    # contains a `**` spread at all — rather than for every function.
+    literal_readers: dict = {}
+
+    def literal_of(fn):
+        vk = literal_readers.get(fn.name)
+        if vk is None:
+            vk = M.ValueKinds(fn, int_names=FT.TYPE_NAMES,
+                              string_names=FT.STRING_TYPE_NAMES)
+            literal_readers[fn.name] = vk
+        return vk.dict_literal_of
+
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
         for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -8659,8 +8676,12 @@ def check_construction_shapes(functions, structs_by_name,
                     name, owners[name], _one(sources)))
             if M.type_constructor_kind(name) is not None:
                 continue
+            spread_of = None
+            if any(isinstance(a, F.UnaryOp) and a.op == "**"
+                   for a in (getattr(node, "args", None) or ())):
+                spread_of = literal_of(fn)
             _plan, refusal = M.struct_construction_plan(
-                st, node, structs_by_name, cands, rets)
+                st, node, structs_by_name, cands, rets, literal_of=spread_of)
             if refusal is not None:
                 raise CodegenError(refusal)
 

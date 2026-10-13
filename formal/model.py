@@ -24991,6 +24991,40 @@ class ValueKinds:
             return None
         return dict_literal_key_value_kind(self._dict_inits.get(obj.name), e.index)
 
+    def dict_literal_of(self, operand):
+        """The dict LITERAL a NAME's every binding in this function wrote, or None.
+
+        The one reader of "is this `**` operand a mapping whose KEYS the source
+        itself wrote", and it is the `_dict_inits` evidence the kind readers
+        beside it already use: a binding statement that wrote a `DictExpr`
+        records the node, and the moment a second statement binds the name to
+        anything else the entry is tombstoned to `None` (`_note_dict_init`).
+        So a name that answers here has exactly ONE mapping, which is what the
+        spread needs — a name bound twice is two mappings, and the keys of the
+        first would be a claim about one instruction rather than about the
+        operand.
+
+        Only a bare NAME is answered, and only when its evidence is a LITERAL.
+        `d = {'b': 2}` is answerable; `d = make()` is not, for the reason
+        `literal_dict_items` gives (a computed mapping's keys are not in the
+        source). The conservative answer is `None`, which the caller turns back
+        into the refusal it was producing before.
+
+        A PARAMETER is deliberately NOT answered even when the body later binds
+        it to a literal: `_dict_inits` is flow-insensitive, and a `**` spread is
+        a build decision where a subscript is only a kind, so a parameter whose
+        value before the rebinding differs must keep the refusal. That is also
+        what keeps the corpus's own shape — `def mk(..., **kw)` forwarding
+        `**kw` — refused here rather than resolved to whatever a later statement
+        happened to write.
+        """
+        if not isinstance(operand, F.IdentExpr):
+            return None
+        if operand.name in self._param_names:
+            return None
+        value = self._dict_inits.get(operand.name)
+        return value if isinstance(value, F.DictExpr) else None
+
     def _string_method_kind(self, call):
         """What a lowered string method call yields, or None if this is not one.
 
@@ -37830,7 +37864,8 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
     )
 
 
-def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
+def _unspread_keyword_mappings(args, kwargs, name: str = "this construction",
+                               literal_of=None):
     """`(args, kwargs, refusal)` — `**` spreads folded in, or why one cannot be.
 
     A `**mapping` is not an argument: it is a set of arguments whose NAMES are in
@@ -37849,8 +37884,18 @@ def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
     `S(a=1, **{'a': 2})` a refusal — CPython's `TypeError` — rather than
     something this path invented.
 
-    Any other operand (a name, a computed dict, a call) is refused by name: the
-    keys are not in the source at this point and guessing them is the fabrication
+    **A spread through a NAME whose every binding is a dict literal is the same
+    fact one hop out**, and `literal_of` is where that evidence arrives: the
+    caller passes the function's `ValueKinds.dict_literal_of`, which resolves a
+    name to the ONE literal a binding statement wrote (and `None` the moment a
+    second statement binds the name to something else). `d = {'b': 2}` then
+    `S(a=1, **d)` is then un-spread exactly as `S(a=1, **{'b': 2})` is, with the
+    same keys and the same duplicate check. The `None` default is the build
+    pass's conservative answer, where there is no `ValueKinds` to ask.
+
+    Any other operand (a name with no literal evidence, a computed dict, a call,
+    a `**`-parameter) is refused by name: the keys are not in the source at this
+    point and guessing them is the fabrication
     `formal/known_limits.md` calls a false PASS. A `*` spread is deliberately NOT
     touched: it is a POSITIONAL expansion rather than a keyword one, it has its
     own refusal, and it is not this function's business.
@@ -37858,9 +37903,17 @@ def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
     plain, folded, refusal = [], list(kwargs), None
     for arg in args:
         if isinstance(arg, F.UnaryOp) and arg.op == "**":
-            items = literal_dict_items(arg.operand)
+            operand = arg.operand
+            # A dict LITERAL answers for itself; a NAME answers through the
+            # caller's `_dict_inits` reader. Anything else is left as the
+            # operand, so `literal_dict_items` returns None and the refusal
+            # names what the source did write.
+            mapping = operand
+            if not isinstance(mapping, F.DictExpr) and literal_of is not None:
+                mapping = literal_of(operand)
+            items = literal_dict_items(mapping) if mapping is not None else None
             if items is None:
-                refusal = keyword_spread_refusal(name, spelled(arg.operand))
+                refusal = keyword_spread_refusal(name, spelled(operand))
                 break
             folded.extend(items)
             continue
@@ -37980,7 +38033,8 @@ def construction_copy_unrecognised_refusal(name: str, arg) -> str:
 
 
 def struct_construction_plan(struct_def, call, decls: dict,
-                             candidates: dict, rets=None) -> tuple:
+                             candidates: dict, rets=None,
+                             literal_of=None) -> tuple:
     """`(plan, refusal)` — which of the three shapes `S(...)` is, or why not.
 
     THE decision, in the shared model, so the two backends cannot answer it
@@ -38029,7 +38083,7 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # docstring has the measurement and the reason a literal spread is answered
     # rather than refused.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        args, kwargs, f"constructing {name}")
+        args, kwargs, f"constructing {name}", literal_of=literal_of)
     if spread_refusal is not None:
         return (None, spread_refusal)
     slots = struct_frame_slots(struct_def)
@@ -48843,7 +48897,8 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list,
+                        literal_of=None) -> tuple:
     """`(slots, error)` — a call's arguments in positional form, or why not.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -48891,7 +48946,8 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()")
+        list(args or []), list(kwargs or []), f"call {name}()",
+        literal_of=literal_of)
     if spread_refusal is not None:
         return None, spread_refusal
     slots: list = list(args or [])

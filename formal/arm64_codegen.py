@@ -4480,6 +4480,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._vkinds_cache[name] = vk
         return vk
 
+    def _spread_literal_of(self):
+        """`ValueKinds.dict_literal_of` for the function being emitted, or None.
+
+        The reader `_unspread_keyword_mappings` asks for the dict-literal
+        evidence a NAME has: `d = {'b': 2}` then `S(a=1, **d)` has both keys and
+        both values in the source after all, so the spread is un-spread exactly
+        as a literal one is. `self._vkinds` is the CURRENT function's table
+        (`_emit_function` sets it); the guard is for a construction emitted
+        before any `_emit_function` ran (a module-level site, refused
+        elsewhere), where `None` keeps the conservative refusal in place.
+        """
+        vk = getattr(self, "_vkinds", None)
+        return None if vk is None else vk.dict_literal_of
+
     def _declared_kind_for(self, fn_name):
         """`_declared_kind` bound to the function `fn_name`, for `ValueKinds`.
 
@@ -9401,7 +9415,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"keyword arguments are not supported ({names})")
             return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+        slots, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs, literal_of=self._spread_literal_of())
         if err is not None:
             raise CodegenError(err)
         return slots
@@ -9671,7 +9686,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         many times the constructor runs: a constructor inside a loop reuses
         its site's block, exactly as a C local is reused."""
         plan, refusal = M.struct_construction_plan(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            literal_of=self._spread_literal_of())
         if refusal is not None:
             raise CodegenError(refusal)
         shape = plan[0]
