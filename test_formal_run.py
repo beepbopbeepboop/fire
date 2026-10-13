@@ -6342,6 +6342,35 @@ ASSIGNED_TYPE_CASES = [
      "    var xs = [a + b + c for a, (b, c) in [(1, (2, 3)), (10, (20, 30))]]\n"
      "    printf(\"n=%d s=%d\\n\", len(xs), xs[0] + xs[1])\n"
      "    return 0\n", 0, "n=2 s=66"),
+    # A STARRED for-target binds the tail as a rest blob, on both machines.
+    # `for a, *rest in …` was a silent wrong program on arm64 and a build
+    # refusal on x86-64, and the two causes are different, which is why the row
+    # is in this group: arm64's rest loop subtracted an IMMEDIATE 6 instead of
+    # the register `X6` holding the fixed arity, and exited the copy loop on the
+    # wrong condition, so the rest blob was never filled and the image returned
+    # `exit(1)` with nothing printed; x86-64 had no star arm at all — it stored
+    # the leaf `*rest` verbatim and refused it with "'*rest' has no home". The
+    # expected 27 = (1 + 2*10 + 2) for a three-element tuple plus (4 + 0) for a
+    # one-element one, and the second loop's EMPTY rest is half the subject: a
+    # rest blob of count 0 must build and `len` 0. CPython's answer for the text.
+    ("both_arch_a_starred_for_target_binds_the_rest_blob",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, *rest in [(1, 2, 3)]:\n"
+     "        s = s + a + rest[0] * 10 + len(rest)\n"
+     "    for a, *rest in [(4,)]:\n"
+     "        s = s + a + len(rest)\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "27"),
+    # …and a starred leaf NESTED inside a group, so the star arm is exercised
+    # from `_emit_for_unpack`'s recursive call too: 305 = 1 + 2 + 3*100 + 2.
+    ("both_arch_a_nested_starred_for_target_binds_the_rest_blob",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, *rest) in [(1, (2, 3, 4))]:\n"
+     "        s = s + a + b + rest[0] * 100 + len(rest)\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "305"),
 ]
 
 # Positive cases built and RUN on BOTH backends, which is what
