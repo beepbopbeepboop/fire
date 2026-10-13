@@ -692,7 +692,9 @@ TUPLE_CASES = [
      "a walk, observed through a sum for the same order-independence reason as "
      "the set walk"),
     ("t_eq_r", ["t = (1, 2, 3)", "v = 1 if t == (1, 2, 3) else 0"],
-     None, "`==` on two blobs — the operator gate's own row"),
+     "v", "`==` on two TUPLES of words: the same length-plus-element lowering "
+     "the list rows exercise, on the blob a tuple shares with a list — so the "
+     "row that says the lowering is not keyed on the LIST spelling"),
     ("t_count_r", ["t = (1, 2, 1)", "v = t.count(1)"], None,
      "`count` on a tuple: only lowered on a `char *`"),
     ("t_index_m_r", ["t = (1, 2, 3)", "v = t.index(2)"], None,
@@ -758,9 +760,13 @@ ALIAS_CASES = [
 OPERATOR_CASES = [
     # The operator matrix, as a table rather than as prose: every operator this
     # gate covers, with a blob on the left, and the CPython answer beside it.
-    # These are all REFUSALs, and they are here because a gate that stopped
-    # covering one of them would answer with an ADDRESS again — silently, and
-    # with exit 0.
+    # Most are REFUSALs, and they are here because a gate that stopped covering
+    # one of them would answer with an ADDRESS again — silently, and with exit 0.
+    # `==`/`!=` between two WORD-element ordered containers are the exception:
+    # they moved from this gate's refusals to real ANSWERs when the element-wise
+    # lowering landed (both backends), and the rows beside them pin the shapes
+    # that stayed refused (a string or nested element, a set, a dict) so the
+    # lowering cannot be widened to them.
     ("o_lt", ["a = [9]", "b = [1]", "v = 1 if b > a else 0"], None,
      "`>` between two blobs: the row the gate started as, measured answering 1 "
      "where CPython answers 0 — the ALLOCATION ORDER, not the elements"),
@@ -771,12 +777,72 @@ OPERATOR_CASES = [
      "a blob against a NUMBER. CPython raises TypeError for it, so there is no "
      "correct program on the far side of the gate"),
     ("o_eq", ["a = [3, 1, 2]", "v = 1 if a == [3, 1, 2] else 0"],
-     None,
-     "`==`: measured answering 0 where CPython answers 1, because the literal "
-     "is a SECOND block at a different address"),
+     "v",
+     "`==` between two lists of WORDS is now the length check plus a per-element "
+     "word compare on BOTH backends (it used to answer 0 where CPython answers "
+     "1, because the literal is a SECOND block at a different address). "
+     "Observed through the 0/1 so a lowering that read one element or none "
+     "cannot pass"),
     ("o_ne", ["a = [3, 1, 2]", "v = 1 if a != [3, 1, 2] else 0"],
-     None, "`!=` is the same comparison inverted, and answered 1 where CPython "
-     "answers 0"),
+     "v", "`!=` is the same compare inverted, and the SAME lowering — the value "
+     "is flipped at the join rather than by a second loop, so the two operators "
+     "cannot disagree about which pairs are equal. It answered 1 where CPython "
+     "answers 0 before the lowering"),
+    ("o_eq_diff_elem", ["a = [3, 1, 2]", "b = [3, 9, 2]",
+                        "v = 1 if a == b else 0"],
+     "v",
+     "the SAME length, a DIFFERENT element: the row that separates a real "
+     "element compare from a length-only one. CPython answers 0"),
+    ("o_eq_diff_len", ["a = [3, 1, 2]", "b = [3, 1]", "v = 1 if a == b else 0"],
+     "v",
+     "a DIFFERENT length, where CPython answers 0 before reading an element — "
+     "the row that keeps a short blob from reading the longer one's tail"),
+    ("o_eq_mixed", ["a = [1]", "b = (1,)", "v = 1 if a == b else 0"],
+     "v",
+     "a LIST against a TUPLE: CPython answers 0 whatever the elements, so this "
+     "is an ANSWER and not a refusal — and it is the row that catches a class "
+     "guess, because the two lower to the SAME blob here"),
+    ("o_chain_eq", ["a = [1, 2]", "b = [1, 2]", "c = [1, 2]",
+                    "v = 1 if a == b == c else 0"],
+     "v",
+     "a CHAIN (`a == b == c`) of three equal lists. It is its own emitter that "
+     "never reached `_emit_binop`, so before the lowering landed it answered 0 "
+     "where CPython answers 1 — a silent wrong answer, not a refusal"),
+    ("o_chain_eq_false", ["a = [1, 2]", "b = [1, 9]", "c = [1, 2]",
+                          "v = 1 if a == b == c else 0"],
+     "v",
+     "the same chain with the MIDDLE list differing: CPython short-circuits to "
+     "0, and the earlier links' answers must survive the running AND"),
+    ("o_chain_mixed", ["a = [1]", "b = (1,)", "c = [1]",
+                       "v = 1 if a == b == c else 0"],
+     "v",
+     "a chain whose FIRST link is a list against a tuple — 0 in CPython "
+     "whatever the elements, and the row that catches a chain link that read an "
+     "element instead of the class"),
+    ("o_chain_ne", ["a = [1]", "b = [2]", "v = 1 if a != b != a else 0"],
+     "v",
+     "a `!=` chain, where every link is true: it pins that the inverted link "
+     "result is what the AND consumes"),
+    ("o_chain_eq_str_r", ['a = ["ab"]', 'b = ["ab"]',
+                          'v = 1 if a == b == a else 0'], None,
+     "a CHAIN over lists of STRINGS: the elements are `char *`, so the link "
+     "needs a content compare the lowering does not make — the chain spelling "
+     "must refuse exactly the shapes the binary spelling refuses"),
+    ("o_eq_str_r", ['a = ["ab"]', 'v = 1 if a == ["ab"] else 0'], None,
+     "`==` on two lists of STRINGS: the elements are `char *`s, so the compare "
+     "is CONTENT and a word compare would answer by interning order — the row "
+     "that keeps the lowering from being widened to every list"),
+    ("o_eq_nested_r", ["a = [[1]]", "b = [[1]]", "v = 1 if a == b else 0"],
+     None,
+     "`==` on two lists of LISTS: the element is the ADDRESS of another blob, "
+     "so this is a recursive compare the lowering does not make"),
+    ("o_eq_set_r", ["a = {1, 2}", "v = 1 if a == {1, 2} else 0"], None,
+     "`==` on two SETS is order-INDEPENDENT and a set lowers as a list here, so "
+     "an element walk would answer 0 for `{2, 1} == {1, 2}` where CPython "
+     "answers 1 — a set lowers as a list, so only the flow tables can say so"),
+    ("o_eq_dict_r", ['a = {"x": 1}', 'v = 1 if a == {"x": 1} else 0'], None,
+     "`==` on two DICTS compares keys and values at the pair stride, not the "
+     "8-byte element walk this lowering makes"),
     ("o_is", ["a = [1, 2]"], "1 if a is a else 0",
      "`is` is IDENTITY, which on this path is unboxed word equality, and two "
      "distinct blob literals ARE two distinct addresses — so `a is a` answers "

@@ -805,6 +805,16 @@ dylib_exports: list = None, globals_base: int = None,
         # list here — but asked by a different question: a tuple is
         # IMMUTABLE, so a subscript store into one is refused.
         self._tuple_vars = set()
+        # Names bound to a LIST, the positive twin of `_tuple_vars` and
+        # `_set_vars`.  A list is the SAME blob as a set and a tuple here, and
+        # the question that needs telling them apart — beyond the two above —
+        # is CPython's `==`, which is False between a list and a tuple whatever
+        # the elements.  "Not in `_tuple_vars`/`_set_vars`" is NOT a list (a
+        # container a CALL returned is in neither), so only a name a binding
+        # established as a list is in here; `_equality_blob_class` is the
+        # reader, and a name in none of the three refuses the comparison rather
+        # than guessing its class.
+        self._list_vars = set()
         # Names bound to a list/tuple/set blob.  This is what makes `a + b` on
         # two LOCALS a concatenation: without it two bare idents are
         # indistinguishable from two integers and the operator silently lowers
@@ -1424,6 +1434,7 @@ dylib_exports: list = None, globals_base: int = None,
         self._dict_vars = set()
         self._set_vars = set()
         self._tuple_vars = set()
+        self._list_vars = set()
         self._blob_vars = set()
         self._blob_var_est = {}
         self._blob_loop_stack = []
@@ -5186,6 +5197,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._tuple_vars.add(name)
         else:
             self._tuple_vars.discard(name)
+        # And LIST-NESS, the positive half of the pair `_set_vars`/`_tuple_vars`
+        # each keep a NEGATIVE of (a name in neither is not thereby a list — a
+        # container a call returned is in neither).  `==` between a list and a
+        # tuple is False in CPython whatever the elements, so `_equality_blob_
+        # class` has to tell the two apart, and only a positive table can.
+        if self._expr_is_list_like(value):
+            self._list_vars.add(name)
+        else:
+            self._list_vars.discard(name)
 
     def _expr_is_set_like(self, e) -> bool:
         """True when `e` is a set literal, a set comprehension, or a NAME this
@@ -8035,6 +8055,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         # with a blob operand goes to the shared gate below.
         if self._maybe_emit_set_binop(e.left, e.right, op):
             return
+        # `==`/`!=` between two blobs whose elements are WORDS and whose classes
+        # are known and equal are lowered here, before the shared refusal below
+        # can claim them.  `_maybe_emit_blob_equality` says which pairs those
+        # are; every other blob pair — a string or nested element, a set, a dict,
+        # an unknown class — keeps the refusal, which is the same split
+        # `_maybe_emit_set_binop` above already makes for `&`/`-`/`^`.
+        if op in ("==", "!=") and self._maybe_emit_blob_equality(
+                e.left, e.right, op):
+            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -9034,6 +9063,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         # pre-change tree: `s < t` was TRUE and `s > t` FALSE on both backends
         # for `s = "abc"`, `t = "bc"`, with no property of the program
         # deciding either.
+        # `==`/`!=` between two blobs that `_emit_binop` lowers falls through to
+        # the caller's truthiness path (`_emit_truthy_word` → `_emit_expr` →
+        # `_emit_binop`), because the lowering produces a 0/1 and not a flag
+        # pair. Letting it reach the refusal below instead would make
+        # `if a == b:` a build error while `r = a == b` answers — the two
+        # spellings of one question disagreeing, which is exactly the defect the
+        # `string_binary_refusal` comment below is about.
+        if cond.op in ("==", "!=") \
+                and self._blob_equality_plan(cond.left, cond.right) is not None:
+            return False
         reason = M.string_binary_refusal(
             cond.op, self._expr_str_kind(cond.left),
             self._expr_str_kind(cond.right), left=cond.left, right=cond.right,
@@ -12095,6 +12134,44 @@ ctor_field_value=self._ctor_field_value_for(name),
         for i, op in enumerate(ops):
             u, s = cmp_conds[op]
             self._emit_expr_to(operands[i + 1], "X1")
+            # A link between two containers of WORDS is the same comparison the
+            # binary spelling lowers, over bases the chain has ALREADY evaluated
+            # — `[SP+0]` holds the left (the previous link stored it) and X1 the
+            # right — so it is lowered from the registers rather than by
+            # re-evaluating the operands, which would run a call operand twice.
+            # The chain is a separate emitter that never reached `_emit_binop`,
+            # so without this `a == b == c` compared two blob ADDRESSES and
+            # answered 0 for three equal lists (measured, both backends).
+            left_is_blob = M.container_operand_is_blob(
+                self._expr_str_kind(operands[i]))
+            right_is_blob = M.container_operand_is_blob(
+                self._expr_str_kind(operands[i + 1]))
+            if op in ("==", "!=") and (left_is_blob or right_is_blob):
+                plan = self._blob_equality_plan(operands[i], operands[i + 1])
+                if plan is not None:
+                    lc, rc = plan
+                    if lc != rc:
+                        self.asm.emit(encode_movz_wd_imm(
+                            0, 0 if op == "==" else 1))
+                    else:
+                        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+                        self.asm.emit(encode_mov_zr_xn(10, 1))
+                        self._emit_blob_word_equality_bases(op)
+                    self.asm.emit(encode_cbz_xn(0, 0))
+                    self.asm.emit_label_rel(false_label, here_offset=-4)
+                    if i < len(ops) - 1:
+                        self.asm.emit(encode_str_xt_xn_imm(1, 31, 0))
+                    continue
+                reason = M.string_binary_refusal(
+                    op, self._expr_str_kind(operands[i]),
+                    self._expr_str_kind(operands[i + 1]), left=operands[i],
+                    right=operands[i + 1], fn=self._cur_fn,
+                    untyped_callee=self._untyped_callee)
+                if reason is not None:
+                    raise CodegenError(reason)
+                # else a blob against a NON-blob: CPython answers that a
+                # container is never equal to a scalar, which is exactly what
+                # the address compare below computes, so it falls through.
             self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
             self.asm.emit(encode_cmp_xn_xm(0, 1))
             if cmp_signed(common_type(self._ttype(operands[i]),
@@ -12874,6 +12951,172 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(e, F.SliceExpr):
             return self._expr_is_tuple_like(e.obj)
         return False
+
+    def _expr_is_list_like(self, e) -> bool:
+        """True when `e` is a list literal, a list comprehension, or a NAME this
+        function has bound to one — the positive twin of `_expr_is_tuple_like`.
+
+        The flow-sensitive half of `model.is_list_expr` and the second reader
+        `_tuple_vars`/`_set_vars` cannot stand in for: a name in neither is not
+        thereby a list, it is a name whose class is UNKNOWN (a container a call
+        returned), and `_equality_blob_class` refuses rather than guess.  It
+        follows `_expr_is_tuple_like` shape for shape and for the same reason —
+        a slice of a list is a list, and `+` of two lists is a list — so the two
+        predicates cannot disagree about a name the same binding wrote.
+        """
+        if M.is_list_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._list_vars
+        if isinstance(e, F.BinaryOp) and e.op == "+":
+            return (self._expr_is_list_like(e.left)
+                    and self._expr_is_list_like(e.right))
+        if isinstance(e, F.SliceExpr):
+            return self._expr_is_list_like(e.obj)
+        return False
+
+    def _equality_blob_class(self, e):
+        """`"list"` / `"tuple"` / `None` — the CPython class of a blob, if known.
+
+        `None` means "do not lower this comparison", and it covers three
+        different things that all have to refuse:
+
+        * a SET or a DICT, whose `==` is order-independent / key-and-value
+          respectively and is NOT the element-by-element walk `_emit_blob_word_
+          equality` makes — a set lowers as a list here, so nothing but the flow
+          tables can tell one from a list;
+        * a blob whose class is unknown (a container a call returned);
+        * anything that is not a blob at all.
+
+        The class has to be KNOWN on both sides or the comparison is refused
+        rather than guessed, because `[1] == (1,)` is False in CPython whatever
+        the elements: answering it off "not a tuple" would call a call's return
+        value a list and print 1 where CPython prints 0.
+        """
+        if (self._expr_is_set_like(e) or M.is_dict_expr(e)
+                or self._is_dict_subscript(e)):
+            return None
+        if self._expr_is_tuple_like(e):
+            return "tuple"
+        if self._expr_is_list_like(e):
+            return "list"
+        return None
+
+    def _blob_equality_plan(self, left, right):
+        """`(left_class, right_class)` when this pair's `==`/`!=` is word
+        comparable, else None.  Shared by the value and the branch path so they
+        cannot disagree about what is lowered."""
+        if not M.blob_equality_word_comparable(
+                self._expr_str_kind(left), self._expr_str_kind(right)):
+            return None
+        lc = self._equality_blob_class(left)
+        rc = self._equality_blob_class(right)
+        if lc is None or rc is None:
+            return None
+        return lc, rc
+
+    def _maybe_emit_blob_equality(self, left, right, op: str) -> bool:
+        """Lower `left == right` / `left != right` between two blobs, else False.
+
+        The one place the shared `container_operator_refusal` gate is DEFERRED
+        for `==`/`!=`, exactly as `_maybe_emit_set_binop` defers it for
+        `&`/`-`/`^` on two sets: `blob_equality_word_comparable` says both
+        element kinds are words and `_equality_blob_class` says both classes are
+        known and the same, and every other shape keeps the gate's named
+        refusal.  A LIST and a TUPLE are answered rather than refused — CPython
+        says they are never equal — which is why the class check can produce an
+        answer without touching either operand's elements.
+        """
+        plan = self._blob_equality_plan(left, right)
+        if plan is None:
+            return False
+        lc, rc = plan
+        if lc != rc:
+            self.asm.emit(encode_movz_wd_imm(0, 0 if op == "==" else 1))
+            return True
+        self._emit_blob_word_equality(left, right, op)
+        return True
+
+    def _emit_blob_word_equality(self, left, right, op: str) -> None:
+        """`left == right` (or `!=`) as a length check + per-element word compare.
+
+        X0 = 0/1 on exit, the same contract `_emit_cmp` produces for two words.
+        A blob is `[count:i64][elem0]…` with an 8-byte element stride, so this is
+        `count` first (CPython's own cheapest rejection, and the one that makes a
+        differing length answer False without reading a single element), then
+        `[base + 8 + 8i]` against `[base + 8 + 8i]` for `i < count` — the same
+        address arithmetic `_emit_key_eq` makes for a static container key, with
+        the count read from the blob's own header instead of from a literal.
+
+        No call happens inside the loop, so the two bases live in X9/X10 and only
+        the left base is spilled while the RIGHT operand is evaluated (an
+        expression can call).  `!=` is the inverted 0/1 at the join rather than a
+        second loop, so the two operators cannot come to disagree about which
+        pairs are equal.
+        """
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # [SP+0] = left base
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_zr_xn(10, 0))          # X10 = right base
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))   # X9 = left base
+        self._emit_blob_word_equality_bases(op)
+        # Into X9/XZR, NOT X0/XZR: the pop would throw away the 0/1 the join
+        # just computed, which is the trap `_emit_strcmp` documents on the other
+        # backend for the same reason (`_pop_slot` writes its target). X9 is
+        # free here — the loop is over and the bases are no longer needed.
+        self.asm.emit(encode_ldp_sp_post(9, 31))
+
+    def _emit_blob_word_equality_bases(self, op: str) -> None:
+        """X0 = 0/1 for `X9 == X10` (or `!=`) as two blobs of words.
+
+        The body `_emit_blob_word_equality` wraps and the COMPARE CHAIN calls
+        directly, because a chain must not re-evaluate its operands: it already
+        holds the left at `[SP+0]` and the right in X1, so handing it a
+        node-based emitter would run both operands twice and a call operand
+        twice with them. Preconditions: X9 = the left base, X10 = the right
+        base, both real blobs of the same class (the caller has decided that).
+        Clobbers X2-X7, X11, X12, X13 and leaves X9/X10 alone; touches no stack.
+        """
+        fn = self.func_name
+        self._if_counter += 1
+        sid = self._if_counter
+        loop = f"{fn}_bwe{sid}_loop"
+        diff = f"{fn}_bwe{sid}_diff"
+        done = f"{fn}_bwe{sid}_done"
+        end = f"{fn}_bwe{sid}_end"
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))    # X2 = left count
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 10, 0))   # X3 = right count
+        self.asm.emit(encode_cmp_xn_xm(2, 3))
+        self.asm.emit(encode_cset_xd_cond(4, "ne"))
+        self.asm.emit(encode_cbnz_xn(0, 4))             # lengths differ
+        self.asm.emit_label_rel(diff, here_offset=-4)
+        self.asm.emit(encode_movz_wd_imm(4, 0))         # X4 = i
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(4, 2))
+        self.asm.emit(encode_cset_xd_cond(5, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 5))             # i >= count: all equal
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))    # &left[i]
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 4))
+        self.asm.emit(encode_add_xd_xn_imm(7, 10, 8))   # &right[i]
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(7, 7, 4))
+        self.asm.emit(encode_ldr_xt_xn_imm(11, 6, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(12, 7, 0))
+        self.asm.emit(encode_cmp_xn_xm(11, 12))
+        self.asm.emit(encode_cset_xd_cond(5, "ne"))
+        self.asm.emit(encode_cbnz_xn(0, 5))             # element differs
+        self.asm.emit_label_rel(diff, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_movz_wd_imm(0, 1))
+        self._emit_b_to(end)
+        self.asm.label(diff)
+        self.asm.emit(encode_movz_wd_imm(0, 0))
+        self.asm.label(end)
+        if op == "!=":
+            self.asm.emit(encode_cmp_xn_imm(0, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
 
     def _refuse_tuple_store(self, target) -> None:
         """Raise when `target`'s base is a TUPLE — a write CPython forbids.

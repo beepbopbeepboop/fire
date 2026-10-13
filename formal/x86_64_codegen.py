@@ -890,6 +890,13 @@ class X86_64Codegen:
         # list here — but asked by a different question: a tuple is
         # IMMUTABLE, so a subscript store into one is refused.
         self._tuple_vars = set()
+        # Names bound to a LIST, the positive twin of `_tuple_vars`/`_set_vars`
+        # and arm64's twin — a list is the same blob as the other two here, and
+        # the question that needs telling them apart is CPython's `==`, which is
+        # False between a list and a tuple whatever the elements. A name in none
+        # of the three has an UNKNOWN class and refuses; `_equality_blob_class`
+        # is the reader.
+        self._list_vars = set()
         # Names bound to a list/tuple/set blob. This is what makes `a + b`
         # on two LOCALS a concatenation: without it, two bare idents are
         # indistinguishable from two integers, and the operator silently
@@ -1419,6 +1426,7 @@ class X86_64Codegen:
         self._dict_vars = set()
         self._set_vars = set()
         self._tuple_vars = set()
+        self._list_vars = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -7493,6 +7501,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        # `==`/`!=` between two blobs whose elements are WORDS and whose classes
+        # are known and equal are lowered here, before the shared refusal below
+        # can claim them — the same deferral arm64's `_maybe_emit_blob_equality`
+        # makes and over the same predicate set.  A string or nested element, a
+        # set, a dict or an unknown class keeps the refusal.
+        if op in ("==", "!=") and self._maybe_emit_blob_equality(
+                e.left, e.right, op):
+            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -8013,6 +8029,42 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # would, so each link asks the same frame-ordering question.
             self._refuse_frame_order_operand(op, operands[i])
             self._refuse_frame_order_operand(op, operands[i + 1])
+            # A link between two containers of WORDS is the same comparison the
+            # binary spelling lowers, over operands the chain has ALREADY
+            # evaluated and put on the stack — so it is lowered from those slots
+            # rather than by re-evaluating the operands, which would run a call
+            # operand twice. The chain is a separate emitter that never reached
+            # `_emit_binop`, so without this `a == b == c` compared two blob
+            # ADDRESSES and answered 0 for three equal lists (measured, both
+            # backends).
+            left_is_blob = M.container_operand_is_blob(
+                self._expr_str_kind(operands[i]))
+            right_is_blob = M.container_operand_is_blob(
+                self._expr_str_kind(operands[i + 1]))
+            if op in ("==", "!=") and (left_is_blob or right_is_blob):
+                plan = self._blob_equality_plan(operands[i], operands[i + 1])
+                if plan is not None:
+                    lc, rc = plan
+                    if lc != rc:
+                        self._emit_mov_imm(Reg.RAX, 0 if op == "==" else 1)
+                    else:
+                        self.asm.emit(encode_mov_r64_rm64(
+                            Reg.RSI, Reg.RSP, _SLOT * (n - 1 - i)))
+                        self.asm.emit(encode_mov_r64_rm64(
+                            Reg.RDI, Reg.RSP, _SLOT * (n - 2 - i)))
+                        self._emit_blob_word_equality_bases(op)
+                    self.asm.emit(encode_and_r64_r64(Reg.R10, Reg.RAX))
+                    continue
+                reason = M.string_binary_refusal(
+                    op, self._expr_str_kind(operands[i]),
+                    self._expr_str_kind(operands[i + 1]), left=operands[i],
+                    right=operands[i + 1], fn=self._cur_fn,
+                    untyped_callee=self._untyped_callee)
+                if reason is not None:
+                    raise CodegenError(reason)
+                # else a blob against a NON-blob: CPython answers that a
+                # container is never equal to a scalar, which is exactly what
+                # the address compare below computes, so it falls through.
             unsigned, signed = _CMP_CONDS[op]
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP,
                                               _SLOT * (n - 1 - i)))
@@ -10197,6 +10249,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._tuple_vars.add(name)
         else:
             self._tuple_vars.discard(name)
+        # And LIST-NESS, the positive half of the pair `_set_vars`/`_tuple_vars`
+        # each keep a NEGATIVE of (a name in neither is not thereby a list — a
+        # container a call returned is in neither).  `==` between a list and a
+        # tuple is False in CPython whatever the elements, so `_equality_blob_
+        # class` has to tell the two apart, and only a positive table can.
+        if self._expr_is_list_like(value):
+            self._list_vars.add(name)
+        else:
+            self._list_vars.discard(name)
 
     def _expr_is_set_like(self, e) -> bool:
         """True when `e` is a set literal, a set comprehension, or a NAME this
@@ -10254,6 +10315,138 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(e, F.SliceExpr):
             return self._expr_is_tuple_like(e.obj)
         return False
+
+    def _expr_is_list_like(self, e) -> bool:
+        """True when `e` is a list literal, a list comprehension, or a NAME this
+        function has bound to one — arm64's twin, and the positive half of the
+        pair `_set_vars`/`_tuple_vars` keep a negative of.  Shape for shape the
+        same as `_expr_is_tuple_like` (a slice of a list is a list, `+` of two
+        lists is a list), so the two predicates cannot disagree about a name the
+        same binding wrote."""
+        if M.is_list_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._list_vars
+        if isinstance(e, F.BinaryOp) and e.op == "+":
+            return (self._expr_is_list_like(e.left)
+                    and self._expr_is_list_like(e.right))
+        if isinstance(e, F.SliceExpr):
+            return self._expr_is_list_like(e.obj)
+        return False
+
+    def _equality_blob_class(self, e):
+        """`"list"` / `"tuple"` / `None` — arm64's twin and the same three
+        refusals: a set or a dict (whose `==` is order-independent / key-and-value
+        and not the element walk), an unknown class (a container a call
+        returned), or not a blob at all.  A known class on both sides is
+        required because `[1] == (1,)` is False in CPython whatever the elements,
+        so answering off "not a tuple" would print 1 where CPython prints 0."""
+        if (self._expr_is_set_like(e) or M.is_dict_expr(e)
+                or self._is_dict_subscript(e)):
+            return None
+        if self._expr_is_tuple_like(e):
+            return "tuple"
+        if self._expr_is_list_like(e):
+            return "list"
+        return None
+
+    def _blob_equality_plan(self, left, right):
+        """`(left_class, right_class)` when this pair's `==`/`!=` is word
+        comparable, else None — the same question arm64 asks, beside the same
+        emitter, so the two architectures lower the same set of programs."""
+        if not M.blob_equality_word_comparable(
+                self._expr_str_kind(left), self._expr_str_kind(right)):
+            return None
+        lc = self._equality_blob_class(left)
+        rc = self._equality_blob_class(right)
+        if lc is None or rc is None:
+            return None
+        return lc, rc
+
+    def _maybe_emit_blob_equality(self, left, right, op: str) -> bool:
+        """Lower `left == right` / `left != right` between two blobs, else False.
+
+        The one place this backend defers the shared `container_operator_refusal`
+        for `==`/`!=`, exactly as arm64 does.  A list against a tuple is ANSWERED
+        (CPython: never equal) without reading an element; every other shape
+        keeps the gate's named refusal.
+        """
+        plan = self._blob_equality_plan(left, right)
+        if plan is None:
+            return False
+        lc, rc = plan
+        if lc != rc:
+            self._emit_mov_imm(Reg.RAX, 0 if op == "==" else 1)
+            return True
+        self._emit_blob_word_equality(left, right, op)
+        return True
+
+    def _emit_blob_word_equality(self, left, right, op: str) -> None:
+        """`left == right` (or `!=`) as a length check + per-element word compare.
+
+        RAX = 0/1, the contract every comparison on this backend produces, so a
+        value site and a truthiness site both work unchanged (this backend has
+        one comparison hook where arm64 has a flag path and a value path).  The
+        left base is spilled while the RIGHT operand is evaluated (an expression
+        can call and clobber the scratch registers), then both bases go to the
+        register helper `_emit_blob_word_equality_bases` runs.
+        """
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                    # [rsp] = left base
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))   # RDI = right base
+        self._pop_slot(Reg.RSI)                     # RSI = left base
+        self._emit_blob_word_equality_bases(op)
+
+    def _emit_blob_word_equality_bases(self, op: str) -> None:
+        """RAX = 0/1 for `RSI == RDI` (or `!=`) as two blobs of words.
+
+        The body `_emit_blob_word_equality` wraps and the COMPARE CHAIN calls
+        directly, because a chain must not re-evaluate its operands: it already
+        holds them all on the stack, so handing it a node-based emitter would run
+        a call operand twice. Preconditions: RSI = the left base, RDI = the right
+        base, both real blobs of the same class (the caller decided that). The
+        layout is `[count:i64][elem0]…` at an 8-byte stride, so the walk is
+        `[base + 8 + 8i]` against `[base + 8 + 8i]` — `_emit_elem_addr`'s own
+        address arithmetic.
+
+        **R10 is deliberately UNTOUCHED**: the compare chain keeps its running
+        AND there across every link (`_emit_compare_chain`), and a helper that
+        clobbered it would silently drop the earlier links' answers. No call
+        happens inside the loop, so the counts live in registers.
+        """
+        fn = self.func_name
+        self._if_counter += 1
+        sid = self._if_counter
+        loop = f"{fn}_bwe{sid}_loop"
+        diff = f"{fn}_bwe{sid}_diff"
+        done = f"{fn}_bwe{sid}_done"
+        end = f"{fn}_bwe{sid}_end"
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSI, 0))   # RAX = left n
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDX, Reg.RDI, 0))   # RDX = right n
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.RDX))
+        self._emit_jcc(COND_NE, diff)               # lengths differ
+        self._emit_mov_imm(Reg.R8, 0)               # R8 = i
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.RAX))
+        self._emit_jcc(COND_AE, done)               # i >= n: all equal
+        self._emit_elem_addr(Reg.RSI, Reg.R8, Reg.R9, header=8, scale=3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.R9, 0))
+        self._emit_elem_addr(Reg.RDI, Reg.R8, Reg.R9, header=8, scale=3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R9, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.R11))
+        self._emit_jcc(COND_NE, diff)               # element differs
+        self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self._emit_mov_imm(Reg.RAX, 1)
+        self._emit_jmp(end)
+        self.asm.label(diff)
+        self._emit_mov_imm(Reg.RAX, 0)
+        self.asm.label(end)
+        if op == "!=":
+            self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
+            self._emit_setcc_bool(Reg.RAX, "sete")
 
     def _refuse_tuple_store(self, target) -> None:
         """Raise when `target`'s base is a TUPLE — a write CPython forbids.

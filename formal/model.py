@@ -12940,6 +12940,30 @@ def container_store_refusal(spelled_base: str, base_is_tuple: bool,
         f"mutability that CPython's type system guarantees")
 
 
+def is_list_expr(e) -> bool:
+    """True when `e` builds a LIST literal or a list comprehension.
+
+    The third of the container-constructor predicates beside `is_dict_expr`,
+    `is_set_expr` and `is_tuple_expr`, and the one the value model never needed
+    until `==`/`!=` between two containers was lowered: a list, a set and a
+    tuple all classify as `list:<elem>` (`is_set_expr`'s docstring says why), so
+    nothing but a predicate of this shape can say which of the three an
+    expression builds — and CPython's `==` differs between them (`[1] == (1,)`
+    is False while `[1] == [1]` is True, and a set is order-independent where
+    both others are not).
+
+    `is_tuple_expr` is its twin and carries the measurement for the same
+    conflation; this is the LIST half. A list comprehension is a
+    `Comprehension` whose `kind` is `"list"` (or absent, the parser's default),
+    exactly as the other three spellings are `"set"`/`"dict"`/`"tuple"`.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.ListExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "list")
+
+
 def is_set_expr(e) -> bool:
     """True when `e` builds a SET literal or a set COMPREHENSION.
 
@@ -13990,6 +14014,50 @@ def container_operand_is_blob(kind) -> bool:
     answers by address.
     """
     return is_list_kind(kind)
+
+
+#: The ONE element kind whose blobs `==`/`!=` may compare with a raw 64-bit
+#: WORD compare, which is the lowering `blob_equality_word_comparable` guards.
+#: A set rather than a bare `== INT_KIND` so the axis is named once: an emitter
+#: asking this question asks this predicate and not its own element-kind test.
+BLOB_EQUALITY_WORD_KINDS = frozenset({INT_KIND})
+
+
+def blob_equality_word_comparable(left_kind, right_kind) -> bool:
+    """True when `left == right` between two blobs is a per-element WORD compare.
+
+    The whole of CPython's `==` on two ordered containers is "compare the
+    lengths, then compare element by element" (`CONTAINER_OP_MEANING`), and for a
+    blob whose element kind is an INTEGER that element compare IS the machine's
+    own word compare — the value model already compares list elements and dict
+    keys as raw 64-bit words (`static_key_elements`' section note says why that
+    is value equality exactly for canonical values). So this is the predicate
+    that says whether the shared `container_operator_refusal` gate may be
+    DEFERRED to an emitter, exactly as the two-set question defers for `&`/`-`/`^`
+    (`SET_ALGEBRA_OPS`).
+
+    The element kinds it is NOT true of are the whole reason it is a predicate
+    and not an `is_list_kind` test:
+
+      * a STRING element is a `char *`, so `["ab"] == ["ab"]` is a CONTENT
+        compare, and a word compare would answer by interning order;
+      * a NESTED container element is the ADDRESS of another blob, so
+        `[[1]] == [[1]]` is a recursive compare, `["ab"] == ["cd"]` a content one;
+      * a byte blob's element is one byte at a different stride.
+
+    Each of those keeps the gate's answer.
+
+    Set-ness and dict-ness are deliberately NOT asked here, and cannot be: they
+    are flow-sensitive facts each backend keeps in its own `_set_vars`/
+    `_dict_vars`, not properties of the KIND (a set and a list are the same
+    `list:<elem>`). A set is order-INDEPENDENT where a list is not, so a caller
+    that reads this `True` must still exclude a set and a dict before it lowers —
+    the emitters do it through `_equality_blob_class` and say so there.
+    """
+    return (container_operand_is_blob(left_kind)
+            and container_operand_is_blob(right_kind)
+            and list_elem_kind(left_kind) in BLOB_EQUALITY_WORD_KINDS
+            and list_elem_kind(right_kind) in BLOB_EQUALITY_WORD_KINDS)
 
 
 #: The CPython MEANING of each operator this gate covers, as the message
