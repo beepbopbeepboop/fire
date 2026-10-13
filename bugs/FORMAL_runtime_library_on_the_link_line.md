@@ -715,7 +715,47 @@ change and not a separate cleanup. 219 → 207.
   another branch's work, which is what made the old sentence wrong.
 
 
-## Reproducing
+## Status 2026-10-13: the triple moved by one again and the §6 phase-2 pin is RED
+
+A runtime declaration added a word-shaped entry point after the 2026-10-05 sweep,
+and neither this document's table nor `FORMAL.md` §6 phase 2 moved with it:
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label rtl -- python3 test_formal_runtime_link.py
+      arm64: 273 word-shaped, 217 exported, 177 reachable (40 need a handle)
+FAIL  arm64: 273 word-shaped entry points in `runtime_abi()`, FORMAL.md §6
+            phase 2 publishes 272
+FAIL  arm64: 217 word-shaped entry points exported, … publishes 216
+FAIL  arm64: 177 reachable with no heap handle, … publishes 176
+      x86_64: identical triple, identical three failures
+…
+185 passed, 6 failed, 191 checks
+```
+
+The cause is one declaration, not a code defect:
+
+```console
+$ git show 38d19a52 -- runtime/fire_runtime.h
++void mojo_str_register(char *s);
+```
+
+`38d19a52` ("runtime: make mojo_boxed_is_str sound…", 2026-10-10) added
+`mojo_str_register(char *)` — a `void` return with a one-word parameter, so it
+is `word: True`, exported by the core runtime dylib, and needs no heap handle.
+That is **+1 in all three columns**: 272→273, 216→217, 176→177, and the
+subtractions stay 56 and 40 because they moved together.
+
+**§2.2 already carries the right figure** (`273 of 684`, and
+`test_runtime_header_scan.py` is green at 72/72), so this is the §6 phase 2
+table and the prose that quotes it, not a second reading of the surface. The
+rows to move are `FORMAL.md` lines 527–529 plus the sentences at 531, 533, 536,
+539, 574, 760 and 1234, and this document's own table above (272/216/176 →
+273/217/177). **Then `test_formal_runtime_link.py` is 191/191.** The reproduction
+block below still names the older `206`/`166` figures and is stale in the same
+way; the live numbers are the ones in this section.
+
+
 
 Everything in the 2026-10-05 Status is one pure-Python census — the export trie
 and `model.runtime_abi()`, no build and no Lean — plus the one test that pins
