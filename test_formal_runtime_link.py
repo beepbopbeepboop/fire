@@ -593,10 +593,12 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
     Measured on a COLD cas, because a warm one returns before any staging
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
-    shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    shared cas the other groups use. All three instances of the shape are now
+    asserted here: `runtime_dylib`'s `mojo_rt_*` and `_driver_targets`'s
+    `mojo_archprobe_*` (half a megabyte each) and `build()`'s `mojostdlib_*`,
+    which a full stdlib build turns into tens to hundreds of megabytes per cold
+    build and which used to be left behind — `build()` created the directory
+    and had no `finally` to remove it. This assertion pins that fix.
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
@@ -617,6 +619,34 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
               str(left))
+
+    # `build()` is the third instance and the largest: it creates a
+    # `mojostdlib_*` work directory for EVERY cold stdlib build and used to
+    # leave it. A full build is 664 modules, so the directory is tens to
+    # hundreds of megabytes; ONE module keeps this under a second and still
+    # exercises the leak end to end (the workdir is created unconditionally,
+    # before the per-module jobs). One architecture is enough: the leak is in
+    # Python, created before any arch-specific work, so a fix that missed one
+    # target does not exist.
+    home = tempfile.mkdtemp(prefix='stdstage_home_')
+    tmp = tempfile.mkdtemp(prefix='stdstage_tmp_')
+    env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+    out = os.path.join(home, 'liboner.dylib')
+    code = ('import build_stdlib_dylib as B\n'
+            "m = [x for x in B.stdlib_modules() if x.endswith('floatable.mojo')][0]\n"
+            f"print(B.build([m], {out!r}, use_cache=False, link_runtime=False,\n"
+            f"               jobs=1, track_local_deps=False, arch='arm64'))\n")
+    proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                          capture_output=True, text=True)
+    check(proc.returncode == 0,
+          'a cold one-module `build()` succeeds',
+          (proc.stderr or proc.stdout)[-400:])
+    check(os.path.exists(out), '…and it produced a dylib', proc.stdout[-200:])
+    left = sorted(os.path.basename(p) for p in
+                  glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+    check(not left,
+          'and no `build()` work directory is left behind in $TMPDIR',
+          str(left))
 
 
 # ── 5. the audit still fires ────────────────────────────────────────────────
