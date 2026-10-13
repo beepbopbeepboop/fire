@@ -1527,7 +1527,53 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     return code, info, external_syms, binary
 
 
-def _without_own_template_bodies(source_path: str, stmts: list) -> list:
+def _barely_constructed_template_structs(stmts: list, source: str) -> set:
+    """The STRUCT templates of `source` this module CONSTRUCTS without brackets.
+
+    A generic struct is instantiated from a BRACKETED call site — that is what
+    `monomorph.all_instantiation_calls` reads, and the declaration itself is
+    then dropped (`monomorph.without_template_bodies`) because a template body
+    has no instantiation in scope. A BARE construction (`Marker(x)`, with the
+    type arguments Mojo would infer) is not a demand, so nothing instantiates
+    the template — and with the declaration dropped as well, the call reaches
+    the emitters as a call to a symbol named `Marker` that nothing provides, or
+    (if a field of the result is read) as a field access whose base has no home.
+    Measured, both architectures, on
+
+        struct Marker[T: AnyType]:
+            var v: Int
+        def main(n: Int) -> Int:
+            var m = Marker(7)
+            return m.v
+
+    `formal/build.py`'s answer, when the executable path keeps the declaration,
+    is to compile the template body as the concrete struct the constructor call
+    can bind, which is exactly what the source's own bare call asks for. This
+    computes the names that answer needs, so the executable can keep those and
+    drop the rest.
+
+    Read off the AST and NOT re-derived from the source text: "is this callee a
+    bare call to a declared template struct" is a question about the call node,
+    and the names it is asked about come from `monomorph.template_names`, the
+    export rule's own answer, so there is no second reader of `struct X[`.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    names = {n for n in MM.template_names(source)
+             if MM.template_kind(source, n) == MM.KIND_STRUCT}
+    if not names:
+        return set()
+    used = set()
+    for st in stmts:
+        for node in M.iter_nodes(st):
+            func = getattr(node, "func", None)
+            if isinstance(node, F.CallExpr) and isinstance(func, F.IdentExpr) \
+                    and func.name in names:
+                used.add(func.name)
+    return used
+
+
+def _without_own_template_bodies(source_path: str, stmts: list,
+                                 keep_bare: bool = False) -> list:
     """`stmts` with THIS source's generic template declarations dropped.
 
     One call, two call sites, and the reason it is a function rather than an
@@ -1537,6 +1583,14 @@ def _without_own_template_bodies(source_path: str, stmts: list) -> list:
     does the same for an EXECUTABLE. `monomorph.without_template_bodies` is the
     rule and this is the seam — the source text, which is the other half of its
     question, is the same file both paths read.
+
+    `keep_bare` is the EXECUTABLE's half, and it is off for the LIBRARY for a
+    reason that is about the boundary rather than about the construct: a kept
+    template is a concrete declaration in the image, and in a library that is a
+    public symbol for a parametric type the export rule excludes on purpose
+    (`doc/ABI.md` §Generics). An executable has no export table to be wrong
+    about, so it can compile the template body the source's own bare
+    construction asks for — see `_barely_constructed_template_structs`.
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     try:
@@ -1544,7 +1598,8 @@ def _without_own_template_bodies(source_path: str, stmts: list) -> list:
             source = f.read()
     except OSError:
         return stmts
-    return MM.without_template_bodies(stmts, source)
+    keep = _barely_constructed_template_structs(stmts, source) if keep_bare else ()
+    return MM.without_template_bodies(stmts, source, keep=keep)
 
 
 def _imported_structs(source_path: str, stmts: list, arch: str,
@@ -1916,7 +1971,7 @@ def compile_formal(source_path: str, output: str = None,
     # docstring: a template's body has no instantiation in scope when it is
     # analysed, so a read of a bracket parameter is refused — with a message
     # about `len(Self.keys)` — in a body that is in no image.
-    stmts = _without_own_template_bodies(source_path, stmts)
+    stmts = _without_own_template_bodies(source_path, stmts, keep_bare=True)
     # …and the target again, because the dylib builds above republished it as
     # the dylib's own Mach-O target. This is the one place the two genuinely
     # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O

@@ -21111,14 +21111,15 @@ ORIGIN_OF_CASES = [
     # expression, so nothing is emitted for the `origin_of` in it and the
     # escape check — which walks `fn.body` for statements — never saw it.
     # This row's premise — a generic `Marker[...]` constructed from a ref
-    # parameter's field — is now refused at the BINDING, before the
-    # annotation is ever relevant: any annotated (or inferred-type-arg)
-    # construction of a generic struct in this position loses its home
-    # classification on both architectures (filed as
-    # bugs/FORMAL_generic_local_binding_has_no_home.md). The row pins the
-    # refusal that actually fires, so a re-point at the annotation itself is
-    # possible only after that defect is fixed — with `Marker[Int](b.a)`,
-    # the explicit-type-argument spelling, it builds.
+    # parameter's field with the type arguments INFERRED — was refused at the
+    # BINDING, before the annotation was ever relevant: a bare construction of
+    # a generic struct left the bound name with no home classification on both
+    # architectures. That is fixed (`formal/build.py::
+    # _barely_constructed_template_structs` keeps a template body the module
+    # constructs without brackets), so the row now asserts what it was written
+    # to assert: the `origin_of(b)` in the annotation is a TYPE and not a
+    # runtime expression, nothing is emitted for it, and the program builds,
+    # runs and answers CPython.
     ("origin_of_in_a_local_type_annotation_is_still_a_type",
      "struct Marker[T: AnyType]:\n"
      "    var v: Int\n\n"
@@ -21132,7 +21133,8 @@ ORIGIN_OF_CASES = [
      "    var g = Bag()\n"
      "    g.a = 7\n"
      "    g.b = 8\n"
-     "    return tag(g)\n", "refuse:nothing this image can see about 'm'", None),
+     "    printf(\"%d\", tag(g))\n"
+     "    return 0\n", 0, "7"),
 ]
 
 # The rewrite erases the CALL, not the CHECK. Every row here is a construct that
@@ -21308,6 +21310,35 @@ TYPE_ARGUMENT_LIST_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var m = Box[Int, Int](7)\n"
      "    return m.v\n", 7, ""),
+    # The INFERRED sibling of the row above, and the whole of the
+    # bare-generic-construction defect: Mojo lets a template
+    # call's type arguments be inferred, so `Marker(7)` is a construction and
+    # not a bracket the caller forgot. This path reads a demand off a BRACKET
+    # (`monomorph.all_instantiation_calls`), so a bare call was no demand, the
+    # template declaration was dropped, and the call reached the emitters as a
+    # call to a symbol named `Marker` that nothing provides — or, when a field
+    # of the result is read, as the field-access refusal about `m`'s binding.
+    # Fixed by keeping the template body of a struct the module CONSTRUCTS bare
+    # (`formal/build.py::_barely_constructed_template_structs`), so the call
+    # binds the declaration the source can see. Both are build-and-RUN rows
+    # because the old failure was a refusal and a wrong answer would pass a
+    # build-only check.
+    ("a_bare_construction_of_a_generic_struct_binds_its_result",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Marker(7)\n"
+     "    return m.v\n", 7, ""),
+    # …and the same construction with the field declared at the type parameter,
+    # which is the shape that makes "keep the template" a DECISION rather than a
+    # spelling: `T` is an unresolved name in the kept body, and the field is one
+    # word either way, so the value comes back correct.
+    ("a_bare_construction_of_a_generic_struct_with_a_parameter_typed_field",
+     "struct Box[T: AnyType]:\n"
+     "    var v: T\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(7)\n"
+     "    return Int(b.v)\n", 7, ""),
     # THE COUNTER-CASES, and they are the whole reason the change is a narrow
     # skip rather than a deletion of the container branch. Every escape the
     # branch exists for has a base that is a DICT or a LIST, and no type name is
