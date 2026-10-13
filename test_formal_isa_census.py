@@ -189,8 +189,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    result = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                           exit=False).result
+    # `wasSuccessful() and 0 or 1` reads as a boolean but is 1 either way: `0`
+    # is falsy, so the `or` always wins. A PASSING census printed OK and exited
+    # 1, and `tools/memslot.py` reports the child's exit, so the verifier read
+    # green as red. Match `test_formal_field_walk.py`'s conditional.
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":
