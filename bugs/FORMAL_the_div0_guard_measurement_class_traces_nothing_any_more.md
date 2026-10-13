@@ -5,6 +5,81 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
+**Status 2026-10-13 (`work/formal341-docs`): the class is STILL RED, and BOTH
+diagnoses the sections below state are now STALE on this tree. The cause has
+moved a third time, it is the HONEST behaviour rather than a refusal, and the
+class's own diagnostic now says which cause fired instead of guessing. Four
+measurements, each re-derivable with no Lean except the two the class itself
+runs:**
+
+1. **Defect 2 is FIXED. `info["compiler_traps"]` is POPULATED on arm64.** The
+   section below says "nothing ever adds to it (the only two occurrences are the
+   declaration and the export)". That is no longer true:
+   `formal/arm64_codegen.py::_emit_trap_flush` records the address of the `BL
+   fflush` it emits (`self._compiler_trap_addrs.update(...)`, and its own
+   docstring names `_program_extern_calls` as the consumer), and `compile()`
+   publishes the set. So the subtraction `formal/arm64_proof_gen.py::
+   _program_extern_calls` performs is LIVE, not a no-op. **Do not go looking for
+   the dropped merge recording; it is back.**
+
+2. **The fixture no longer REFUSES — it GENERATES, and the theorem it emits is
+   no longer the universal one.** `_symbolic_divisor_proof` now compiles
+   `def q(a, b): return a // b` to a proof whose only theorem for the program is
+
+       theorem q_reaches_call_at_0x100000504 (n : UInt64) …
+
+   with **no `theorem q_compiles_correctly_universal`** and **no `_ADMIT`**
+   (`all_goals (first | done | sorry)`) anywhere. So the class does not dissect a
+   blind file and does not raise in `setUpClass`: it is blind because the walk
+   HALTS at the one opaque call it still sees — the divide-by-zero arm's `BL
+   fflush` — and states REACHABILITY of it. **That is the honest theorem for this
+   program**: `x0 = mojo n` would be FALSE at `b = 0`, so the walk refusing to
+   state it is the behaviour this doc's option 1 is trying to replace with a
+   correct universal one, not a regression to undo.
+
+3. **Option 1's first half ("subtract `compiler_traps` in `_unfollowable_calls`
+   too") is STILL necessary and STILL not sufficient — re-measured.** Filtering
+   `info["compiler_traps"]` out of the list `formal/arm64_proof_gen.py:11286`
+   reads removes the halt address and the generator then refuses at a DIFFERENT
+   point:
+
+       NotImplementedError: recursion contract: the call in block 4 has to be
+       below the source condition's negation (`u64_sub_one_toNat_le` needs it),
+       and this walk reached the call with no enclosing branch condition to take
+       it from.
+
+   exactly as this doc's 2026-10-07 section predicted ("subtracting it is
+   measured NOT to reach the div0 residual"): removing the trap from the halt
+   LIST does not tell the walk to treat the compiler's trap as the boundary it
+   is, so the `BL fflush` is still executed as a call. **The fix remains
+   `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`'s
+   per-block terminal / disjunction work, and no part of it is this class's.**
+
+4. **The class's own diagnostic now NAMES what the fixture emitted.** The
+   2026-10-07 section's step 1 (`work/formal128-docs`) made `blind` a dict of
+   per-spelling reasons, but the reason could not tell "the walk stated a
+   reachability theorem" from "the universal theorem lost its admission marker".
+   `_div0_universal_absent_reason` (in `test_formal_call_proof_gen.py`) now scans
+   for `q_reaches_call_at_<addr>` and reports it, is Lean-free and build-free, and
+   is pinned by `TestTheDiv0BlindReasonNamesWhatWasEmitted` (4 rows, no Lean). The
+   red now reads:
+
+       as_emitted: the fixture's universal theorem is not emitted at all: the
+       walk halts at a call it cannot follow and states REACHABILITY instead
+       (q_reaches_call_at_0x100000504) …
+
+   **Measured:** `TestTheZeroDivisorGuardAgainstLean` is 3 tests / 3 FAIL, all
+   three naming the reachability theorem (62 s, the class still runs its two Lean
+   passes); `TestTheDiv0BlindReasonNamesWhatWasEmitted` is 4 tests / OK (0.00 s).
+   On a tree with `lib/ProofLib.olean`, `test_formal_call_proof_gen.py` is
+   **175 tests / 9 failures** — this class is 5 of them, and the other four are
+   `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`'s, not this doc's.
+
+**What is left, unchanged in shape and now correctly named:** the class cannot
+trace the div0 residual because there is no universal theorem to trace, and
+making one would state a FALSE theorem until the walk can discharge a call it
+cannot follow. The doc stays red until that project lands.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the

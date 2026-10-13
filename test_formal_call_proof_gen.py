@@ -5423,6 +5423,56 @@ def _symbolic_divisor_proof(tmp):
     return head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail
 
 
+def _div0_universal_absent_reason(head, tail):
+    """Why the class cannot trace a residual, NAMED rather than guessed at.
+
+    `_symbolic_divisor_proof` partitions the generated file on
+    `theorem q_compiles_correctly_universal`.  When that theorem is not emitted
+    the WHOLE file lands in `head` and `tail` is empty, so the two ways the
+    mechanism can come up empty — the walk states something OTHER than the
+    universal theorem, or it states the universal theorem without the admission
+    marker — used to read as the same sentence.  They do not have the same fix,
+    and the one a reader needs today is the first: `a // b`'s divide-by-zero arm
+    ends in the compiler's own `BL fflush`, the walk halts at that opaque call
+    and states REACHABILITY of it (`q_reaches_call_at_<addr>`) rather than a
+    universal `x0 = mojo n`.  That is the honest theorem for this program — the
+    universal one would be FALSE at `b = 0` — so the class is blind for a reason
+    its own message should say out loud.
+
+    Returns None when the admission IS present (nothing to explain), which is
+    the only case in which the residual is traceable.
+
+    Lean-free and build-free on purpose: it is a string question about the text,
+    so it is asked directly in `setUpClass` and pinned by a test that needs no
+    Lean (see `TestTheDiv0BlindReasonNamesWhatWasEmitted`).
+    """
+    if _ADMIT in tail:
+        return None
+    text = head + tail
+    reaches = re.findall(r"^theorem (q_reaches_call_at_[0-9A-Za-z_]+)",
+                         text, re.M)
+    if reaches:
+        return (
+            f"the fixture's universal theorem is not emitted at all: the walk "
+            f"halts at a call it cannot follow and states REACHABILITY instead "
+            f"({', '.join(reaches)}), so there is no `{_ADMIT}` to replace and "
+            f"no residual to trace — the honest theorem for `a // b`, whose "
+            f"divide-by-zero arm ends in the compiler's own `BL fflush`, and "
+            f"the class's premise (a reachable `⊢ 1 = …` residual) has moved "
+            f"with it")
+    if "theorem q_compiles_correctly_universal" in text:
+        return (
+            f"the fixture emits `q_compiles_correctly_universal`, but not "
+            f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is a no-op "
+            f"and no goal can be traced: whatever the div0 residual is today, "
+            f"this class is not looking at it")
+    return (
+        f"the fixture emits no `q_compiles_correctly_universal` and no "
+        f"`q_reaches_call_at_…` either, so there is nothing here for `"
+        f"{_ADMIT}` to absorb and nothing to trace: the fixture's own shape "
+        f"changed, not only the div0 walk")
+
+
 def _with_branch_facts_in_the_terminal_flow(tail):
     """`tail` with the enclosing `by_cases hc_N` added to every terminal `simp`.
 
@@ -5514,6 +5564,58 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             self.assertEqual(p.stdout, "",
                              f"{backend}: the program printed after a zero "
                              f"divisor: {p.stdout!r}")
+
+
+class TestTheDiv0BlindReasonNamesWhatWasEmitted(unittest.TestCase):
+    """`_div0_universal_absent_reason`: the class's own diagnostic, pinned.
+
+    Lean-free and build-free — the reason builder is a string question about the
+    generated text, so it is asked here with the two texts a reader has to tell
+    apart.  It is the half of `TestTheZeroDivisorGuardAgainstLean`'s mechanism
+    check (`work/formal128-docs`) that says WHICH cause fired: the walk stating a
+    reachability theorem is a different fact from a universal theorem emitted
+    without the admission, and only the first is what is measured today
+    (`bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`).
+    """
+
+    def test_a_universal_theorem_carrying_the_admission_is_not_blind(self):
+        """The one case in which the residual IS traceable: no reason to give."""
+        self.assertIsNone(
+            _div0_universal_absent_reason(head="", tail=f"x\n{_ADMIT}\ny"))
+
+    def test_a_reachability_theorem_is_NAMED_as_the_cause(self):
+        """The current cause, named with the theorem the walk actually emitted.
+
+        The generated text here is the shape `_symbolic_divisor_proof` produces
+        when the walk halts at the compiler's own `fflush`: the universal theorem
+        absent (so everything is in `head`) and a `q_reaches_call_at_<addr>`
+        replacing it.
+        """
+        head = ("theorem q_runs_0 (st : Arm64State) : True := by trivial\n"
+                "theorem q_reaches_call_at_0x100000504 (n : UInt64) : True := "
+                "by trivial\n")
+        msg = _div0_universal_absent_reason(head=head, tail="")
+        self.assertIn("q_reaches_call_at_0x100000504", msg,
+                      "the reason must NAME the theorem that replaced the "
+                      "universal one, or a reader cannot tell which cause fired")
+        self.assertIn("REACHABILITY", msg)
+
+    def test_a_universal_theorem_without_the_admission_says_so(self):
+        """The other cause keeps its own sentence: the theorem IS there and the
+        admission marker is not, which is a different fact from the walk
+        emitting a reachability theorem."""
+        head = "theorem q_compiles_correctly_universal (n : UInt64) : True := by"
+        msg = _div0_universal_absent_reason(head=head, tail=head)
+        self.assertIn("emits `q_compiles_correctly_universal`", msg)
+        self.assertNotIn("REACHABILITY", msg)
+
+    def test_a_fixture_that_emits_neither_theorem_says_the_shape_changed(self):
+        """Neither theorem: was an absent-reachability case, now named as the
+        fixture's own shape changing rather than as the residual moving."""
+        msg = _div0_universal_absent_reason(head="theorem q_runs_0 : True := by\n",
+                                            tail="")
+        self.assertIn("no `q_compiles_correctly_universal` and no", msg)
+        self.assertNotIn("REACHABILITY", msg)
 
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
@@ -5662,11 +5764,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 cls.out[label] = ""
                 continue
             if _ADMIT not in tail:
-                cls.blind[label] = (
-                    f"the fixture generates no `q_compiles_correctly_universal` "
-                    f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is "
-                    f"a no-op and no goal can be traced: whatever the div0 "
-                    f"residual is today, this class is not looking at it")
+                cls.blind[label] = _div0_universal_absent_reason(head, tail)
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
