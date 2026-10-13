@@ -3190,15 +3190,16 @@ _STEP_CONDS = [
     (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
     (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
     (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
-    # 66 CMN, 67 TST. **Both encoders are UNWIRED on this tree** — measured:
-    # `grep -c encode_cmn_xn_xm formal/arm64_codegen.py` is 0, the same for
-    # `encode_tst_xn_xm`, and both are in
-    # `tools/arm64_insn_audit.py::unwired_encoders`. That CORRECTS this file's own
-    # §2 measurement, which listed them among "every encoder in the table above is
-    # wired" and called `encode_cmn_xn_xm` "emitted by `formal/arm64_codegen.py`";
-    # no lowering emits either, so an image cannot contain them and by the
-    # distinguishing test this table exists for, a model that cannot step them
-    # costs nothing.
+    # 66 CMN, 67 TST. **Both encoders ARE emitted now, and this paragraph used
+    # to say they were not** — `arm64_codegen.py` calls `encode_cmn_xn_xm` at
+    # 9001 (a `(x + y) == 0` test lowers to CMN + B.cond) and
+    # `encode_tst_xn_xm` at 8929 (an `if x & y`), and `encode_adds_xd_xn_xm` at
+    # 8294 for `int_overflow_traps`'s `+`. The wiring landed after this comment,
+    # so both arms are reachable in a REAL image and a model that steps them
+    # wrongly is a soundness defect and not a completeness one.  The
+    # `0xab000000` class is shared by `ADDS Xd, Xn, Xm` and `CMN Xn, Xm`
+    # (`Rd = 31`), so its arm writes `Rd` and `arm64_set_reg 31` is what makes
+    # `CMN` write nothing.
     #
     # They are modelled anyway, and the reason is worth stating because it is not
     # the doc's: the audit's test is about IMAGES, and the other consumer of

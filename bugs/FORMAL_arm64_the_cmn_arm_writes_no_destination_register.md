@@ -40,12 +40,27 @@ are pinned together).  The `lib/ProofLib.olean` rebuild itself measures
 `TestUnsignedOffsetAccess` row are the integrator's to run.
 
 **Area:** FORMAL (the arm64 machine model's flag-setting-compare arm).
-**Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
-incompleteness — `arm64_step` returns a state that is not the machine's.** Not
-fixed: the fix is a `lib/ProofLib.lean` change, and that build peaks at
-**9.8 GB** measured with `formal/lean.py::ensure_library`'s own invocation —
-over a bounded worker's 8 GB ceiling, under the tree's `LIBRARY_MEMORY_MB =
-12288`, so the blocker is memory alone and the library is not broken.
+**Status: FIXED IN CODE 2026-10-08 (`work/formal164-docs`), and the library
+build that would VERIFY it is still out of a bounded worker's reach — so this is
+landed-but-UNVERIFIED, and `prooflib` is the job that closes it.** The change is
+exactly §5's prescription and no more: `arm64_step`'s `0xab000000` arm reads
+`Rd` and returns `arm64_set_reg rd {s with nzcv := …} (arm64_reg rn s + arm64_reg
+xm s)` (`arm64_set_reg 31` is the identity, so `CMN Xn, Xm` — `Rd = 31` — still
+writes no register); `work_step_cmn`'s statement is the same term; and
+`_step_rhs`/`_step_rhs_generic` idx 66, `_regs_written` idx 66 and the
+`_STEP_CONDS` comment carry the same fact. **The blocker is memory alone and the
+library is not broken** — re-measured 2026-10-08 with a comment-only change to a
+COPY of the library: `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at 2m04s,
+so a bounded worker still cannot rebuild `ProofLib`; the fix is unverified here
+and a red `prooflib` is what would say it is wrong.
+
+The tests landed with it: `test_formal_call_proof_gen.py`'s
+`TestGeneratorSource::test_adds_writes_its_destination_and_cmn_is_the_same_class`
+(pins the model arm reading `Rd`, the RHS, and `_regs_written`, Lean-free) and
+`TestUnsignedOffsetAccess`'s new `adds x11, x1, x15` CPU-vs-model row (the one
+that checks the register, which the existing `cmn x7, x4` row could not — it
+writes none).  The second needs the rebuilt library, so it is the integrator's
+to run.
 
 (The measurement has a trap: `run_lean`'s `heartbeats=0` becomes `-T 0` =
 `maxHeartbeats 0`, and a build under it fails with a `bv_decide` "unknown join

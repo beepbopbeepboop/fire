@@ -767,6 +767,57 @@ class TestGeneratorSource(unittest.TestCase):
                     "the immediate is not scaled by the sh field, or an "
                     "unshifted one was scaled")
 
+    def test_adds_writes_its_destination_and_cmn_is_the_same_class(self):
+        """The `0xab000000` class is `ADDS Xd, Xn, Xm` AND `CMN Xn, Xm` (`Rd = 31`).
+
+        The model arm set the flags and dropped `Rd`, so `ADDS x11, x1, x15` —
+        the form `formal/arm64_codegen.py` emits for
+        `formal/model.py::int_overflow_traps`'s `+` — stepped to a state that
+        left `x11` at its old value: a SOUNDNESS defect, since a proof over an
+        image containing it reasons about a state the machine never reached.
+        The two spellings are pinned TOGETHER because the fix that writes `Rd`
+        unconditionally would clobber `sp` on a `CMN`, where `arm64_set_reg 31`
+        is the identity.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            w = fn(*args)
+            return (int.from_bytes(w, "little")
+                    if isinstance(w, (bytes, bytearray)) else w)
+
+        adds = word(A.encode_adds_xd_xn_xm, 11, 1, 15)
+        cmn = word(A.encode_cmn_xn_xm, 7, 4)
+        for w, what in ((adds, "ADDS x11, x1, x15"), (cmn, "CMN x7, x4")):
+            self.assertEqual(
+                G._step_branch_index(w), 66,
+                f"{what} does not resolve to the shared `0xab000000` row")
+        self.assertEqual(G._regs_written(adds, 66), {11},
+                         "ADDS writes its destination")
+        self.assertEqual(
+            G._regs_written(cmn, 66), set(),
+            "CMN is `ADDS XZR, Xn, Xm`; `arm64_set_reg 31` is the identity, so "
+            "a certificate claiming `sp` was clobbered would be false")
+        for w, rd, what in ((adds, 11, "ADDS"), (cmn, 31, "CMN")):
+            rhs = G._step_rhs(w, 66)
+            self.assertIn(f"arm64_set_reg {rd}", rhs,
+                          f"{what}: the step result must write `Rd`")
+            self.assertIn("arm64_adds_flags", rhs,
+                          f"{what}: the step result must still set the flags")
+        self.assertIn("arm64_reg 1 s + arm64_reg 15 s",
+                      G._step_rhs(adds, 66),
+                      "the value written is the SUM of the operands")
+        # The model's own arm must read `Rd`, not just the two sources — the
+        # generator agreeing with a model that still drops `Rd` would make a
+        # generated step-result lemma about the wrong machine.
+        src = open(os.path.join(HERE, "lib", "ProofLib.lean")).read()
+        arm = re.search(
+            r"= 0xab000000 then\n(.*?)\n  else if", src, re.S)
+        self.assertIsNotNone(arm, "the `0xab000000` arm is gone from the model")
+        self.assertIn("(insn &&& 0x1f)", arm.group(1),
+                      "the model's arm does not read `Rd`")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -1532,6 +1583,58 @@ class TestBitTestBranches(unittest.TestCase):
                 text, r"have hb : .*>>> 5 &&& 16383 &&& 8192",
                 f"{name}: the sign-extend decision is not over the 14-bit "
                 f"immediate")
+
+    def test_the_sign_extend_decision_reads_the_immediate_s_own_sign_bit(self):
+        """`hb`'s POLARITY, not just its shape -- and which bit it reads.
+
+        `test_the_displacement_is_read_at_this_family_s_own_width` pins that
+        `hb` is *phrased* over the 14-bit immediate; this pins that it is TRUE
+        about the word.  The sign bit of `(w >>> 5) & mask` is bit
+        `mask.bit_length()-1` of the SHIFTED value -- bit 18 of the word for
+        `imm14`, bit 23 for `imm19` -- and the generator used to test
+        `w & 0x2000` / `w & 0x40000` instead, i.e. bit 13 / bit 18 of the WORD.
+        Those are ordinary bits of the displacement, so whenever they disagree
+        with the sign bit the emitted `hb` is false: `count.mojo`'s
+        `tbz x4, #6, +9228` (word `0x36312064`) has bit 13 set and bit 18 clear,
+        so `hb` was `\u00ac (0 = 0)` and `native_decide` refused the step lemma.
+        The words below are chosen so that at least one has the two candidate
+        bits DISAGREE, which is what makes the row non-vacuous."""
+        import struct as _struct
+
+        import formal.arm64_proof_gen as G
+        from formal.arm64 import encode_tbz_xn_bit, encode_tbnz_xn_bit
+
+        cases = []  # (word, the bit of the WORD the model's sign test reads)
+        for enc in (encode_tbz_xn_bit, encode_tbnz_xn_bit):
+            for delta in (1024, -4, 4, -1024):
+                cases.append((_struct.unpack("<I", enc(4, 6, delta))[0], 18))
+        # A CBZ whose `imm19` sign bit (bit 23) and bit 18 of the word disagree.
+        cases.append((0xB4000000 | (0x2000 << 5) | 4, 23))
+        mismatched = 0
+        for word, shift in cases:
+            with self.subTest(word=f"0x{word:08x}"):
+                self.assertIn(
+                    G._step_branch_index(word), (16, 17, 51, 52, 53),
+                    f"word 0x{word:08x} is not a conditional branch")
+                text = G._gen_step_result_lemmas(
+                    "syn", _struct.pack("<I", word), 0x1000)
+                hb = [ln for ln in text.splitlines()
+                      if ln.strip().startswith("have hb :")]
+                self.assertEqual(len(hb), 1, f"expected one `hb`:\n{text}")
+                emitted_negated = "\u00ac" in hb[0]
+                sign_set = ((word >> shift) & 1) == 1
+                self.assertEqual(
+                    emitted_negated, sign_set,
+                    f"0x{word:08x}: `hb` calls the sign-extend "
+                    f"{'negative' if emitted_negated else 'non-negative'}, but "
+                    f"bit {shift} of the word is {int(sign_set)}")
+                if (((word >> 5) & (1 << (shift - 5)))
+                        != (word & (1 << (shift - 5)))):
+                    mismatched += 1
+        self.assertGreater(
+            mismatched, 0,
+            "no word has the two candidate bits disagree, so this row could "
+            "pass against the bug it exists to catch")
 
     def test_the_branch_target_is_the_sign_extended_imm14(self):
         """`_branch_target` decodes TBZ/TBNZ, and its target is the model's.
