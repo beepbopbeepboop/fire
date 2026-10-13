@@ -66,10 +66,10 @@ That is a deliberate choice with two costs and three advantages, and it is worth
 stating because a reader will wonder:
 
   * COST: comments and blank lines do not survive, so a finding's twin does not
-    read like the program it came from, and the examples of `formal/examples`
-    that spell Mojo-only syntax (`var`, `fn`, `struct`) are translated by the
-    normaliser before a transform runs — a file no rule can rescue is reported
-    as `skipped_examples`, never silently dropped.
+    read like the program it came from, and the 8 examples of
+    `formal/examples` that spell Mojo-only syntax (`var`, `fn`) cannot be
+    transformed at all — they are reported as `skipped_examples`, never
+    silently dropped.
   * ADVANTAGE: the tree being rewritten is the one CPython will execute, so the
     oracle's reading of `T` is derived from the SAME parse rather than from a
     second implementation's, and the two cannot disagree about what `T` says. A
@@ -642,9 +642,6 @@ class Analysis:
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
         self.all_names = _all_names(module)
         self.module_bindings = set(self.scopes[id(module)].bindings)
-        #: `{id(fn): {name: frozenset(aliases)}}`, filled lazily by
-        #: `alias_closure`.  `t_reorder` is the only reader.
-        self._alias_cache: dict = {}
         self._int_params: set = set()
         self._int_returns: set = set()
         self._int_sequences: set = set()
@@ -1079,24 +1076,6 @@ class Analysis:
                 if isinstance(n, ast.Name) and n.id == name
                 and isinstance(n.ctx, ast.Store)]
 
-    def alias_closure(self, fn, names):
-        """`names` plus every name in `fn` that may refer to the same object.
-
-        `t_reorder`'s independence test is a name-disjointness test, and two
-        names can be one object (`A32 = h31.b23`) — see `_reference_aliases`.
-        The closure is cached per function because `t_reorder` asks it once per
-        adjacent pair and the relation is a property of the function, not of
-        the pair.
-        """
-        groups = self._alias_cache.get(id(fn))
-        if groups is None:
-            groups = _reference_aliases(fn)
-            self._alias_cache[id(fn)] = groups
-        out = set(names)
-        for name in names:
-            out |= groups.get(name, frozenset())
-        return out
-
     def in_nested_scope(self, fn, node):
         """Whether `node` sits inside a scope nested in `fn`."""
         cur = node
@@ -1147,81 +1126,6 @@ def _all_names(module):
         elif isinstance(n, ast.Attribute):
             out.add(n.attr)
     return out
-
-
-def _function_scope_nodes(fn):
-    """Every node in `fn`'s OWN scope, nested scopes excluded.
-
-    The alias relation below is about names that can refer to the same OBJECT
-    within one function, so a nested `def`'s body must not contribute: its
-    names are a different scope's, and an `x = y` inside it says nothing about
-    the `x` in `fn`.  Walking and skipping the nested-scope subtrees is the
-    whole of it.
-    """
-    stack = [fn]
-    while stack:
-        node = stack.pop()
-        yield node
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.Lambda, ast.ClassDef)):
-                continue
-            stack.append(child)
-
-
-def _reference_aliases(fn):
-    """`{name: frozenset(names)}` — names a plain assignment can make the same
-    OBJECT, transitively.
-
-    `A32 = h31.b23` makes `A32` and `h31.b23` one list, so a store through
-    `h31` (`h31.b23[0] = 62`) and a read through `A32` (`A32[0]`) are the same
-    memory even though the two statements mention no name in common.  This is
-    the hazard that made `refs:0`'s `reorder` swap `h31.b23[0] = 62` past
-    `w34 = A32[0]` and change the printed value from 62 to 46.
-
-    The relation is built from assignments whose RIGHT-hand side is a
-    reference — a `Name`, an `Attribute` or a `Subscript` — because those are
-    the shapes that can hand the target an object another name also holds.  A
-    literal or an arithmetic result cannot alias anything.  A `Subscript` RHS
-    is included even though it usually yields an int: it can yield a nested
-    container, and leaving it out is the unsound direction (the
-    over-approximation can only refuse a swap).  Function PARAMETERS are not
-    aliased, which is a deliberate narrowing: the corpus's aliasing comes from
-    assignments, and aliasing every parameter to every other would refuse
-    nearly every pair.
-    """
-    parent = {}
-
-    def find(x):
-        parent.setdefault(x, x)
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:
-            parent[x], x = root, parent[x]
-        return root
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    def consider(target, value):
-        if isinstance(target, ast.Name) and isinstance(
-                value, (ast.Name, ast.Attribute, ast.Subscript)):
-            for other in _names_in(value):
-                union(target.id, other)
-
-    for node in _function_scope_nodes(fn):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            consider(node.targets[0], node.value)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            consider(node.target, node.value)
-    groups = {}
-    for name in list(parent):
-        groups.setdefault(find(name), set()).add(name)
-    return {name: frozenset(group)
-            for group in groups.values() for name in group}
 
 
 def _replace_child(parent, old, new):
@@ -1817,18 +1721,6 @@ def _inv(node, an, fn, index):
 
 # -- 8. reorder adjacent statements -----------------------------------------
 
-#: The CONTENTS of a container or object, as a name no source can spell (no
-#: Python identifier contains a NUL).  A subscript or attribute access reads or
-#: writes this cell, because the base it is reached through is not the thing it
-#: names: `A32 = h31.b23` makes `A32[0]` and `h31.b23[0]` two spellings of ONE
-#: element.  The independence test below compares NAMES, so without this cell it
-#: read `h31.b23[0] = 62` and `w34 = A32[0]` as disjoint (`h31` vs `A32`),
-#: exchanged them, and the printed value moved 46 -> 62 on the `refs` mix.
-#: Collapsing every container to one cell over-approximates (any two bases may
-#: alias), and an over-approximation here can only REFUSE a swap.
-CONTAINER_CONTENTS = "\x00contents"
-
-
 class _Info:
     """Reads, writes, closure-visible names, control transfer and OBSERVABILITY
     of a statement — everything `t_reorder`'s independence test reads."""
@@ -2062,9 +1954,7 @@ def t_reorder(module, an, rng):
     SOUNDNESS.  Two statements may be exchanged iff
 
       * neither reads a name the other writes, and neither writes a name the
-        other reads or writes — and the test is over ALIASES, not names, so
-        `A32 = h31.b23` makes a write through one name and a read through the
-        other a conflict (`alias_closure`);
+        other reads or writes;
       * neither escapes through a nested function over the other's writes or
         reads;
       * neither can leave the block (`return`, `yield`, `raise`, `await`, or a
@@ -2140,15 +2030,7 @@ def t_reorder(module, an, rng):
             # a same-field or same-read pair (`self.a = self.b`).
             if a.writes & (b.reads | b.writes):
                 continue
-            if b.writes & an.alias_closure(fn, a.reads | a.writes):
-                continue
-            # A heap write may reach a container a heap access of the OTHER
-            # statement names through a different local, so neither a proof of
-            # disjointness nor the `.reads`/`.writes` name intersection above
-            # can license the swap.  See the SOUNDNESS note.
-            if a.heap_write and (b.heap_read or b.heap_write):
-                continue
-            if b.heap_write and (a.heap_read or a.heap_write):
+            if b.writes & (a.reads | a.writes):
                 continue
             if a.writes & b.escapes or b.writes & a.escapes:
                 continue
@@ -2453,16 +2335,13 @@ TRANSFORM_WHY = {
 #                     all four of its methods `fn` and builds and answers `4` on
 #                     both backends, while 41 of the 52 examples spell `def`.
 #
-# HERE, as a DECISION rather than as a removal: `struct Point:`.  A Python
-# `class` of bare annotations has no attributes, so `p.get_y()` would read a name
-# that was never assigned while the struct's field reads `0` — a disagreement
-# with CPython the translation would manufacture rather than find.  The decision
-# (§6 item 1 of `bugs/FORMAL_metamorphic_ledger.md`) is to translate exactly the
-# struct whose every field is declared an INTEGER type, giving each field the
-# initialiser this path's own semantics already give it (a zero), and to leave
-# every other struct unmeasured naming the construct — so `wide_recv.mojo`,
-# `struct_point.mojo` and `struct_method.mojo` are driven, and the coverage
-# check asks WHY a file is unmeasured rather than assuming the corpus is lexed.
+# NOT here, and said rather than guessed: `struct Point:`.  A Python `class`
+# body of bare annotations has no attributes, so `p.get_y()` reads a name that
+# was never assigned while the struct's field reads `0` — a real disagreement
+# with CPython, produced by the translation rather than found by it.  Giving
+# each field an initialiser is a judgement about what the struct's fields are
+# worth, which is not a removal of syntax, so `wide_recv.mojo` stays unmeasured
+# and `example_program` names the construct it could not remove.
 
 #: `(name, pattern)`, applied in this order.  `re.MULTILINE` and a leading
 #: `^[ \t]*` rather than a word-boundary match, because the point is to match a
@@ -2520,87 +2399,6 @@ def _blocking_keyword(text):
     return ""
 
 
-#: A `struct` field whose DECLARED type zeroes to the integer `0`.  This path
-#: zero-initialises a struct's fields at construction — `Point()` reads `0` from
-#: every field before any store is emitted, measured on both architectures — so a
-#: field declared one of these translates to `self.<field> = 0` in the Python
-#: class the normaliser builds.  Any OTHER field type is a value this tool will
-#: not guess at, and a file that declares one stays unmeasured naming `struct`
-#: rather than being translated with an invented initialiser.  This is the
-#: DECISION §6 item 1 of `bugs/FORMAL_metamorphic_ledger.md` asked for, and this
-#: table is where it is spelled.
-_STRUCT_ZERO_TYPE_RE = re.compile(r"U?Int(?:8|16|32|64)?\Z")
-_STRUCT_HEAD_RE = re.compile(r"struct\s+([A-Za-z_]\w*)\s*:\s*$")
-_STRUCT_FIELD_RE = re.compile(r"([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)\s*$")
-
-
-def _translate_structs(text):
-    """`(text, n)` with each top-level `struct Name:` a Python `class Name:`.
-
-    A `struct`'s translation is a DECISION rather than a removal of syntax: a
-    Python `class` of bare annotations has no attributes, so `p.get_y()` would
-    read a name that was never assigned while the struct's field reads `0`, which
-    is a disagreement with CPython that the translation would MANUFACTURE rather
-    than find.  So the rule is scoped to the case where the decision is forced —
-    every field is declared an INTEGER type (its zero on this path is `0`) and no
-    explicit `__init__` is present (a constructor body is the construction, and
-    this tool does not model it) — and each field becomes a `self.<field> = 0` in
-    a synthesised `__init__`.  The `_normalisation` step of every later pair
-    builds the struct file AS WRITTEN and compares it against this twin, so the
-    decision is checked per file rather than argued.
-
-    `n` is how many structs were translated, so the caller reports the rewrite the
-    way it reports `var`/`fn`.  A struct this rule does not decide is left
-    UNCHANGED, so the file is still reported with `struct` named.
-    """
-    lines = text.splitlines(keepends=True)
-    out, i, n = [], 0, 0
-    while i < len(lines):
-        line = lines[i]
-        head = _STRUCT_HEAD_RE.match(line.rstrip("\n"))
-        if not head:
-            out.append(line)
-            i += 1
-            continue
-        j, body = i + 1, []
-        while j < len(lines):
-            s = lines[j]
-            if s.strip() and len(s) - len(s.lstrip()) == 0:
-                break
-            body.append(s)
-            j += 1
-        child = next((len(s) - len(s.lstrip()) for s in body if s.strip()), None)
-        fields, ok = [], True
-        if child is not None:
-            for s in body:
-                if not s.strip() or len(s) - len(s.lstrip()) != child:
-                    continue
-                st = s.strip()
-                if st.startswith("def "):
-                    if "__init__" in st:
-                        ok = False
-                    continue
-                m = _STRUCT_FIELD_RE.match(st)
-                if m:
-                    if not _STRUCT_ZERO_TYPE_RE.match(m.group(2)):
-                        ok = False
-                    fields.append(m.group(1))
-        if not ok:
-            out.append(line)
-            i += 1
-            continue
-        pad = " " * (child if child is not None else 4)
-        out.append("class " + head.group(1) + ":\n")
-        if fields:
-            out.append(f"{pad}def __init__(self):\n")
-            for f in fields:
-                out.append(f"{pad}{pad}self.{f} = 0\n")
-        out.extend(body)
-        i = j
-        n += 1
-    return "".join(out), n
-
-
 def normalise_mojo(source):
     """`(text, notes, why)` for `source` in a dialect CPython's parser accepts.
 
@@ -2631,14 +2429,11 @@ def normalise_mojo(source):
     if n:
         notes.append(f"proof decorators x{n}")
     text = "".join(lines)
-    for name, rx, repl in (("var declaration", VAR_DECL_RE, r"\1"),
-                           ("fn declaration", FN_DECL_RE, r"\1def ")):
-        text, k = rx.subn(repl, text)
+    for name, rx in (("var declaration", VAR_DECL_RE),
+                     ("fn declaration", FN_DECL_RE)):
+        text, k = rx.subn(r"\1", text)
         if k:
             notes.append(f"{name} x{k}")
-    text, ns = _translate_structs(text)
-    if ns:
-        notes.append(f"struct translation x{ns}")
     try:
         ast.parse(text)
     except (SyntaxError, ValueError) as e:
