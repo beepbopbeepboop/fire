@@ -5595,7 +5595,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # registered containers still records nothing: the generic walker names
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(elem, _kinds):
+    if _literal_needs_kinds(gen, elem, _kinds, lowered):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
@@ -5713,7 +5713,21 @@ def _is_scalar_elem_kind(elem: str) -> bool:
             or elem == 'MojoBytes *')
 
 
-def _literal_needs_kinds(elem: str, kinds: str) -> bool:
+def _provably_int_word(gen, el, ev: str) -> bool:
+    """Is this `int64_t`-typed literal ELEMENT provably an integer, rather than
+    a word whose kind is unknown? An `int64_t` element is both in this value
+    model -- a real Int, or the box any untyped node/string/handle travels in
+    (`[self._parse_expr(0)]` in the compiler's own parser is a list of boxed
+    AST nodes typed `int64_t`). Only the former may be described as 'i'."""
+    if isinstance(el, IntLiteral):
+        return True
+    if (isinstance(el, UnaryOp) and _as_str(el.op) == '-'
+            and isinstance(el.operand, IntLiteral)):
+        return True
+    return ev in gen._int_word_vals
+
+
+def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
     """Whether a list/tuple LITERAL must record `mojo_list_set_kinds`.
 
     Two independent reasons, both of which the runtime already supports:
@@ -5737,7 +5751,18 @@ def _literal_needs_kinds(elem: str, kinds: str) -> bool:
     ks = set(kinds)
     if len(ks) > 1 or 'n' in ks:
         return True
-    return _is_scalar_elem_kind(elem)
+    if not _is_scalar_elem_kind(elem):
+        return False
+    # A homogeneous INTEGER row is only true of integers: an `int64_t`
+    # element that is a boxed node or string would be rendered as its address
+    # by the 'i' row (the self-hosted compiler's `.ast` dump printed every
+    # `ListExpr.elements` as decimals). Such a list keeps no row, as before,
+    # and the generic walker names its slots.
+    if ks == {'i'} and lowered is not None:
+        for _pl in lowered:
+            if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
+                return False
+    return True
 
 
 # `_lower_list_literal`'s spread test and `_lower_tuple_literal`'s identical
@@ -6230,7 +6255,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # display rendered `(None, 1)` — for the reason that predicate's own
     # docstring gives, and it is the same rule the list lowering applies.
     _tkinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(elem, _tkinds):
+    if _literal_needs_kinds(gen, elem, _tkinds, lowered):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])
