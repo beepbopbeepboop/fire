@@ -1,5 +1,54 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
+**RE-MEASURED 2026-10-13 (`work/formal367-docs`): the defect this doc is NAMED
+for is FIXED, the five examples are unmasked and generate again, and one of the
+two failures left was a no-op peel that is now fixed too.** Three measurements,
+all on this tree:
+
+* **`x30` is no longer reloaded from the frame.** No emitted block of
+  `formal/examples/count.mojo`'s arm64 proof assigns `x30 := mem_read_u64 …`
+  (`grep -c 'x30 := mem_read' count_proof.lean` is `0`); the return block is
+  `def count_b5_qT3 (st) := { (count_b5_qS3 st) with pc := (count_b5_qS3 st).x30.toNat }`
+  — the RET semantics, with `x30` untouched. So `hx30fr_N` closes by `rfl`, and
+  **the statement is no longer FALSE**: the `st.sp` counterexample
+  §"The correction" computes has no reload left to trip over. That section is
+  now the record of a defect that is gone, not of one that is latent.
+* **The five are no longer MASKED.** `14af4cbe` made a reachable source
+  conditional a BARRIER for the halt-address question rather than a global
+  refusal, so `count`, `fact`, `pow2`, `sqsum`, `sum` all reach a proof file
+  again (`compile_formal(..., prove=True, check=False)` on each, no Lean).
+  `e6952091`'s "MASKED" status is stale.
+* **The frame-window peel the emitter emitted was a NO-OP, and it is fixed.**
+  `count_proof.lean` still fails at four sites — `4305` `maxRecDepth`, `4665`
+  unsolved goals, `4865`/`5080` `arm64_matches_condition` rewrites (a different
+  bug), and the FrameOk window clauses `refine_*_5_14` — and the window clause
+  was closing on
+  `simp only [..., mem_read_after_write_u64_high_fb, hf, hj]`, which makes **no
+  progress**: the lemma's `stride` is an implicit that no goal mentions, so
+  `simp` leaves it a metavariable it cannot discharge and never rewrites
+  (measured in isolation: that `simp only` is a no-op, and the same peel with
+  `(stride := 131152) (K := …)` named closes). A local `∀`-form of the lemma
+  does not help either — `simp` still cannot discharge the arithmetic side
+  goals, while `rw` can. The emitter now emits
+  `all_goals try repeat rw [mem_read_after_write_u64_high_fb _ st.sp
+  (stride := {stride}) (K := _) (j := j) (by decide) (by decide) hj hf]`,
+  pinning `sp` and `stride` to the site's own state and frame size and leaving
+  only `K` to unification. Measured: `count`'s `runs-ret-frame-ok-window` error
+  is **gone**; the second window clause still fails because its store addresses
+  are not yet canonical (`st.sp - (UInt64.ofNat 16 - 8)` rather than
+  `st.sp - UInt64.ofNat 8`), which is the next step.
+
+**The change is arm64-dec1-only, measured rather than argued.** Regenerating
+all 93 `formal/examples/*.mojo` × both backends with and without it, exactly
+**6** proofs change (`count`, `fact`, `fib`, `pow2`, `sqsum`, `sum`, all arm64)
+and every one of those is red already; the one-call-site program
+(`test_formal_call_proof_gen.py::TestSameImageCallLean`) is byte-identical.
+Pinned by `TestTheRecursionFamiliesStillGenerate::
+test_the_frame_window_peel_is_the_one_that_fires` (generation only, no Lean).
+**What is still owed: the five do not PROVE yet**, and the remaining four error
+sites each need their own pass — the non-canonical second window clause first,
+since the mechanism is now in place and only the address shape is missing.
+
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
 **Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
 CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is

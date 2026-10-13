@@ -8808,8 +8808,17 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
               f"(simp +decide only [h8, {_fs}, {_VSP}, u64_sub_zero] "
               f"<;> all_goals try rfl)")
             A(f"{IND}  all_goals intro j hj")
-            A(f"{IND}  all_goals try simp +decide only [h8, {_fs}, {_VSP}, "
-              f"mem_read_after_write_u64_high_fb, hf, hj]")
+            # The frame peel for stores BELOW `sp`.  `simp only [...
+            # mem_read_after_write_u64_high_fb, hf, hj]` is a no-op: the lemma's
+            # `stride` is an implicit that no goal mentions, so `simp` leaves it
+            # a metavariable it cannot discharge and never rewrites (measured —
+            # see doc 4's Status).  A `rw` with `sp`/`stride` pinned to THIS
+            # site's state and frame size and `K` left to unification peels one
+            # store; `repeat` peels the whole stack, and `try` keeps it a no-op
+            # on a goal that never had one.
+            A(f"{IND}  all_goals try repeat rw [mem_read_after_write_u64_high_fb "
+              f"_ st.sp (stride := {stride}) (K := _) (j := j) "
+              f"(by decide) (by decide) hj hf]")
             # The callee's return state is abstract (introduced by `obtain` from
             # the contract), so its memory can only be reached through
             # Peel the callee's store stack outermost-first: the goal's

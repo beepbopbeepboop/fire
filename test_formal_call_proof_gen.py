@@ -4803,6 +4803,39 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                               f"{stem} generated a file with no end-to-end "
                               f"theorem in it; that is not a proof of anything")
 
+    def test_the_frame_window_peel_is_the_one_that_fires(self):
+        """The frame-window store peel, pinned to the mechanism that WORKS.
+
+        `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`'s Status records
+        how this was found: the emitter closed the window goal with
+        `simp only [..., mem_read_after_write_u64_high_fb, hf, hj]`, and that
+        is a NO-OP.  The lemma's `stride` is an implicit that no goal mentions,
+        so `simp` leaves it a metavariable it cannot discharge and never
+        rewrites; measured, the same peel with `stride`/`K` named closes.  The
+        emitter now emits `repeat rw [mem_read_after_write_u64_high_fb _ st.sp
+        (stride := …) (K := _) (j := j) …]`, pinning `sp` and `stride` to the
+        site's own state and frame size and leaving only `K` to unification.
+        `count` is the witness: it is the smallest recursive example whose
+        window goal has a store below the caller frame.  The recursive family
+        is the only place this line is emitted (measured: 6 of 93 examples x 2
+        backends change, all arm64 dec1), so a wider appearance is a change to
+        report, not a detail.
+        """
+        text, err = self._generate("count")
+        self.assertIsNotNone(text, err)
+        self.assertIn(
+            "repeat rw [mem_read_after_write_u64_high_fb _ st.sp (stride := ",
+            text,
+            "the frame-window peel is not the pinned `repeat rw` any more; if "
+            "it was replaced, measure that the replacement FIRES — the "
+            "unpinned library lemma in a `simp only` list does not")
+        self.assertNotIn(
+            "mem_read_after_write_u64_high_fb, hf, hj]", text,
+            "`simp only [..., mem_read_after_write_u64_high_fb, hf, hj]` is "
+            "the no-op this replaced: `stride` is not inferrable from the "
+            "goal, so the rewrite never fires and the window goal is left "
+            "open")
+
     def test_the_one_that_refuses_says_why(self):
         """Every needle of a `REFUSED` row, not just one of them.
 
