@@ -2255,6 +2255,71 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_lemmas("syn", code, 0x1000))
 
 
+class TestExecutableStepCode(unittest.TestCase):
+    """`G.executable_step_code` is the step lemmas' region, and it stops at the
+    first interned string.
+
+    The step lemmas are emitted over whatever `code` they are handed, and
+    `__TEXT` carries every function body and THEN every interned string.  A
+    string byte that decodes as an instruction the step table knows therefore
+    gets a step lemma for a word no execution reaches, whose discriminator fact
+    is FALSE, and the whole proof fails to typecheck with no `sorry` anywhere:
+    `model.stack_trap_message` contains `909189220` (`0x36312064`, a `TBZ`),
+    which every guarded image carries.  The ordinary generator truncated
+    `code` at the first string; the frame and dylib generators did not, so this
+    pins the ONE home all three ask rather than each site's copy.
+
+    No Lean: these are facts about the bytes and the plan.
+    """
+
+    def test_it_stops_at_the_first_interned_string(self):
+        import formal.arm64_proof_gen as G
+        code = b"\x00" * 16
+        info = {"str_addrs": {"hello": 0x1000 + 8}}
+        self.assertEqual(G.executable_step_code(code, 0x1000, info), code[:8])
+
+    def test_with_no_strings_it_is_the_whole_code(self):
+        import formal.arm64_proof_gen as G
+        code = b"\x00" * 16
+        self.assertEqual(G.executable_step_code(code, 0x1000, {}), code)
+        self.assertEqual(G.executable_step_code(code, 0x1000, {"str_addrs": {}}),
+                         code)
+
+    def test_a_string_at_or_below_the_base_clamps_to_empty(self):
+        import formal.arm64_proof_gen as G
+        code = b"\x00" * 16
+        info = {"str_addrs": {"x": 0x1000}}
+        self.assertEqual(G.executable_step_code(code, 0x1000, info), b"")
+        info = {"str_addrs": {"x": 0x800}}
+        self.assertEqual(G.executable_step_code(code, 0x1000, info), b"")
+
+    def test_the_trap_message_word_is_planned_and_then_truncated_away(self):
+        """The measured reproducer, as bytes.
+
+        `909189220` decodes to a step-table branch, so a `code` made of that
+        word alone is planned; placed AFTER a one-word body and a string
+        address, the truncation removes it before `_step_result_plan` sees it —
+        which is the difference between a proof that typechecks and one whose
+        `native_decide` is FALSE about a data word."""
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        word = 909189220
+        self.assertIsNotNone(G._step_branch_index(word),
+                             "the trap message word no longer decodes; the "
+                             "reproducer this test is named for has moved")
+        body = _struct.pack("<I", 0xD503201F)   # NOP: a real instruction word
+        data = _struct.pack("<I", word)
+        base = 0x1000
+        code = body + data
+        info = {"str_addrs": {"stack_trap_message": base + 4}}
+        trunc = G.executable_step_code(code, base, info)
+        self.assertEqual(trunc, body)
+        self.assertNotIn(1, G._step_result_plan(trunc))
+        # …and the untruncated code IS planned at the data word's index: that is
+        # the lemma the truncation exists to drop.
+        self.assertIn(1, G._step_result_plan(code))
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
