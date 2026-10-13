@@ -2364,6 +2364,59 @@ class TestStepLemmasStopAtTheExecutableRegion(unittest.TestCase):
                 self.assertNotIn(f"_step_ok_{i}", text)
 
 
+class TestACorpusExampleKeepsItsUniversalTheorem(unittest.TestCase):
+    """The stack-floor guard's `getrlimit` is the COMPILER's call, and it must
+    not remove the universal theorem from a corpus example.
+
+    A stack guard went into every arm64 prologue, and on arm64 its
+    `RLIMIT_STACK` read sat ABOVE the entry and inside the CFG walk's range, so
+    the walk saw a compiler call as the program's own opaque call: `count`,
+    `sum` and `fact` refused at generation and `plain` lost its
+    `_compiles_correctly_universal` and kept only a `main_reaches_call_at_…`.
+    The guard now runs below `func_offset` and `_program_extern_calls` subtracts
+    it by address, so each of these generates a universal theorem again.  This
+    is that fix's anti-rot; generation only, no Lean.
+    """
+
+    EXAMPLE_DIR = os.path.join(HERE, "formal", "examples")
+    EXAMPLES = ("count", "sum", "fact", "mod_by_var")
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.build as fb
+        cls.tmp = tempfile.mkdtemp(prefix="a2-universal-")
+        cls.text = {}
+        cls.error = {}
+        srcs = {name: os.path.join(cls.EXAMPLE_DIR, name + ".mojo")
+                for name in cls.EXAMPLES}
+        srcs["plain"] = os.path.join(cls.tmp, "plain.mojo")
+        with open(srcs["plain"], "w") as fh:
+            fh.write("def main(n):\n    return 7\n")
+        for name, src in sorted(srcs.items()):
+            try:
+                r = fb.compile_formal(
+                    src, arch="arm64",
+                    output=os.path.join(cls.tmp, name + ".aout"),
+                    prove=True, check=False)
+            except Exception as e:                    # noqa: BLE001
+                cls.error[name] = f"{type(e).__name__}: {e}"
+                continue
+            with open(r["proof_path"], encoding="utf-8") as fh:
+                cls.text[name] = fh.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_every_example_generates_and_keeps_its_universal(self):
+        for name in ("plain",) + self.EXAMPLES:
+            with self.subTest(example=name):
+                self.assertNotIn(name, self.error,
+                                 self.error.get(name, ""))
+                self.assertIn("_compiles_correctly_universal",
+                              self.text.get(name, ""))
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
