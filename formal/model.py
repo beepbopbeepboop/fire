@@ -49064,10 +49064,12 @@ def struct_is_context_manager(struct_def) -> bool:
         own `TemporaryDirectory` and `nullcontext` both keep more than one
         attribute, so the honest mirror of either is representable.
       * `__enter__` takes no argument other than the receiver and RETURNS a
-        value.  `__exit__` takes either the receiver alone or CPython's own
-        `(self, exc_type, exc_val, tb)` — and the four-parameter spelling is
-        accepted ONLY when the method never reads its last three words
-        (`context_exit_ignores_its_exception_words`).  Those three words are a
+        value.  `__exit__` takes the receiver alone, CPython's own
+        `(self, exc_type, exc_val, tb)`, or the variadic spelling
+        `(self, *exc)` — and each wider spelling is accepted ONLY when the
+        method never reads the words it would receive
+        (`context_exit_ignores_its_exception_words` /
+        `context_exit_variadic_ignores`).  Those three words are a
         question about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
         `__exit__` that acted on them could not act on a value this path
@@ -49097,10 +49099,17 @@ def struct_is_context_manager(struct_def) -> bool:
     # unwinder), so passing a made-up value to a method that looks at it would be
     # a lie; a method that ignores them is the cleanup-only shape and lowers
     # with the receiver alone plus three words it never looks at.  See
-    # `context_exit_ignores_its_exception_words`.
-    if params not in (1, 4):
-        return False
-    if params == 4 and not context_exit_ignores_its_exception_words(exit_):
+    # `context_exit_ignores_its_exception_words`.  The variadic spelling of the
+    # same shape, `__exit__(self, *exc)` with `exc` unread, is the second half of
+    # that predicate (`context_exit_variadic_ignores`) and is called with the
+    # receiver alone, which binds it to the empty tuple.
+    if params == -1:
+        if not context_exit_variadic_ignores(exit_):
+            return False
+    elif params == 4:
+        if not context_exit_ignores_its_exception_words(exit_):
+            return False
+    elif params != 1:
         return False
     return not context_exit_returns_truthy(exit_)
 
@@ -49208,17 +49217,28 @@ def context_exit_returns_truthy(method) -> bool:
 
 
 def _dunder_receiver_params(method) -> int:
-    """How many parameters a method declares, receiver included; -1 if unknown.
+    """How many parameters a method declares, receiver included; -1 if variadic.
 
     `*args`/`**kwargs` cannot be counted from the tree and are -1, which fails
     every comparison here — a variadic context-manager method is refused rather
     than assumed, for the same reason a variadic call is
-    (`refuse_variadic_parameter_read`).
+    (`refuse_variadic_parameter_read`) — **except** for the one variadic shape a
+    context manager really writes, which `context_exit_variadic_ignores` decides
+    and `__exit__`'s gate lets through.
+
+    **The star is read from the parameter LIST, not from an attribute.**  This
+    used to ask `getattr(method, "vararg", None)`, and no `FunctionDef` on this
+    front end has that attribute — the parser keeps the star IN the name it
+    appends to `params` (`("*args", …)` / `("**kwargs", …)`,
+    `fire_compiler.py::_parse_function`).  So `def __exit__(self, *args)` came
+    out as arity 2, was refused with a message about "1 parameters after the
+    receiver", and the variadic branch below was dead.  `function_param_shape`
+    is the one reader of that list for the whole file, so the two cannot drift.
     """
-    params = list(getattr(method, "params", None) or ())
-    if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
+    shape = function_param_shape(method)
+    if shape.variadic:
         return -1
-    return len(params)
+    return len(shape.fixed)
 
 
 def _param_names(params) -> list:
@@ -49260,17 +49280,63 @@ def context_exit_ignores_its_exception_words(method) -> bool:
     conservative direction: it is not a read, and refusing it costs a shape no
     real context manager writes.
     """
-    params = list(getattr(method, "params", None) or ())
-    if len(params) != 4 or getattr(method, "vararg", None) or \
-            getattr(method, "kwarg", None):
+    shape = function_param_shape(method)
+    if shape.variadic or len(shape.fixed) != 4:
         return False
-    names = set(_param_names(params[1:]))
+    names = set(_param_names(list(getattr(method, "params", None) or [])[1:]))
     if len(names) != 3 or None in names:
         return False
+    return not _body_reads_any_name(method, names)
+
+
+def _body_reads_any_name(method, names) -> bool:
+    """Whether any of `names` occurs as an identifier in `method`'s body.
+
+    The shared half of the two ignoring predicates below — the four-fixed-word
+    shape and the variadic one — so a name read inside a nested `def`, a
+    closure, or as an assignment TARGET is one occurrence either way (the
+    conservative direction `context_exit_ignores_its_exception_words` states).
+    """
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if isinstance(node, F.IdentExpr) and getattr(node, "name", None) in names:
-            return False
-    return True
+            return True
+    return False
+
+
+def context_exit_variadic_ignores(method) -> bool:
+    """True when `__exit__(self, *exc)` never reads its catch-all.
+
+    **The variadic spelling of the same ignoring shape
+    `context_exit_ignores_its_exception_words` accepts**, and it is the one
+    `with` signature this path used to refuse for a reason that stopped being
+    true.  CPython calls `__exit__(type, value, tb)` POSITIONALLY, so a method
+    that catches them catches them in `*exc`:
+
+        class TempDir:
+            def __enter__(self): ...
+            def __exit__(self, *exc): self.close()      # ignores the triple
+
+    On a normal exit CPython binds `exc = (None, None, None)`; this path calls
+    the method with the receiver alone, so `exc` binds the empty tuple.  A body
+    that never looks at `exc` cannot tell the two apart, which is exactly the
+    evidence the four-word predicate uses — so the two are one question and this
+    is its second spelling rather than a second rule.
+
+    **Two clauses are structural rather than about reading, and both are the
+    call shape.**  A *positional* catch-all is required: `def __exit__(self,
+    **kw)` is not a context manager in CPython either (three positional
+    arguments against a keyword-only signature is a `TypeError`), so a `kwarg`
+    with no `vararg` is refused.  And the receiver must be the ONLY fixed
+    parameter: `def __exit__(self, exc_type, *rest)` would leave `exc_type`
+    unbound on the receiver-only call this path makes, so it stays refused even
+    though `rest` is ignored — a value the method could read would be the
+    caller's leftover, which is the failure this whole family refuses.
+    """
+    shape = function_param_shape(method)
+    if shape.vararg is None or len(shape.fixed) != 1:
+        return False
+    names = {n for n in (shape.vararg, shape.kwarg) if n}
+    return not _body_reads_any_name(method, names)
 
 
 def context_exit_arity(struct_def) -> int:
@@ -49279,10 +49345,12 @@ def context_exit_arity(struct_def) -> int:
     The ONE reader of "what does the exit call pass", for the lowering that
     builds the call (`formal/build.py::_one_with_item`).  It answers from the
     same `_dunder_receiver_params` the gate does, so the call and the gate cannot
-    disagree; a receiver-only `__exit__` is 1 and CPython's own three-word
-    spelling is 4.  A struct that is not a context manager this path lowers gets
-    the receiver-only answer, which is the shape the resource arm
-    (`open`) uses and the only one its `close` builtin takes.
+    disagree; a receiver-only `__exit__` is 1, CPython's own three-word spelling
+    is 4, and the variadic shape (`(self, *exc)`, `_dunder_receiver_params` -1)
+    is 1 — it catches the words in an empty tuple the body never reads.  A struct
+    that is not a context manager this path lowers gets the receiver-only
+    answer, which is the shape the resource arm (`open`) uses and the only one
+    its `close` builtin takes.
     """
     for m in struct_methods(struct_def):
         if getattr(m, "name", None) == CONTEXT_EXIT:
@@ -49446,6 +49514,27 @@ def with_context_manager_defect(struct_def) -> str:
         if params == 1:
             continue
         if params < 0:
+            if name == CONTEXT_EXIT and context_exit_variadic_ignores(
+                    methods[name]):
+                # The gate accepts this shape, so reaching here is impossible —
+                # kept so the sentence and the decision cannot come apart if
+                # `struct_is_context_manager` is ever reordered.
+                continue
+            if name == CONTEXT_EXIT:
+                shape = function_param_shape(methods[name])
+                if shape.vararg and len(shape.fixed) == 1:
+                    return (
+                        f"it declares both dunders, but its `{CONTEXT_EXIT}` "
+                        f"takes CPython's three exception words through a "
+                        f"variadic `*{shape.vararg}` and READS it. Those three "
+                        f"words are a question about an UNWINDER this backend "
+                        f"does not have: there is no exception value, no "
+                        f"traceback and no type word to pass, so any value this "
+                        f"path supplied would be a lie the method then acted on. "
+                        f"Drop the reads (or the catch-all): a `{CONTEXT_EXIT}` "
+                        f"that IGNORES it is the cleanup-only shape, it is what "
+                        f"`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` "
+                        f"declares, and it lowers")
             return (f"it declares both dunders, but its `{name}` is variadic "
                     f"(`*args`/`**kwargs`), which cannot be counted from the "
                     f"tree — so this path refuses it rather than assume it "

@@ -19827,12 +19827,15 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
                        args=[F.IdentExpr(tmp)], kwargs=[]),
             fn)
     tmp = fresh_name()
-    # `__exit__` takes the receiver alone, or CPython's own three exception
-    # words.  The four-word shape is accepted only when the method never reads
-    # them (`model.context_exit_ignores_its_exception_words`), so the three
-    # zeros below are the `None, None, None` CPython passes on a normal exit —
-    # spelled as the only value this word-based model has for "nothing" — and
-    # nothing in the callee looks at them.
+    # `__exit__` takes the receiver alone, CPython's own three exception words,
+    # or the variadic `(self, *exc)`.  A wider shape is accepted only when the
+    # method never reads the words it would receive
+    # (`model.context_exit_ignores_its_exception_words` /
+    # `model.context_exit_variadic_ignores`), so the three zeros below are the
+    # `None, None, None` CPython passes on a normal exit — spelled as the only
+    # value this word-based model has for "nothing" — and nothing in the callee
+    # looks at them.  `context_exit_arity` is 4 only for the fixed-word shape;
+    # the variadic one is 1, and its catch-all binds to the empty tuple.
     exit_args = [F.IdentExpr(tmp)]
     if M.context_exit_arity(struct) == 4:
         exit_args += [F.IntLiteral(value=0, line=0, col=0, raw="")] * 3
