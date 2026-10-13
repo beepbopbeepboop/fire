@@ -162,5 +162,78 @@ Three reasons, in order of weight:
   (`formal28-2` / `formal28-6-r2` hold the arm64 proof-gap claims, and
   `bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` is
   the `formal19-3-r2` area);
+* and, measured below, the code that would have to change is
+  `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s subject,
+  which is **claimed** by `formal310-docs` — so the honest disposition is that
+  this doc is BLOCKED on that claim rather than a decision about this doc's own
+  question.
+
+## 7. Status 2026-10-12 (`formal311-docs`): the answer this doc asked for, and it is neither of the two it guessed
+
+§5's step 2 asks the one question the doc could not answer without a Lean read:
+*"does the div0 arm still contribute a goal at all, and if not, which admission
+now consumes it?"* The theorem's BODY is answerable from the generated file,
+which needs no Lean kernel to read — `compile_formal(prove=True, check=False)`
+writes it — so this was measured on a tree with `lib/*.olean` present:
+
+```console
+$ python3 - <<'EOF'
+import formal.build as fb
+r = fb.compile_formal("symdiv.mojo", output="symdiv.aout", arch="arm64",
+                      prove=True, check=False)   # src = def q(a,b): return a // b
+info = r["info"]
+print([(c["sym"], hex(c["addr"])) for c in info["extern_calls"]])
+print([hex(a) for a in info["compiler_traps"]])
+EOF
+[('getrlimit', '0x1000003e0'), ('fflush', '0x100000504')]
+['0x100000504']
+```
+
+and the generated `symdiv_proof.lean`:
+
+* carries **no `q_compiles_correctly_universal` at all** — the name appears only
+  inside the CALL BOUNDARY note that quotes what a caller asked for. The
+  `text.partition("theorem q_compiles_correctly_universal")` the class uses
+  therefore lands on the PROSE, so `tail` is not where the theorem is: it is the
+  rest of the file, which prints no `sorry` and no `trace_state` goal.
+* carries `q_reaches_call_at_0x100000504` instead, whose stated proposition is
+  the `arm64_go_exit` `match` on the call being reached.
+
+So the answer is **neither "closed" nor "unreached by the terminal value flow"**:
+the universal theorem is **replaced** by a reachability statement, and the thing
+that replaces it is the `BL fflush` at `0x100000504` in `_emit_div_shift_pow`'s
+div0 arm. `info["compiler_traps"]` records that address on this tree, and
+`_program_extern_calls` subtracts it for the CONCRETE run tests, but the
+UNIVERSAL theorem's value flow treats the compiler's own call as an
+out-of-image call it cannot follow and declines the value theorem on that
+boundary. That is exactly the subject of
+`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`, which
+records the same three red `test_formal_call_proof_gen.py` rows.
+
+**Consequences, all three worth more than the guess this doc shipped:**
+
+1. This doc's diagnosis — "the residual goal is no longer REACHED by the
+   terminal value flow" — is **not the mechanism**. Nothing about the div0 arm or
+   the residual moved; the theorem that carries the residual is not emitted.
+   The cause is the opaque-flush substitution, one layer up.
+2. The class itself is no longer MISLEADING: `setUpClass` records why its
+   mechanism did not fire (`cls.blind`) and
+   `test_the_measurement_class_can_still_see_what_it_measures` fails by NAME on
+   "the fixture generates no `q_compiles_correctly_universal` carrying
+   `all_goals (first | done | sorry)`", so a reader no longer sees "the residual
+   moved — the fix this doc wants" when the truth is "there is no residual here
+   to move". That was landed by
+   `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`'s step 1.
+3. It is BLOCKED, not merely unfixed: the fix is the opaque-flush substitution
+   in `formal/arm64_proof_gen.py`'s universal value flow, which is
+   `formal310-docs`'s live claim. This worker may not edit it.
+
+**Exact next step, unchanged in shape but now correctly aimed:** land
+`FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`, then
+re-run `test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean`. With the
+universal theorem emitted again, `_ADMIT` is present, `trace_state` fires, and
+the class once more measures whether the div0 residual is the `⊢ 1 =` goal — the
+question it exists for. If the goal still cannot be traced after that, THIS doc's
+own §4 mechanism becomes the next thing to look at, and not before.
 * and the one fact I would need to distinguish "closed" from "unreached" is the
   generated theorem's body, which is a Lean read.
