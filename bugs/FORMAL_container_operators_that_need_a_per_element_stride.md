@@ -1,11 +1,41 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64, and item
+1's INTEGER-element half (container `==`/`!=`) is LANDED on BOTH backends
+(2026-10-13); item 2 (ordering) and item 4 (a length-changing slice store) are
+unchanged, and item 1's other element kinds (a set, a dict, a nested or a string
+element) still reach the shared gate.** `test_formal_container_methods.py`
+measures the whole surface against CPython on both architectures and is green;
+this doc is about the rows in it that are green *as refusals*, which is a
+different thing from green as answers. Several of those rows are answers now.
+
+**2026-10-13 (`work/formal376-docs`): `==`/`!=` between two INTEGER-element
+sequence blobs is lowered on both backends, and the boundary is pinned.** The
+decision is one shared predicate, `model.container_equality_is_lowered`, so the
+two architectures cannot disagree about which operand pair is lowered. Measured
+with `test_formal_container_methods.py operator tuple`: the `o_eq`, `o_ne` and
+`t_eq` rows moved from refusals to answers that equal CPython on BOTH
+architectures, and four new rows pin the boundary — `o_eq_miss` (equal lengths,
+one element different) and `o_eq_short` (a prefix) pin the element and length
+halves of the answer, and `o_set_eq_r`, `o_nested_eq_r` and `o_strlist_eq_r`
+pin that a set (order-independent), a nested blob (recursive) and a string
+element (content compare) are STILL refused by the shared gate rather than
+word-compared. The gate was NOT narrowed the way "What to do, in order" item 1
+prescribed, and the reason is the one §3 already gives for the set operators:
+`CONTAINER_GATED_OPS` is SHARED by both backends and by every element kind, so
+dropping `==`/`!=` from it would send a set, a dict and a nested blob into the
+address comparison the gate exists to prevent. The lowering therefore sits
+BESIDE the gate, the backend intercepts the integer-list/tuple shape first
+exactly as it intercepts two sets for `&`/`-`/`^`, and the message stands for
+the rest. What is left of item 1 is the recursive/content compares —
+`[[1]] == [[1]]` and `["ab"] == ["ab"]` — which are the "value-model question"
+the section below describes and are still refusals.**
+
+The whitelist is one element kind and it is deliberate: `WORD_EQUALITY_ELEM_KINDS`
+holds `int` alone, because it is the set of kinds whose CPython equality IS the
+word equality. `float64` is excluded (CPython says `0.0 == -0.0` while the two
+have different words), `str` is a content compare, and a nested kind is a
+recursion. An unrecognised element kind falls on the refusing side by default.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -119,12 +149,18 @@ the second reason this is a project rather than a rewrite.
    first, the way `|` already splits `_emit_set_union` from
    `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
    not started. See the Status at the top for the measurements and the emitters.
-2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
-   item 3 because the answer may be a recursive descent over nested blobs and a
-   content compare over `char *` elements, so it is a value-model question and
-   not only an emitter one. It also has a proof obligation the others do not:
-   the loop is data-dependent, where every current container loop is
-   count-bounded.
+2. **`==` / `!=` between two containers** (item 1) — **the INTEGER-element
+   half is DONE on both backends (2026-10-13)**; the rest is the recursive
+   descent over nested blobs and the content compare over `char *` elements,
+   which is what makes the remainder a value-model question and not only an
+   emitter one. The lowering that landed is `model.container_equality_is_lowered`
+   plus `_emit_blob_eq` in each backend, and it is reached at the comparison
+   site and in the CONDITION emitter (`arm64`'s `_emit_branch_unless`), because a
+   comparison in a condition is a separate emitter that never went through
+   `_emit_binop`. Its "data-dependent loop" is the same shape the set emitters
+   already emit and it has the same proof story: a proof generator that cannot
+   contract it refuses rather than admits, which is the honest outcome and not a
+   wrong answer.
 3. **Ordering** (item 2). Both backends. Strictly after item 1, and it reuses
    item 1's compare — a three-way element compare is the same inner loop with a
    different exit.

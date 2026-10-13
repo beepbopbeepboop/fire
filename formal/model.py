@@ -14169,6 +14169,70 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 container_relational_refusal = container_operator_refusal
 
 
+#: Element kinds whose two values compare correctly as WHOLE WORDS.
+#:
+#: `container_equality_is_lowered` reads this, and it is a WHITELIST rather than
+#: a "not a container and not a string" blacklist on purpose: the safe set is
+#: exactly the set of element kinds whose CPython equality IS the word equality,
+#: so an element kind nothing here recognises falls on the refusing side by
+#: default.  `int` is the whole of it today:
+#:
+#:   * `float64` is EXCLUDED because `0.0 == -0.0` is True in CPython while the
+#:     two have different words (IEEE-754 signed zero), so a word compare would
+#:     answer False where CPython answers True;
+#:   * `str` is an element whose CPython equality is a CONTENT compare over a
+#:     `char *`, which is `strcmp` per element rather than one word compare;
+#:   * a nested list kind is a recursive descent into another blob.
+WORD_EQUALITY_ELEM_KINDS = frozenset({INT_KIND})
+
+
+def container_equality_is_lowered(op, left_kind, right_kind, *,
+                                  left_is_set, right_is_set,
+                                  left_is_dict, right_is_dict) -> bool:
+    """True when `left {op} right` is an `==`/`!=` a backend can lower.
+
+    The SECOND question for `==`/`!=` on two blobs, asked once
+    `container_operator_refusal` has been reached and would have refused them,
+    the same way `set_algebra_refusal` is the second question for `&`/`-`/`^`.
+    Two sequence blobs of INTEGER elements compare element by element as whole
+    words at the 8-byte element stride WITH a length check, which is exactly
+    CPython's `==` for a list or a tuple of ints, so it is lowered; every other
+    shape keeps the shared refusal rather than getting a word compare that is
+    not CPython's answer:
+
+      * a SET — equality is an order-independent membership, not a positional
+        compare, so a word compare would call `{1, 2} == {2, 1}` False.  Set-ness
+        is flow-sensitive and is a KIND-independent fact, so the backend passes
+        its own `_expr_is_set_like` answer in;
+      * a DICT — a PAIR blob whose elements are key/value slots at stride 16, so
+        neither the stride nor the "compare each slot" rule is a list's;
+      * a NESTED or STRING element kind, for the reasons `WORD_EQUALITY_ELEM_KINDS`
+        gives;
+      * a bare `LIST_PREFIX` (an element kind nothing pinned down), whose
+        elements this build cannot say are words.
+
+    `left_is_set`/`right_is_set`/`left_is_dict`/`right_is_dict` are the
+    backend's flow-sensitive answers rather than kind reads, because a set and a
+    list classify identically (`list:<elem>`) and a dict literal classifies as a
+    bare blob — the same division of labour `set_algebra_refusal`'s callers
+    already make.
+    """
+    if op not in ("==", "!="):
+        return False
+    if left_is_set or right_is_set or left_is_dict or right_is_dict:
+        return False
+    if not (container_operand_is_blob(left_kind)
+            and container_operand_is_blob(right_kind)):
+        return False
+    return (_equality_elem_kind_is_word(left_kind)
+            and _equality_elem_kind_is_word(right_kind))
+
+
+def _equality_elem_kind_is_word(kind) -> bool:
+    """True when `kind` is a sequence blob whose elements are integer words."""
+    return list_elem_kind(kind) in WORD_EQUALITY_ELEM_KINDS
+
+
 def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
                         right_is_set: bool, backend_has_emitter: bool) -> str:
     """Why `left {op} right` is not lowered by the backend that asks.

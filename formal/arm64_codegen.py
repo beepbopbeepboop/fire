@@ -8035,6 +8035,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         # with a blob operand goes to the shared gate below.
         if self._maybe_emit_set_binop(e.left, e.right, op):
             return
+        # `==`/`!=` between two INTEGER-element sequence blobs is lowered here,
+        # before the shared gate below refuses it — see
+        # `model.container_equality_is_lowered`.  A set, a dict, a nested or a
+        # string element kind still reaches the gate.
+        if self._maybe_emit_container_eq(e.left, e.right, op):
+            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -9023,6 +9029,21 @@ ctor_field_value=self._ctor_field_value_for(name),
         if self._emit_branch_unless_and_test(cond, false_label):
             return True
         if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
+            return False
+        # A container `==`/`!=` is a LOWERING, not a flags compare, so hand it
+        # back to the caller: the fallback materializes the 0/1 `_emit_blob_eq`
+        # leaves in X0 and tests that, exactly as it does for any condition that
+        # is not a bare comparison. Asked BEFORE the shared refusal below, which
+        # would otherwise refuse the very shape `_emit_binop` now lowers — the
+        # "same source, two spellings, two answers" defect this function's own
+        # `string_binary_refusal` call exists to prevent.
+        if M.container_equality_is_lowered(
+                cond.op, self._expr_str_kind(cond.left),
+                self._expr_str_kind(cond.right),
+                left_is_set=self._expr_is_set_like(cond.left),
+                right_is_set=self._expr_is_set_like(cond.right),
+                left_is_dict=self._is_dict_subscript(cond.left),
+                right_is_dict=self._is_dict_subscript(cond.right)):
             return False
         # A comparison in a CONDITION does not go through `_emit_binop` — the
         # whole point of this function is to branch on the flags instead of
@@ -13517,6 +13538,100 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_set_filter_pass(offset, 7, 2, 8, 3, op == "&")
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _maybe_emit_container_eq(self, left, right, op: str) -> bool:
+        """Lower `left {op} right` when it is a container `==`/`!=`, else False.
+
+        The third question for two blobs at a comparison site, beside
+        `_maybe_emit_set_binop` and asked for the same reason: `==`/`!=` on two
+        blobs would otherwise reach `string_binary_refusal`'s shared gate and be
+        refused for every element kind, but for two sequence blobs of INTEGER
+        elements CPython's answer IS a word compare and this path can emit it.
+        `model.container_equality_is_lowered` is the one decision both backends
+        ask, so a pair of operands cannot get an answer from one and a refusal
+        from the other."""
+        if not M.container_equality_is_lowered(
+                op, self._expr_str_kind(left), self._expr_str_kind(right),
+                left_is_set=self._expr_is_set_like(left),
+                right_is_set=self._expr_is_set_like(right),
+                left_is_dict=self._is_dict_subscript(left),
+                right_is_dict=self._is_dict_subscript(right)):
+            return False
+        self._emit_blob_eq(left, right, op)
+        return True
+
+    def _emit_blob_eq(self, left, right, op: str) -> None:
+        """`left == right` / `left != right` over two integer-element blobs.
+
+        Only reached through `container_equality_is_lowered`, which has already
+        established that both operands are sequence blobs whose elements are
+        INTEGER words — so this is CPython's list/tuple `==`: lengths must agree,
+        then every element is compared at the blob's own 8-byte element stride,
+        and the answer is 1 (or 0 for `!=`) exactly when every one matches.
+
+        The two operands are emitted and pushed FIRST, because evaluating the
+        right can clobber any register the left is in; the result is 0/1 in X0,
+        the same shape `_emit_setcc` gives every other comparison, so the
+        enclosing `if`/`printf` reads it as a condition unchanged.
+
+        Register plan, matching `_emit_set_op` so the two read alike: X7 = left
+        base, X8 = right base, X2 = nL, X3 = nR, X5 = i, X9/X10 = the two
+        elements."""
+        self._while_counter += 1
+        sid = self._while_counter
+        fn = self.func_name
+        differ = f"{fn}_ceq{sid}d"
+        shorter = f"{fn}_ceq{sid}n"
+        same = f"{fn}_ceq{sid}a"
+        done = f"{fn}_ceq{sid}e"
+        loop = f"{fn}_ceq{sid}l"
+        # The two answers this comparison can give, chosen once so the three
+        # exits cannot disagree about the polarity of `!=`.
+        yes = 1 if op == "==" else 0
+        no = 0 if op == "==" else 1
+
+        self._emit_expr(left)
+        self.asm.emit(encode_stp_sp_pre(0, 2))         # [SP] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_stp_sp_pre(0, 2))         # [SP] = right, [SP+16] = left
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))  # X8 = right base
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # X7 = left base
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))   # X2 = nL
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))   # X3 = nR
+        self.asm.emit(encode_cmp_xn_xm(2, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "eq"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(shorter, here_offset=-4)  # lengths differ → no
+        self.asm.emit(encode_movz_wd_imm(5, 0))        # X5 = i
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(same, here_offset=-4)  # i >= n → all equal
+        # left[i] → X9, right[i] → X10, both past the 8-byte count header.
+        self.asm.emit(encode_add_xd_xn_imm(9, 7, M.BLOB_HEADER_BYTES))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(9, 9, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(10, 8, M.BLOB_HEADER_BYTES))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(10, 10, 0))
+        self.asm.emit(encode_cmp_xn_xm(9, 10))
+        self.asm.emit(encode_cset_xd_cond(0, "ne"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(differ, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(loop)
+        self.asm.label(differ)
+        self.asm.emit(encode_movz_wd_imm(0, no))
+        self._emit_b_to(done)
+        self.asm.label(shorter)
+        self.asm.emit(encode_movz_wd_imm(0, no))
+        self._emit_b_to(done)
+        self.asm.label(same)
+        self.asm.emit(encode_movz_wd_imm(0, yes))
+        self.asm.label(done)
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.

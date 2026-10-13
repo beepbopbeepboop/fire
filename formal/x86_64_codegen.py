@@ -5415,6 +5415,83 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))   # [R11+0] = 0
         self._emit_mov_imm(Reg.RAX, 0)                     # None
 
+    def _maybe_emit_container_eq(self, left, right, op: str) -> bool:
+        """Lower `left {op} right` when it is a container `==`/`!=`, else False.
+
+        The counterpart of `ARM64Codegen._maybe_emit_container_eq` and asked at
+        the same site for the same reason: `==`/`!=` on two blobs would
+        otherwise reach `string_binary_refusal`'s shared gate and be refused for
+        every element kind, but for two sequence blobs of INTEGER elements
+        CPython's answer IS a word compare and this path can emit it.
+        `model.container_equality_is_lowered` is the one decision both backends
+        ask, so a pair of operands cannot get an answer from one and a refusal
+        from the other."""
+        if not M.container_equality_is_lowered(
+                op, self._expr_str_kind(left), self._expr_str_kind(right),
+                left_is_set=self._expr_is_set_like(left),
+                right_is_set=self._expr_is_set_like(right),
+                left_is_dict=self._is_dict_subscript(left),
+                right_is_dict=self._is_dict_subscript(right)):
+            return False
+        self._emit_blob_eq(left, right, op)
+        return True
+
+    def _emit_blob_eq(self, left, right, op: str) -> None:
+        """`left == right` / `left != right` over two integer-element blobs.
+
+        The x86-64 twin of `ARM64Codegen._emit_blob_eq`: only reached through
+        `container_equality_is_lowered`, so both operands are sequence blobs of
+        INTEGER words and this is CPython's list/tuple `==` — a length check,
+        then an element compare at the blob's own 8-byte stride.  The answer is
+        0/1 in RAX, the same shape every other comparison leaves, so an
+        enclosing `if`/`printf` reads it unchanged.
+
+        RSI = left base, RDX = right base, R8 = nL, R9 = nR, R11 = i, R10/RCX =
+        the two elements, RAX = the answer.  The left operand is pushed before
+        the right is emitted, because emitting the right can clobber any
+        register the left is still in."""
+        yes = 1 if op == "==" else 0
+        no = 0 if op == "==" else 1
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                   # [rsp] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))       # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))   # left
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))    # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))    # nR
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        differ = f"{fn}_ceq{wid}d"
+        shorter = f"{fn}_ceq{wid}n"
+        same = f"{fn}_ceq{wid}a"
+        done = f"{fn}_ceq{wid}e"
+        loop = f"{fn}_ceq{wid}l"
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R9))
+        self._emit_jcc(COND_NE, shorter)           # lengths differ → no
+        self._emit_mov_imm(Reg.R11, 0)             # i = 0
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R8))
+        self._emit_jcc(COND_AE, same)              # i >= n → all equal
+        self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.R10)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R10, 0))
+        self._emit_elem_addr(Reg.RDX, Reg.R11, Reg.RCX)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RCX, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.RCX))
+        self._emit_jcc(COND_NE, differ)
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(loop)
+        self.asm.label(differ)
+        self._emit_mov_imm(Reg.RAX, no)
+        self._emit_jmp(done)
+        self.asm.label(shorter)
+        self._emit_mov_imm(Reg.RAX, no)
+        self._emit_jmp(done)
+        self.asm.label(same)
+        self._emit_mov_imm(Reg.RAX, yes)
+        self.asm.label(done)
+
     def _conversion_operand_is_text(self, operand) -> object:
         """True / False / None: does this conversion's operand hold text.
 
@@ -7493,6 +7570,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        # `==`/`!=` between two INTEGER-element sequence blobs is lowered here,
+        # before the shared gate below refuses it — see
+        # `model.container_equality_is_lowered`.  A set, a dict, a nested or a
+        # string element kind still reaches the gate.
+        if self._maybe_emit_container_eq(e.left, e.right, op):
+            return
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the

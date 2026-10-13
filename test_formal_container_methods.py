@@ -691,8 +691,15 @@ TUPLE_CASES = [
     ("t_walk", ["t = (1, 2, 3)", "s = 0", "for x in t:", "    s = s + x"], "s",
      "a walk, observed through a sum for the same order-independence reason as "
      "the set walk"),
-    ("t_eq_r", ["t = (1, 2, 3)", "v = 1 if t == (1, 2, 3) else 0"],
-     None, "`==` on two blobs — the operator gate's own row"),
+    ("t_eq", ["t = (1, 2, 3)", "v = 1 if t == (1, 2, 3) else 0"],
+     "v", "`==` on two INTEGER-element tuples: a length check and then a word "
+     "compare at the element stride, which IS CPython's answer. This row was a "
+     "refusal until `model.container_equality_is_lowered` landed; the "
+     "`*_eq_r` rows below pin the shapes that are still refused"),
+    ("t_eq_miss", ["t = (1, 2, 3)", "v = 1 if t == (1, 2, 9) else 0"],
+     "v", "the SAME tuple with one element changed: a word compare that ignored "
+     "the elements would answer 1 here, so the miss is what makes the row above "
+     "an element compare and not a length compare"),
     ("t_count_r", ["t = (1, 2, 1)", "v = t.count(1)"], None,
      "`count` on a tuple: only lowered on a `char *`"),
     ("t_index_m_r", ["t = (1, 2, 3)", "v = t.index(2)"], None,
@@ -771,12 +778,39 @@ OPERATOR_CASES = [
      "a blob against a NUMBER. CPython raises TypeError for it, so there is no "
      "correct program on the far side of the gate"),
     ("o_eq", ["a = [3, 1, 2]", "v = 1 if a == [3, 1, 2] else 0"],
-     None,
-     "`==`: measured answering 0 where CPython answers 1, because the literal "
-     "is a SECOND block at a different address"),
+     "v",
+     "`==` on two INTEGER-element lists: element by element at the blob's own "
+     "8-byte stride and then a length check, which is CPython's answer. "
+     "Measured before `model.container_equality_is_lowered`: it answered 0 "
+     "where CPython answers 1, because the literal is a SECOND block at a "
+     "different address — the wrong answer this row exists to keep gone"),
     ("o_ne", ["a = [3, 1, 2]", "v = 1 if a != [3, 1, 2] else 0"],
-     None, "`!=` is the same comparison inverted, and answered 1 where CPython "
-     "answers 0"),
+     "v", "`!=` is the same comparison inverted, and answered 1 where CPython "
+     "answers 0 before the lowering"),
+    ("o_eq_miss", ["a = [3, 1, 2]", "v = 1 if a == [3, 1, 9] else 0"],
+     "v", "the element-by-element half: two equal-length lists with one element "
+     "different must answer 0, so a lowering that only compared the lengths "
+     "cannot pass"),
+    ("o_eq_short", ["a = [1, 2]", "v = 1 if a == [1, 2, 3] else 0"],
+     "v", "the length half: a prefix of the same elements is NOT equal, so a "
+     "lowering that compared only the first `min(nL, nR)` elements cannot pass"),
+    # ── equality on the shapes the lowering deliberately does NOT cover ──────
+    ("o_set_eq_r", ["s = {1, 2}", "v = 1 if s == {1, 2} else 0"], None,
+     "a SET `==` — CPython's equality is order-INDEPENDENT membership, not a "
+     "positional compare, so the element-wise word compare the list lowering "
+     "emits would answer `{1, 2} == {2, 1}` wrongly. The shared operator gate "
+     "still refuses it"),
+    ("o_nested_eq_r", ["a = [[1], [2]]", "v = 1 if a == [[1], [2]] else 0"],
+     None,
+     "a list whose elements are THEMSELVES blobs: CPython's `==` is a recursive "
+     "descent and the elements are addresses, so a word compare is not the "
+     "answer and the shared gate still refuses it"),
+    ("o_strlist_eq_r", ['a = ["ab", "cd"]',
+                        'v = 1 if a == ["ab", "cd"] else 0'],
+     None,
+     "a list of STRINGS: the elements are `char *` and CPython's `==` is a "
+     "content compare per element, not an address compare, so the shared gate "
+     "still refuses it"),
     ("o_is", ["a = [1, 2]"], "1 if a is a else 0",
      "`is` is IDENTITY, which on this path is unboxed word equality, and two "
      "distinct blob literals ARE two distinct addresses — so `a is a` answers "
