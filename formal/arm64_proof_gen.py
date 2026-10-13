@@ -11559,8 +11559,19 @@ def generate_arm64_proof(prog, code, info) -> str:
             "    statement is FALSE, which is the defect these close. -/\n"
             + "\n\n".join(_narrow_lemmas) + "\n")
 
+    # `maxRecDepth` is a LIMIT rather than an allocation, so raising it costs
+    # nothing when it is not needed (the same reasoning `x86_64_endtoend_test.py`
+    # records for its computed value).  It was 100000 until a proof that FOLLOWS
+    # a call into the same image (`bugs/FORMAL_arm64_the_universal_theorem_
+    # cannot_follow_a_call_into_the_same_image.md`) started failing with
+    # `maximum recursion depth has been reached` on a `rfl` that unfolds a
+    # one-step block state -- an environment interaction, not a genuinely deep
+    # term.  Measured on `formal/examples/main_calls_helper.mojo`: rc=0 at
+    # 200000 and at 1000000, `maximum recursion depth` at 100000, 80 s / 2.6 GB.
+    # 1000000 is cheap headroom over the measured threshold for a proof that
+    # otherwise proves.
     return f"""{SPECS.header_imports(bool(refines))}
-set_option maxRecDepth 100000
+set_option maxRecDepth 1000000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false

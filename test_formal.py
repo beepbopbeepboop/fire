@@ -329,18 +329,16 @@ EXPECTED_FAILURES = {
     "struct_method": "the same, for a struct's constructor, with the method's "
                      "receiver behind it",
 
-    # (4) Calls. The universal theorem's CFG walk is per-function and cannot
-    # follow a call out of the ENTRY; `bugs/FORMAL_arm64_the_universal_theorem_
-    # cannot_follow_a_call_into_the_same_image.md` owns it. The corpus had NO
-    # program with a call at all, so this is the first measurement of it from
-    # the corpus: `call_helper` (the CALLEE is the entry) proves and
-    # `main_calls_helper` (the same image with the CALLER as the entry) is
-    # refused -- the pair is the sharpest statement of the frontier in the
-    # corpus.
-    "main_calls_helper": "the entry calls a second function in the same image, "
-                         "and the CFG walk cannot follow a call out of the "
-                         "entry; `call_helper` is the same image with the "
-                         "callee as the entry and it proves",
+    # (4) Calls. `call_helper` (the CALLEE is the entry) has always proved and
+    # `main_calls_helper` (the same image with the CALLER as the entry) now does
+    # too -- the return-address map follows the one call site
+    # (`bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
+    # same_image.md`), so neither is listed here. Getting the followed call's
+    # proof to CHECK needed a deeper `maxRecDepth` than the emitted constant
+    # allowed; that is the `set_option` note in `formal/arm64_proof_gen.py`, and
+    # `main_calls_helper` is the corpus row that pins it. `multi_export` stays:
+    # two call SITES on one path is more than the walk follows, and the model
+    # refuses the inner callee first.
     "multi_export": "three exports where the entry calls two of them, so two "
                     "call SITES on one path -- more than the walk can follow, "
                     "and the model refuses the inner callee first",
