@@ -28,16 +28,15 @@ the wrong thing, it is not getting a proof file to measure at all.
 
 This section's own diagnosis (§"Why it went blind") is the upstream half and it
 is right: `_unfollowable_calls` does not subtract `info["compiler_traps"]`. What
-is new, and what blocks the fix this doc wants, is that (a) on master arm64's
-`compiler_traps` list is EMPTY because the emitter recording was dropped by a
-merge (`8df5b273`; the EMITTER half is landed again on `work/formal115-docs`,
-see
-`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_getrlimit_is_a_program_call.md`),
-so on master there is nothing to subtract, and (b) subtracting it is measured NOT to reach
-the div0 residual: with the recording restored and the traps filtered out of
-`_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion contract: the
-call in block 2 has to be below the source condition's negation`), not to the
-`⊢ 1 = …` goal. The next step this doc states (option 1, "subtract
+is new, and what blocks the fix this doc wants, is that (a) the emitter
+recording that was dropped by a merge (`8df5b273`) is landed again on master
+(`806e72cb`, "formal/arm64: read RLIMIT_STACK in the startup stub, and restore
+the trap flush" — the `compiler_traps`-lost bug, whose doc is deleted with that
+fix), so the list is no longer empty, and (b) subtracting it is measured NOT to
+reach the div0 residual: with the recording restored and the traps filtered out
+of `_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion
+contract: the call in block 2 has to be below the source condition's negation`),
+not to the `⊢ 1 = …` goal. The next step this doc states (option 1, "subtract
 `compiler_traps` in `_unfollowable_calls`") is therefore necessary and not
 sufficient; the walk needs a terminal for a call it cannot follow, which is
 `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`.
