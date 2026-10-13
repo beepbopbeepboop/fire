@@ -746,7 +746,7 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
+    printf("m2 size=%d ino=%d dev=%u blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",
@@ -789,8 +789,16 @@ def _stat_oracle(p):
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
-    out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+    # `st_dev` is the one field compared as UNSIGNED, and the reason is a fact
+    # about the field rather than a convenience: CPython reports `dev_t` as the
+    # 32-bit signed field sign-extended into a Python int (`/dev/null` here is
+    # `18446744072249612928` = `0xffffffffa8fb1a80`), so the image's `%u` word
+    # and CPython's int are the same 64 bits read two ways. Printing both with
+    # `%u`/`% (1 << 64)` is what makes them the same STRING. See
+    # `formal/hostmods/os/path/__init__.mojo::stat_dev`.
+    out["m2"] = "size=%d ino=%d dev=%u blocks=%d blksize=%d" % (
+        field(s, "st_size"), field(s, "st_ino"),
+        field(s, "st_dev") % (1 << 64),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

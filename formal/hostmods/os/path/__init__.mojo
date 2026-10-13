@@ -72,7 +72,7 @@ from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
-from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32s, fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -615,13 +615,17 @@ def stat_ino(p, follow) -> int:
 
 
 def stat_dev(p, follow) -> int:
-    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+    """`st_dev` — the device the inode lives on, a SIGNED 32-bit field at 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+    Read SIGNED because `dev_t` is signed on this target and the reference this
+    module is checked against sign-extends it: on a device whose `st_dev` has
+    its high bit set the unsigned read answers `0xa8fb1a80` where the oracle
+    answers `0xffffffffa8fb1a80`, and both are the same four bytes.
     """
-    return fs_stat_field32(p, follow, 0)
+    return fs_stat_field32s(p, follow, 0)
 
 
 def stat_nlink(p, follow) -> int:

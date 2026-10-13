@@ -1242,6 +1242,25 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` reads the four bytes as an UNSIGNED field, which is what a `uint32`
+    field wants (`st_uid`/`st_gid`) and is not what a `dev_t` wants: `dev_t` is
+    a SIGNED 32-bit type on this target, and the reference this module is
+    checked against sign-extends it. Measured on this host — `/dev/null`'s
+    `st_dev` is `0xffffffffa8fb1a80` (`18446744072249612928`), which is
+    `0xa8fb1a80` sign-extended, and an unsigned read of the same four bytes
+    gives `2835028608`. The two differ only when the field's high bit is set,
+    which is why `st_dev` passed on every shape whose device has a clear high
+    bit and failed on `/dev/null`.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1603,6 +1622,21 @@ def fs_stat_field32(p, follow, at) -> int:
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_dev` is the field: the layout above spells it `int32` because `dev_t`
+    is a signed 32-bit type on this target, and the width being right is not the
+    same claim as the signedness being right (see `le32s`). `st_rdev` is the
+    same signed width at offset 24 and is not read by this module yet; when it
+    is, it comes through here rather than through `fs_stat_field32`.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
