@@ -23428,6 +23428,30 @@ def fn_returns_a_value(fn) -> bool:
     return scan(getattr(fn, "body", None) or [])
 
 
+def function_body_is_absent(fn) -> bool:
+    """Whether `fn`'s body is the no-implementation marker `...` — a
+    DECLARATION rather than an implementation.
+
+    `def f(): ...` parses to one `ExprStmt` wrapping an `EllipsisLiteral`, and
+    this path cannot lower it at all: `ellipsis_refusal` refuses the body when
+    the walk reaches it. So a reader that is about to claim something ABOUT a
+    call to such a function — `returnless_return_refusal` above all — must not:
+    nothing here has decided what the call returns, and the fact the reader
+    needs is the one the body's own refusal states (the pin is
+    `test_formal_run.py::limit_ellipsis_function_body`).
+
+    A `pass` body is NOT absent: it lowers, and a function that falls off its
+    end returns nothing, which is exactly what `returnless_return_refusal` is
+    for. `None` (a name that is not a function of this unit) is not absent
+    either, so the caller's conservative default is unchanged.
+    """
+    body = getattr(fn, "body", None)
+    if not body:
+        return False
+    return all(is_ellipsis(getattr(st, "value", None)) or is_ellipsis(st)
+               for st in body)
+
+
 def fn_declares_a_return(fn) -> bool:
     """Whether `fn` STATES a return type — the ONE reader of that, and it
     delegates rather than repeating `declared_returns_a_value`'s test.
@@ -23493,6 +23517,66 @@ def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:
         f"this path printed `0`). Refused rather than emitted, because a "
         f"plausible number is worse than a refusal. Give {callee} a `return`, "
         f"or do not use its value"
+    )
+
+
+def returnless_return_refusal(fn_name: str, value, no_value_callee_of,
+                              function_of=None):
+    """The refusal for `return g(…)` — or `return v` for a `v` bound only to
+    such calls — or None.
+
+    **The THIRD position a value this path cannot carry can occupy, and it is
+    not a rendering one.** `print` (this file's `returnless_value_refusal`) and
+    `printf` (`returnless_printf_argument_refusal`) are the two where the word
+    becomes TEXT; here it becomes the FUNCTION'S OWN RESULT, which is the shape
+    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
+    None.md` §0c names as the `returned` position — "the clearest divergence",
+    because there is no further use site between the wrong word and the
+    caller's answer. `f`'s `return g(…)` for a `g` with no `return` builds, runs
+    and exits 0 answering `0` on BOTH architectures where CPython answers
+    `None`; the word is whatever `g`'s epilogue left in the return register.
+
+    `no_value_callee_of` is the caller's `ValueKinds` hook, the one reader of
+    "this expression's value is the result of a function that returns nothing",
+    passed in rather than re-derived so the three positions cannot answer that
+    question differently. A `value` of `None` (a bare `return`) is not a
+    value at all and is left alone.
+
+    **`function_of` is the caller's name→definition lookup, and it exists to
+    DECLINE for a callee whose body is absent.** `def g(): ...` is a
+    declaration this path cannot lower, and `ellipsis_refusal` owns that fact
+    when the walk reaches `g`'s body; until then nothing has decided what `g`
+    returns, so `return g(…)` must not be reported as "g returns nothing" — it
+    would take the `no body to lower` message away from the reader (the pin is
+    `test_formal_run.py::limit_ellipsis_function_body`). `None` (no lookup, or
+    an unknown name) leaves the rule exactly where it was.
+
+    The wording discipline is `returnless_value_refusal`'s: name the callee,
+    say what CPython answers, say what this path has instead, and say what to
+    do. The clause that states the FACT is `CPython answers `None`` and the
+    one that names the CONSTRUCT is `returns the value of`, and
+    `tools/formal_sweep_causes.py` keys its row on a clause unique to this
+    message so it cannot steal `print`'s row (which says "evaluates that call
+    to `None`") or fall into `other refusal`.
+    """
+    if value is None:
+        return None
+    callee = no_value_callee_of(value)
+    if callee is None:
+        return None
+    if function_of is not None and function_body_is_absent(function_of(callee)):
+        return None
+    return (
+        f"{fn_name} returns the value of {callee}(…), and {callee} returns "
+        f"nothing: CPython answers `None` and {fn_name} answers `None`, and a "
+        f"value on this path is one 64-bit word with no way to say `no value` — "
+        f"the epilogue writes no return register, so the word {fn_name} would "
+        f"answer with is whatever {callee}'s last instruction left there, which "
+        f"is a number nothing in the source wrote (measured on BOTH "
+        f"architectures from this source: CPython answered `None` where this "
+        f"path answered `0`). Refused rather than emitted, because a plausible "
+        f"number is worse than a refusal. Give {callee} a `return`, or do not "
+        f"return its value"
     )
 
 

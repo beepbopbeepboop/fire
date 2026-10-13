@@ -2395,6 +2395,20 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
             else:
+                # A RETURNED value this path cannot carry is refused FIRST, and
+                # for the reason `_print_call`'s refusal is: `return g(…)` for a
+                # `g` with no `return` answers `g`'s epilogue word (measured `0`
+                # on BOTH architectures, where CPython answers `None`), and this
+                # is the position §0c of
+                # `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_
+                # cpython_yields_None.md` names as the `returned` one. The
+                # decision is `ValueKinds.no_value_callee_of` and the words are
+                # `model.returnless_return_refusal`, both shared with x86-64, so
+                # the two cannot differ. A callee whose body is absent (`...`) is
+                # NOT claimed here — its own `ellipsis_refusal` owns that fact
+                # when the walk reaches the body — which is why
+                # `returnless_return_refusal` is handed the definition lookup.
+                self._refuse_returnless_value(stmt.value)
                 # A double returned under an INTEGER annotation. Asked before the
                 # value is emitted, because the answer is about the FUNCTION's
                 # declaration rather than about the return instruction, and
@@ -6528,6 +6542,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         reason = M.call_argument_kind_refusal(
             name, list(e.args or ()), [p[1] for p in params],
             self._printf_arg_conversion_class, TYPE_NAMES)
+        if reason is not None:
+            raise CodegenError(reason)
+
+    def _refuse_returnless_value(self, value) -> None:
+        """Raise when this function returns a call that produces no value.
+
+        The `returned` position of
+        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+        yields_None.md` §0c, and the sibling of `_print_call`'s refusal asked at
+        the other end of the same word's life: there the word becomes TEXT,
+        here it becomes this function's RESULT. Both ask
+        `ValueKinds.no_value_callee_of`, so a `return g()` and a `print(g())`
+        for the same `g` cannot get two answers, and both name the callee rather
+        than the local, because the callee is what the reader has to change.
+        `model.returnless_return_refusal` is the one message, shared with
+        x86-64.
+
+        `self._functions.get` is handed over so the rule can DECLINE for a
+        callee whose body is absent (`def f(): ...`): such a function is a
+        declaration, its return value is not something this path has decided,
+        and `ellipsis_refusal` owns that fact when the walk reaches its body —
+        which is the pin `test_formal_run.py::limit_ellipsis_function_body`
+        holds, and why this check must not claim the callee "returns nothing".
+        """
+        reason = M.returnless_return_refusal(
+            getattr(self._cur_fn, "name", "this function"), value,
+            self._vkinds.no_value_callee_of, self._functions.get)
         if reason is not None:
             raise CodegenError(reason)
 

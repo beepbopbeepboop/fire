@@ -592,6 +592,17 @@ CAUSES = (
     ("a printed value that is not a value: the callee returns nothing",
      (("CPython evaluates that call to `None`",),
       ("is asked to render the value of",))),
+    # The SAME not-a-value, at the position where the word becomes the
+    # FUNCTION'S OWN RESULT rather than TEXT: `return g(…)` for a `g` with no
+    # `return` (`formal/model.py::returnless_return_refusal`, the `returned`
+    # position of the same bug doc's §0c). It needs its own row because a file
+    # refused here is refused by the same decision with the same remedy and the
+    # POSITION is what a reader has to change (give the callee a `return`, or do
+    # not return its value) — and it must NOT be read as the `print` row above,
+    # whose markers it deliberately shares no clause with ("answers `None`" here
+    # against "evaluates that call to `None`" there).
+    ("a returned value that is not a value: the callee returns nothing",
+     (("returns the value of", "CPython answers `None`"),)),
     # A REPETITION whose count this path cannot read at compile time. It is its
     # own row and not `other refusal` for the reason the `==` row above gives:
     # `xs * n` is a construct this backend now LOWERS (both architectures, a

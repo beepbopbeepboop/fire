@@ -2191,6 +2191,59 @@ REFUSALS = [
      "    printf(\"%d\\n\", v)\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # THE THIRD POSITION, and it is not a rendering one: `return g(…)` makes the
+    # word the FUNCTION'S OWN RESULT rather than TEXT, and it built, ran and
+    # exited 0 answering `0` on BOTH architectures where CPython answers `None`
+    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # yields_None.md` §0c calls this the `returned` position and "the clearest
+    # divergence"). The refusal is asked at the `ReturnStmt` of each emitter
+    # through `model.returnless_return_refusal`, over the same
+    # `ValueKinds.no_value_callee_of` evidence `print` uses, so the two ends of
+    # one word's life cannot be answered differently. The needle names the
+    # CONSTRUCT (`returns the value of`) rather than the FACT, so it is distinct
+    # from the `print`/`printf` rows' `is asked to render the value of`.
+    ("a_return_of_a_return_less_function_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a, b):\n"
+     "    return g(a, b)\n"
+     "\n"
+     "def main():\n"
+     "    print(f(1, 2))\n"
+     "    return 0\n",
+     "f returns the value of g(…)"),
+    # …and through a LOCAL, the second shape the `returned` position has: the
+    # operand is a name and what makes its word not a value is a binding two
+    # lines up, so this needs the `no_value_callee_of` evidence rather than a
+    # test on the operand — the same second shape `print` and `printf` have.
+    ("a_return_less_local_is_refused_at_the_return",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a, b):\n"
+     "    v = g(a, b)\n"
+     "    return v\n"
+     "\n"
+     "def main():\n"
+     "    print(f(1, 2))\n"
+     "    return 0\n",
+     "f returns the value of g(…)"),
+    # The DECLINE, as its own case rather than an absence. `return g(…)` for a
+    # `g` whose body is the no-implementation marker `...` is NOT claimed by the
+    # returned-position refusal: such a function is a DECLARATION this path
+    # cannot lower, `ellipsis_refusal` owns that fact, and reporting "g returns
+    # nothing" here would take the `no body to lower` message away from the
+    # reader. `model.function_body_is_absent` is the rule and
+    # `test_formal_run.py::limit_ellipsis_function_body` is the same boundary in
+    # the run suite; this row pins it where the refusal LIVES.
+    ("a_return_of_a_function_with_no_body_keeps_its_own_refusal",
+     "def slen(value):\n"
+     "    ...\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return slen(1)\n",
+     "no body to lower"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

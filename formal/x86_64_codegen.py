@@ -2215,6 +2215,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
+                # A RETURNED value this path cannot carry is refused FIRST, for
+                # the reason arm64 asks the same reader at the same point:
+                # `return g(…)` for a `g` with no `return` answers `g`'s
+                # epilogue word (measured `0` on BOTH architectures, where
+                # CPython answers `None`), and this is the `returned` position
+                # §0c of
+                # `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_
+                # cpython_yields_None.md` names. `model.returnless_return_
+                # refusal` and `ValueKinds.no_value_callee_of` are shared with
+                # arm64, and the rule DECLINES for a callee whose body is
+                # absent, which is what lets `limit_ellipsis_function_body`
+                # keep its `no body to lower` message.
+                self._refuse_returnless_value(stmt.value)
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -4429,6 +4442,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason = M.call_argument_kind_refusal(
             name, list(e.args or ()), [p[1] for p in params],
             self._printf_arg_conversion_class, TYPE_NAMES)
+        if reason is not None:
+            raise CodegenError(reason)
+
+    def _refuse_returnless_value(self, value) -> None:
+        """Raise when this function returns a call that produces no value.
+
+        Delegation to the same decision arm64 asks at its own `ReturnStmt`:
+        `ValueKinds.no_value_callee_of` is the reader and
+        `model.returnless_return_refusal` is the one message, so the two
+        architectures cannot disagree about `return g(…)` for a `g` with no
+        `return` — the `returned` position of
+        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+        yields_None.md` §0c. `self._functions.get` is handed over so the rule
+        DECLINES for a callee whose body is absent (`def f(): ...`), which is
+        what keeps `limit_ellipsis_function_body`'s `no body to lower` message.
+        """
+        reason = M.returnless_return_refusal(
+            getattr(self._cur_fn, "name", "this function"), value,
+            self._vkinds.no_value_callee_of, self._functions.get)
         if reason is not None:
             raise CodegenError(reason)
 

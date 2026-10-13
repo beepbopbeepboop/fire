@@ -943,6 +943,16 @@ CAUSE_SAMPLES = [
      "print() is asked to render the value of g(…), and g returns nothing: "
      "CPython evaluates that call to `None` and prints `None`, and a value on "
      "this path is one 64-bit word with no way to say `no value`"),
+    # The SAME not-a-value at the OTHER position, the one where the word becomes
+    # the function's RESULT rather than text: `formal/model.py::returnless_return_
+    # refusal`'s own f-string, so a reword fails this row instead of emptying it
+    # into `other refusal`. It is a SEPARATE sample from the one above because
+    # `classify_message` sees only the message: the two causes share no clause,
+    # and one sample in each is one proof its marker matches.
+    ("a returned value that is not a value: the callee returns nothing",
+     "f returns the value of g(…), and g returns nothing: CPython answers "
+     "`None` and f answers `None`, and a value on this path is one 64-bit word "
+     "with no way to say `no value`"),
     # A REAL message, not a constructed one: `test_llm/dumb_gemm.mojo` is
     # `[0.0] * (m * k)` three times over, and it is the file whose
     # "print() cannot classify" row this replaced. Pinned here so a rewording
