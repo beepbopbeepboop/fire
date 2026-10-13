@@ -64,11 +64,19 @@ a real encoding.
 """
 
 import os
-import re
 import sys
-import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# `sys.path[0]` is this script's own directory, `formal/`, and it makes
+# `formal/types.py` shadow the STDLIB `types`: on 3.14 `re` reaches `types`
+# (`re` -> `enum` -> `types`), so the first stdlib import below died with
+# `cannot import name 'GenericAlias' from 'types'` and this file — a REGISTERED
+# job — never ran. Replace the script's directory with the repository root
+# BEFORE importing anything, which is what the old `sys.path.insert` wanted and
+# could not do while `formal/` stayed ahead of the stdlib on the path.
+sys.path[0:1] = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+
+import re                                                # noqa: E402
+import tempfile                                          # noqa: E402
 
 import formal.x86_64 as X                                # noqa: E402
 import formal.x86_64_decode as D                         # noqa: E402
@@ -320,8 +328,8 @@ def samples():
     # `formal/x86_64_codegen.py` emits all of these, and until now `samples()`
     # named NONE of them, so `x86_step` was never asked the one question this
     # list exists to ask — `tools/formal_isa_census.py`'s LEAN column for x86-64
-    # IS this list, and it read `no` for each.  See
-    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+    # IS this list, and it read `no` for each — the SSE2 coverage gap the
+    # x86-64 ISA census tracked, closed on 2026-10-07.
     #
     # A HIGH XMM index is not available (SysV AMD64 names only XMM0-XMM7, and
     # every encoder asserts it), so unlike the GPR rows there is no r8-r15 pair

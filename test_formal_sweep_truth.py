@@ -5206,5 +5206,52 @@ class TestLabelUniqueness(unittest.TestCase):
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
 
 
+class TestTheX86_64DriversImportFromTheRepository(unittest.TestCase):
+    """A registered `formal/*_test.py` job must import with its OWN directory on
+    `sys.path[0]`.
+
+    Running `python3 formal/x86_64_endtoend_test.py` (which is exactly how the
+    suite's registry spells each of these three jobs) puts `formal/` at
+    `sys.path[0]`, and `formal/types.py` then shadows the STDLIB `types`.  On
+    Python 3.14 that is fatal before the body runs: `re` imports `enum` which
+    does `from types import …`, so each job died at its first stdlib import
+    with `cannot import name 'GenericAlias' from 'types'`.  Two of the three
+    carry an `expect=` marker, which absorbs a FAIL — including an import
+    failure — so nothing noticed that they never ran at all.
+
+    The fix is a `sys.path[0:1] = [<repository root>]` line before the first
+    stdlib import in each driver.  This is the pin, and it reproduces the exact
+    condition the shadow needs (`sys.path[0]` set to the script's directory)
+    without paying for any driver's body.
+    """
+
+    DRIVERS = ("formal/x86_64_endtoend_test.py",
+               "formal/x86_64_model_coverage_test.py",
+               "formal/x86_64_model_test.py")
+
+    def test_each_driver_imports_with_its_own_directory_on_the_path(self):
+        import subprocess
+        for rel in self.DRIVERS:
+            with self.subTest(driver=rel):
+                code = (
+                    "import os, runpy, sys\n"
+                    "p = %s\n"
+                    "sys.path[0] = os.path.dirname(os.path.abspath(p))\n"
+                    "runpy.run_path(p, run_name='__shadow_check__')\n"
+                    % repr(rel))
+                r = subprocess.run([sys.executable, "-c", code],
+                                   capture_output=True, text=True,
+                                   cwd=HERE, timeout=300)
+                self.assertEqual(
+                    r.returncode, 0,
+                    "`python3 %s` cannot even import: %s"
+                    % (rel, (r.stderr or r.stdout).strip()[-500:]))
+                self.assertNotIn(
+                    "GenericAlias", r.stderr,
+                    "`%s` left `formal/` on `sys.path[0]`, so `formal/types.py` "
+                    "shadows the stdlib `types` and the job dies at import: %s"
+                    % (rel, r.stderr.strip()[-300:]))
+
+
 if __name__ == "__main__":
     unittest.main()

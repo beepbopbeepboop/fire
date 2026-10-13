@@ -27,14 +27,22 @@ Run: python3 formal/x86_64_model_test.py [-v]
 Exit: 0 iff every example agrees.
 """
 
-import glob
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# `sys.path[0]` is this script's own directory, `formal/`, and it makes
+# `formal/types.py` shadow the STDLIB `types`: `glob` reaches it
+# (`glob` -> `re` -> `enum` -> `types`), so the first stdlib import below died
+# with `cannot import name 'GenericAlias' from 'types'` and this file — a
+# REGISTERED job — never ran. Replace the script's directory with the repository
+# root BEFORE importing anything, which is what the old `sys.path.insert`
+# wanted and could not do while `formal/` stayed ahead of the stdlib.
+sys.path[0:1] = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+
+import glob                                                 # noqa: E402
+import shutil                                               # noqa: E402
+import subprocess                                           # noqa: E402
+import tempfile                                             # noqa: E402
 
 import formal.build as B                                    # noqa: E402
 import formal.lean as L                                     # noqa: E402

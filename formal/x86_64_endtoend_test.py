@@ -137,14 +137,22 @@ Usage: python3 formal/x86_64_endtoend_test.py [file.mojo ...]
 """
 
 import os
-import re
-import subprocess
 import sys
-import tempfile
 
+# `sys.path[0]` is this script's own directory, `formal/`, and it makes
+# `formal/types.py` shadow the STDLIB `types`: on 3.14 `re` reaches `types`
+# (`re` -> `enum` -> `types`), so the first stdlib import below died with
+# `cannot import name 'GenericAlias' from 'types'` and this file — a REGISTERED
+# job — never ran. Replace the script's directory with the repository root
+# BEFORE importing anything, which is what the old `sys.path.insert` wanted and
+# could not do while `formal/` stayed ahead of the stdlib on the path.
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
+sys.path[0:1] = [ROOT]
+
+import re                         # noqa: E402
+import subprocess                 # noqa: E402
+import tempfile                   # noqa: E402
 
 import formal.build as B          # noqa: E402
 import formal.x86_64_decode as D  # noqa: E402
