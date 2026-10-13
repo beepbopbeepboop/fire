@@ -5,7 +5,15 @@ through a value whose binding the image cannot see, `formal/build.py`'s export
 rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 **Status: the ranking is DONE and it says the task's "next 4-6 modules by files
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
-this file is about is NOT built and §5 says what building it takes.**
+this file is about is NOT built and §5 says what building it takes.** 2026-10-13
+(`work/formal374-docs`): the two INSTRUMENTS this doc leans on had drifted and
+are corrected — §3's dead-import ratchet had grown from the one file it names
+(`fire_compiler.py`) to three, because `tools/formal_doc_index.py` and
+`tools/formal_metamorph.py` each imported `subprocess` and read nothing through
+it (both deleted), and §0/§4's `importlib.util` row had gained
+`importlib.util.find_spec` (spelled by `test_formal_imports.py`'s own CPython
+oracle), so its expected name list was stale. The bug this doc is about — a field
+read through a call's result — is unchanged; see §5.
 
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
