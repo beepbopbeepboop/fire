@@ -41,10 +41,11 @@ LC_UNIXTHREAD = 0x05
 ARM_THREAD_STATE64 = 4
 ARM_THREAD_STATE64_COUNT = 32
 
-MH_TWOLEVEL = 0x00800000
-MH_NOUNDEFS = 0x00000001
-MH_BIND_AT_LOAD = 0x00000002
-MH_DEAD_STRIPPABLE_DYLIB = 0x00002000
+# The `MH_*` header and segment flags are defined beside the writer that stamps
+# them, in `formal/macho_linker.py` (`MH_NOUNDEFS`, `MH_DYLDLINK`, `MH_TWOLEVEL`,
+# `MH_PIE`, `MH_NO_REEXPORTED_DYLIBS`, `SG_READ_ONLY`, …). They used to be
+# duplicated here, aliased onto other flags; the writer's are the canonical
+# ones.
 
 
 def _build_segment_64(
