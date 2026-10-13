@@ -902,12 +902,11 @@ checked.
 | `too-large` | **2** | Lean's own `-M` refused the proof — **not a verdict** | `formal/lean.py`'s `LEAN_MEMORY_MB` |
 
 **The three `lean-rejected` families, by the site they stop at** (each row is a
-`Counter` over the committed baseline, and every one of these is one subject
-with a doc of its own):
+`Counter` over the committed baseline, and every one of these is one subject):
 
 | n | the site | whose |
 |---:|---|---|
-| 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
+| 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `count` and `pow2` — declared in `test_formal.py::EXPECTED_FAILURES` with the address as the reason, and pinned by `test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`; the fix is the frame-address canonicalisation the `x30`-reload and dylib-frame-bounds work owns |
 | 5 | `⊢ (if sKey a ≤ sKey b then 1 else 0) = …` or a `t32s (t8s n) = n` round trip, all at `:2332:41` / `:2212:41` / `:61:57` | **was** `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` — now **fixed and its document deleted**: the universal theorem carries `nw : n < 128` and the truncation discharges against it, so `sgt8`/`sle8`/`ug8`/`n8` are `PASS` with 0 admitted `sorry` (re-measured 2026-10-05, `PASS=4 KNOWN-GAP=0 FAIL=0`). The `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` half of this row is its `Still open 3`, which is about the loop MODELS and was never this obligation |
 | 2 | a frame-condition read: `fib`'s tree-recursion `FrameOk` window and `sum_range`'s conditions-operand slot | each has its own doc, both linked from `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
 
