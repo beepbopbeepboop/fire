@@ -3412,9 +3412,9 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
     enumerates `CSET`s and finds none. So the chain carried
     `simp [h, Arm64State.init]` with **no flag lemma at all**, and the raw
     `arm64_matches_condition 11 (arm64_subs_flags …) = true` had nothing to
-    reduce it. That is
-    `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`,
-    and it is pinned here rather than in `test_formal.py` because the thing
+    reduce it. That was the bug — a `B.cond` chain whose closing `simp` named no
+    flag lemma, fixed now — and it is pinned here rather than in
+    `test_formal.py` because the thing
     under test is the text the generator emits — which is this file's whole
     subject, and which is checkable with no Lean run at all.
 
@@ -3434,16 +3434,19 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
       naming `_COND_LEMMA` as the only source (the generator source check below
       fails if a second table reappears).
 
-    What is NOT asserted, and is the honest edge: the lemma being in the `simp`
-    set is necessary and not sufficient, because the chain's earlier
-    `simp only` unfolds `arm64_subs_flags` / `arm64_matches_condition` — and
-    `simp only` is irreversible, so a lemma in a LATER `simp` can never match
-    the term the earlier line expanded. `sum_range.mojo`'s own `hcond_4` is the
-    measured case (`0 ^^^ 0x8000… < n ^^^ 0x8000…`, a RANGE, which
-    `by_cases` + `simp [h]` cannot ground because it leaves `n` free on both
-    branches), and the chain order that would let the lemma fire is written down
-    there rather than landed here — it changes 26 of the 49 generated arm64
-    proofs and a light worker cannot Lean-verify that.
+    The third half, and the one a presence check cannot see, is the ORDER: the
+    lemma being in the `simp` set is necessary and not sufficient, because the
+    chain's earlier `simp only` unfolds `arm64_subs_flags` /
+    `arm64_matches_condition` — and `simp only` is irreversible, so a lemma in a
+    LATER `simp` can never match the term the earlier line expanded. That order
+    was the conditions-operand doc's step 3 and is now landed (the `try rw
+    [<flag>]` sits between the block-chain `simp only` and the flag unfold,
+    `_hcond_close`), pinned by
+    `test_the_flag_lemma_fires_before_the_flags_are_unfolded` below.
+    `sum_range.mojo`'s own `hcond_4` was the measured case
+    (`0 ^^^ 0x8000… < n ^^^ 0x8000…`, a RANGE); it is now REFUSED for a
+    different reason (`test_both_shapes_generate` below), so the equality shape
+    carries this check.
     """
 
     RANGE = ("def sum_range(n):\n"
@@ -3578,6 +3581,60 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                           f"is reduced to an order the machine does not test, "
                           f"and the chain still elaborates — the failure a "
                           f"presence check cannot see")
+
+    def test_the_flag_lemma_fires_before_the_flags_are_unfolded(self):
+        """The ORDER, which is the half a presence check cannot see.
+
+        `simp only` is IRREVERSIBLE: `arm64_subs_flags` /
+        `arm64_matches_condition` unfolded once cannot be matched again, so a
+        flag lemma left to the closing `simp` still hands `bv_decide` an opaque
+        `arm64_reg`/`arm64_matches_condition` term — the "potentially spurious
+        counterexample". The lemma therefore has to fire FIRST, as an explicit
+        `try rw [<flag>]` between the block-chain `simp only` and the line that
+        unfolds the flags. That order is what
+        the conditions-operand doc's step 3 was, and this pins it rather than
+        the lemma's presence.
+
+        `try` and not `rw` is what makes it safe when the operands have not
+        reduced, so a chain may legitimately have no flag line (the `try rw` is
+        a no-op); what may NOT happen is a chain whose flag lemma is named only
+        AFTER `arm64_subs_flags` was unfolded.
+        """
+        with open(self.equal) as fh:
+            lines = fh.read().split("\n")
+        hid = None
+        checked = 0
+        for i, line in enumerate(lines):
+            if "have hcond_" not in line:
+                continue
+            hid = line.strip().split()[1]
+            flag_at = subs_at = None
+            for j in range(i + 1, min(i + 20, len(lines))):
+                body = lines[j].lstrip()
+                if flag_at is None and "arm64_flag_" in body \
+                        and body.startswith(("try rw [", "rw [")):
+                    flag_at = j
+                if subs_at is None and "arm64_subs_flags" in body:
+                    subs_at = j
+                if "by_cases h :" in body:
+                    break
+            if subs_at is None:
+                continue
+            self.assertIsNotNone(
+                flag_at,
+                f"{hid}: the chain unfolds `arm64_subs_flags` at line "
+                f"{subs_at + 1} and never names a flag lemma with an explicit "
+                f"`try rw`, so the lemma is left to the closing `simp` — which "
+                f"`simp only` has already made unmatchable")
+            self.assertLess(
+                flag_at, subs_at,
+                f"{hid}: `arm64_flag_…` is named at line {flag_at + 1} but "
+                f"`arm64_subs_flags` is unfolded at line {subs_at + 1}, AFTER "
+                f"it; `simp only` is irreversible, so the lemma can never fire "
+                f"and bv_decide sees an opaque register")
+            checked += 1
+        self.assertGreater(checked, 0,
+                           "no hcond chain with a flag unfold to check")
 
 
 class TestLoopContractBlocks(unittest.TestCase):

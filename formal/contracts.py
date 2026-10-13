@@ -811,10 +811,10 @@ _MASK = (1 << 64) - 1
 # `Arm64State` is a structure and not a bitvector.  Measured on the dylib
 # export contract `hreg`, which is where the diagnosis and the fix both live
 # (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
-# memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
+# memory round trip as its own `simp`-closed lemma first).  The same failure was
+# measured on the loop-contract chain: `bv_decide` abstracted an `arm64_reg` as
+# opaque and reported a spurious counterexample, which is an artefact of the
+# abstraction rather than a false goal.  If a clause over `BitVec` is
 # ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`

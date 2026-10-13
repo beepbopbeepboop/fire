@@ -77,7 +77,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_known_proof_gaps.md` | `formal260-docs-r2-r2` | the arm64 examples whose proof is a documented gap |
 | `FORMAL_float_step_functions.md` | `formal262-docs-r2` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | **unclaimed** | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
-| `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | **unclaimed** | `bv_decide` reports a counterexample for a flag the spill hid |
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | **unclaimed** | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | **unclaimed** | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | **unclaimed** | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
