@@ -3728,7 +3728,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # is far smaller and is stated in the comment at the registration.
 #
 # `formal-proof-census-tool` is `test_formal_proof_census.py`: 46 assertions, no
-# Lean, no build — the corpus is the whole directory and sorted, the rank order
+# Lean of its own — the corpus is the whole directory and sorted, the rank order
 # is the documented one, an unmeasured time is never compared and never zero, a
 # changed example is never compared against its old row, the three check
 # outcomes classify apart, and the COMMITTED baseline is honest about all of it
@@ -3736,6 +3736,10 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
+# `deps` includes `prooflib`: one row (`test_library_state_agrees_with_the_question_
+# it_asks`) asserts `lib/*.olean` exists, so under a parallel `proofs` bucket this
+# job can otherwise start before the shared library is built and fail on a machine
+# that has not built it — a failure about the machine, not about the baseline.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
@@ -3778,7 +3782,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
