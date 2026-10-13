@@ -3,6 +3,42 @@
 
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py`'s
 `audit_step_table`, and the census it was hiding.
+
+**Status 2026-10-13 (`work/formal341-docs`): the audit fix is confirmed in place
+and PINNED, and the 2026-10-07 status's "the PIN below is RED, 12 failures" is
+STALE — the pin is GREEN. Measured; what is left is the Lean corpus, not this
+doc's code:**
+
+* `formal.arm64_proof_gen.audit_step_table("lib/ProofLib.lean")` returns exactly
+  the three shadow notes the audit's own text records (`entry 3 shadows entry
+  5`, `entry 4 shadows entry 47`, `entry 48 shadows entry 50`) — it is the
+  de-duplicated reader (`_decoder_branch_conds`) and not a reworded comment.
+* `test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is
+  **GREEN** (5 tests / 0.314 s / OK, including `test_the_one_that_refuses_says_why`
+  and `test_the_owner_of_the_one_refusal_still_exists`), and so is
+  `TestTheReachedWalkIsPerPath` (2 tests / OK). The twelve refusals the
+  2026-10-07 section records were caused by the `_reached_without_a_condition`
+  logic bug; that walk now carries `(block, crossed)` and answers `True` only for
+  a block CONTAINING the halt address with no source conditional crossed, which
+  is the fix. **So the doc's §4.1 question — "does LEAN accept each of them" — is
+  the whole of what is left, and it is a series of Lean runs
+  (`test_formal.py -j 1 <stem>`), which is the integrator's.**
+* On a tree with `lib/ProofLib.olean`, `test_formal_call_proof_gen.py` is
+  **175 tests / 9 failures**. Four are
+  `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`'s
+  (`mod_by_var`, `same_image_leaf`, the `hprior_` fact-count ratio, and the
+  narrow-typed parameter test). The other five are this class's neighbour,
+  `TestTheZeroDivisorGuardAgainstLean`
+  (`FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`).
+  **Of this doc's eleven examples, `sgt8` is the one among the current reds, and
+  its SIGNATURE has moved**: §5 records a 30-field `Arm64State` literal /
+  `bv_decide` shape, and it is now a `rewrite` that no longer finds its pattern
+  (`sgt8_proof.lean:4306:10` and `:4475:10`, `rw [mem_read_two_writes_adj_uint
+  _ (((s_0).sp - UInt64.ofNat 32) - UInt64.ofNat 16) _ _]`, the pattern
+  `mem_read_u64 (mem_write_u64 (mem_write_u64 …))` not present in the goal). So
+  §5's per-family census is stale for at least that family and needs a Lean
+  re-measurement — do not read §5 as current.
+
 **Status: the AUDIT is fixed, `sum_range` now generates too, and what is LEFT
 is eleven LEAN RUNS — which is §4.1's own verdict about itself, and it is not
 work this tree can do.** The eleven are re-measured ONE AT A TIME below, each

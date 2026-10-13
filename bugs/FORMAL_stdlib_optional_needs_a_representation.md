@@ -1,5 +1,40 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
+**Status 2026-10-13 (`work/formal341-docs`): the REPRESENTATION this doc's title
+asks for HAS LANDED, and the chain below is stale at its FIRST arrow again. Read
+`FORMAL_optional_needs_a_niche.md` as the live home for this subject; this doc is
+kept only for the `builtin_slice` row and the chain's history.**
+
+* **`Optional` got its one-word NICHE representation** (`formal/model.py`'s
+  `optional_none_word`, `formal/build.py::apply_optional_none_representation`,
+  the `_emit_optional_unwrap` paths in both backends) and the unwrap the chain
+  was waiting on now LOWERS: `Optional[Bool]`, `Optional[String]`,
+  `Optional[Int32]` and every reference-shaped payload answer `or_else` / `is
+  None` / `value_or` on both architectures, pinned by `test_formal_optional.py`
+  (25/0) and `test_formal_module_attr.py` (36/0). So the sentence this doc opens
+  with — "NOT FIXED — it is a value-model decision" — is no longer true of the
+  representation. What is left of `Optional` is the **`Optional[Int]` two-word
+  value** (every 64-bit word is a value of `Int`, so there is no niche), and that
+  is `FORMAL_optional_needs_a_niche.md` §2, not this doc.
+* **The chain's first arrow is no longer a frame or a value-model question on
+  this tree: it is the EXPORT rule.** Measured, both architectures,
+  byte-identical, `fire.py build --formal --no-prove --backend=<a>` on
+  `../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo`:
+
+      build: Slice.write_to: `FormatStruct` is called, and it is imported from
+      `std.format._utils`, so the call has to bind a symbol `std.format._utils`
+      exports. … If the call names no type argument at all, the SOURCE is right
+      and this path is short … in
+      bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md
+
+  So `builtin_slice.mojo` now stops at the bare-template-call/export wall
+  (`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`, a
+  different claim) rather than at any arrow §"Re-measured" records. **The honest
+  accounting is unchanged and still zero: 0 of the 13 files gained a PASS.** The
+  row is not waiting on this doc, and has not been since the representation
+  landed.
+
+
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
 Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
 value-model decision, and it is the last thing between the `builtin_slice` row
