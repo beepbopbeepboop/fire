@@ -1879,11 +1879,13 @@ class TestNestedConditionFactSharing(unittest.TestCase):
     scope, each of them by unfolding a block's whole composed state.
 
     The emission was `branches x prior-blocks-on-the-path x variables x PATHS`,
-    and the paths are the multiplier: at four conditional branches the four
-    programs below carried 48 / 144 / 384 / 960 facts, growing x3.0, x2.67 and
-    x2.5 per branch, against a distinct-statement count of 6 / 8 / 10 / 12.
-    With the memo it is 24 / 48 / 96 / 192 — x2.0 per branch, which is the
-    number of PATHS and therefore the part that is not re-derivation.
+    and the paths are the multiplier. The case below measures the shape on this
+    tree: with the memo the per-condition INCREMENT doubles — the path count,
+    and the part that is not re-derivation — while disabling the memo makes it
+    grow faster still. The absolute totals and the pre-memo ratio move with the
+    block layout between generator changes (measured 192 -> 45 facts at four
+    conditions between 2026-10-04 and 2026-10-13), which is why that case bounds
+    the increment and not the total.
 
     **Sharing is per path and never across one, because `s_{pb}` is rebound per
     path**: `hsid_{pb}` is emitted once per visit, measured 1 / 2 / 4 / 8 / 16
@@ -1994,26 +1996,44 @@ class TestNestedConditionFactSharing(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_the_fact_count_grows_with_the_paths_and_not_with_the_branches(self):
+        """The INCREMENT doubles, and that is the quantity a per-path memo fixes.
+
+        An added condition doubles the number of paths, so it adds one copy of
+        the path-invariant prefix on each of the two new paths — the frozen
+        prefix cancels in the difference, and only the increment is the path
+        count. The TOTAL is `3 * (2**k - 1)` here (3 / 9 / 21 / 45), whose own
+        ratio is 3.00 / 2.33 / 2.14: a bound on the total reads that additive
+        `-3` as super-linear growth at small `k`. Measured 2026-10-13 before this
+        change: 9 / 21 / 45 against the old 2.2 bound on the total, so the 2 -> 3
+        step failed for an arithmetic reason rather than a sharing one. The
+        increments are 6 / 12 / 24, x2.0 exactly, which is the number of PATHS
+        and the part that is not re-derivation.
+        """
         tmp = tempfile.mkdtemp(prefix="hprior_growth_")
         try:
             counts = {}
-            for k in (2, 3, 4):
+            for k in (1, 2, 3, 4):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
-            # x2 per condition, which is the path count. The pre-memo growth was
-            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
-            # bound of 2.2 is below the old one and above the new one — and it
-            # is a bound rather than a count because the exact number moves with
-            # the block layout, while the growth rate is the thing that was wrong.
+            # x2 per condition on the INCREMENT, which is the path count. With
+            # the memo disabled the 3 -> 4 increment was 36 -> 96 (x2.67), the
+            # exponential back this pins; the bound 2.2 is below that and above
+            # the memo's x2.0. A bound rather than a count, because the exact
+            # number moves with the block layout while the growth rate is the
+            # thing that was wrong.
             for k in (3, 4):
-                ratio = counts[k] / counts[k - 1]
+                was = counts[k - 1] - counts[k - 2]
+                now = counts[k] - counts[k - 1]
+                ratio = now / was
                 self.assertLessEqual(
                     ratio, 2.2,
-                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
-                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
-                    f"this x2 (the number of paths) and anything above 2.2 is "
-                    f"the exponential back")
+                    f"{k - 2} -> {k - 1} conditions added {was} facts and "
+                    f"{k - 1} -> {k} added {now} (x{ratio:.2f}, totals "
+                    f"{counts[k - 2]} / {counts[k - 1]} / {counts[k]}); the "
+                    f"per-path memo makes each new condition add one copy per "
+                    f"new PATH, so the increment doubles and anything above 2.2 "
+                    f"is the exponential back")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
