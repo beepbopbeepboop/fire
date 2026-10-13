@@ -201,6 +201,35 @@ def template_names(src: str) -> list:
         if why == reflect.EXCL_GENERIC))))
 
 
+def template_struct_names(src: str) -> list:
+    """The names `src` declares as a generic STRUCT template.
+
+    A SUBSET of `template_names`, and the subset is what a reader needs when the
+    question is "can a bracket list on this name be a runtime subscript". A
+    generic struct template is not a value and has no container representation,
+    so a multi-element bracket on it is a compile-time parameter list — and a
+    generic FUNCTION template is the other answer (`twice[Int](n)` is a call
+    specialisation, not an instantiation this module publishes).  The two are
+    told apart by the DECLARATION, and `template_kind` is the one reader of
+    that distinction, so this asks it rather than re-deriving it.
+
+    **Why it exists as a function rather than a loop at the caller.**  A
+    `struct Tagged[T, origin: Int]` is DROPPED from the statements a build
+    compiles (`without_template_bodies`), so once the module is being checked
+    neither `callee_defs` (functions) nor the instantiated `structs` table names
+    it — and `formal/build.py::check_module_symbols` then classified
+    `Tagged[Int, 0]` as "a subscript whose index is a tuple", which is false
+    about the source: it is a comptime parameter list.  The names have to come
+    from the SOURCE, which is the only place they survive, and this is the one
+    reader of them.
+
+    Derives once per distinct source text (`_derived_from_source`), for the
+    reason `template_names` gives: it is a function of the text alone.
+    """
+    return list(_derived_from_source("template_struct_names", src, lambda: tuple(
+        n for n in template_names(src) if template_kind(src, n) == KIND_STRUCT)))
+
+
 def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     """`stmts` with this source's GENERIC TEMPLATE declarations removed.
 
@@ -243,8 +272,7 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     gone from the next build's too.
     """
     import fire_compiler as F                        # lazy — the AST classes
-    drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
+    drop = set(template_struct_names(src)) - set(keep or ())
     if not drop:
         return stmts
     return [s for s in stmts

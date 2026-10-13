@@ -13399,6 +13399,21 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
+    # A module-DECLARED generic STRUCT template whose bracket list names a
+    # comptime value. The template is DROPPED from the image before the
+    # multi-index question is asked (`_declared_struct_templates`), so neither
+    # the function table nor the instantiated struct table names it — and
+    # without `declared_struct_templates` this was refused as "a subscript
+    # whose index is a tuple", which describes a container lookup that never
+    # happens. The construct is a compile-time parameter list, exactly as it is
+    # for the imported `Span[StaticString, ImmStaticOrigin]` the message names.
+    ("sub_multi_index_declared_struct_template_is_comptime_params",
+     "struct Tagged[T, origin: Int]:\n"
+     "    var v: T\n\n"
+     "def main(n):\n"
+     "    var t = Tagged[Int, 0]()\n"
+     "    return 0\n",
+     "refuse:is a compile-time explicit-parameter list on a generic", None),
     # The refusal NAMES WHICH ELEMENT has no word, and this is the row for the
     # shape `std/sys/arg.mojo:51` has: a first element this image can resolve to
     # a declaration and a second it cannot. Before, the one sentence merged both
