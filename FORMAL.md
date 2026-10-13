@@ -564,9 +564,9 @@ same 11 and not three different numbers:
 | `mojo_repr_slot_kind` | `char *mojo_repr_slot_kind(char kind, int64_t v)` | ″ |
 | `mojo_str_count_from` | `int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_endswith_from` | `int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop)` | ″ |
+| `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 | `mojo_str_rfind_from` | `int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_startswith_from` | `int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop)` | ″ |
-| `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 
 **The `40` and `56` gaps did not move, and that is a fact rather than a
 coincidence**: the eleven added no `void *` parameter, so none of them joined
