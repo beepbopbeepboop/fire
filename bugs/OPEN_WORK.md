@@ -66,7 +66,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md` | **unclaimed** | FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 
-### `formal/arm64_proof_gen` — 21 documents, 4 claimed
+### `formal/arm64_proof_gen` — 22 documents, 4 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -79,6 +79,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | **unclaimed** | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | **unclaimed** | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | **unclaimed** | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
+| `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` | **unclaimed** | 20 of 78 functions, the largest cause in the proof-breadth census |
 | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` | **unclaimed** | the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it |
 | `FORMAL_ast_bridge_carries_one_argument_per_call.md` | **unclaimed** | `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false |
 | `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` | **unclaimed** | `test_formal_call_proof_gen.py`'s remaining reds after merging the oct-7 formal branches |
@@ -132,7 +133,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 14 documents, 1 claimed
+### `formal/lean` — 13 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -141,7 +142,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | **unclaimed** | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
 | `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md` | **unclaimed** | A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone |
 | `FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_contract.md` | **unclaimed** | 8 of the 44 examples added to `formal/examples` on 2026-10-05, and the model it used to emit for them was a diverging `partial def` |
-| `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` | **unclaimed** | 20 of 78 functions, the largest cause in the proof-breadth census |
 | `FORMAL_contract_ladder_reach.md` | **unclaimed** | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | **unclaimed** | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
 | `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | **unclaimed** | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
