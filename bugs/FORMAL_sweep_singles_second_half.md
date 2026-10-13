@@ -1,5 +1,46 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
+**Status 2026-10-13 (`work/formal341-docs`): the three rows that remain (§1, §3,
+§5) do not reach their stated refusal on this tree any more — each row's FILE now
+stops one wall EARLIER, at the f-string / string-composition refusal
+(`FORMAL_string_composition_has_no_buffer`, a different claim). The rows' own
+conclusions about the underlying constructs are unchanged; what moved is the
+first refusal a builder sees, so a reader following §1/§3 must expect the wall
+below.**
+
+* **§1 `field(default_factory=F)` — `formal/x86_64_decode.py`.** §1 records the
+  refusal as the `field(default_factory=F)` sentence. On this tree the file stops
+  earlier, at its f-string on line 133:
+
+      build: an f-string literal on line 133 is refused on this path: its value is
+      its INTERPOLATED text, and this path has no buffer to compose one in. … The
+      parser keeps the whole source token (`f"SIB with index {index} is not
+      emitted"`) as the literal's value …
+
+  which is `FORMAL_string_composition_has_no_buffer`'s row, **not** the
+  `default_factory` refusal §1 measured. So §1's "CORRECT refusal" is still true
+  of the underlying `field(default_factory=F)` construct, but the file no longer
+  reaches it in one build.
+
+* **§3 a slot holding a frame address rebound — `regex_compile.py`.** Same shape:
+  the file now stops at its f-string on line 116
+  (`f"regex parse error at {self.i} in {self.p!r}"`, the same
+  string-composition refusal), not at the frame-rebind sentence §3 quotes.
+
+* **§5 a method call on a value receiver** — unchanged: both files are stdlib
+  (`std/format/repr.mojo`, `std/utils/_serialize.mojo`), so the probe is a stdlib
+  edit and not makeable from a repository worktree; the next step is still the
+  `repr` model §5 names.
+
+**The measurement**, both rows, arm64, one build each:
+
+    $ python3 tools/memslot.py --gb 8 --label b -- python3 fire.py build \
+          --formal --no-prove -o .tmp/esc/out <file>
+
+This does not change §2/§4/§6 (retired, fixed) and it does not make any of the
+three a patch: it moves where the wall is, not whether it is there.
+
+
 **Status: filed 2026-10-03 from the sweep map
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
