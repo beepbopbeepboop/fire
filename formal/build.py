@@ -17675,6 +17675,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `interpolated_literal_refusal`), so it is a refusal, and a refusal asked
     # from either backend would be a second copy of one decision — which is how
     # the executable and dylib paths come to answer differently about one file.
+    #
+    # The fold in front of it is the half of that subject which needs NO buffer:
+    # an f-string with no `{…}` field is a constant, and `fold_constant_
+    # interpolated_literals` rewrites it into the plain literal it is before the
+    # refusal is asked.  In front rather than inside so the refusal's own
+    # sentence stays about the interpolating case it is for; a caller that
+    # skipped the fold would refuse a correct program, never miscompile one.
+    M.fold_constant_interpolated_literals(stmts)
     M.refuse_interpolated_literals(stmts)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk

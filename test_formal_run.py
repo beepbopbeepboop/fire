@@ -6410,6 +6410,47 @@ BOTH_ARCH_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d %d\", count(\"a\"), count(\"abcd\"), count(\"\"))\n"
      "    return 0\n", 0, "1 4 0"),
+    # An f-string with NO `{…}` field is not a composition and needs no buffer:
+    # its value is the text between its quotes, exactly what the same literal
+    # without the `f` holds.  It was refused anyway, with a message that said of
+    # this very shape "its value is a CONSTANT and this refusal is over a missing
+    # buffer" — a closer reading of the source than the refusal was, since a
+    # constant is interned and needs no buffer.  `formal/model.py::
+    # fold_constant_interpolated_literals` rewrites it into the plain literal it
+    # is before `refuse_interpolated_literals` is asked, and these two rows are
+    # the half so the refusal's subject is the INTERPOLATING case it is for.
+    #
+    # `f"a{{b}}"` carries the brace escape, so this is not only "a constant":
+    # it checks that the fold unescapes `{{`/`}}` the way the language does.  The
+    # second row's `rf"\d+"` is why the fold reads `is_raw` off the PREFIX:
+    # rewriting a raw f-string as a non-raw literal would decode its backslashes
+    # and `rf"a\nb"` would become a newline where CPython has a backslash and an
+    # `n`.  Both arms build and run on both machines, so the group is the right
+    # one for them: the fold is in the shared pipeline and nothing about it is
+    # architecture-specific.
+    ("an_fstring_with_no_field_is_the_plain_string",
+     "def main(n):\n"
+     "    a = f\"hello\"\n"
+     "    b = f\"a{{b}}\"\n"
+     "    printf(\"[%s][%s]\", a, b)\n"
+     "    return 0\n", 0, "[hello][a{b}]"),
+    ("a_raw_fstring_with_no_field_keeps_its_backslash",
+     "def main(n):\n"
+     "    a = rf\"\\d+\"\n"
+     "    b = f\"x\\ny\"\n"
+     "    printf(\"[%s][%s]\", a, b)\n"
+     "    return 0\n", 0, "[\\d+][x\ny]"),
+    # …and the t-string prefix is folded by the same reader and for the same
+    # reason: a t-string's `{name}` is a TEMPLATE, but a t-string with no field
+    # has no template to answer, and the interpreter already reads a field-less
+    # `t"…"` as its text (myinterpreter.py's `eval_StringLiteral`).  One row, so
+    # a fold that keyed on the `f` prefix alone would fail it rather than
+    # quietly refusing correct code.
+    ("a_tstring_with_no_field_is_the_plain_string",
+     "def main(n):\n"
+     "    a = t\"hello\"\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n", 0, "[hello]"),
     # …and the eq-dispatch case that is in this group for the reason the group's
     # docstring gives, read for this construct: the two backends' HOLDER
     # analysis is one shared table (`formal/build.py`'s `_frame_receivers`), so

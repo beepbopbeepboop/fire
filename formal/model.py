@@ -11620,6 +11620,76 @@ def interpolated_literal_segments(spelled: str) -> list:
     return out
 
 
+def interpolated_literal_constant(node):
+    """`(text, is_raw)` for an interpolated literal with NO `{…}` field, else None.
+
+    **An f-string with no field is not a composition and needs no buffer.** Its
+    value is the text between its quotes with `{{`/`}}` unescaped, which is
+    exactly what an ordinary string literal of the same body holds — so this is
+    the half of `interpolated_literal_refusal`'s subject that the refusal itself
+    is WRONG about. It says, of this very shape, "its value is a CONSTANT and
+    this refusal is over a missing buffer rather than a run-time value", and a
+    constant needs no buffer: it is interned like any other literal's bytes.
+    `fold_constant_interpolated_literals` turns the node back into the plain
+    literal it is instead of refusing it.
+
+    `is_raw` is read from the literal's own PREFIX, and
+    `interpolated_literal_quote_start` is the one reader of that width, so a raw
+    f-string keeps its backslashes: `rf"\\n"` is a backslash and an `n`, and
+    rewriting it as the non-raw `"\\n"` would silently turn it into a newline.
+    `interpolated_literal_segments` already leaves every backslash untouched
+    (only the brace escapes are f-string syntax), so the raw flag is the whole
+    of what has to be carried across.
+
+    None for a literal that HAS a field — the interpolating case the refusal
+    exists for — and for a token `interpolated_literal_segments` cannot take
+    apart, so the caller keeps that reader's own reason rather than this one.
+    """
+    if not is_interpolated_literal(node):
+        return None
+    spelled = getattr(node, "value", "")
+    if not isinstance(spelled, str):
+        return None
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError:
+        return None
+    if any(s[0] == 'field' for s in segs):
+        return None
+    text = "".join(s[1] for s in segs if s[0] == 'lit')
+    prefix = spelled[:interpolated_literal_quote_start(spelled)]
+    return text, any(c == 'r' or c == 'R' for c in prefix)
+
+
+def fold_constant_interpolated_literals(stmts) -> int:
+    """Rewrite every field-less interpolated literal under `stmts` into the
+    plain string literal it is; return how many were rewritten.
+
+    Asked immediately before `refuse_interpolated_literals` in the one pipeline
+    both front ends go through (`formal/build.py::_prepare_functions`), so the
+    refusal's subject becomes exactly the literals that INTERPOLATE. Every
+    reader downstream — both emitters, `non_ascii_strings_in`, the proof
+    generators — sees an ordinary `StringLiteral` and needs no knowledge of
+    f-strings at all for this shape.
+
+    In place, and lossless by construction: the node it rewrites denotes the
+    same string it did, so a later reader of the same parsed module sees the
+    folded value and not a different program. It is idempotent — the rewritten
+    node is no longer `is_interpolated`, so a second pass counts zero.
+    """
+    n = 0
+    for node in iter_nodes(stmts):
+        got = interpolated_literal_constant(node)
+        if got is None:
+            continue
+        text, is_raw = got
+        node.value = text
+        node.is_raw = is_raw
+        node.is_interpolated = False
+        n += 1
+    return n
+
+
 def interpolated_literal_refusal(node, where: str = "") -> str:
     """Why an f-string/t-string literal is refused on this path.
 
@@ -11749,7 +11819,7 @@ def _interpolated_shape_sentence(segs: list) -> str:
 
 
 def refuse_interpolated_literals(stmts) -> None:
-    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+    """Raise `CodegenError` on the first INTERPOLATING literal in `stmts`.
 
     Asked over the MODULE's statement list, once, by the one pipeline both
     front ends go through (`formal/build.py:_prepare_functions`) — the same
@@ -11766,6 +11836,14 @@ def refuse_interpolated_literals(stmts) -> None:
     A module-level statement the walker does not descend into is not a hole:
     `iter_nodes` recurses through dataclass fields, and a `FunctionDef`'s body
     is one of them.
+
+    **The field-less half is FOLDED before this is asked, not refused**, and
+    the caller runs `fold_constant_interpolated_literals` immediately in front
+    of this for that reason: an interpolated literal with no `{…}` field is a
+    constant string and needs no buffer (`interpolated_literal_constant`), so
+    the refusal's subject is exactly the literals that interpolate.  A caller
+    that reached here without the fold would refuse a correct program rather
+    than miscompile it — the fold is the fix and this refusal is the backstop.
     """
     for node in iter_nodes(stmts):
         if is_interpolated_literal(node):
