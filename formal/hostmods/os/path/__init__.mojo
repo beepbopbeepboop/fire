@@ -72,7 +72,7 @@ from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
-from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32_signed, fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -615,13 +615,19 @@ def stat_ino(p, follow) -> int:
 
 
 def stat_dev(p, follow) -> int:
-    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+    """`st_dev` — the device the inode lives on, a SIGNED 32 bits at offset 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
-    next four bytes are padding, and a 64-bit read of a 32-bit field is a
-    number assembled out of the field and whatever the compiler put after it.
+    next four bytes are `st_mode`/`st_nlink`, and a 64-bit read of a 32-bit
+    field is a number assembled out of the field and whatever follows it.
+
+    Read SIGNED, because the layout types the field `int32` and CPython widens
+    it with the sign: `/dev/null`'s four bytes are `0xA8FB1A80`, and
+    `os.stat("/dev/null").st_dev` is `18446744072249612928` (the signed
+    `-1459938688` widened to a word) where an unsigned read answers
+    `2835028608`. `test_formal_os_backing.py`'s `stat_null` is the differential.
     """
-    return fs_stat_field32(p, follow, 0)
+    return fs_stat_field32_signed(p, follow, 0)
 
 
 def stat_nlink(p, follow) -> int:

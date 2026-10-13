@@ -746,7 +746,12 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
+    # `dev` is `%u`, not `%d`: `st_dev` is a signed 32-bit C field, and CPython
+    # widens it with the sign, so `/dev/null`'s is 18446744072249612928 -- above
+    # 2**63, i.e. a value only an unsigned 64-bit print can spell. The oracle
+    # below spells it the same way. Every other field here fits a `%d` on every
+    # shape the fixture makes.
+    printf("m2 size=%d ino=%d dev=%u blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",
@@ -786,11 +791,19 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    # `dev` is a 64-bit WORD on both sides, not a signed number. `st_dev` is a
+    # signed 32-bit C field and CPython widens it with the SIGN, so on
+    # `/dev/null` it is 18446744072249612928 -- above `2**63`, a value `%d`
+    # cannot spell on either side, hence the `%u` in the program and here. For a
+    # path CPython cannot stat there is no word to widen and every reader in the
+    # module answers -1, i.e. every bit set; the oracle spells that same word so
+    # the two `%u`s agree. The other fields fit a `%d` on every fixture shape.
+    dev = (2 ** 64 - 1) if s is None else s.st_dev
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
-    out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+    out["m2"] = "size=%d ino=%d dev=%u blocks=%d blksize=%d" % (
+        field(s, "st_size"), field(s, "st_ino"), dev,
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

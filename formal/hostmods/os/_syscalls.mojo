@@ -1595,14 +1595,41 @@ def fs_stat_field16(p, follow, at) -> int:
 def fs_stat_field32(p, follow, at) -> int:
     """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
-    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
-    and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    `st_uid` and `st_gid`, which the layout above types `uint32`. The field is 32
+    bits and reading it as 64 would take the four bytes of padding after it, so
+    the width is the field's and not the alignment's. A field the layout types
+    `int32` is read with `fs_stat_field32_signed` beside this one -- the two are
+    not spellings of each other on every input with bit 31 set.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32_signed(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    The layout above types `st_dev` and `st_rdev` as `int32`, and the signedness
+    is observable rather than bookkeeping: `/dev/null`'s `st_dev` four bytes are
+    `0xA8FB1A80`, and CPython's `os.stat` exposes them as `18446744072249612928`
+    -- the field SIGN-EXTENDED, i.e. the signed `-1459938688` widened to a word
+    -- where `fs_stat_field32` answers the unsigned `2835028608`. Which one the
+    module owes is the differential `test_formal_os_backing.py`'s `stat_null`
+    runs: it compares against `os.stat` in the same process, and CPython widens
+    a `int32` field with the sign, not with a zero.
+
+    `sign_extend_32`'s arithmetic (`formal/hostmods/ctypes.mojo`) spelled here
+    rather than imported, for the reason that file's own note gives: these
+    readers take an OFFSET and that is a different function from `c_int32`'s.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    var low = le32(buf, at)
+    if low >= 2147483648:
+        return low - 4294967296
+    return low
 
 
 def fs_realpath(p) -> str:
