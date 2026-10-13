@@ -526,6 +526,19 @@ LIST_CASES = [
      "the lowering: exit 1 with nothing on either stream. arm64-only like the "
      "grow, and both directions are here because a resize that moved the tail "
      "the wrong way would pass a length-only reading"),
+    ("l_slice_store_insert", ["a = [3, 1, 2]", "a[1:1] = [9]"],
+     ("%d %d %d %d\\n", ["a[0]", "a[1]", "a[2]", "a[3]"]),
+     "the EMPTY-range store, an insertion at `start`: [3, 1, 2] answers "
+     "[3, 9, 1, 2]. It is its own row because the shift `delta` is the whole "
+     "length of the value here (the range is zero), which is the case a "
+     "resize that divided by the range length would get wrong"),
+    ("l_slice_store_backrange", ["a = [3, 1, 2]", "a[3:2] = [9]"],
+     ("%d %d %d %d\\n", ["a[0]", "a[1]", "a[2]", "a[3]"]),
+     "a BACKWARDS range, `stop < start`, which CPython normalizes to an EMPTY "
+     "range at `start` and inserts into: [3, 1, 2] answers [3, 1, 2, 9]. The "
+     "normalization is the one the bounds above get, and the row keeps a "
+     "resize that stopped on `stop < start` instead of clamping it from "
+     "returning the wrong answer"),
 ]
 
 DICT_CASES = [
@@ -914,6 +927,8 @@ BACKEND_ONLY = {
     # into and the backend refuses it outright (`slice_store_refusal`).
     "l_slice_store_grow": "x86_64",
     "l_slice_store_shrink": "x86_64",
+    "l_slice_store_insert": "x86_64",
+    "l_slice_store_backrange": "x86_64",
 }
 
 

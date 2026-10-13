@@ -51,7 +51,11 @@ wrong" table below that is still a stop. The lowering is
 into is written, a negative delta moves it DOWN from `stop`, and the count is
 bumped by `delta`. Both directions are pinned as separate rows because a resize
 that moved the tail the wrong way passes a length-only reading — the group
-prints all five elements of the grow and the two of the shrink.
+prints all five elements of the grow and the two of the shrink — and so are the
+two boundary shapes: an EMPTY range (`a[1:1] = [9]`, an insertion whose `delta`
+is the whole value length) and a BACKWARDS one (`a[3:2] = [9]`, which CPython
+normalizes to an empty range at `start`; the resize clamps `stop` up to `start`
+the way the other bounds are clamped rather than stopping on it).
 
 **The room a growth needs is a reservation, not a heap, and it comes from the
 append machinery rather than a second one.** `model.slice_store_growth_slots`

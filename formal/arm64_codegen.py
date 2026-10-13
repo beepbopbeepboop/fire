@@ -12545,10 +12545,19 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit_label_rel(c2, here_offset=-4)
         self.asm.emit(encode_mov_zr_xn(5, 2))
         self.asm.label(c2)
+        # `stop < start` is an EMPTY range in CPython and the assignment still
+        # inserts at `start`: `a = [3, 1, 2, 4]; a[3:2] = [9, 9]` is
+        # `[3, 1, 2, 9, 9, 4]`. The range is normalized to `[start, start)` here
+        # — the same clamp the bounds above get — rather than stopped, which is
+        # what the resize path needs and what the same-length path reads as a
+        # `len(value) != 0` diagnostic.
         self.asm.emit(encode_cmp_xn_xm(5, 4))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        self.asm.emit_label_rel(fail_label, here_offset=-4)
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        keep = f"{fn}_ssk{sid}"
+        self.asm.emit_label_rel(keep, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(5, 4))
+        self.asm.label(keep)
         # X6 = stop - start, the length of the range being replaced.
         self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))
 
