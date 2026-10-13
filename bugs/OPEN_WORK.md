@@ -236,17 +236,17 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` | **unclaimed** | the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable |
 | `FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md` | **unclaimed** | the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses |
 
-### `formal/x86_64_model_fuzz` — 1 document, 0 claimed
-
-| doc | claim | what it is (its own title) |
-|---|---|---|
-| `FORMAL_x86_64_instruction_coverage_backlog.md` | **unclaimed** | the x86-64 half of the ISA census, form by form |
-
 ### `formal/x86_64_proof_gen` — 1 document, 0 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_one_field_mutator_has_no_method_contract.md` | **unclaimed** | A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say |
+
+### `tools/formal_isa_census.py` — the optional `EX` column` — 1 document, 0 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
+| `FORMAL_isa_census_examples_column_is_keyed_by_mnemonic.md` | **unclaimed** | the EX column identifies a form by its DISASSEMBLY MNEMONIC, so two encodings of one instruction are indistinguishable |
 
 ### `unclassified` — 3 documents, 1 claimed
 

@@ -189,8 +189,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    # `ok and 0 or 1` reads as "0 on success", but `0` is false, so it returns
+    # `1` on success and on failure alike — the script always exited 1. Spelled
+    # out, because this file is the ratchet's driver and an exit code that is
+    # always non-zero is a red nobody can act on.
+    ok = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                       exit=False).result.wasSuccessful()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

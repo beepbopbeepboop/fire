@@ -543,6 +543,13 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "`FF /2` with mod=11 calls through a REGISTER, and the "
+                       "register's contents are the target — a value the "
+                       "harness cannot install inside its one `MAP_FIXED` "
+                       "region, so a case leaves the generated stub. This is "
+                       "arm64's `encode_blr_xn` reason, not work: the model "
+                       "HAS the arm (`x86_step_call_r64`) and `samples()` asks "
+                       "it",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -596,26 +603,29 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
+    #
+    # **All three remaining x86-64 entries came out on 2026-10-13**, each for
+    # its own measured reason rather than by the list being tidied:
+    #
+    # * `encode_call_r64` MOVED to `HARNESS_LIMITS` above. Its gap was never the
+    #   model (`x86_step_call_r64` and a `samples()` row landed 2026-10-05, so
+    #   LEAN and AS read `yes`) — only the FUZZ column, whose reason is a
+    #   property of the harness (the target is a register's contents, outside the
+    #   one `MAP_FIXED` region) and is arm64's `encode_blr_xn` reason exactly.
+    #   A permanent limit belongs in the harness table, not in the bug-doc table.
+    # * `encode_and_r8_r8` / `encode_or_r8_r8` are GONE because they are fully
+    #   covered now: the RBP-operand "anomaly" this entry blamed was this tree's
+    #   own encoder omitting the SPL/BPL/SIL/DIL REX prefix, `_byte_rex_required`
+    #   fixed it, the rows are in the fuzz pool, and the census reads
+    #   `yes yes yes` for both. The exemption had outlived its gap — the exact
+    #   state `test_formal_isa_census.py`'s anti-rot half was red on.
+    #
+    # With that, **x86-64 has no `BACKLOG` entry at all**: the backend's
+    # remaining exemptions are all `HARNESS_LIMITS`, each a property of the
+    # harness. The x86-64 ISA-backlog document this table used to name is
+    # deleted in the same commit (its whole subject — 18 emitted forms with a
+    # missing LEAN/FUZZ/AS column — is closed); arm64's gaps keep their own
+    # docs, above.
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two

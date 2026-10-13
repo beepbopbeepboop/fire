@@ -765,8 +765,9 @@ def pool():
     # All nine are emitted by `formal/x86_64_codegen.py` and none was in this
     # pool, so `tools/formal_isa_census.py`'s FUZZ column read `no` for each and
     # the model's SSE arms (added with the decoder and the samples in the same
-    # change) had no CPU to be compared against.  See
-    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+    # change) had no CPU to be compared against.  That was the x86-64 half of
+    # the ISA census's backlog, closed 2026-10-13; `test_formal_isa_census.py`
+    # is the ratchet that keeps every emitted form covered.
     #
     # The XMM FILE is compared word for word by this harness (the entry stub
     # loads it, the dump stub stores it), and the initial values are RANDOM
