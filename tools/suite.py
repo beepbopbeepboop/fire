@@ -3727,8 +3727,13 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # the state a cold tree or a changed generator puts this job in; the warm number
 # is far smaller and is stated in the comment at the registration.
 #
-# `formal-proof-census-tool` is `test_formal_proof_census.py`: 46 assertions, no
-# Lean, no build — the corpus is the whole directory and sorted, the rank order
+# `formal-proof-census-tool` is `test_formal_proof_census.py`: 61 checks, no
+# Lean, no build — but its `library_state` check reads `lib/*.olean`, so it
+# carries `deps=['preflight', 'prooflib']` like its sibling `formal-proof-census`:
+# on a clean worktree with no library that assertion is red, and a job whose
+# subject is the baseline's honesty must not be able to start before the library
+# it reports on exists. The corpus is the whole directory and sorted, the rank
+# order
 # is the documented one, an unmeasured time is never compared and never zero, a
 # changed example is never compared against its old row, the three check
 # outcomes classify apart, and the COMMITTED baseline is honest about all of it
@@ -3778,7 +3783,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
