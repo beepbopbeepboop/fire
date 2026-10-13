@@ -641,14 +641,24 @@ still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
    parenthesised import, and §0.2 names the file, the line and the error. The
    walk now measures 8 links on this scope where it measured 3, on both
    architectures, with 0 files reporting its own damage.
-4. **`formal.imports.resolve_module_path` is wrong for one importer in this
-   scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
-   — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
-   because `_candidates` puts a root's leaf fallback in the same list as its
-   dotted path and the root loop is nearest-first. Measured inside a real build,
-   not only by direct call. It surfaced here because the probe now resolves the
-   module a refusal names with that same function, and it put three files of one
-   round under a group keyed on the IMPORTER.
+4. ~~**`formal.imports.resolve_module_path` is wrong for one importer in this
+   scope**~~ **CLOSED on master** (`7927b159`, *"tests: pin the self-resolution
+   row, and retire the doc the two-phase ordering fixed"*). The defect was that
+   `std/_gpu/_utils.mojo` importing `std.format._utils` resolved to ITSELF,
+   because `_candidates` put a root's leaf fallback in the same list as its
+   dotted path and the root loop was nearest-first. It was filed as
+   `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`, and that doc is
+   **deleted** on master with the fix; the row is now pinned in
+   `test_formal_imports.py::test_a_dotted_stdlib_import_resolves_to_the_module_
+   it_names` (the `("_gpu/_utils.mojo", "std.format._utils", "format/_utils.mojo")`
+   case — the degenerate one where the nearest root holds a file with the same
+   basename as the importer), so the citation above names a file that no longer
+   exists.
+   **This was the last open item of §6** — items 1-3 and 5 were already closed
+   (§0.1, §0.2, §0.3, §0.4) — so the document has nothing left of its own: the
+   two features §2 names are `FORMAL_a_bare_call_to_a_template_whose_type_
+   arguments_are_inferrable`'s and `FORMAL_a_module_that_exports_nothing_cannot_
+   be_a_dylib`'s, and the per-file table is §2's.
 5. ~~**One link of §0.2's new table has no claim and no doc**:
    `hasher.mojo` re-exports `Span` from `std.collections` and no module it
    imports exports the name, so 9 files of this scope sit behind it. ~~

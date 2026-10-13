@@ -233,7 +233,16 @@ candidate for it.
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_int_semantics.py
 
-`test_formal_int_semantics.py::test_variable_operands_are_still_untrapped` is
-the row that pins this doc: it asserts the CURRENT (wrong) answer for a variable
-operand, with a comment pointing here, and it is the row that must change when
-this is fixed.
+The pin is that file's `VARIABLE_ROWS` table (and the `STILL_UNTRAPPED_DOC`
+constant beside it), which asserts the CURRENT (wrong) answer for a variable
+operand, with the comment at the head of the table naming this doc and saying
+the rows become `("trapped", TRAP)` — and the section is deleted with the doc —
+when the run-time trap lands. (An earlier revision of this line named a
+`test_variable_operands_are_still_untrapped` method; there is no such method,
+and a reader sent after it found the pin only by reading the file.) **Measured
+2026-10-13 (`work/formal343-docs`): the file is 176/176 green (88 rows x 2
+backends), and the variable rows still assert the wrapped answers** —
+`var_add_over` = -9223372036854775808, `var_sub_over` = 9223372036854775804,
+`var_mul_over` = -2446744065709551615, `var_shl_over` = -9223372036854775808,
+`var_floordiv_min` = -9223372036854775808 on arm64 and `trapped` on x86-64 —
+so step 2 is untouched and steps 2-3 remain the whole of the fix.
