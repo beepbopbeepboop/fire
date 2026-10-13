@@ -11843,6 +11843,47 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+    # The same capability through a NAME bound to such a literal, which is the
+    # shape the corpus writes (`d = {…}` a statement earlier) and which used to
+    # be refused by name because the keys were tracked only at the literal
+    # itself. `ValueKinds.spread_items` resolves the name out of `_dict_inits`,
+    # the unanimity map the element-kind reader already asks, so a name whose
+    # every binding is a dict literal answers the same list the inline spelling
+    # does — and a name something else also binds stays refused (the next
+    # group's rebound row).
+    ("a_spread_through_a_local_dict_literal_is_answered",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    p = P(a=1, **d)\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    ("a_spread_through_a_local_dict_literal_is_answered_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **d))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -11860,19 +11901,6 @@ SPREAD_REFUSALS = [
      "    printf(\"%d\", p.a)\n"
      "    return 0\n",
      "refuse:more than one value", None),
-    # A spread whose keys are NOT in the source, at a construction — refused by
-    # name, with the reason and the way out.
-    ("a_spread_through_a_mapping_name_is_refused_by_name",
-     "struct P:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var d = {'b': 2}\n"
-     "    var p = P(a=1, **d)\n"
-     "    printf(\"%d\", p.a)\n"
-     "    return 0\n",
-     "refuse:constructing P spreads `d` with `**`", None),
     # …and through a `**`-PARAMETER, which is the corpus case
     # (`formal/x86_64_decode.py`'s `insn()` helper forwards `**kw`) and the shape
     # the refusal names as the real blocker: a formal value is one 64-bit word
@@ -11892,17 +11920,24 @@ SPREAD_REFUSALS = [
      "    printf(\"%d\", i.offset)\n"
      "    return 0\n",
      "refuse:constructing Insn spreads `kw` with `**`", None),
-    # The same on a call, so the two readers cannot drift: one message, one
-    # cause, and the subject spelled by the construct it is about.
-    ("a_spread_through_a_mapping_name_is_refused_by_name_at_a_call",
-     "def f(a: Int, b: Int) -> Int:\n"
-     "    return a * 10 + b\n"
+    # A NAME bound a dict literal AND something else is still refused: the
+    # resolution of `a_spread_through_a_local_dict_literal_is_answered` reads
+    # `ValueKinds._dict_inits`, whose unanimity rule tombstones a name any other
+    # statement rebinds. This is the row that keeps the fix from answering a
+    # name whose keys are only sometimes written — the same conservative
+    # direction the literal case already takes for a computed key.
+    ("a_spread_through_a_rebound_dict_local_is_still_refused",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var d = {'b': 2}\n"
-     "    printf(\"%d\", f(a=1, **d))\n"
+     "    d = {'b': 3}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d\", p.a)\n"
      "    return 0\n",
-     "refuse:call f() spreads `d` with `**`", None),
+     "refuse:constructing P spreads `d` with `**`", None),
 ]
 
 CONSTRUCTION_REFUSALS = [

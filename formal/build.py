@@ -8640,6 +8640,13 @@ def check_construction_shapes(functions, structs_by_name,
                                string_names=FT.STRING_TYPE_NAMES)
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
+        # The `**`-spread reader, built only for a function that has one and
+        # only when a construction site asks: it is the SAME
+        # `ValueKinds.spread_items` the two emitters pass, so the build pass and
+        # the emitter resolve a local `**`-operand out of one table and cannot
+        # disagree about whether the name is a dict literal. `ValueKinds`'s scan
+        # is a property of the whole function, so it is built once and reused.
+        vk = None
         for node in M.iter_nodes(getattr(fn, "body", None)):
             if not isinstance(node, F.CallExpr) \
                     or not isinstance(node.func, F.IdentExpr):
@@ -8659,8 +8666,14 @@ def check_construction_shapes(functions, structs_by_name,
                     name, owners[name], _one(sources)))
             if M.type_constructor_kind(name) is not None:
                 continue
+            spread_items = None
+            if any(isinstance(a, F.UnaryOp) and a.op == "**"
+                   for a in (node.args or ())):
+                if vk is None:
+                    vk = M.ValueKinds(fn)
+                spread_items = vk.spread_items
             _plan, refusal = M.struct_construction_plan(
-                st, node, structs_by_name, cands, rets)
+                st, node, structs_by_name, cands, rets, spread_items)
             if refusal is not None:
                 raise CodegenError(refusal)
 

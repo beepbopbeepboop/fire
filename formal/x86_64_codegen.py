@@ -11211,7 +11211,10 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"keyword arguments are not supported "
                     f"({[k for k, _ in e.kwargs]})")
             return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+        slots, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs,
+            spread_items=(self._vkinds.spread_items
+                          if getattr(self, "_vkinds", None) is not None else None))
         if err is not None:
             raise CodegenError(err)
         return slots
@@ -11527,7 +11530,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         instruction: arm64 emits `LDR`/`STR Xt, [Xn, #8k]` for the same layout
         and this emits `mov` to and from `[RBP + 8k]`."""
         plan, refusal = M.struct_construction_plan(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            spread_items=(self._vkinds.spread_items
+                          if getattr(self, "_vkinds", None) is not None else None))
         if refusal is not None:
             raise CodegenError(refusal)
         shape = plan[0]

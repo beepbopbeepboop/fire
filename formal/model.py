@@ -24120,6 +24120,32 @@ class ValueKinds:
             return self._no_value_calls.get(operand.name)
         return None
 
+    def spread_items(self, operand):
+        """`[(key, value)]` for a `**operand` whose KEYS this function wrote, or None.
+
+        The second half of `_unspread_keyword_mappings`'s "a dict LITERAL is
+        un-spread": the operand of a spread is frequently a NAME bound to such
+        a literal a statement or two earlier (`d = {"b": 2}; S(a=1, **d)`), and
+        the keys are written in the source exactly as they are for the inline
+        spelling. The evidence is `_dict_inits`, the same unanimity map every
+        other reader of "which literal gave this name its elements" asks
+        (`dict_literal_key_kind`, the element-kind reader): it holds the
+        literal only when EVERY binding of the name in this function is one, so
+        a name something else also binds — or a `**kw` parameter, which has no
+        binding statement for the scan to see — answers None and keeps the
+        by-name refusal the caller produced before.
+
+        None for everything else, which is the direction that matters: a caller
+        that reads None turns it into that same refusal, so an operand whose
+        keys are genuinely not in the source is never guessed.
+        """
+        items = literal_dict_items(operand)
+        if items is not None:
+            return items
+        if isinstance(operand, F.IdentExpr):
+            return literal_dict_items(self._dict_inits.get(operand.name))
+        return None
+
     def _note_field_stores(self, target) -> None:
         """Record that a statement writes THROUGH a holder's field.
 
@@ -37819,7 +37845,9 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
         f"this path cannot enumerate, so there is no saying which field each key "
         f"names, and `S(a=1, **{{'a': 2}})` is a run-time `TypeError` in "
         f"CPython too — the only way to tell it from `S(a=1, **{{'b': 2}})` is "
-        f"to know the keys. A spread of a dict LITERAL is un-spread and "
+        f"to know the keys. A spread of a dict LITERAL — written inline, or "
+        f"through a name whose every binding in the function is such a literal — "
+        f"is un-spread and "
         f"answered like any other keyword (both keys and values are in the "
         f"source), so write the keywords out, or pass the mapping as an ordinary "
         f"parameter this path can carry. Note that a `**`-PARAMETER cannot be "
@@ -37830,7 +37858,8 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
     )
 
 
-def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
+def _unspread_keyword_mappings(args, kwargs, name: str = "this construction",
+                               spread_items=None):
     """`(args, kwargs, refusal)` — `**` spreads folded in, or why one cannot be.
 
     A `**mapping` is not an argument: it is a set of arguments whose NAMES are in
@@ -37849,16 +37878,26 @@ def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
     `S(a=1, **{'a': 2})` a refusal — CPython's `TypeError` — rather than
     something this path invented.
 
+    **A NAME bound to such a literal is the same question**, and `spread_items`
+    is how a caller supplies that reader: when it is passed,
+    `ValueKinds.spread_items` resolves an operand that is a local whose every
+    binding in the function is a dict literal (`d = {'b': 2}; S(a=1, **d)`) to
+    the same `(key, value)` list the inline spelling produces, so the two
+    spellings cannot answer differently. It returns None for every operand
+    whose keys are not written — a `**`-parameter, a computed mapping, a name
+    something else also binds — and that is exactly the set this refuses.
+
     Any other operand (a name, a computed dict, a call) is refused by name: the
     keys are not in the source at this point and guessing them is the fabrication
     `formal/known_limits.md` calls a false PASS. A `*` spread is deliberately NOT
     touched: it is a POSITIONAL expansion rather than a keyword one, it has its
     own refusal, and it is not this function's business.
     """
+    resolve = spread_items if spread_items is not None else literal_dict_items
     plain, folded, refusal = [], list(kwargs), None
     for arg in args:
         if isinstance(arg, F.UnaryOp) and arg.op == "**":
-            items = literal_dict_items(arg.operand)
+            items = resolve(arg.operand)
             if items is None:
                 refusal = keyword_spread_refusal(name, spelled(arg.operand))
                 break
@@ -37980,7 +38019,8 @@ def construction_copy_unrecognised_refusal(name: str, arg) -> str:
 
 
 def struct_construction_plan(struct_def, call, decls: dict,
-                             candidates: dict, rets=None) -> tuple:
+                             candidates: dict, rets=None,
+                             spread_items=None) -> tuple:
     """`(plan, refusal)` — which of the three shapes `S(...)` is, or why not.
 
     THE decision, in the shared model, so the two backends cannot answer it
@@ -37993,6 +38033,11 @@ def struct_construction_plan(struct_def, call, decls: dict,
     `CalleeReturnTable`'s `{name: declared return annotation}` plus its reading
     of a callee that declares none — the evidence for the one argument kind that
     is refused, a container returned by a callee (`_callee_container_evidence`).
+    `spread_items` is the optional `ValueKinds.spread_items` reader a caller
+    with a whole-function binding table passes so that a `**` operand that is a
+    NAME bound to a dict literal is un-spread exactly as the inline literal is;
+    a caller without that table leaves it None and keeps the literal-only
+    answer (`_unspread_keyword_mappings`'s docstring has the whole of it).
 
     A `plan` is `(kind, …)`:
 
@@ -38029,7 +38074,7 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # docstring has the measurement and the reason a literal spread is answered
     # rather than refused.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        args, kwargs, f"constructing {name}")
+        args, kwargs, f"constructing {name}", spread_items)
     if spread_refusal is not None:
         return (None, spread_refusal)
     slots = struct_frame_slots(struct_def)
@@ -48843,7 +48888,8 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list,
+                        spread_items=None) -> tuple:
     """`(slots, error)` — a call's arguments in positional form, or why not.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -48889,9 +48935,11 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     # counting it as a positional both invented an argument (and, with one fewer
     # keyword, reported `multiple values for argument` about a duplicate the
     # source does not contain — measured) and put a mapping where a value
-    # belonged.
+    # belonged. `spread_items` is the caller's `ValueKinds.spread_items`, so a
+    # spread through a NAME bound to a dict literal is folded here exactly as
+    # `struct_construction_plan` folds it — the two readers cannot disagree.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()")
+        list(args or []), list(kwargs or []), f"call {name}()", spread_items)
     if spread_refusal is not None:
         return None, spread_refusal
     slots: list = list(args or [])

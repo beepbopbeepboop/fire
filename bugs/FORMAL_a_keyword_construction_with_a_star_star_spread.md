@@ -1,5 +1,22 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
+**Status 2026-10-12 (`work/formal304-docs`): the LITERAL-KEY half is CLOSED.**
+The doc's §"The exact next step" item 2 — "track a spread's key set when it is a
+literal … through a local that is only ever bound such a literal" — is landed.
+`ValueKinds.spread_items` resolves a `**d` whose operand is a NAME every binding
+of which is a dict literal to the same `(key, value)` list the inline spelling
+produces, and `_unspread_keyword_mappings` folds it, so `d = {'b': 2}` then
+`P(a=1, **d)` / `f(a=1, **d)` now build and answer CPython — measured, both
+architectures, `1 2` and `12`. The two readers (`struct_construction_plan` and
+`bind_call_arguments`) and `formal/build.py`'s own construction check all get
+the SAME reader, so they cannot disagree about whether the name is a dict
+literal. A name any other statement rebinds stays refused (the unanimity
+tombstone in `_dict_inits`), pinned by
+`test_formal_run.py::a_spread_through_a_rebound_dict_local_is_still_refused`.
+What remains, and it is a different cause, is unchanged: a spread through a
+`**`-PARAMETER needs the variadic ABI
+(`FORMAL_a_variadic_parameter_read_has_no_abi.md`).
+
 **Status: PARTIAL — the false half is fixed and the real blocker is now
 measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
 repository, `formal/hostmods/` and 252 stdlib files the corpus holds THREE `**`
@@ -216,6 +233,40 @@ Two ways out, and they are different jobs:
    `**`-parameter, which is the same flow question
    `“`struct` keyword arguments are silently dropped”` asks on the gimple
    side and should share an answer with.
+
+**Item 2's literal half is DONE (2026-10-12) — see the Status at the top and
+"What landed (2026-10-12)" at the end.** The "through a local" half is the part
+that landed; "keeping the set through a `**`-parameter" is the variadic ABI and
+is untouched.
+
+## What landed (2026-10-12, `work/formal304-docs`): the literal half, through a NAME
+
+The capability is one reader and one parameter, in the shared model:
+
+* `model.ValueKinds.spread_items(operand)` — the one reader of "this spread's
+  keys are written where its operand is", answering for the inline dict literal
+  (`literal_dict_items`, unchanged) and for a NAME through `_dict_inits`, the
+  unanimity map the element-kind reader already asks. A name any other
+  statement rebinds is tombstoned in that map and answers None, so it keeps the
+  old refusal.
+* `_unspread_keyword_mappings(args, kwargs, name, spread_items=None)` calls the
+  supplied reader, so a caller that has a `ValueKinds` folds a name exactly as
+  it folds a literal, and a caller that does not keeps the literal-only answer.
+* `struct_construction_plan` and `bind_call_arguments` take the reader as an
+  optional last argument and pass it down; both emitters pass
+  `self._vkinds.spread_items`, and `formal/build.py`'s construction check builds
+  one `ValueKinds` per function, lazily, only when a construction carries a
+  `**`, so the build pass and the emitter resolve the same name out of one
+  table.
+
+The rows (`test_formal_run.py`, both architectures against CPython):
+`a_spread_through_a_local_dict_literal_is_answered` (a construction) and
+`a_spread_through_a_local_dict_literal_is_answered_at_a_call` (a call) moved out
+of `SPREAD_REFUSALS` and into `SPREAD_CONSTRUCTION_CASES`, and
+`a_spread_through_a_rebound_dict_local_is_still_refused` is the new tombstone
+row. `a_spread_through_a_kwargs_parameter_is_refused_by_name` still refuses: a
+`**kw` parameter has no binding statement, so `spread_items` answers None for it
+and the variadic ABI remains the blocker.
 
 ## Why it is in no list
 
