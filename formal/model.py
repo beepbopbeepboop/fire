@@ -12940,6 +12940,59 @@ def container_store_refusal(spelled_base: str, base_is_tuple: bool,
         f"mutability that CPython's type system guarantees")
 
 
+def set_literal_word_key(e):
+    """The 64-bit WORD a set-literal element is known to have at compile time,
+    as a hashable key, or None when this path cannot know it.
+
+    `CANONICAL_ELEM_TYPES` is the same statement one level up: an `IntLiteral`,
+    a `BoolLiteral` and a `StringLiteral` are the elements this path compares as
+    a raw word — a string literal is INTERNED BY CONTENT (`_str_intern`), so two
+    equal texts are one address and the word comparison is a content comparison.
+    That is why a key here is a key over the WORD rather than over the syntax.
+    """
+    if isinstance(e, F.IntLiteral):
+        return ("int", int(e.value))
+    if isinstance(e, F.BoolLiteral):
+        return ("bool", bool(e.value))
+    if isinstance(e, F.StringLiteral):
+        return ("str", e.value)
+    return None
+
+
+def set_literal_distinct_elements(elements):
+    """A set literal's elements with compile-time-equal WORDS removed.
+
+    Returns `(kept, dropped)`: the element list with the duplicates of a word
+    already seen removed, and how many were removed. `(None, 0)` when ANY
+    element's word is not known here, which is the signal that this literal
+    cannot be deduplicated at compile time.
+
+    **Why a set literal has to be deduplicated at all**: a set lowers as a list
+    (`bugs/FORMAL_set_value_model.md`), and CPython's `len` and its iteration
+    see the DISTINCT elements. Measured on this tree BEFORE this call existed,
+    on BOTH backends: `len({1, 1, 2, 3, 3})` was **5** where CPython answers
+    **3**, and `{x, x, 2}` was **3** where CPython answers **2** when `x` is
+    bound. The count word is one of the three things the value-model document
+    claimed agreed, and it did not.
+
+    A literal whose elements are NOT all word-canonical still lowers with its
+    repeats, because establishing distinctness for a run-time value needs a set
+    RUNTIME (a hash or a scan) and this path has none on x86-64: that half is
+    the same project `set_union_refusal` names.
+    """
+    keys = [set_literal_word_key(e) for e in elements]
+    if any(k is None for k in keys):
+        return None, 0
+    seen = set()
+    kept = []
+    for e, k in zip(elements, keys):
+        if k in seen:
+            continue
+        seen.add(k)
+        kept.append(e)
+    return kept, len(elements) - len(kept)
+
+
 def is_set_expr(e) -> bool:
     """True when `e` builds a SET literal or a set COMPREHENSION.
 

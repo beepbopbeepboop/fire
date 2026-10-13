@@ -1,5 +1,43 @@
 # A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython
 
+## Status 2026-10-12 (`work/formal329-docs`): ONE DISAGREEMENT THIS FILE CALLED "AGREED" WAS REAL, AND THE WORD-CANONICAL HALF IS FIXED
+
+**This file's table said `len(s)` was "the element count" on all three engines
+and that `for x in s` was "the one disagreement". The second half of that was
+FALSE.** A set's elements are DISTINCT in CPython, and this path lowered a set
+literal as a plain list with the repeats KEPT, so the count word was not the
+element count. Measured on this tree, before the fix, on BOTH backends:
+
+    s = {1, 1, 2, 3, 3};  len(s)   ->  5 here, 3 in CPython
+    s = {x, x, 2} (x = 7); len(s)   ->  3 here, 2 in CPython
+
+and a walk summed 10 where CPython sums 6. The fuzzer could not see it because
+`--mix sets` builds its literal with `rng.sample(range(1, 30), n)`, which
+cannot draw a repeat, and because the `set_order` row forgives every
+divergence in a program that walks a set.
+
+**What is fixed, on both backends:** a set LITERAL whose elements all have a
+word the model already treats as canonical (`CANONICAL_ELEM_TYPES`: an
+`IntLiteral`, a `BoolLiteral`, a `StringLiteral`) is deduplicated at COMPILE
+time by `formal/model.py::set_literal_distinct_elements`, before it is lowered
+as a list. A string's word is its interned address, so the comparison is a
+WORD comparison and two equal texts dedup. Pinned by three cases in
+`test_formal_container_methods.py`'s `set` group, run differentially against
+CPython on both architectures: `s_len_dups`, `s_walk_dups`,
+`s_len_dups_str`.
+
+**What is NOT fixed, and it needs a set RUNTIME rather than a compile-time
+pass:** a set literal with an element whose word the model cannot know here (a
+name, a call, a subscript) and a set COMPREHENSION both still lower with their
+repeats, so `{x, x, 2}` still reports 3. Establishing distinctness for a
+run-time value needs a hash or a scan, and x86-64 has no set emitter at all
+(`set_union_refusal`), so the durable fix is a set runtime on both backends —
+the same project `FORMAL_the_host_import_wall_is_at_its_honest_floor.md`'s
+"run-time-length container" row names. Until then the honest statement is: a
+set literal is a list of the DISTINCT words it was written with.
+
+---
+
 **Status: NOT A BUG — this is the value model, and it is the document
 `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES['set_order']` row names.** The row
 was added by the fuzz-5 sweep in the same session that added `--mix sets`,
@@ -19,7 +57,7 @@ no hash, no bucket array, no probe sequence, no load factor, and no resize. So:
 
 | operation | CPython | this path | why |
 |---|---|---|---|
-| `len(s)` | the element count | the element count | the count word |
+| `len(s)` | the element count | the element count | the count word — of the DISTINCT elements when every one is word-canonical, and of the REPEATS otherwise (see the Status at the top) |
 | `x in s` | a hash probe | a linear scan | same answer, different cost |
 | `s.add(x)` for a member | no change | no change | a list walk finds it |
 | `for x in s` | HASH order | **INSERTION order** | the one disagreement |

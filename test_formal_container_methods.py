@@ -601,6 +601,18 @@ SET_CASES = [
     ("s_len", ["s = {1, 2}"], "len(s)",
      "a set lowers as a LIST here (`bugs/FORMAL_set_value_model.md`), so its "
      "count is the blob's count word"),
+    ("s_len_dups", ["s = {1, 1, 2, 3, 3}"], "len(s)",
+     "a set's elements are DISTINCT in CPython, so the duplicate literal is "
+     "dropped: the count word must be 3, not 5. Measured on this tree before "
+     "the compile-time dedup, on both backends: 5 "
+     "(`bugs/FORMAL_set_value_model.md`)"),
+    ("s_walk_dups", ["s = {1, 1, 2, 3, 3}", "t = 0", "for x in s:",
+                     "    t = t + x"], "t",
+     "the walk over the same duplicate set: CPython walks the three distinct "
+     "elements and sums 6, while the repeats this path used to keep summed 10"),
+    ("s_len_dups_str", ['s = {"a", "a", "b"}'], "len(s)",
+     "the same over STRING elements, whose word is the INTERNED address — so "
+     "this row is what says the dedup compares words and not source text"),
     ("s_in", ["s = {1, 2}"], "1 if 1 in s else 0",
      "a set's membership is a linear scan where CPython's is a hash probe — "
      "same answer, different cost, and the file is the kind that says so"),
