@@ -8,10 +8,10 @@ applied with a literal comptime value now instantiates, through the module's OWN
 `own_demands` AND through `formal/imports.py::instantiation_demands` for an
 IMPORTED one, both gated on the parameter's declared kind; and a THIRD false
 sentence (the tuple-index one) is fixed with it. §1's imported `Span[...]`
-instance (its second element is a comptime ALIAS that does not fold), `unbox[
-Int](b)`, and a value parameter whose annotation is outside the allowlist are
-still OPEN. Filed 2026-10-05 on `work/formal27-5` at `7ac78995`, with every
-claim below measured on that tree.
+instance (its second element is a comptime ALIAS that does not fold), the
+`unbox[Int](b)` bare-call-inference row, and a value parameter whose annotation
+is outside the allowlist are still OPEN. Filed 2026-10-05 on `work/formal27-5`
+at `7ac78995`, with every claim below measured on that tree.
 
 **What landed 2026-10-13 (`work/formal392-docs`), in the order the pieces
 matter.** Four real defects and one capability, all in the demand walk:
@@ -49,10 +49,10 @@ matter.** Four real defects and one capability, all in the demand walk:
 **Pinned by** `test_formal_monomorph.py`:
 `test_a_struct_templates_comptime_value_argument_instantiates` (both routes, one
 file and one library, a CPython differential that reads `origin` in the body on
-both architectures), `test_a_literal_in_a_type_parameters_position_is_not_a_
-demand` (the gate as a pure function: `Pair[2]` makes nothing and fails
-nothing), and `test_a_literal_on_a_type_parameter_is_refused_as_the_construct`
-(the sentence names the construct and not the tuple index).
+both architectures), `test_a_literal_in_a_type_parameters_position_is_not_a_demand`
+(the gate as a pure function: `Pair[2]` makes nothing and fails nothing), and
+`test_a_literal_on_a_type_parameter_is_refused_as_the_construct` (the sentence
+names the construct and not the tuple index).
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
