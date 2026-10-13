@@ -9,8 +9,9 @@ answered **6** where CPython says **3**, and `len({x % 3 for x in range(6)})`
 answered **6** where CPython says **3**, both from a build that exited 0. So
 `len` and the element MULTISET were wrong wherever the source produced a repeat,
 and the only divergence this file recorded — iteration ORDER — was not the only
-one. `formal/arm64_codegen.py::_emit_blob_uniquify` and x86-64's twin of the same
-name are the one in-place pass the literal and the comprehension now both ask: a
+one. `arm64_codegen`'s `_emit_blob_uniquify` (and x86-64's twin of the same name)
+is the one in-place pass the literal and the comprehension now both ask, beside
+the blob layout `formal/model.py` keeps and does not change: a
 word compare (an element is one 8-byte slot), the same compare `_emit_set_union`'s
 dedup already used, with the write index never passing the read index so the
 compaction cannot overwrite an element it has not read yet. **What is unchanged
@@ -40,11 +41,11 @@ no hash, no bucket array, no probe sequence, no load factor, and no resize. So:
 
 | operation | CPython | this path | why |
 |---|---|---|---|
-| `len(s)` | the element count | the element count | the count word |
+| `len(s)` | the DISTINCT element count | the distinct element count | the count word, after the in-place dedup below |
 | `x in s` | a hash probe | a linear scan | same answer, different cost |
-| `s.add(x)` for a member | no change | no change | a list walk finds it |
+| `s.add(x)` | insert if absent | **REFUSED** | `add` is not in `model.BUILTIN_VALUE_METHODS`; a set is a list here and the count word is what an insert would have to re-check, so it is named rather than lowered as an append |
 | `for x in s` | HASH order | **INSERTION order** | the one disagreement |
-| `print(s)` | `{3, 1, 2}` | refused or a blob | `print` will not guess a set's spelling |
+| `print(s)` | `{3, 1, 2}` | refused | `print` will not guess a set's spelling |
 
 ## The measurement
 
