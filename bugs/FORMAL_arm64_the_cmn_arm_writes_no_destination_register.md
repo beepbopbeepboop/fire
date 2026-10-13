@@ -173,8 +173,12 @@ whose §3 prescribed this arm ("`CMP` is `CMN` with the operands the other way
 round, so all three are one-line changes to an existing arm's shape"). The
 prescription produced the arm; the arm took the whole class. That doc's Status
 is corrected with the same measurement. The sibling defect found in the same
-sweep — the `imm12` arms dropping their `lsl #12` — is
-`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`.
+sweep — the `imm12` arms dropping their `lsl #12` — is FIXED: `arm64_ext_imm12`
+reads bits 23:22 as the `sh` field and all five `imm12` arms (ADD 32/64, SUB
+32/64, CMP) call it, so the shift cannot be present in one and absent from
+another (commit `5361903f`, pinned by `test_formal_call_proof_gen.py`'s
+`TestUnsignedOffsetAccess`, which runs each instruction on the CPU and through
+`arm64_step` and requires the two states to agree).
 ## 7. Confirmed a second way, without the fuzzer (2026-10-05)
 
 The fuzzer's `run_model` passes `heartbeats=0` to `formal/lean.py::run_lean`,
@@ -197,5 +201,5 @@ word little-endian at `pc = 0x1000` the way `arm64_read_insn` does.
 
 Same two words, same run, one right and one wrong, which is the whole claim:
 the defect is the missing `Rd`, not the flag computation and not the byte
-layout. The sibling `imm12` defect is confirmed the same way in
-`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`.
+layout. The sibling `imm12` defect is confirmed the same way, and is fixed by
+the same change (commit `5361903f`).
