@@ -14143,6 +14143,7 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
+#:
 #: The three operators that are SET ALGEBRA, and the ones a backend may lower
 #: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
 #: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
