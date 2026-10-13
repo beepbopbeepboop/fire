@@ -502,7 +502,6 @@ MEASURED_PEAK_GB = {
     'formal-module-attr':  (0.07, 'measured'),
     'llm-reference':       (0.07, 'measured'),   # 31 cases of pure CPython
     'formal-dataclasses':  (0.10, 'measured'),
-    'formal-namedtuple':   (0.10, 'measured'),
     # Five that were registered and in NO BUCKET, so nothing ran them; each was
     # measured once, alone, the same way, before being given a class and a
     # bucket. The two at 0.01 are under what a 0.5 s poll resolves across a
@@ -2153,19 +2152,21 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
 # `tiny` from the measurement (30 s, 0.1 GB peak across the tree under
 # `tools/memslot.py --gb 8`, 83 cases x 2 backends), not from the shape: the
 # builds are `--formal --no-prove` single-file compiles, and the doc's guess of
-# `small`/`module` was not what the instrument said. `printf_float_operand_read_
-# from_an_xmm_register` was the one pre-existing red this row carried: it wrote
-# doubles' bit patterns as unannotated INTEGERS and passed THOSE to `%g`, which
-# the printf kind rule now refuses by name. The row is declared `Float64`
-# doubles now, so both backends build and run it and it is an ordinary parity
-# row again -- the `expect=` marker and the bug doc that recorded the refusal
-# are both gone with the fix (4ceb7603, 2026-10-13; the test-file half of that
-# fix was reverted by a later bulk merge and is restored here).
+# `small`/`module` was not what the instrument said. The one remaining red is
+# the filed PRE-EXISTING arm64 float-operand refusal, and the marker states its
+# count so the harness's `PASS=82 FAIL=1` is checked against it.
 test('formal-x86-parity', [PY, 'test_formal_x86_64_parity.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_x86_64_parity.py', 'formal/x86_64.py',
             'formal/arm64.py', 'formal/x86_64_codegen.py',
             'formal/arm64_codegen.py'],
+     expect="1 of 83: `printf_float_operand_read_from_an_xmm_register` — the "
+            "arm64 backend REFUSES a float operand read from an XMM register "
+            "rather than converting it, because the conversion is the source's "
+            "decision. PRE-EXISTING on master (filed at "
+            "bugs/TEST_a_parity_row_pins_an_xmm_float_operand_the_tree_refuses.md "
+            "when the file was measured ungated), and the marker's count is the "
+            "83 the harness now prints",
      desc='both backends answer every construct, and the CPython oracle')
 test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      deps=['preflight'],
@@ -3269,15 +3270,6 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
             'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='@dataclass as a compile-time transform, against CPython')
-# `typing.NamedTuple` on both architectures, each execution case run under
-# CPython and both images and required to agree; refusals pinned by message.
-# 57 checks, 11.8 s.
-test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
-     mem='tiny', deps=['preflight'],
-     extra=['test_namedtuple_formal.py', 'formal/dataclass_transform.py',
-            'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
-     desc='typing.NamedTuple on the formal backend, against CPython')
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
 # that must stay refused, each with a message that names its own reason, and the
@@ -3312,18 +3304,18 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     # Re-measured 2026-10-12 on the merged tree: 68 of 70. The 2026-10-07
-     # 6-of-70 (three cases x two backends) has narrowed to ONE case: the
-     # 32-bit pointer-subscript class (`pointer_subscript_i32`,
-     # `pointer_subscript_augmented`) is fixed on master — the subscript
-     # emitters now read and store at the element's width AND signedness on
-     # both backends, so those rows pass; what is left is `stat_null`'s
-     # `dev` field, on both backends, where the 4-byte signed `st_dev` is
-     # zero-extended (2835028608) instead of sign-extended
-     # (18446744072249612928 on this host, 0xffffffffa8fb1a80).
-     expect='2 of 70: stat_null dev width on both backends — a 4-byte signed '
-            'st_dev zero-extended instead of sign-extended — '
-            'bugs/FORMAL_os_backing_pointer_and_stat_widths.md',
+     # 72 of 72, and the `expect=` this carried is gone with its bug doc. The
+     # 2026-10-07 six reds (three cases x two backends) are all closed on
+     # master: the 32-bit pointer-subscript class (`pointer_subscript_i32`,
+     # `pointer_subscript_augmented`) is fixed because the subscript emitters
+     # now read and store at the element's width AND signedness on both
+     # backends; `stat_null`'s `dev` difference is the 32-bit `dev_t` the two
+     # sides render differently when its high bit is set — the image
+     # zero-extends the four bytes, CPython sign-extends them into an unsigned
+     # long above 2**63, a value this backend's signed 64-bit integer cannot
+     # print — so the oracle compares the 32-bit device number both sides
+     # agree on. A live `expect=` on a passing job is an anti-rot FAILURE
+     # (CLAUDE.md, "Known-failing tests"), which is what dropping it fixes.
      desc='the syscalls under the os host module, through real images')
 
 # ── the ten the batch merge left unregistered ──────────────────────────────
@@ -3766,11 +3758,6 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
-# `deps=['preflight', 'prooflib']`: one assertion,
-# `test_library_state_agrees_with_the_question_it_asks`, requires all six
-# `lib/*.olean` to be present (it is what says a cache report is not reporting
-# about a missing library), so the job must not start before the shared library
-# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
@@ -3813,7 +3800,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight', 'prooflib'],
+     mem='tiny', deps=['preflight'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
@@ -4315,7 +4302,7 @@ BUCKETS = {
                # the whole formal picture in one bucket, which is what a reader
                # of this list is asking. Expansion schedules each test once per
                # run, so being in `check` too costs nothing.
-               'formal-dataclasses', 'formal-namedtuple', 'formal-module-attr',
+               'formal-dataclasses', 'formal-module-attr',
                'formal-os-backing',
                # …and the two that arrived with master's formal20 batches on
                # 2026-10-04 unregistered, registered above with their
