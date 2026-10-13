@@ -68,6 +68,24 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    in `test_formal_call_proof_gen.py`, and the document that was tracking them is
    deleted with the answer.
 
+**Status update 2026-10-13 (measured against the served `lib/ProofLib.olean`):
+the "read of the stack-floor word at `4294968008`" reason the table above gives
+for `fact`, `sqsum` and `sum` is STALE: the same change that put a value theorem
+back in the whole arm64 corpus took that store out of the chain.** `806e72cb` /
+`70b76755` moved the
+`RLIMIT_STACK` read out of every prologue into the startup stub, so the
+stack-floor store is no longer in the dec1 call chain at all — `grep -c
+4294968008 fact_proof.lean` is **0** — and the three now stop on the
+return-frame / `FrameOk` window read (`runs-ret-frame-ok-window`) that `pow2`'s
+`:4857` also fails in: `⊢ mem_read_u64 (the frame stores) (st.sp + j).toNat = …`
+at `fact`/`sum` `:4858` and `sqsum` `:5227`, `rfl` failing with both sides
+reduced. That is `FORMAL_arm64_x30_is_reloaded_from_the_frame.md`'s family and
+its owner is where the repair is, so the OWNER of this row is unchanged; what
+changed is the reason the census gives for it. `count` fails earlier still, on
+`maximum recursion depth has been reached` (`count_proof.lean:4305`), which the
+x30 doc's re-measurement (when its examples were masked by the conditional-halt
+refusal) did not see.
+
 **What is still true of everything below, and is why the rest of the file is
 kept as it is:** the four declared gaps are each owned by another document or by
 this one, and the three undeclared `dec1` failures are one fact owned by
