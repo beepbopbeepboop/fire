@@ -6530,23 +6530,35 @@ def _walk_range(words: dict, func_entry: int, func_end=None) -> int:
 
 def _same_image_call_plan(code: bytes, base: int, func_entry: int,
                           func_end=None) -> tuple:
-    """`({call_pc: return_pc}, "")` for a call the CFG walk CAN follow into the
-    same image, and `(None, why)` for one it cannot.
+    """`({call_pc: return_pc}, "")` for every call the CFG walk CAN follow into
+    the same image, and `(None, why)` for the first shape it cannot.
 
-    The return-address map this file lacked is exact for ONE shape, and this is
-    that shape: a single `BL` whose target is a block start inside the walked
-    range, whose own body contains no call of its own, and which the caller
-    returns from itself.  For that shape `x30` at the callee's `RET` is the
-    constant `call_pc + 4`, so the callee's blocks are ordinary blocks with an
-    ordinary edge — no dispatch, no disjunction, no second induction chain.
-    The doc named this the whole limit (`bugs/FORMAL_arm64_the_universal_theorem_
-    cannot_follow_a_call_into_the_same_image.md` step 1) and it is.
+    The return-address map this file lacked is exact for a whole CLASS, and the
+    class is: every `BL` whose target is a block start inside the walked range,
+    whose own body neither leaves the image nor reaches back into it, and where
+    no single callee is entered twice on one path.  For every call in that class
+    `x30` at the callee's `RET` is the constant `call_pc + 4`, so the callee's
+    blocks are ordinary blocks with an ordinary edge — no dispatch, no
+    disjunction, no second induction chain.  What the single-call version could
+    not do and this does is the SEQUENTIAL and NESTED cases: `main` calling two
+    leaves one after another, and a CHAIN (`main → b → c`) where the callee
+    itself calls a further function.  Both are one return address PER CALL,
+    which the walk carries as a stack (`ctx["ret_stack"]`), because a chain's
+    inner call must come back to the outer call's continuation and not to the
+    halt address.
 
-    Every other shape is REFUSED, and it is refused HERE rather than in each of
-    the two places that need to know: `generate_arm64_proof` writes the reason
-    into the message a reader sees, and `_gen_universal_e2e_cfg` reads the same
-    answer to decide whether its `bl` arm may descend.  One rule read twice; a
-    second copy of these conditions is a second answer to the same question.
+    What is still REFUSED is the shape whose blocks really are entered twice:
+    two call sites targeting the SAME function (the callee's block certificates
+    and the `hprior` memo would have to be told the two visits apart, and that
+    is a project rather than a map), a callee that reaches back into the entry
+    (RECURSION, whose frame bound and fuel descent are the recursion contract's
+    and not a return address), and a callee that calls OUT of the image (whose
+    terminal is reachability of that call, a different answer from the callee's
+    own return).  Each is named rather than left to the walk, and the same rule
+    is read twice: `generate_arm64_proof` writes the reason into the message a
+    reader sees, and `_gen_universal_e2e_cfg` reads the same answer to decide
+    whether its `bl` arm may descend.  One rule read twice; a second copy of
+    these conditions is a second answer to the same question.
     """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -6555,66 +6567,111 @@ def _same_image_call_plan(code: bytes, base: int, func_entry: int,
              if c["kind"] == "intralocal"]
     if not intra:
         return {}, ""
-    where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x}" for c in intra)
-    if len(intra) > 1:
-        return None, (
-            f"there are {len(intra)} calls into the same image ({where}) and ONE "
-            f"return address does not serve them: a path can reach the second "
-            f"without passing the first, so `x30` at the callee's `RET` would be "
-            f"a property of the CALL PATH rather than a constant")
-    c = intra[0]
-    if not (func_entry <= c["target"] < end):
-        return None, (
-            f"the callee at {c['target']:#x} lies outside the range the walk "
-            f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be a "
-            f"second walk over code this theorem does not cover")
     blocks = _cfg_blocks(words, func_entry, end)
-    if c["target"] not in {b["start"] for b in blocks}:
+    starts = {b["start"] for b in blocks}
+    start_to_bi = {b["start"]: i for i, b in enumerate(blocks)}
+    rets = [b["start"] for b in blocks if b["kind"] == "ret"]
+
+    def body_calls(start):
+        """Every `BL` reachable from a function entry, by the block graph.
+
+        Reachability rather than a pc window: a pc window from a callee's entry
+        runs past the end of that function into its siblings, which is exactly
+        how the single-call version mis-read `main → b → c` (it saw `b`'s call
+        as a second call of `main`'s).  The walk follows every edge the CFG has
+        — both sides of a conditional, a `b`'s target, a `bl`'s fall-through and
+        its callee — and stops at `RET`, so the answer is the callee's own body
+        and nothing else.
+        """
+        seen, stack, out = set(), [start], []
+        while stack:
+            bi = start_to_bi.get(stack.pop())
+            if bi is None or bi in seen:
+                continue
+            seen.add(bi)
+            blk = blocks[bi]
+            if blk["kind"] == "bl":
+                out.append((blk["instrs"][-1], blk["targets"][1]))
+            for t in blk.get("targets") or []:
+                if t in start_to_bi:
+                    stack.append(t)
+        return out
+
+    where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x}" for c in intra)
+    for c in intra:
+        if not (func_entry <= c["target"] < end):
+            return None, (
+                f"the callee at {c['target']:#x} lies outside the range the walk "
+                f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would "
+                f"be a second walk over code this theorem does not cover")
+        if c["target"] not in starts:
+            return None, (
+                f"the callee's entry {c['target']:#x} is not a block start of "
+                f"the walk, so no certificate would exist for its first run")
+    if not rets:
         return None, (
-            f"the callee's entry {c['target']:#x} is not a block start of the "
-            f"walk, so no certificate would exist for its first run")
-    inner = [pc for pc, w in words.items()
-             if c["target"] <= pc < end and _step_branch_index(w) == 15]
-    if inner:
-        # Two different things, and the refusal must not call both of them
-        # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
-        # to follow again (and its frame bound and fuel descent with it), while a
-        # `BL` out of it is a call the model stops at — which is the halt-address
-        # family's own question, decided by `_unfollowable_calls` above. Saying
-        # "recursion" about a `printf` sends a reader after a program that has
-        # none.
-        again, outside = [], []
-        for pc in inner:
-            tgt = _branch_target(words, pc)
-            (again if (tgt is not None and func_entry <= tgt < end)
-             else outside).append(pc)
-        what = []
-        if again:
-            what.append(
-                f"it calls back into this image at "
-                f"{', '.join(hex(p) for p in again)}, which is RECURSION and not "
-                f"a return-address map: the frame bound and the fuel descent of "
-                f"the recursion contract would have to be re-proved for a second "
-                f"function")
-        if outside:
-            what.append(
-                f"it calls OUT of the image at "
-                f"{', '.join(hex(p) for p in outside)}, so the run stops there "
-                f"and the theorem becomes reachability of that call — which the "
-                f"callee's own return address cannot also be, because the two "
-                f"answers are about different terminals")
+            f"the caller has no return of its own, so nothing states what the "
+            f"program returns once the callee has")
+    for c in intra:
+        if not any(r >= c["target"] for r in rets):
+            return None, (
+                f"the callee at {c['target']:#x} has no `RET` inside the walked "
+                f"range, so its blocks have no terminal and the walk would leave "
+                f"the function without one")
+        for pc, tgt in body_calls(c["target"]):
+            if tgt is None or tgt == func_entry:
+                return None, (
+                    f"the callee at {c['target']:#x} calls back into the entry "
+                    f"at {pc:#x}, which is RECURSION and not a return-address "
+                    f"map: the frame bound and the fuel descent of the recursion "
+                    f"contract would have to be re-proved for a second function")
+            if not (func_entry <= tgt < end):
+                return None, (
+                    f"the callee at {c['target']:#x} calls OUT of the image at "
+                    f"{pc:#x}, so the run stops there and the theorem becomes "
+                    f"reachability of that call — which the callee's own return "
+                    f"address cannot also be, because the two answers are about "
+                    f"different terminals")
+    # A callee entered TWICE on one path cannot reuse its block certificates or
+    # its `hprior` memo, so two call sites targeting one function are refused by
+    # name rather than handed to a walk that would re-enter a block it is
+    # already inside (`entry_bi in path`).
+    targets = [c["target"] for c in intra]
+    repeated = sorted({t for t in targets if targets.count(t) > 1})
+    if repeated:
         return None, (
-            f"the callee is not a straight-line leaf, because "
-            + "; and ".join(what))
-    if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
-        return None, (
-            f"the caller has no return of its own before {c['target']:#x}, so "
-            f"nothing states what the program returns once the callee has")
-    if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
-        return None, (
-            f"the callee has no `RET` inside the walked range, so its blocks "
-            f"have no terminal and the walk would leave the function without one")
-    return {c["pc"]: c["pc"] + 4}, ""
+            f"two call sites target the same function "
+            f"({', '.join(hex(t) for t in repeated)}), so its blocks would be "
+            f"entered twice on one path and one return address cannot be the "
+            f"constant `x30` holds at both visits")
+    # A cycle among callees is RECURSION, and the walk's per-path `path` set
+    # would re-enter a block it is already inside rather than close it.  The
+    # graph is small (one node per callee), so the cycle check is a DFS over it.
+    edges = {}
+    for c in intra:
+        edges.setdefault(c["target"], set()).update(
+            tgt for _, tgt in body_calls(c["target"])
+            if tgt is not None and func_entry <= tgt < end)
+    color = {}
+
+    def _acyclic(node):
+        color[node] = 1
+        for nxt in edges.get(node, ()):
+            if color.get(nxt) == 1:
+                return False
+            if color.get(nxt, 0) == 0 and not _acyclic(nxt):
+                return False
+        color[node] = 2
+        return True
+
+    for node in list(edges):
+        if color.get(node, 0) == 0 and not _acyclic(node):
+            return None, (
+                f"the calls into this image form a cycle "
+                f"({where}), which is RECURSION and not a return-address map: "
+                f"the frame bound and the fuel descent of the recursion contract "
+                f"would have to be re-proved for a second function")
+    return {c["pc"]: c["pc"] + 4 for c in intra}, ""
 
 
 def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
@@ -7437,7 +7494,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # every block the entry itself reaches, and `None` is exactly the
         # value that means "this is the program's own return", because that
         # one jumps to `exit_pc`.
-        _ret_to = ctx.get("ret_to")
+        #
+        # A STACK and not a single value, because a chain (`main → b → c`)
+        # reaches two `RET`s with two different return addresses live at once:
+        # the top is the call the walk is inside, and popping it when that
+        # callee returns restores the outer call's continuation.  A single value
+        # would send `b`'s `RET` to `c`'s call site and close a cycle.
+        _ret_stack = ctx.get("ret_stack") or ()
+        _ret_to = _ret_stack[-1] if _ret_stack else None
         IND = "  " * (depth + 1)
         path = path | {bi}
         fuel_next = (_fuel_minus(fuel_n, m_run) if isinstance(fuel_n, str)
@@ -7559,15 +7623,17 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # flow unfold what the callee computed.
             tgt_bi = start_to_bi.get(_ret_to)
             if tgt_bi is None or tgt_bi in path:
-                raise ValueError(
-                    f"unsupported same-image return continuation to {_ret_to:#x}")
-            # The caller's own continuation is the CALLER's, so `ret_to` is
-            # dropped here: what follows this block returns to the halt address
-            # like every other return of the function the walk started from.
+                raise NotImplementedError(
+                    f"same-image return continuation to {_ret_to:#x} re-enters "
+                    f"block {tgt_bi} on this path, which one return address per "
+                    f"path cannot discharge")
+            # Pop THIS call's return address: what follows this block returns
+            # to whatever call the walk is still inside, or — when the stack is
+            # empty — to the halt address like every other return of the entry.
             # Leaving it set would make the caller's own `RET` come back to the
             # call site and the walk would close a cycle.
             _cr = dict(ctx)
-            _cr["ret_to"] = None
+            _cr["ret_stack"] = _ret_stack[:-1]
             emit_block(tgt_bi, s_cur, fuel_next, depth, path, _cr)
         elif kind == "ret" or _halts:
             if is_contract:
@@ -7934,13 +8000,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         f"cannot be followed by this walk, and {_intra_why}.")
                 entry_bi = start_to_bi.get(entry)
                 if entry_bi is None or entry_bi in path:
-                    raise ValueError(
-                        f"unsupported same-image call continuation to {entry:#x}")
+                    raise NotImplementedError(
+                        f"same-image call at {bl_pc:#x} -> {entry:#x} re-enters "
+                        f"block {entry_bi} on this path, which one return "
+                        f"address per path cannot discharge")
                 _ct = dict(ctx)
                 for _k in ("lets", "flow_hsid", "flow_defs", "flow_blocks",
                            "conds", "branch_srcs"):
                     _ct[_k] = list(ctx.get(_k, []))
-                _ct["ret_to"] = _intra_returns[bl_pc]
+                _ct["ret_stack"] = _ret_stack + (_intra_returns[bl_pc],)
                 # At THIS block's indentation, not one deeper: Lean's layout
                 # closes a tactic sequence when a tactic arrives at a column the
                 # sequence has not used yet, so a `rw` at column 6 followed by a

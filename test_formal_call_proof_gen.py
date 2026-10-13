@@ -136,12 +136,11 @@ REFUSED = {
     "two_args": ("fn add2(a, b):\n    return a + b\n"
                  "fn main():\n    return add2(3, 4)\n",
                  "a two-argument callee: every argument must be modelled"),
-    "callee_chain": ("fn c(n):\n    return n\n"
-                     "fn b(n):\n    return c(n) + 1\n"
-                     "fn main():\n    return b(1)\n",
-                     "two call sites into the same image: `x30` at the callee's "
-                     "`RET` is then a property of the CALL PATH, and one return "
-                     "address does not serve two of them"),
+    "same_target": ("def f(a):\n    return a + 1\n"
+                    "def main(x):\n    return f(x) + f(x)\n",
+                    "two call sites to the SAME function: its blocks would be "
+                    "entered twice on one path, and one return address cannot be "
+                    "the constant `x30` holds at both visits"),
 }
 
 
@@ -187,17 +186,28 @@ TWO_OPAQUE_CALLS = {
 # `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
 # blocks of the walk with an ordinary edge.
 #
-# Both were REFUSED by name before, with a message saying interprocedural
-# walking was missing.  They generate now, and the difference between the two
-# rows is what the fix costs rather than what it buys: the callee's own `if` is
-# a third conditional branch, and the walk explores BOTH edges of every
-# conditional it meets, so this program's certificate has TWICE the paths of the
-# leaf one and four times the ones a single function with the same three
-# conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
-# the branching one exceeds Lean's own `-M 6144` — and so does a program with
-# NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call (`bugs/FORMAL_a_three_branch_certificate_exceeds_
-# the_lean_bound.md`).
+# All four generate now, and the rows are the class the map covers rather than
+# one shape: a single call (the leaf), a single call with a conditional callee
+# (the branching one), TWO sequential calls to different callees, and a CHAIN
+# (`main → b → c`) where the callee itself calls a further function.  The
+# difference between the rows is what the fix costs rather than what it buys:
+# the callee's own `if` is a third conditional branch, and the walk explores
+# BOTH edges of every conditional it meets, so the branching one's certificate
+# has TWICE the paths of the leaf's.  Measured: the leaf checks (5687 lines,
+# 0 sorries); the branching one exceeds Lean's own `-M 6144` — and so does a
+# program with NO CALL and the same number of conditionals, which is why the
+# boundary is the path count and not the call
+# (`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`).
+#
+# The multi-call rows need the return-address STACK the walk now carries
+# (`ctx["ret_stack"]`): a single `ret_to` sends the callee's `RET` to the
+# halt address, which is right for one call and a closed cycle for a chain.
+# They still cannot be Lean-checked on this tree, and the reason is not the
+# call: `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` records
+# that the `arm64_ext_imm12` term in `work_step_add_imm64`'s statement makes the
+# elaborator exceed `maxRecDepth` on the SAME-IMAGE LEAF proof too, so the Lean
+# rows here are red for a reason that predates the multi-call work and is
+# another worker's.  Generation is what these rows pin.
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
         "def helper(n):\n"
@@ -215,6 +225,27 @@ SAME_IMAGE_CALL = {
         "    return helper(x)\n",
         "the same call with a conditional callee: generation is what is pinned "
         "here, and the cost boundary is the walk's path count, not the call"),
+    "same_image_sequential": (
+        "def f(a):\n"
+        "    return a + 1\n"
+        "def g(a):\n"
+        "    return a + 2\n"
+        "def main(x):\n"
+        "    return f(x) + g(x)\n",
+        "TWO call sites, one after another, to DIFFERENT callees: each is a "
+        "constant `x30` at its own `RET`, and the walk carries them as a "
+        "return-address STACK so the first call's continuation is not the "
+        "second call's"),
+    "same_image_chain": (
+        "fn c(n):\n"
+        "    return n\n"
+        "fn b(n):\n"
+        "    return c(n) + 1\n"
+        "fn main():\n"
+        "    return b(1)\n",
+        "a CHAIN (`main → b → c`): the callee itself calls a further function, "
+        "so `x30` at each `RET` is a different constant and the stack is what "
+        "keeps them apart — the shape the single-return-address map refused"),
 }
 
 
@@ -390,7 +421,7 @@ class TestGeneratorSource(unittest.TestCase):
                       "`mojo` to every caller")
 
     def test_callee_models_are_defined_before_use(self):
-        defs = _models(REFUSED["callee_chain"][0], "main")
+        defs = _models(SAME_IMAGE_CALL["same_image_chain"][0], "main")
         for name in ("c_go", "b_go", "main_go"):
             self.assertIn(f"def {name}", defs,
                           f"{name} is called but never defined; Lean reports "
@@ -2353,26 +2384,59 @@ class TestCallProofs(unittest.TestCase):
                "`RET`: the return address map is built and never read, so the "
                "callee's `ret` ends the path instead of returning")
 
-    def test_a_second_call_site_into_the_same_image_is_still_refused(self):
-        """The boundary of the fix, and it is a boundary of the MAP.
+    def test_a_chain_and_two_sequential_calls_are_followed(self):
+        """The boundary of the fix MOVED, and this is where it is now.
 
-        Two call sites means `x30` at the callee's `RET` is a property of the
-        CALL PATH rather than a constant, which is the whole of what the fix
-        buys; the refusal has to say so, and it has to say it instead of the
-        recursion arm's error about a program with no recursion in it.
+        It used to be "two call sites is not a constant": a single return
+        address served one call, so a chain (`main → b → c`) or two calls in a
+        row were refused.  The map is now the whole class where no callee is
+        entered twice on one path — a chain and two sequential calls to
+        DIFFERENT callees both qualify, because each `RET` is reached with its
+        own constant on top of the return-address stack — and what is still
+        refused is the same-target case, below.  These rows generate, which is
+        what the machine half is responsible for; the Lean verdict for the leaf
+        is red on this tree for a reason that predates this change and is
+        `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`'s.
         """
-        err = self.errors["callee_chain"]
-        self.assertIsNotNone(err, "callee_chain: expected a refusal, got a proof")
+        for name in ("same_image_chain", "same_image_sequential"):
+            self.assertIsNone(self.errors[name],
+                              f"{name}: a chain and two sequential calls into "
+                              f"different callees are followed now, so a "
+                              f"refusal here is a regression: {self.errors[name]}")
+            p = self.proofs[name]
+            self.assertIsNotNone(p)
+            with open(p) as f:
+                text = f.read()
+            with self.subTest(program=name):
+                self.assertNotIn("CALL BOUNDARY", text,
+                                 "a followed call is not a call boundary")
+                self.assertIn("theorem main_compiles_correctly_universal", text,
+                              "a followed call gets the FULL theorem, not the "
+                              "reachability one")
+
+    def test_two_calls_to_the_same_function_are_still_refused(self):
+        """The boundary of the map, and it is a boundary of the BLOCKS.
+
+        Two call sites to the SAME function means that callee's blocks are
+        entered twice on one path, so one return address cannot be the constant
+        `x30` holds at both visits — the block certificates and the `hprior`
+        memo would have to be told the two visits apart.  That is a project and
+        not a map, so it is refused by name, and the refusal has to say so
+        instead of the recursion arm's error about a program with no recursion
+        in it.
+        """
+        err = self.errors["same_target"]
+        self.assertIsNotNone(err, "same_target: expected a refusal, got a proof")
         self.assertNotIn("recursion argument bound", err,
-                         "callee_chain: the old recursion-only error "
+                         "same_target: the old recursion-only error "
                          "misdescribes a program with no recursion in it")
-        self.assertIn("2 calls into the same image", err,
-                      f"callee_chain: the refusal must name the shape, so a "
-                      f"reader can tell it from the one-call case that now "
-                      f"proves: {err}")
-        self.assertIn("return address", err,
-                      f"callee_chain: and it must say what is missing — a "
-                      f"return address per call path: {err}")
+        self.assertIn("two call sites target the same function", err,
+                      f"same_target: the refusal must name the shape, so a "
+                      f"reader can tell it from the chain that now generates: "
+                      f"{err}")
+        self.assertIn("entered twice", err,
+                      f"same_target: and it must say what is missing — the "
+                      f"callee's blocks visited twice on one path: {err}")
 
     def test_a_two_argument_callee_is_refused_by_the_bridge(self):
         """`REFUSED['two_args']` keeps its own reason, and states it.
@@ -2431,16 +2495,31 @@ class TestCallProofs(unittest.TestCase):
                          "the return address of a `BL` is the instruction after "
                          "it, and that constant is the whole mechanism")
 
-        got, why = plan(REFUSED["callee_chain"][0])
-        self.assertIsNone(got, "two call sites is not a constant")
-        self.assertIn("ONE return address does not serve them", why)
+        got, why = plan(SAME_IMAGE_CALL["same_image_chain"][0])
+        self.assertEqual(len(got or {}), 2,
+                         f"a chain is two call sites, each with its own "
+                         f"constant return address: {why}")
+        for call_pc, ret_pc in (got or {}).items():
+            self.assertEqual(ret_pc, call_pc + 4,
+                             "every call's return address is the instruction "
+                             "after its own `BL`")
+
+        got, why = plan(SAME_IMAGE_CALL["same_image_sequential"][0])
+        self.assertEqual(len(got or {}), 2,
+                         f"two sequential calls to different callees are two "
+                         f"entries in the map: {why}")
+
+        got, why = plan(REFUSED["same_target"][0])
+        self.assertIsNone(got, "two call sites to the SAME function is not a "
+                               "constant either")
+        self.assertIn("entered twice", why)
 
         # A callee that calls BACK INTO THE ENTRY is recursion the plan cannot
         # see as a second call site — `_unfollowable_calls` skips a target equal
-        # to the entry — so it is the `inner` check, not the count, that has to
-        # catch it, and the message has to say why rather than let the walk reach
-        # the recursion contract and report a program with no recursion as a
-        # recursion problem.
+        # to the entry — so it is the body-reachability check, not the count,
+        # that has to catch it, and the message has to say why rather than let
+        # the walk reach the recursion contract and report a program with no
+        # recursion as a recursion problem.
         got, why = plan("def helper(n):\n"
                         "    if n > 0:\n"
                         "        return n\n"
@@ -3242,29 +3321,29 @@ class TestAstBridgeCallLimit(unittest.TestCase):
         """The two gaps, and which one a reader should be shown first.
 
         A program with a second function in its image can be short of BOTH the
-        machine half (the CFG walk is per-function) and of the bridge, and when
-        both are short the machine half is the bigger one — so arm64 must refuse
-        with the return-address message, not with the bridge's. That ordering is
-        a deliberate act (the check is emitted after that refusal) and this is
-        what keeps it one.
+        machine half and of the bridge, and when both are short the machine half
+        is the bigger one — so arm64 must refuse with the return-address message,
+        not with the bridge's. That ordering is a deliberate act (the check is
+        emitted after that refusal) and this is what keeps it one.
 
-        The fixture is a TWO-call-site program now. `ONE_ARG` used to be it, and
-        the machine half stopped being short of it: one call into the same image
-        is followed, so `ONE_ARG`'s arm64 refusal is the bridge's own message
-        (pinned below), and a row still asserting the interprocedural wording
-        for it would be asserting a gap that is closed.
+        The fixture is a TWO-call-site-to-the-SAME-function program whose callee
+        also takes two arguments, so BOTH gaps are live.  It used to be a CHAIN,
+        and the machine half stopped being short of that: a chain is followed
+        now (the return-address STACK), so its arm64 refusal became the bridge's
+        own message, and a row still asserting the machine wording for it would
+        be asserting a gap that is closed.  What is still short of the machine
+        half is the same-target shape, and it is also short of the bridge here.
         """
-        two_sites = ("def c(n):\n    return n\n"
-                     "def b(n):\n    return c(n) + 1\n"
-                     "def main(x):\n    return b(x)\n")
+        two_sites = ("def h(a, b):\n    return a + b\n"
+                     "def main(x):\n    return h(x, 1) + h(x, 2)\n")
         tmp = tempfile.mkdtemp(prefix="a2-bridge-")
         try:
             p, err = _generate(tmp, two_sites, "bridge_arm64")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIsNone(p, "two call sites into the same image cannot be "
-                             "followed: one return address does not serve them")
-        self.assertIn("return address", err,
+        self.assertIsNone(p, "two call sites to the same function cannot be "
+                             "followed: its blocks would be entered twice")
+        self.assertIn("entered twice", err,
                       f"arm64 must name the machine half first: {err}")
         self.assertNotIn("2 arguments", err,
                          "and it must be the MACHINE half that is named, "

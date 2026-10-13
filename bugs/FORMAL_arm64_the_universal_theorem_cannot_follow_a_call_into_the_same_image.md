@@ -1,5 +1,54 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**Status 2026-10-13 (`work/formal396-docs`): STEP 1 IS LANDED — the map now
+covers the whole class where no callee is entered twice on one path, which
+includes the CHAIN (`main → b → c`) this doc named and two SEQUENTIAL calls to
+different callees. Recursion is still step 2's and the census is still not
+re-run, so "20 of 78" remains the last measurement of what it is worth.**
+
+`formal/arm64_proof_gen.py::_same_image_call_plan` no longer refuses at the
+second call site. It returns `{call_pc: call_pc + 4}` for every `BL` whose
+target is a block start in the walked range and whose own body (found by block
+REACHABILITY, not a pc window — the window was what made `b`'s call look like
+`main`'s second one) neither leaves the image nor reaches back into the entry,
+and where no two call sites share a target. The walk carries those return
+addresses as a STACK (`ctx["ret_stack"]`): a chain reaches two `RET`s with two
+return addresses live at once, so the callee's `RET` pops to the outer call's
+continuation instead of jumping to the halt address. A single `ret_to` was
+right for one call and a closed cycle for a chain.
+
+**Still refused, each by name rather than by the recursion arm's error:** two
+call sites to the SAME function (that callee's blocks would be entered twice on
+one path, so its certificates and the `hprior` memo would have to be told the
+two visits apart — a project, not a map); a callee that reaches back into the
+entry (RECURSION); and a callee that calls OUT of the image (whose terminal is
+reachability of that call, a different answer from the callee's own return).
+
+**Measured, and it is two separate things.**
+
+* **Behaviour-preserving for everything that already built, measured rather than
+  argued:** all **93 `formal/examples/*.mojo` × 2 backends = 186 proofs** are
+  byte-identical (sha256) against `HEAD`'s generator. The leaf proof is
+  unchanged to the byte, which is why nothing in `~/.gmojo` is invalidated.
+* **The chain and the sequential program PROVE**, through
+  `formal/lean.py::check_proof_cached`: `main → b → c` checks at **0 errors, 0
+  sorries, 459 s / 5.3 GB**, and `f(x) + g(x)` at **0 errors, 0 sorries, 306 s /
+  5.7 GB** — each with `maxRecDepth` raised to 200000. So the walk emits a TRUE,
+  closed theorem for both; this is not merely generation.
+* **The `maxRecDepth` raise is NOT part of this change and the Lean rows cannot
+  be green without it.** `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_
+  merge.md` (claimed by `bunny-proofgen`) records that the `arm64_ext_imm12`
+  term now in `work_step_add_imm64`'s statement makes the elaborator exceed the
+  generated header's `maxRecDepth 100000` on the **single-call leaf** proof too
+  — measured here: the leaf at 100000 fails, at 200000 checks at 0 errors / 0
+  sorries / 123 s. So the same-image Lean row is red for a reason that predates
+  the multi-call work and belongs to that doc; `TestSameImageCallLean` is red on
+  this tree for the same reason. The tests added here therefore pin GENERATION
+  for the chain and the sequential program (`TestCallProofs`), and the Lean
+  verdict is owed to whoever fixes that doc.
+
+Step 2 (recursion) is unchanged, and step 3 (the census) is still not re-run.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1
