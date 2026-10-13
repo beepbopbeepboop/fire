@@ -23546,12 +23546,43 @@ def fn_returns_a_value(fn) -> bool:
     a function whose result this path cannot represent either; what the refusal
     below is about is the function that has no value at all, because that is the
     case where the source never suggests one is coming.
+
+    Read with NO resolver, so a `return f(…)` counts as a value even where `f`
+    produces none — this is the source-only question. `function_returns_a_value`
+    is the same walk with the transitive half, and it is the reader both
+    emitters and the return-less census call.
     """
+    return _body_returns_a_value(fn, None)
+
+
+def _body_returns_a_value(fn, callee_returns_value) -> bool:
+    """`fn_returns_a_value`'s walk, with an optional transitive reading.
+
+    `callee_returns_value` is None for the source-only question and a callable
+    `name -> bool` for the extended one. The extension is one case and it is
+    the whole of what an intermediate function needs: `return f(…)` is a value
+    for the source-only reader (there IS a `return` and it has an expression),
+    but if `f` itself produces no value — the same `function_returns_a_value`
+    question one call down — then the `return` hands back the very word this
+    path cannot carry, so it is not a value-producing return either. Everything
+    else an expression can be (a literal, an arithmetic expression, a call to a
+    callee the resolver cannot answer for) is a value, which is the safe
+    direction: an unrecognised shape keeps the answer the caller already had.
+    """
+    def value_of(v) -> bool:
+        if callee_returns_value is None:
+            return True
+        func = getattr(v, "func", None)
+        if isinstance(v, F.CallExpr) and isinstance(func, F.IdentExpr):
+            return callee_returns_value(func.name)
+        return True
+
     def scan(stmts) -> bool:
         for st in stmts or []:
             kind = type(st).__name__
             if kind == "ReturnStmt":
-                if getattr(st, "value", None) is not None:
+                v = getattr(st, "value", None)
+                if v is not None and value_of(v):
                     return True
                 continue
             if kind in ("FunctionDef", "StructDef", "TraitDef",
@@ -23586,7 +23617,7 @@ def fn_declares_a_return(fn) -> bool:
     return declared_returns_a_value(fn)
 
 
-def function_returns_a_value(fn) -> bool:
+def function_returns_a_value(fn, callee_returns_value=None) -> bool:
     """Whether a call to `fn` produces a value this path can carry.
 
     The conjunction of the two halves above, plus the two spellings whose
@@ -23596,10 +23627,48 @@ def function_returns_a_value(fn) -> bool:
     corpus. The parser's own `is_generator`/`is_async` are the answer, for the
     reason `tools/formal_returnless_census.py` gives: they are the front end's
     decision and not a re-read of the body.
+
+    **`callee_returns_value` carries the answer through a `return f(…)`, and it
+    is a hook because "does `f` produce a value" is a question about ANOTHER
+    function.** With it, `def h(): return g()` where `g` has no `return` is a
+    function that produces nothing — CPython's `h(…)` is `None` — so a `print`
+    of `h(…)` is refused by the same rule that refuses `print(g(…))` and
+    `v = g(); print(v)`, one call deeper. Without it the answer is the
+    source-only one and is unchanged, which is what the census and
+    `ValueKinds.returns_a_value` ask for. The resolver is the emitter's job
+    (`arm64_codegen`/`x86_64_codegen`'s `_callee_returns_value`), because the
+    name→definition table lives there and a cycle has to be stopped there.
     """
     if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
         return True
-    return fn_returns_a_value(fn) or fn_declares_a_return(fn)
+    if fn_declares_a_return(fn):
+        return True
+    return _body_returns_a_value(fn, callee_returns_value)
+
+
+def function_returns_a_value_resolver(functions):
+    """A `name -> bool` resolver for `function_returns_a_value`, over a
+    `{name: FunctionDef}` table.
+
+    The ONE implementation of the transitive half, so the two backends and the
+    value-model test cannot answer "does `f` produce a value" three ways. The
+    emitters build it over `self._functions` and hand it to the reader, which is
+    why the table is an argument: the name→definition map is the emitter's and
+    this file has no module index.
+
+    A name that is not in `functions` answers True, and so does a name already on
+    the recursion stack. Both are the safe direction — a value the source cannot
+    be asked about (a linked module's export) and a cycle are each left with the
+    answer the caller already had, where a wrong "no value" would refuse a
+    program CPython runs.
+    """
+    def resolve(name, _seen=frozenset()):
+        fn = functions.get(name)
+        if fn is None or name in _seen:
+            return True
+        return function_returns_a_value(
+            fn, lambda callee, _s=_seen | {name}: resolve(callee, _s))
+    return resolve
 
 
 def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:

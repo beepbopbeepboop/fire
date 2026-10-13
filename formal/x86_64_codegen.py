@@ -9963,22 +9963,25 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _callee_returns_value(self, name):
         """Whether a call to the local function `name` produces a value at all.
 
-        arm64's `_callee_returns_value` over the same shared reader, and for the
-        same reason the dict-ness hook above is duplicated in that shape and not
-        in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.function_returns_a_
-        value` decides it — a `return` with a value at any depth of the body, a
-        declared return type, or a `yield` — and NO STACK, because walking one
-        body for its first value-returning `return` cannot recurse where
-        `_callee_kind`'s kind question does.
+        The seventh question `ValueKinds` asks about a callee, and the only one
+        whose answer is not about a KIND: a function with no `return` produces
+        nothing, CPython calls that `None`, and a value here is one 64-bit word,
+        so the honest answer for such a call is "not a value this path can carry"
+        rather than a kind. `model.function_returns_a_value` is the ONE reader
+        of the declaration and the body, because the x86-64 backend answers the
+        same question and two readings of "does this function return" is how the
+        two machines come to disagree about a construct.
 
-        True for a name that is not a function of this unit, which leaves every
-        caller with the answer it had: a linked module's export has no body here
-        to read, and a refusal asked about it would be a refusal about a
-        function this backend never saw.
+        **The answer is carried through `return f(…)`, and the recursion lives in
+        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
+        return-less `g` is a function whose result is `None` in CPython too, so
+        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
+        deeper, and the shape `v = g(); print(v)` already covers one binding up.
+        The resolver is built over `self._functions` (the emitter's own table)
+        and the cycle stop and the not-of-this-unit default are the shared
+        resolver's, so the two backends cannot answer this one differently.
         """
-        fn = self._functions.get(name)
-        return True if fn is None else M.function_returns_a_value(fn)
+        return M.function_returns_a_value_resolver(self._functions)(name)
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
