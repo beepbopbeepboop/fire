@@ -436,21 +436,30 @@ CASES = [
     # register number 0 both, which is why this was invisible from every suite
     # that builds one architecture.
     #
-    # The values are the IEEE-754 BIT PATTERNS of doubles (`math.mojo`'s own
-    # representation, and the module's docstring says why), and 17 digits is
-    # the shortest round-tripping form, so CPython's `repr` and the C library's
-    # `%.17g` produce the same text. The `1.0000000000000002` is deliberate: it
-    # is the smallest double above 1.0 and its low 32 bits are 1, so a lowering
-    # that truncated the word to 32 bits — which is what an unannotated integer
-    # does on this path — would print `1.000000` and this row would still pass
-    # on that conversion alone. The mixed rows are the other half and are the
-    # reason this is not one `movq`: an SSE argument does not consume a GPR, so
-    # `printf("%f %lld", d, n)` needs `n` in **RDI** rather than RSI, and a fix
-    # that only moved the float would print `n` one register late.
+    # **The operands are declared `Float64`, and that is required rather than
+    # stylistic.** This row used to write the doubles' IEEE-754 BIT PATTERNS as
+    # unannotated integers and pass THOSE to `%g`/`%f`; the kind rule
+    # (`formal/model.py::printf_kind_conversion_refusal`) now refuses that by
+    # name, because a `%g` conversion tells the C library to read the word as a
+    # double while the word's own kind says integer — a rendering of the wrong
+    # value, and the same defect class as the uninitialised XMM0 above. The
+    # refusal is right (`bugs/FORMAL_float_binary64_only.md`), so the row uses
+    # doubles: the ABI question it pins is unchanged, and a declared `Float64`
+    # is what puts a value in XMM0 in the first place.
+    #
+    # 17 digits is the shortest round-tripping form, so CPython's `repr` and
+    # the C library's `%.17g` produce the same text. The `1.0000000000000002`
+    # is deliberate: it is the smallest double above 1.0 and its low 32 bits
+    # are 1, so a lowering that truncated the word to 32 bits would print
+    # `1.000000` and this row would still pass on that conversion alone. The
+    # mixed rows are the other half and are the reason this is not one `movq`:
+    # an SSE argument does not consume a GPR, so `printf("%f %d", d, n)` needs
+    # `n` in **RDI** rather than RSI, and a fix that only moved the float would
+    # print `n` one register late.
     ("printf_float_operand_read_from_an_xmm_register",
      "def main():\n"
-     "    var one = 4607182418800017409\n"
-     "    var two = 4611686018427387904\n"
+     "    var one: Float64 = 1.0000000000000002\n"
+     "    var two: Float64 = 2.0\n"
      "    var n = 12345\n"
      "    printf(\"%.17g %.17g\\n\", one, two)\n"
      "    printf(\"%f %d\\n\", one, n)\n"
@@ -458,17 +467,15 @@ CASES = [
      "    printf(\"%e %g\\n\", one, two)\n"
      "    printf(\"%d %d\\n\", n, 7)\n"
      "    return 0\n",
-     "import sys\nimport struct\n\n"
-     "def d(u):\n"
-     "    return struct.unpack('<d', struct.pack('<Q', u))[0]\n\n"
+     "import sys\n\n"
      "def main():\n"
-     "    one = 4607182418800017409\n"
-     "    two = 4611686018427387904\n"
+     "    one = 1.0000000000000002\n"
+     "    two = 2.0\n"
      "    n = 12345\n"
-     "    sys.stdout.write(\"%.17g %.17g\\n\" % (d(one), d(two)))\n"
-     "    sys.stdout.write(\"%f %d\\n\" % (d(one), n))\n"
-     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, d(one), 99, d(two)))\n"
-     "    sys.stdout.write(\"%e %g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%.17g %.17g\\n\" % (one, two))\n"
+     "    sys.stdout.write(\"%f %d\\n\" % (one, n))\n"
+     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, one, 99, two))\n"
+     "    sys.stdout.write(\"%e %g\\n\" % (one, two))\n"
      "    sys.stdout.write(\"%d %d\\n\" % (n, 7))\n"
      "    return 0\n"),
     # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and

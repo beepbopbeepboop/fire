@@ -1208,7 +1208,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # they named were rewrites of an assertion that could no longer see the case
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
+    # wrong. `formal-x86-parity` is a SIXTH drop, and the same shape as the
+    # three above rather than as `formal-x86-machine-model`: its marker said
+    # `1 of 83 ... printf_float_operand_read_from_an_xmm_register`, and the row
+    # it named now builds and runs on BOTH backends (2026-10-13) because its
+    # operands are declared `Float64` doubles instead of the integers whose bits
+    # happened to be a double's — the kind the printf conversion rule now
+    # refuses by name. The marker and its bug doc are both gone with the fix.
+    # `formal-x86-machine-model` is a FIFTH drop and the only one of the
     # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
     # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
     # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
@@ -1231,12 +1238,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'formal-x86-endtoend': 1,
-                     # +1 on 2026-10-06 (`work/x86-coverage-endtoend`): the
-                     # parity differential was registered in a bucket and given
-                     # a count-checked `expect=`; a census that did not state
-                     # the new marker would fail on the registry's own state,
-                     # which is this check working.
-                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
