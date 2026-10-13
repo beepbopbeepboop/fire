@@ -765,8 +765,7 @@ def pool():
     # All nine are emitted by `formal/x86_64_codegen.py` and none was in this
     # pool, so `tools/formal_isa_census.py`'s FUZZ column read `no` for each and
     # the model's SSE arms (added with the decoder and the samples in the same
-    # change) had no CPU to be compared against: the SSE2 scalar-double
-    # coverage gap, closed 2026-10-08.
+    # change) had no CPU to be compared against.
     #
     # The XMM FILE is compared word for word by this harness (the entry stub
     # loads it, the dump stub stores it), and the initial values are RANDOM

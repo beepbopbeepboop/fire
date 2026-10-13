@@ -1,10 +1,5 @@
 # An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable
 
-**Status 2026-10-11 (`work/formal264`): PARTIAL FIX LANDED — the
-closed-constant class is gone (A/B on the same 40 x86-64 sources: 27/13 →
-30/10, three programs repaired, none regressed), the big-body class is not.**
-Read §"Status 2026-10-11" last, after §"Status 2026-10-05" (which correctly
-says what it says and does not cover the class the A/B repaired).
 **Status 2026-10-05 (`work/formal19-3-r2`): the Status section's central
 conclusion is WRONG, and it was measured wrong because of a defect in the
 harness this doc's own reproduce command runs through — now fixed. Read
@@ -515,75 +510,3 @@ reason the row-2 measurement above was taken twice), write to a fresh path under
 ABSOLUTE: `_run_lean` sets `cwd` to the proof's own directory, so a relative
 `lib_dir` resolves `./lib` against the proof's directory and the run reports
 `unknown module prefix 'ProofLib'` with a search path that looks correct.
-
-## Status 2026-10-11 (`work/formal264`): the closed-constant class is repaired,
-## the big-body class is not — A/B 27/13 → 30/10 on the SAME 40 sources
-
-The `have`-decided emission that §"Status 2026-10-05 (`work/formal27-3`)"'s row
-5 declined is **landed as the emitter's** — `formal/x86_64_proof_gen.py` and
-`formal/arm64_proof_gen.py` now emit each *closed constant* condition as
-`have h{i} : (…) := (by native_decide)` and keep `by_cases` only for the
-conditions that read an argument — and its verdict effect was measured where
-row 5 did not measure it. Row 5 tested one program (6 conditions, 3 of them
-closed, 30 statements) and found `have`-ing the closed three only collapses 64
-leaves to 8, which still drown at `maxSteps := 4000000`. That measurement is
-untouched. It does not cover the **fully closed** program, and the A/B is
-exactly that class.
-
-**A/B, same 40 sources, both emissions, x86-64, default `simp` budget.** The
-sources are the 2026-10-04 corpus regenerated in one pass
-(`tools/formal_proof_fuzz.py --count 40 --arch x86_64 --seed 6147731456
---no-check -j 1`, `.tmp/ppf/new4/`; the `-j 1` matters — the default 40-wide
-build races a shared link artifact and every program is `codegen-refused` with
-"the image would bind 2 symbol(s) that nothing provides: getrlimit, write").
-OLD = the historical full-`by_cases` emission against the identical sources,
-produced by monkeypatching the new `_eval_eq_conds_tactic` to return None;
-NEW = the have-decided emission. Verdicts through
-`formal/lean.py::check_proof_cached`, one Lean run per file.
-
-| emission | PASS | FAIL |
-|---|---|---|
-| OLD (full `by_cases`) | 27 | 13 |
-| NEW (closed conditions `have`-decided) | **30** | **10** |
-
-Repaired: exactly **p1, p29, p30** — all three the all-constant shape (every
-`if` tests closed constants; p30's `0 - 7 ≠ 0 - 12` is the p28 underflow
-shape), whose historical cost was `2^k` `simp_all` leaves for constants
-`native_decide` settles in one fact. REGRESSIONS: none — every one of the 10
-remaining reds (p12, p14, p23, p25, p26, p28, p3, p31, p34, p36) also fails
-under OLD with the same `` `simp` failed: maximum number of steps exceeded`` /
-"nested error" sentence. Those are the big-body class: bodies big enough that
-even the open-condition leaf cost blows the default budget, and row 5 showed
-raising the budget just moves the wall to heartbeats. **So "reduce the
-branches is not the lever" stands for the big-body class and is wrong as
-stated for the all-constant one — the A/B is the correction.**
-
-**Two emission details the A/B forced, and that `test_formal_eval_eq_mojo_bridge.py::TestBridgeClosedConditionFacts`
-pins:**
-
-1. `(by native_decide)` must be parenthesised. `have h0 : c := by native_decide; by_cases h1 : d` swallows the `;` into the `by` block ("No goals to be solved"); the working emission is `have h0 : (c) := (by native_decide); by_cases h1 : (…) <;> simp_all +decide [h0, …]`, still one `;`-joined line (a multi-line tactic breaks the `by` block's indentation).
-2. Every bare decimal in a have proposition is emitted as `(N : UInt64)` (`_u64_cast_numerals`). An isolated `have h0 : (0 - 7 ≠ 0 - 12) := by native_decide` infers `Nat`, whose saturated `0 - 7 = 0` makes the proposition a different one and `native_decide` refutes it — the p28 shape on the corpus itself. The test asserts the `(0 : UInt64)` text is present.
-
-The arm64 generator carries the same helper and split; a same-pass bug
-double-listing `hs` in the arm64 simp set (`[h0, h0, …]` instead of
-`[h0, …]`) was fixed by making the list `{hs_join}{simp_lems}` exactly once,
-and is pinned by `test_no_duplicate_hypotheses_in_the_simp_sets`. The arm64
-step certificates **cannot** be typechecked for these bodies on this tree for
-an unrelated reason — a `mem_read_u64`-after-`mem_write_u64` rewrite gap that
-reproduces byte-identically under the HEAD generator at the same lines — so
-the typecheck pin is x86-64 and the arm64 tactic TEXT is asserted.
-
-**What remains, unchanged from §"The next step":** items 1 and 2 — the
-per-statement chain of `have`s or the `ProofLib` induction — are still the
-path for the 10 reds, and row 5's measurements still point to them. The
-have-decided shape is worth keeping regardless: closed conditions as decided
-facts is the honest emission (a `by_cases` on a proposition `decide` settles
-is two goals where one fact is the whole content) and it is what flips 3 of
-the 13 from FAIL to PASS at zero regressions.
-
-**While here, measured and NOT this bug:** the arm64 canonical bridge
-typechecks (`TestBridgeTypechecks` on ifonly/condassign/elif3) fail this tree
-at the step certificates, reproduced identically under the HEAD generator
-(`cp HEAD:formal/arm64_proof_gen.py` in place, same line, same message) — a
-pre-existing red owned by the arm64 instruction-coverage side, in a test file
-no registered gate bucket runs. Not touched here.
