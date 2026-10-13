@@ -2565,6 +2565,12 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
     corpus's `solvable` count from 32 to 2, and the three that were the largest
     of them — 17 `ThinAllocation`, 7 `is_32bit`, `dlsym`'s comment read as a
     type parameter — were all invisible to the pre-2026-10-04 classifier.
+
+    **A fifth correction came later and is not a classifier question at all**:
+    `_strip_comments` cut every line at its first `#`, so a `#` INSIDE a string
+    truncated a one-line docstring's closing quotes and desynced the
+    string-aware bracket walk for the rest of the file. `desync` below is its
+    fixture; it was the corpus's only `the declaration could not be read` row.
     """
     root = os.path.join(tmpdir, "census")
     write_tree(root, {
@@ -2705,6 +2711,33 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
                           "\n"
                           "def main(n: Int):\n"
                           "    print(pick(n))\n"),
+        # 12. A `#` inside a STRING is not a comment, and reading it as one is
+        #     the fifth instrument defect. `_strip_comments` used to cut every
+        #     line at its first `#`, so the one-line docstring above `Hash` lost
+        #     its closing `"""` — an UNTERMINATED string — and
+        #     `elaborate._bracket_depth_by_line` (which IS string-aware, and is
+        #     handed this source AFTER the edit) then ignored every bracket below
+        #     it: `Hash`'s own multi-line header read as the end of its block and
+        #     its `__init__` was invisible, so the site was filed `the
+        #     declaration could not be read`. Measured on the real corpus,
+        #     `std/collections/string/iterators.mojo` spells its `BytesIter`
+        #     docstring exactly this way (`"""UAX #29 …"""` on one line) and it
+        #     was the whole of the corpus's one `could not be read` row.
+        "desync.mojo": ("def helper() -> Int:\n"
+                        '    """UAX #29 helper."""\n'
+                        "    return 1\n"
+                        "\n"
+                        "struct Hash[T: AnyType](\n"
+                        "    Copyable,\n"
+                        "):\n"
+                        "    var v: T\n"
+                        "\n"
+                        "    def __init__(out self, v: T):\n"
+                        "        self.v = v\n"),
+        "use_desync.mojo": ("from desync import Hash\n"
+                            "\n"
+                            "def main(n: Int):\n"
+                            "    print(Hash(n))\n"),
     })
     sys.path.insert(0, os.path.join(HERE, "tools"))
     import formal_template_call_census as T
@@ -2724,6 +2757,7 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
         "note": T.BUCKET_SOLVABLE,
         "pick": T.BUCKET_NO_PARAMETER,
         "wide2": T.BUCKET_UNDECLARED,
+        "Hash": T.BUCKET_SOLVABLE,
     }
     for name, bucket in want.items():
         rows = got.get(name) or []
@@ -2746,7 +2780,7 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
     # the comment, the comptime default) and a fourth is a declaration with
     # nothing to substitute at all.
     check({n for n, b in want.items() if b == T.BUCKET_SOLVABLE} ==
-          {"widen", "Kw", "note"},
+          {"widen", "Kw", "note", "Hash"},
           f"the fixture's solvable set moved: "
           f"{sorted(n for n, b in want.items() if b == T.BUCKET_SOLVABLE)}")
 

@@ -81,7 +81,12 @@ comment inside a header is both a parameter this reader would misread and a
 bracket `_balanced` would count), `MARKER_PIECES` (a packed `*name: Bound` is a
 parameter), `_is_type_spelling` (a numeric or boolean default is not a type) and
 `_concrete_answer` (an answer that is the enclosing template's own `dtype`, or a
-`Self.T`, is not a type argument at all).
+`Self.T`, is not a type argument at all). **A sixth landed 2026-10-13 and is not
+a classifier question: `_strip_comments` is now string-aware, so a `#` inside a
+string no longer truncates it.** The corpus's one `the declaration could not be
+read` row was exactly that — a one-line docstring (`UAX #29 …`, triple-quoted)
+whose closing quotes the old line-splitting edit removed, desyncing the
+string-aware bracket walk for the rest of the file.
 
 **Two flags ride on every row.** `B` — some parameter has a trait bound other
 than the unconstrained spellings, so a unification alone cannot choose a
@@ -202,12 +207,66 @@ def _strip_comments(text: str) -> str:
     `_def_line`'s docstring explains what a reader does with that), and a comment
     removed mid-line must not shift the lines below it. The trailing space keeps
     two tokens from joining into one name.
+
+    **A `#` inside a STRING or a backtick MLIR literal is NOT a comment**, and
+    reading one as a comment is a second defect of the same shape as the one
+    above: `elaborate._bracket_depth_by_line` is string- and comment-aware, so it
+    is handed source this function has already edited, and an edit that removes a
+    string's closing quote desyncs it for the whole rest of the file. Measured on
+    `std/collections/string/iterators.mojo`: the one-line docstring
+    `\"\"\"UAX #29 segmentation state for forward iteration.\"\"\"` became
+    `\"\"\"UAX ` — an UNTERMINATED string — so every bracket below it was ignored
+    and `struct BytesIter`'s own header was read as the end of its block: 77
+    lines of declaration reduced to 2, its `__init__` invisible, and the one call
+    to it reported `the declaration could not be read`. The scan is character by
+    character with the same string rule `_bracket_depth_by_line` uses (`\"`/`'`
+    with escapes, `\"\"\"`/`'''`, and backtick), so the two agree on where a
+    string ends.
     """
     out = []
-    for line in text.split("\n"):
-        at = line.find("#")
-        out.append(line if at < 0 else line[:at])
-    return "\n".join(out)
+    i, n = 0, len(text)
+    in_str = None
+    while i < n:
+        c = text[i]
+        if in_str is not None:
+            if in_str in ('"""', "'''"):
+                if text.startswith(in_str, i):
+                    out.append(in_str)
+                    i += 3
+                    in_str = None
+                    continue
+            else:
+                if c == "\\":
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                if c == in_str:
+                    out.append(c)
+                    i += 1
+                    in_str = None
+                    continue
+            out.append(c)
+            i += 1
+            continue
+        if c == "#":
+            j = text.find("\n", i)
+            if j < 0:
+                break
+            i = j                          # the newline itself is kept
+            continue
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            in_str = text[i:i + 3]
+            out.append(in_str)
+            i += 3
+            continue
+        if c in ('"', "'", '`'):
+            in_str = c
+            out.append(c)
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _is_type_spelling(text) -> bool:
