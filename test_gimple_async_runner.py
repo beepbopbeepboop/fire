@@ -1,7 +1,7 @@
 """REAL behavioral test for Step B (compiled-path async/await codegen,
 async_runtime.h Step A's sibling): compiles a Mojo async function's dual
 output (.c/.ci via gcc -fgimple, .cpp via g++ -std=c++20) for real, links it
-together with Step A's runtime/fire_async_runtime.cpp AND runtime/
+together with Step A's runtime/mojo_async_runtime.cpp AND runtime/
 fire_runtime.c via fire.py's link_executable(cxx=True), RUNS the resulting
 binary, and asserts on its ACTUAL stdout — mirrors
 test_gimple_generator_runner.py's role/shape exactly, but for the async
@@ -38,7 +38,7 @@ import fire
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 RUNTIME_C = os.path.join(RUNTIME_DIR, 'fire_runtime.c')
-ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp')
+ASYNC_RUNTIME_CPP = os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp')
 
 _PASS = 0
 _FAIL = 0
@@ -48,7 +48,7 @@ def _build_async_program(mojo_src: str) -> str:
     """Compile mojo_src (which must contain at least one Step-B-supported
     async function) to a real executable: .c/.ci -> gcc -fgimple -c, .cpp
     (the async function's own generated coroutine unit) -> g++ -std=c++20
-    -c, runtime/fire_runtime.c -> gcc -c, runtime/fire_async_runtime.cpp
+    -c, runtime/fire_runtime.c -> gcc -c, runtime/mojo_async_runtime.cpp
     (Step A's scheduler) -> g++ -std=c++20 -c, then link all four via
     fire.py's link_executable(cxx=True) (g++ as the final link driver, so
     the C++ standard library / coroutine-support symbols resolve) — mirrors
@@ -71,7 +71,7 @@ def _build_async_program(mojo_src: str) -> str:
     c_o = os.path.join(wd, 'prog.o')
     async_o = os.path.join(wd, 'prog_async.o')
     runtime_o = os.path.join(wd, 'fire_runtime.o')
-    async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
+    async_runtime_o = os.path.join(wd, 'mojo_async_runtime.o')
     exe = os.path.join(wd, 'prog.exe')
 
     gcc = find_gcc()
@@ -95,9 +95,9 @@ def _build_async_program(mojo_src: str) -> str:
     r = subprocess.run([gxx, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o, ASYNC_RUNTIME_CPP],
                         capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     if r.returncode != 0:
-        raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
+        raise RuntimeError(f"g++ compile of mojo_async_runtime.cpp failed: {r.stderr}")
 
-    r = fire.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
+    r = mojo.link_executable([c_o, async_o, runtime_o, async_runtime_o], exe, cxx=True)
     if r.returncode != 0:
         raise RuntimeError(f"link_executable(cxx=True) failed: {r.stderr}")
 

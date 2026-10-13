@@ -756,8 +756,8 @@ template; it stopped being true when `__mlir_op` was recognised as spelling a
 specific dialect operation and one sentence was kept for all of them.
 
 `formal/model.py`'s `mlir_dialect_op_refusal` now classifies the operation, and
-the measurement behind it is the operation-vs-operand-type census recorded in
-`formal/model.py`'s `mlir_dialect_op_refusal` docstring.
+the measurement behind it is in
+`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §Correction.
 In short, over the 259 sites / 104 operations in the stdlib: 14 operations / 76
 sites denote **no value at all** (an effect — a store, a trap, an ownership
 marker — where "no representation" remains a true statement), 12 operations /
@@ -808,8 +808,9 @@ missing value — the last of those because its bracket carries two values this 
 COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
 
 Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
-other three sit behind other modules' refusals (the round-1 `std-os-io` scope
-chain), so they move one refusal along rather than out — which is §2.0's "the next
+other three sit behind other modules' refusals
+(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
+so they move one refusal along rather than out — which is §2.0's "the next
 terminal is a different construct" again, and the reason the census above is
 corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
 halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that
@@ -860,8 +861,9 @@ the census doc:
     for a receiver whose DECLARED type says `Bool`
     (`build._lower_dialect_select`), and `std/utils/_select.mojo` swept
     `codegen -> pass` on 2026-10-03. It needed the DECLARATION rather than a
-    fifth kind, and the operation-vs-operand-type census records why the kind
-    would have been the wrong tool. It is also the natural
+    fifth kind, and
+    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`
+    records why the kind would have been the wrong tool. It is also the natural
     first target for the operand-type work, being reachable and mostly word-typed
     where `std/simd.mojo` is 22 sites of pure vector.
 
@@ -959,7 +961,7 @@ is worth recording because it is a rule, not a typo:
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
    and the brief's own headline rule ("callable iff every parameter type AND
-   the return type are word-shaped") is the 223 column, not the 411 one. The
+   the return type are word-shaped") is the 223 column, not the 406 one. The
    brief's own warning is the reason the larger number is the wrong one.
 2. **20 of 22, with `_query` and `_query_dict` the only two refused.** Not
    derivable from the header. `_query` returns `void *`; so do `_open` and

@@ -25,9 +25,9 @@ base name, which is embedded in the image text (`u1-5555` vs `u2-5555`, same
 offset). Both sides must therefore write to the SAME `-o` path and the UUID must
 be zeroed; with that, all 52 `formal/examples/*.mojo` images are byte-identical
 across `HEAD` and `HEAD~1` on both architectures, which is the result §5.1 means.
-Both §5.1 and §6.1 now say so, because the first thing a future session does
-with them is run `cmp` and conclude a behaviour-preserving change is not
-byte-identical.
+Filed as `bugs/TEST_the_byte_identical_image_bar_needs_one_shared_output_path.md`,
+because the first thing a future session does with this § is run `cmp` and
+conclude a behaviour-preserving change is not byte-identical.
 
 Nothing in `formal/build.py` or `formal/model.py` here is a cache: the fixes
 remove two derivations of a MODULE-level table that a per-FUNCTION loop was
@@ -530,10 +530,7 @@ is a per-file property rather than a uniform one.
 behaviour-preserving.** Eight `formal/examples/*.mojo` plus every corpus file
 that declares a one-field struct and still builds: the image is **byte-identical**
 (`sha256`) and the refusals are **identical in exit code and full diagnostic
-text**, table against predicate, on both architectures. **The two sides must
-write to the SAME `-o` path** (§5.1's "one `-o` path token normalised out"), or
-the image's own embedded base name differs and a raw `cmp` reports every file
-different for a reason that has nothing to do with the change.
+text**, table against predicate, on both architectures.
 
 **What it cost in surface, honestly: fifteen signatures**, not the four §6
 predicted — `_frame_receivers`, `_seed_one_word_bindings`,

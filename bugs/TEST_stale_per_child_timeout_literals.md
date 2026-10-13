@@ -2,21 +2,6 @@
 
 ## Status
 
-**Six more files landed 2026-10-07, 30 sites; the census now reads 105 over 48
-files.** The six are the ones the 2026-10-05 entry named as "cheapest first":
-`test_async_void_return.py`, `test_async_with_lock_guard.py`,
-`test_coro_nested_async_capture.py`, `test_mutable_async_capture.py`,
-`test_nested_async_generic.py` and `test_transitive_closure_capture.py`, five
-sites each. In every one the four `gcc`/`g++ -c` children are
-`COMPILE_TIMEOUT_S`, the produced executable's run is `RUN_TIMEOUT_S`, and
-`test_coro_nested_async_capture.py`'s `g++ -o exe` link is `LINK_TIMEOUT_S`; the
-two `_build_and_run` helpers whose `timeout` parameter is a RUN budget had their
-default raised from `30` to `RUN_TIMEOUT_S`. All six re-run with their existing
-verdicts (`async_void_return` 0/3, the other five green). Their rows are gone
-from `STALE_PER_CHILD_BUDGETS` in the same commit, which the census check
-enforces. What remains is the 48 files and the two judgement cases
-(`test_formal_admitted.py`, `test_metal_codegen.py`) the 2026-10-05 entry names.
-
 **Partly landed 2026-10-04.** Two things changed, and the second is the one
 that makes the rest mechanical.
 

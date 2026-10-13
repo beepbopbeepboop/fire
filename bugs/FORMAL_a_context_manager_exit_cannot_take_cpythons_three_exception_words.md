@@ -1,47 +1,13 @@
 # A context manager's `__exit__` cannot take CPython's own three exception
 # words, so every context manager written the way CPython writes one is refused
 
-**Status 2026-10-12 (`work/formal318-docs`): the SECOND spelling of the ignoring
-shape is now accepted too — `__exit__(self, *exc)` whose body never reads `exc`
-lowers, because the catch-all was being refused for a reason that was never
-true: `_dunder_receiver_params` read the star from `getattr(method, "vararg",
-None)`, and no `FunctionDef` on this front end has that attribute (the parser
-keeps the star IN the parameter name, `("*args", …)`), so the shape came out as
-arity 2 and the variadic branch of `with_context_manager_defect` was dead code.
-`function_param_shape` is now the reader, `context_exit_variadic_ignores` is the
-predicate (`**kw` alone and `(self, exc_type, *rest)` stay refused for a
-STRUCTURAL reason — CPython never calls either with the receiver alone — and a
-read of the catch-all is refused by name, the variadic spelling of the read
-refusal below). `test_formal_with.py` is **395 checks, PASS=395** (was 378): two
-new ANSWERED rows run the same `*args` text on both engines, plus four
-in-process gate checks and a re-worded refusal row.**
-
 **Status 2026-10-07 (`work/formal104-docs`): the COMMON CASE is FIXED — a
 `__exit__(self, exc_type, exc_val, tb)` whose body IGNORES the three words is
 now a context manager this path lowers, so the most common `with` in real code
 compiles verbatim. What remains is the narrow half that genuinely needs the
-unwinder: a `__exit__` that READS any of the three words (fixed or variadic) is
-still refused, by name, because there is no exception value to pass and a
-fabricated one would be a lie the method then acted on.**
-
-**2026-10-08 (`work/formal258-docs`): §4 item 3 — the alias-dispatched method
-whose NAME a second struct also declares — is FIXED, and fixed for BOTH
-spellings of the source (this branch added the second).** When the manager
-ANNOTATES its `__enter__` result (`def __enter__(self) -> Res`),
-`model.with_alias_struct` is the one reader of "what does the alias hold", the
-`with` lowering publishes it (`formal/build.py::_one_with_item` →
-`_rewrite_with_statements`' `alias_structs`), and `_prepare_functions` merges it
-into the framed-receiver table `_rewrite_one_word_field_method_calls` reads, so
-`v.m()` lifts from the alias's DECLARED type instead of being declined by name.
-The other spelling — `__enter__` returning its own RECEIVER with no annotation —
-was already closed by the holder round trip (`work/formal118-docs`,
-`_rewrite_holder_method_calls`); §4 item 3 below carries both. What STAYS
-refused is the `__enter__` that returns a bare WORD (`Ctx` returns `self.tag`):
-there the source types nothing, so the ambiguity is real. Pinned by
-`test_formal_with.py`'s `an_annotated_enter_publishes_the_alias_struct` (both
-backends, CPython oracle) plus its in-process predicate checks and the DECLARED
-row `a_method_through_the_alias_with_a_rival_owner_is_answered` — over the
-merged tree the whole file is 387 checks, PASS=387 FAIL=0.
+unwinder: a `__exit__` that READS any of the three words is still refused, by
+name, because there is no exception value to pass and a fabricated one would be
+a lie the method then acted on.**
 
 **What landed, and why it is not the signature change §3 warns against.** The
 three words still have nowhere to come from; the fix does not invent them. It
@@ -139,7 +105,6 @@ document is named for, when the body does not read the words:
 | construct | evidence |
 |---|---|
 | `__exit__(self, exc_type, exc_val, tb)` that ignores them | no read of any of the three parameter names in the body |
-| `__exit__(self, *exc)` that ignores `exc` | no read of the catch-all name in the body (2026-10-12) |
 
 **REFUSED, and this is what is left** — the same signature when the body READS
 a word:
@@ -147,7 +112,6 @@ a word:
 | construct | the refusal |
 |---|---|
 | `__exit__(self, exc_type, exc_val, tb)` whose body reads `exc_type`/`exc_val`/`tb` | "its `__exit__` takes CPython's three exception words and READS them … there is no exception value, no traceback and no type word to pass, so any value this path supplied would be a lie the method then acted on" |
-| `__exit__(self, *exc)` whose body reads `exc` | the same sentence through the variadic spelling: "takes CPython's three exception words through a variadic `*exc` and READS it … there is no exception value, no traceback and no type word to pass" (2026-10-12) |
 
 The wording is itself part of what this branch fixed: until 2026-10-05 the same
 program was told "**it declares no `__enter__`**", which is FALSE about a class
@@ -233,44 +197,32 @@ second is the same missing unwinder seen through a narrower door:
     dropped on the floor). See
     `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` for the
     remaining half of that;
-* ~~a method call through the alias whose NAME a second struct also declares.~~
-    **CLOSED 2026-10-07/2026-10-08 — two publications, one per spelling of the
-    source.** The alias binds whatever `__enter__` returns, and there are two
-    ways the source states what that is; BOTH are published into
-    `formal/build.py`'s framed-receiver table now. (1) **The receiver round trip**
-    (2026-10-07, `work/formal118-docs`): the alias is bound to `S.__enter__(tmp)`,
-    and when `__enter__` returns its receiver that call is a frame-returning
-    call, so the holder fixpoint already knows the alias is an `S` — this is
-    `Box.__enter__` returning `self` with no annotation.
-    `_rewrite_holder_method_calls` runs beside `_rewrite_nested_method_calls`
-    against the same `by_name` table and lifts the bare-name receiver the
-    name-only dispatch declined, with `_derived_overrides`'s guard copied so a
-    child that overrides the member is still refused. (2) **The declared result
-    type** (2026-10-08, `work/formal258-docs`): the manager that ANNOTATES
-    `def __enter__(self) -> Res` writes the type down, `model.with_alias_struct`
-    reads it out of the source, `_rewrite_with_statements` carries it out of the
-    `with` lowering (`alias_structs`), and `_prepare_functions` merges it into
-    the same table — but only where the name has no OTHER binding
-    (`_bound_receiver_structs`/`one_word` win), because two layouts under one
-    name is the ambiguity that table already drops rather than picks.
-    `test_formal_with.py`'s
+  * ~~a method call through the alias whose NAME a second struct also declares.~~
+    **CLOSED 2026-10-07 (`work/formal118-docs`).** The alias's struct is now
+    published into `formal/build.py`'s frame-holder table — the alias is bound to
+    `S.__enter__(tmp)`, and when `__enter__` returns its receiver that call is a
+    frame-returning call, so the holder fixpoint already knows the alias is an
+    `S` (which is why `b.tag` lowered while `c.tag` for an `__enter__` that
+    returns a field still refuses). `_rewrite_holder_method_calls` runs beside
+    `_rewrite_nested_method_calls` against the same `by_name` table and lifts the
+    bare-name receiver the name-only dispatch declined, with
+    `_derived_overrides`'s guard copied so a child that overrides the member is
+    still refused. `test_formal_with.py`'s
     `a_method_through_the_alias_with_a_rival_owner_is_answered` is the row (it
     moved from the REFUSED table to the DECLARED one, against CPython on both
-    architectures), and `an_annotated_enter_publishes_the_alias_struct` is the
-    in-process check that keeps the annotation predicate honest even while the
-    build passes for another reason. `test_formal_run.py`'s
+    architectures), and `test_formal_run.py`'s
     `ambiguous_name_a_derived_struct_also_declares_is_still_refused` still pins
-    the one clause that must not be waived. What stays refused is the
-    `__enter__` that returns a bare WORD (`Ctx` returns `self.tag`): there the
-    alias genuinely has no type, and a wrong layout stays unreachable.
+    the one clause that must not be waived. The context-manager-to-a-value
+    spelling and the `__enter__`-returns-a-word spelling both stay refused, which
+    is what keeps a wrong layout unreachable.
 
 ## 5. The reproduce line for the whole table
 
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py
 
-387 checks, both architectures (measured 2026-10-10, after the merge that
-brought the second publication in). §1's "ANSWERED" rows are its ANSWERED +
-DECLARED + resource rows; §4's remaining shapes are among its REFUSED rows. The
-former two-owner alias row is DECLARED, not refused, and it is now answered
-through both publications: the `Box` receiver round trip (holder analysis) and
-the `Holder` manager's own `-> Holder` annotation.
+338 checks, both architectures (measured 2026-10-07). §1's "ANSWERED" rows are
+its 28 ANSWERED + 7 DECLARED + 3 resource rows; §4's remaining shapes are among
+its 16 REFUSED rows. The former two-owner alias row is now the seventh DECLARED
+row (`a_method_through_the_alias_with_a_rival_owner_is_answered`), not a
+refusal: its alias's `Box` receiver is published by the holder analysis, so the
+ambiguity the name-only dispatch declines is settled by the binding.

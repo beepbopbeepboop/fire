@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -1579,15 +1579,7 @@ def _c_escape(s: str) -> str:
     passed through unchanged rather than having their backslash doubled — the old
     code did `replace('\\\\','\\\\\\\\')` first, turning `\\n` into a literal
     backslash-n in the output. Lone backslashes, quotes, and raw control chars are
-    escaped. Non-ASCII bytes pass through untouched.
-
-    `\\uXXXX`, `\\UXXXXXXXX` and an octal run are passed through too, because C
-    decodes all three natively (a `char[]` literal gets the UTF-8 bytes of the
-    universal character name) — without this they fell to the lone-backslash arm
-    and became a literal `\\u00e9`, six characters where CPython makes one.
-    `\\N{NAME}` has NO C spelling, so it is decoded here through
-    `fire_compiler.decode_c_escapes` (the tree's one decoder) and its bytes are
-    emitted directly; an unknown name raises, as CPython's own lookup does."""
+    escaped. Non-ASCII bytes pass through untouched."""
     known = set('ntr"\\\'0abfv')
     out = []
     i, n = (0, len(s))
@@ -1608,52 +1600,6 @@ def _c_escape(s: str) -> str:
                 out.append('\\\\x')
                 i += 2
                 continue
-        if ch == '\\' and i + 1 < n and s[i + 1] in '1234567':
-            # An octal run. A leading `0` is in `known` and passes through; C
-            # continues an octal run across it the same way (`\01` and `\0`+`1`
-            # are the same two characters). C decodes the run itself, so the
-            # backslash and its first digit pass through and the remaining
-            # digits flow as ordinary text.
-            out.append(ch)
-            out.append(s[i + 1])
-            i += 2
-            continue
-        if ch == '\\' and i + 1 < n and s[i + 1] in ('u', 'U'):
-            digits = 4 if s[i + 1] == 'u' else 8
-            ok = i + 1 + digits <= n
-            if ok:
-                k = i + 2
-                while k < i + 2 + digits:
-                    if s[k] not in '0123456789abcdefABCDEF':
-                        ok = False
-                        break
-                    k += 1
-            if ok:
-                out.append(ch)
-                out.append(s[i + 1])
-                i += 2
-                continue
-            # A short/non-hex run is not an escape: keep the backslash literal.
-            out.append('\\\\')
-            i += 1
-            continue
-        if ch == '\\' and i + 1 < n and s[i + 1] == 'N' \
-                and i + 2 < n and s[i + 2] == '{':
-            close = s.find('}', i + 3)
-            if close != -1:
-                decoded = decode_c_escapes(s[i:close + 1])
-                for dc in decoded:
-                    if dc == '"':
-                        out.append('\\"')
-                    elif dc == '\\':
-                        out.append('\\\\')
-                    else:
-                        out.append(dc)
-                i = close + 1
-                continue
-            out.append('\\\\')
-            i += 1
-            continue
         if ch == '\\':
             out.append('\\\\')
             i += 1

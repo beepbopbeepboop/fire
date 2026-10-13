@@ -256,25 +256,6 @@ def main(n):
     {"a": "1000", "b": "2000", "c": "3000", "d": "0"},
 ))
 
-# A SIGNED pointee, so the load has to sign-extend rather than zero-extend. A
-# four-byte load into a one-word value has to choose, and `q[0] = -2`
-# zero-extended reads back as 4294967294: the same bytes, a different number.
-# `p.value()` has sign-extended through `_emit_dereference` all along; this is
-# the pin that `p[i]` does too, and the read and the store share one width.
-CASES.append(Case(
-    "pointer_subscript_i32_signed",
-    '''\
-def main(n):
-    var q: Pointer[Int32] = malloc(16)
-    q[0] = 0 - 2
-    q[1] = 2000000000
-    printf("a=%d@@", q[0])
-    printf("b=%d@@", q[1])
-    return 0
-''',
-    {"a": "-2", "b": "2000000000"},
-))
-
 CASES.append(Case(
     "pointer_subscript_i64",
     '''\
@@ -755,19 +736,6 @@ def main(n):
 # CPython's own `os.stat` in this process. The shapes are the point: a layout
 # that is right for a regular file is right for all of them, and a case set
 # with only a regular file in it would not know that.
-#
-# `st_dev` is compared as the 64-bit WORD it is and not as the Python integer
-# CPython happens to store, and that is a fact about the FIELD rather than a
-# preference: `st_dev` is `dev_t`, an `int32` on macOS, and CPython exposes
-# `os.stat().st_dev` as that field sign-extended into the `unsigned long long`
-# of its `stat_result` — so a device with bit 31 set is a number ABOVE `2**63`
-# (`/dev/null` on the machine this was measured on is `18446744072249612928`,
-# `0xffff_ffff_a8fb_1a80`). A formal value is one 64-bit word and `%d` is its
-# signed rendering, so the ORACLE folds CPython's value into signed-64
-# (`_as_word64`) and both sides then print the same bits. Without the fold a
-# signed `%d` renders `-1459938688` where CPython reports
-# `18446744072249612928`, and the disagreement shows up exactly when bit 31 of
-# the device is set, which is why it went unseen until such a machine.
 STAT_PROGRAM = '''\
 from os.path import isfile, isdir, islink, lexists, exists, getsize
 from os.path import stat_mode, stat_size, stat_ino, stat_dev, stat_nlink
@@ -778,7 +746,7 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%llu blocks=%d blksize=%d@@",
+    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",
@@ -792,39 +760,6 @@ def main(n):
 '''
 
 
-def _as_word64(v):
-    """`v` folded into the 64-bit two's-complement word a formal value is.
-
-    `os.stat().st_dev` is a non-negative Python int — CPython stores the field
-    in an `unsigned long long` — while the formal path's `stat_dev` holds the
-    same BITS in one 64-bit word, which `%d` renders signed. Folding CPython's
-    value to signed-64 makes the two the same number rather than one number
-    and its two's complement. `-1`, the "no struct here" sentinel every field
-    of a missing path is answered with, is already in range and unchanged.
-    """
-    v &= (1 << 64) - 1
-    return v - (1 << 64) if v >= (1 << 63) else v
-
-
-def _as_printed_by_the_image(v):
-    """`v` as the image's `printf("%d", …)` renders the same 64-bit word.
-
-    The image's `%d` is C's `%lld` on a signed 64-bit word (the formal backend's
-    `%d` is signed for a signed value), while Python's `%d` on an
-    arbitrary-precision int prints the UNSIGNED magnitude.  The two agree for
-    every value below `2**63`; they differ for `st_dev` of `/dev/null`, whose
-    `dev_t` is `int32_t` with the high bit set: CPython reports the 32-bit
-    `0xa8fb1a80` as `18446744072249612928` (`0xffffffffa8fb1a80`), and the image
-    reports the same 64-bit word as `-1459938688`.  This normalisation is a
-    rendering change and NOT a value change — the word both sides hold is
-    identical — so the case still checks what it always did, and it is applied
-    to every stat field rather than to `st_dev` alone so a second field over
-    `2**63` cannot arrive as a surprise.
-    """
-    v = int(v)
-    return v - (1 << 64) if v >= (1 << 63) else v
-
-
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 
@@ -832,9 +767,7 @@ def _stat_oracle(p):
     and `os.stat` for the rest. A path CPython cannot stat is answered as
     -1/`0` rather than raising, because this path has no exception to raise and
     a case that raised would be testing CPython's error handling rather than the
-    module.  Every numeric field is rendered through
-    `_as_printed_by_the_image`, so the comparison is between the 64-bit words
-    and not between two different `%d` rules.
+    module.
     """
     out = {}
     out["pred"] = "isfile=%d isdir=%d islink=%d lexists=%d exists=%d" % (
@@ -851,57 +784,21 @@ def _stat_oracle(p):
         pass
 
     def field(st, name):
-        v = -1 if st is None else getattr(st, name)
-        # `st_dev` is `dev_t` = `int32_t`, and CPython exposes it widened to 64
-        # bits: `(unsigned long long)(int32_t)-1459938688` is
-        # `0xFFFFFFFFA8FB1A80`, which Python prints as the huge POSITIVE
-        # `18446744072249612928`.  The image's word is a SIGNED 64-bit int, so
-        # it prints the same bit pattern as `-1459938688`, and `%d` cannot
-        # print the unsigned form (it must stay signed for the `-1` a missing
-        # path answers).  So the oracle reinterprets the SAME 64-bit word as
-        # signed, which is what both engines actually hold; every device
-        # numbered below 2^31 is unaffected, which is why this was invisible
-        # until a machine whose `/dev/null` has a negative `st_dev` was in the
-        # corpus.
-        if name == "st_dev" and v >= 2 ** 63:
-            v -= 2 ** 64
-        return v
-
-    def device(v):
-        """`st_dev` in the backend's own domain.
-
-        `dev_t` is a 32-bit field, and the two sides render it differently when
-        its high bit is set.  `os/_syscalls.mojo`'s `fs_stat_field32` reads the
-        four bytes as an unsigned 32-bit word, so `/dev/null`'s raw `0xa8fb1a80`
-        is `2835028608`; CPython sign-extends it to 64 bits and renders it as an
-        UNSIGNED long, so the same bytes are `18446744072249612928`.  That value
-        is above `2**63`, outside the signed 64-bit range this backend keeps an
-        integer in (`printf("%d")` on a runtime negative prints it signed), so
-        NO value the image can produce prints as it.  The comparison is
-        therefore on the 32-bit device number both sides agree on.  `-1` is
-        `field`'s "no struct here" sentinel and is left alone, because the image
-        answers -1 for the same paths.  Measured 2026-10-07 on `/dev/null`,
-        both architectures.
-        """
-        return v if v < 0 else v & 0xFFFFFFFF
+        return -1 if st is None else getattr(st, name)
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
-        _as_printed_by_the_image(field(s, "st_mode")),
-        _as_printed_by_the_image(field(s, "st_nlink")),
-        _as_printed_by_the_image(field(s, "st_uid")),
-        _as_printed_by_the_image(field(s, "st_gid")))
+        field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
+        field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), device(field(s, "st_dev")),
+        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
-        _as_printed_by_the_image(field(ls, "st_mode")),
-        _as_printed_by_the_image(field(ls, "st_size")),
-        _as_printed_by_the_image(field(ls, "st_ino")))
+        field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
     try:
         g = os.path.getsize(p)
     except OSError:
         g = -1
-    out["g1"] = "getsize=%d" % _as_printed_by_the_image(g)
+    out["g1"] = "getsize=%d" % g
     return out
 
 
@@ -2064,14 +1961,7 @@ def main():
     # `FAIL stat_fifo [arm64]`, which is the same line a defect in `os` prints —
     # and `bugs/OPEN_WORK.md` §C2 says this area has already been misdiagnosed
     # twice that way.
-    # `PASS=n FAIL=m of N` as well as the human `n/N passed`, so the
-    # registration's `expect=` count is CHECKABLE: the runner's count reader
-    # recognises that shape and not `n/N passed`, and a marker whose count it
-    # cannot read is reported UNCHECKED, which it treats as a failure. `KILLED`
-    # is neither, and is reported separately as before.
     print(f"\n{total - len(failed) - len(killed)}/{total} passed"
-          + f"  (PASS={total - len(failed) - len(killed)}"
-          + f" FAIL={len(failed)} of {total})"
           + (f", {len(killed)} obtained NO verdict because the machine killed "
              f"them on {EXTERNAL_SIGNALS_TEXT}, which is not a wrong answer: "
              f"{', '.join(killed)}" if killed else ""))

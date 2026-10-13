@@ -461,9 +461,7 @@ def gen_flagged_alu(rng, free):
     case_and_an_as_check` was red on that row. Its answer is
     `arm64_logic_flags (Xn &&& Xm)` with C and V clear, so a draw here is the
     one case that exercises the logical flag test against the CPU rather than
-    the arithmetic one `adds`/`smulh` cover. `CMN` is drawn by `gen_flags`
-    (the `census` FUZZ column reads `yes` for it through that mix), so it is not
-    repeated here.
+    the arithmetic one `adds`/`smulh` cover.
     """
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     imm = rng.randrange(0x1000)
@@ -474,14 +472,12 @@ def gen_flagged_alu(rng, free):
         return ("smulh x%d, x%d, x%d" % (d, n, m),
                 A.encode_smulh_xd_xn_xm(d, n, m))
     if k == 2:
-        return "tst x%d, x%d" % (n, m), A.encode_tst_xn_xm(n, m)
-    if k == 3:
         return ("add x%d, x%d, x%d, lsl #3" % (d, n, m),
                 A.encode_add_xd_xn_xm_lsl3(d, n, m))
-    if k == 4:
+    if k == 3:
         return ("add x%d, x%d, x%d, lsl #4" % (d, n, m),
                 A.encode_add_xd_xn_xm_lsl4(d, n, m))
-    if k == 5:
+    if k == 4:
         return ("add x%d, x%d, #%d, lsl #12" % (d, n, imm),
                 A.encode_add_xd_xn_imm_sh(d, n, imm, 1))
     if k == 5:

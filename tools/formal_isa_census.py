@@ -12,12 +12,10 @@ answers the other four, for every instruction form the code generators CAN emit:
 
 The unit is the EMITTED FORM, and "emitted" means a call site: an `encode_*`
 that some emitter (a backend's `codegen.py`, or the Mach-O linker's stub)
-references, read by an AST walk of the emitter so a DOCSTRING that names an
-encoder is not one (see `_emitter_refs`). That is the same distinction the
-survey's 2026-10-03 method change made and it is the reason this tool exists at
-all — an encoder nothing calls is byte-exact, has a Lean arm, and cannot occur
-in an image, so counting it in any of the four columns would over-report all of
-them at once.
+references. That is the same distinction the survey's 2026-10-03 method change
+made and it is the reason this tool exists at all — an encoder nothing calls is
+byte-exact, has a Lean arm, and cannot occur in an image, so counting it in any
+of the four columns would over-report all of them at once.
 
 **Each column names the thing it reads, because a column that cannot say where
 its answer came from is not a measurement.**
@@ -247,44 +245,30 @@ def encoder_names(arch):
     return re.findall(r"^def (encode_[A-Za-z0-9_]+)", src, re.M)
 
 
-def _ast_identifier_counts(path):
-    """`Counter` of identifier occurrences in `path`, by AST.
-
-    A name is counted where it appears as CODE (`ast.Name` / `ast.Attribute`'s
-    `.attr`), not where it appears inside a string. That is the whole point: a
-    docstring that mentions an encoder is not a call site, and the text regex
-    this replaced counted `formal/x86_64_codegen.py`'s prose reference to
-    `encode_cmov_r64_r64` — named in a docstring, called nowhere — so that
-    encoder sat in the census as an EMITTED form with no model, no fuzz case and
-    no `as` check, printing as an unexplained gap and (once the arm64 rows were
-    covered) keeping `test_formal_isa_census.py` red.
-    """
-    import collections
-    counts = collections.Counter()
-    for node in ast.walk(ast.parse(_read(path))):
-        if isinstance(node, ast.Name):
-            counts[node.id] += 1
-        elif isinstance(node, ast.Attribute):
-            counts[node.attr] += 1
-    return counts
-
-
 def call_sites(arch):
     """{encoder: [(file, count)]} over the emitter files only, by AST.
 
-    The walk is over the `LEVER_ROOTS` files and counts `encode_*` names as
-    CODE (`_ast_identifier_counts`), not through a regex over their text.
+    The walk is over the two `LEVER_ROOTS` files and counts `encode_*` NAMES
+    and ATTRIBUTES in code — not a regex over their text. The distinction is the
+    one this module states for the FUZZ column ("a docstring mentioning an
+    encoder is not coverage") and it has to hold here for the same reason: an
+    encoder an emitter only NAMES in prose is not an instruction any image can
+    contain. Measured 2026-10-05: the regex version counted x86-64's
+    `encode_cmov_r64_r64`, which `formal/x86_64_codegen.py` mentions only in the
+    `_emit_stack_floor_init` docstring recording *why it was not used*, and
+    reported the form as an emitted gap it never was.
     """
-    counts = {rel: _ast_identifier_counts(os.path.join(ROOT, rel))
-              for rel in LEVER_ROOTS[arch]}
-    out = {}
-    for name in encoder_names(arch):
-        hits = []
-        for rel in LEVER_ROOTS[arch]:
-            n = counts[rel].get(name, 0)
-            if n:
-                hits.append((os.path.basename(rel), n))
-        out[name] = hits
+    out = {name: [] for name in encoder_names(arch)}
+    for rel in LEVER_ROOTS[arch]:
+        tree = ast.parse(_read(os.path.join(ROOT, rel)))
+        counts = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in out:
+                counts[node.attr] = counts.get(node.attr, 0) + 1
+            elif isinstance(node, ast.Name) and node.id in out:
+                counts[node.id] = counts.get(node.id, 0) + 1
+        for name, n in counts.items():
+            out[name].append((os.path.basename(rel), n))
     return out
 
 
@@ -559,12 +543,6 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
-    "encode_call_r64": "`callq *%r` jumps to the CONTENTS of a register, which "
-                       "is outside the harness's one `MAP_FIXED` region and "
-                       "cannot be installed as a case value — the same reason "
-                       "as `encode_jmp_rm64` and arm64's `encode_br_xn`; the "
-                       "decoder, model arm, `samples()` row and `as` check are "
-                       "all `yes`",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -608,9 +586,9 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
+    # ── x86-64: the forms the harness cannot even NAME ───────────────────
     #
-    # `encode_imul_r64_r64_imm` was removed on 2026-10-06
+    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
     # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
     # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
     # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
@@ -618,18 +596,26 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
-    # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-07: the
-    # byte-wise `and`/`or` the floating compare needs, whose gap was a REX prefix
-    # the tree's own encoder omitted for SPL/BPL/SIL/DIL. `_byte_rex_required`
-    # fixed the encoder, the pool draws both, and the census reads `yes yes yes`
-    # for each — so the entries were stale and the anti-rot half of
-    # `test_formal_isa_census.py` is what caught them.
+    "encode_call_r64": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
+        "maps `FF` only to `FF 15`/`FF 25`"),
+    "encode_and_r8_r8": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "the byte-wise `and` the floating compare needs (no REX.W, so the "
+        "decoder's REX.W-only ALU arm does not reach it)"),
+    "encode_or_r8_r8": (
+        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
+        "as `encode_and_r8_r8`"),
     # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
     # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
     # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.
+    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
+    # listed here — it was left by the previous pass on purpose ("another
+    # claim's write set") and is a separate stale entry this removal does NOT
+    # touch.
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
@@ -641,13 +627,10 @@ BACKLOG = {
     # number in both halves; and a branch to the NEXT instruction stays inside
     # whatever the program has already put there.  All four are in the pool now
     # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its `HARNESS_LIMITS` entry, and that
+    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
     # reason is the one that fits IT: this project does not map the arm64
     # harness's code at a fixed address, so a pc-relative RESULT cannot be
     # compared and only pc DELTAS are.
-    #
-    # So there is no x86-64 row in this dict any more; the arm64 entries above
-    # are the whole of it.
 }
 
 

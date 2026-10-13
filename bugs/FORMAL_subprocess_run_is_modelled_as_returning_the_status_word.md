@@ -107,40 +107,15 @@ makes unilaterally.
 
 ## Status
 
-**OPEN, with the refusal reproduced, the three options costed, and the DECISION
-taken (option 3 — see below).** No code changed for the refusal itself: the
-`functools` commit that found it (`version.py`) leaves `r.returncode` exactly as
-it was, and `version.py` was already refused before that commit — on
-`functools`, which is the module this tree does not need.
+**OPEN, with the refusal reproduced and the three options costed.** No code
+changed for this: the `functools` commit that found it (`version.py`) leaves
+`r.returncode` exactly as it was, and `version.py` was already refused before
+that commit — on `functools`, which is the module this tree does not need.
 
 **Not closed by rewriting `version.py`.** `formal/hostmods/subprocess.mojo` is
 claimed work; the caller-side substitution is deliberately NOT made, because the
 one spelling that compiles on both sides (`rc = completed_process_returncode(r)`)
 is option 3 and option 3 is the decision this doc is asking for.
-
-**DECIDED 2026-10-08 (`work/formal224-docs`): option 3, and the decision is now
-recorded in `formal/hostmods/subprocess.mojo`** (see its "WHAT `run` HANDS BACK"
-section).  Two measurements were taken to decide it, and one of them removes
-option 1 outright:
-
-* **Option 1 is not available for `version.py` even if the model returned a
-  struct, and not because of the one-word admitted ABI alone.**  `version.py`
-  reads TWO fields off `r`: `r.returncode` (lines 83 and 89) and `r.stdout`
-  (line 83).  `stdout` is a captured STREAM, which this target does not model at
-  all, so a one-field `CompletedProcess` — the shape option 1 needs, since a
-  formal value is one word — would move `version.py` onto `r.stdout` rather than
-  past it.  A struct that carried `stdout` too is a frame blob, and an admitted
-  host contract is one word wide
-  (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`).
-* **The line references the doc quotes are stale**: the two files written the
-  CPython way are `test_re_formal.py:661` and `test_x86_64_decode.py:440`, not
-  `:607` and `:359` (both files have moved).  Neither is a caller that only
-  reads `.returncode`.
-
-Option 3 is the only one of the three that needs no capability change, and it is
-the spelling the sibling capability doc reaches for the same family —
-`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §5, whose
-"the cheapest honest form is not a struct at all" is the same answer.
 
 ## Next step, exactly
 
@@ -149,67 +124,6 @@ Decide between 1, 2 and 3 above, and record it in
 docstring is currently silent on whether `run`'s word return is a deliberate
 simplification or an accident of modelling `CompletedProcess` as a word, and
 `version.py` is not the only file that will need to know.
-
-## Status 2026-10-08 (`work/formal165-docs`): option 1's blocker is GONE, and its
-## stated cost was wrong about a one-field struct
-
-**This doc called option 1 ("make the model return a struct") the CPython-
-matching one and priced it at "a frame-allocated struct per `run`". The price is
-wrong for `CompletedProcess`: a ONE-field struct has no frame at all — its value
-IS its only field (`model.struct_is_framed` is False), so `.returncode` lowers to
-the identity and no block is reserved.** That is the same fact
-`_one_word_field_map` states for `var b = Box()`.
-
-**The real blocker was one layer below the model, and it was measured.** The
-backend could not read a field off a name bound from a CALL at all, whatever the
-callee's declared return type named. Both architectures, before this session:
-
-```python
-struct Box:
-    var v: Int = 0
-
-def make_box(n: Int) -> Box:
-    var b = Box()
-    b.v = n
-    return b
-
-def main() -> Int:
-    c = make_box(5)
-    return c.v
-```
-
-    build: main: 'c.v' is a field access through 'c', and this path has no way to
-      say what 'c' holds. … Bind the base from a constructor whose declaration
-      THIS IMAGE can see (`x = S()`)
-
-— a sentence that is false about this program: the image had just compiled the
-constructor the declaration names. So `r = subprocess.run(...); r.returncode`
-fails on the BINDING, not on any of the three options this document costed.
-
-**Fixed this session, as shared infrastructure rather than as this doc's fix.**
-`_call_returns_one_word_struct` is a third source for both
-one-word tables, beside a construction and a declared parameter: a local bound
-from a callee whose declared `-> T` names a one-field struct of this image is
-that struct. Three shapes are refused rather than claimed (a type-constructor
-conversion, a struct that is not one field, and a one-field struct whose sole
-field is itself a FRAME — the holder tables own that word). Pinned by two
-`test_formal_run.py` BOTH_ARCH_CASES rows on both backends:
-`both_arch_one_field_struct_returned_by_a_call_reads_through_its_field` and
-`both_arch_one_field_struct_returned_by_a_call_dispatches_eq`.
-
-**What is left is now a one-line model change and a decision this doc still
-owns.** A `subprocess.run(...) -> CompletedProcess` whose `CompletedProcess` is a
-one-field struct makes `r.returncode` lower; every int-shaped use of `run`'s word
-is unchanged, because the struct's value IS the word (measured: `r != 0` still
-branches as it did; `printf("%d", r)` already took a word). **The one fact the
-decision turns on is which of CPython's four `CompletedProcess` attributes the
-one field is, and the measured answer is `returncode`** — it is the only one of
-the four any of the 547 call sites reads (§5's own census). It is NOT taken here
-because `formal/hostmods/subprocess.mojo` is `@admitted`, and a struct-returning
-admitted function changes the proof obligation the integrator's Lean run has to
-check; a light worker may not run Lean. The three options are now two: option 1
-is cheap and this session removed its blocker, and option 2 (forbid the
-spelling) is the only remaining alternative.
 
 ## Status 2026-10-09 (`formal261-docs-r2-r2`): both cheap options priced by measurement
 
@@ -258,19 +172,3 @@ contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
 already named; this update is the measurement that makes the boundary concrete.
 `version.py` remains exactly as closed — refused at `r.returncode` — and no
 caller-side substitution was made for the same reason the doc originally gave.
-
-**merged 2026-10-13 (merging `work/formal186-docs`): the branch carried a
-parallel 2026-10-08 section for the same landed fix** (its one-word map read the
-callee's declared return type through `M.call_result_type_name` instead of this
-tree's `_call_returns_one_word_struct`, pinned by its own two rows); deduped
-into the 2026-10-08 Status above. Its unique measurements, re-measured on the
-merged tree: the same-image fix is NOT sufficient for `subprocess.run` because
-`run` is MODULE-QUALIFIED, and both cross-module shapes are still refused at
-the BINDING — `var r = libcp.make(7)` and `var r = make(7)` under
-`from libcp import make`, each with a one-field `CP` whose `make` returns `CP`,
-each refusing on `'r.returncode' is a field access through 'r', and this path
-has no way to say what 'r' holds`. On the branch tree the import-from shape was
-refused at the DYLIB stage instead (`libcp.mojo: make returns a frame address,
-so it cannot be compiled into a dylib`); the merged tree stops earlier, at the
-binding, so the dylib-stage sentence is a branch-tree fact and the binding
-refusal is the merged-tree one.

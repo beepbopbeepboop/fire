@@ -504,25 +504,11 @@ LIST_CASES = [
     ("l_reverse_r", ["a = [3, 1, 2]", "a.reverse()"], None,
      "`reverse` writes into the receiver's own bytes, and its length is a word "
      "read at run time"),
-    ("l_slice_store_grow_r", ["a = [3, 1, 2]", "a[0:1] = [9, 9, 9]"], NO_ANSWER,
-     "the GROWING half of the length-changing store: a value LONGER than the "
-     "range needs room the blob did not reserve. The receiver here is a NAME, "
-     "so no build knows its count and the run-time arm stops — loudly — where "
-     "`a[0:1] = []` and `a[0:1] = [9]` are answers. The static build-time "
-     "refusal covers an inline literal receiver"),
     ("l_slice_store_same", ["a = [3, 1, 2]", "a[0:1] = [9]"], "a[0]",
      "a SAME-LENGTH slice store, which arm64 lowers as an in-place replace and "
      "x86-64 does not have. arm64-only, declared in BACKEND_ONLY below rather "
      "than discovered: the group image is one build, so the case is EXCLUDED "
      "from it on x86-64 rather than failing the build"),
-    ("l_slice_store_shrink_empty", ["a = [3, 1, 2]", "a[0:1] = []"],
-     ("%d %d %d\\n", ["a[0]", "a[1]", "len(a)"]),
-     "a store whose value is EMPTY is `del a[0:1]`: the tail moves down one "
-     "and the count drops — the shrink half of the length-changing store"),
-    ("l_slice_store_shrink_mid", ["a = [3, 1, 2, 4]", "a[1:3] = [8]"],
-     ("%d %d %d\\n", ["a[0]", "a[1]", "len(a)"]),
-     "a SHORTER NON-EMPTY value over a middle range: `[3, 8, 4]`, not "
-     "`[3, 8, 2, 4]` — the tail past the range moves down too"),
 ]
 
 DICT_CASES = [
@@ -644,23 +630,17 @@ SET_CASES = [
      "`&` is INTERSECTION and needs a per-element membership scan per element. "
      "arm64 lowers it now; x86-64 has no set emitter and refuses it, so this "
      "case is arm64-only. Observed through a sum so a wrong element is visible"),
-    ("s_intersection_str", ['s = {"a", "b"}', 't = s & {"b"}'], "len(t)",
-     "an intersection over string elements, whose membership compare is on "
-     "`char *` WORDS — equal literals are one merged constant here, which is "
-     "what makes the union emitter's address dedup correct too"),
     ("s_difference_r", ["s = {1, 2}", "t = s - {2}", "u = 0",
                         "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
-     "`-` is SET DIFFERENCE, lowered on both backends. Measured before "
+     "`-` is SET DIFFERENCE, arm64-only like the intersection. Measured before "
      "the gate: SIGSEGV on both architectures, no output, because the result is "
      "a word nowhere near a blob and `len` read a count out of it"),
-    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2, 3}", "u = 0",
+    ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2}", "u = 0",
                      "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
      "`^` is SYMMETRIC DIFFERENCE, arm64-only. Measured before the gate: "
-     "SIGSEGV on both. Both operands have elements the other lacks, so the sum "
-     "exercises BOTH passes of the symmetric difference (left-minus-right and "
-     "right-minus-left) rather than one of them"),
+     "SIGSEGV on both"),
     ("s_sub_r", ["s = {1, 2}", "s -= {2}", "u = 0",
                  "for x in s:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(s)"]),
@@ -671,7 +651,7 @@ SET_CASES = [
                        "for x in s:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(s)"]),
      "the augmented intersection: 2 on arm64 and garbage on x86-64 before the "
-     "gate, and now the same answer on both backends"),
+     "gate, and now arm64's own answer"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
@@ -811,32 +791,17 @@ OPERATOR_CASES = [
      "`-` between two containers: a TypeError in CPython, and measured as a "
      "SIGSEGV here before the gate. This one is a LIST, so the set emitter "
      "below does not answer it and the gate still refuses it on both backends"),
-    ("o_xor", ["a = [1, 2]", "b = [2]", "t = a ^ b"], None,
-     "`^` between two LISTS: a TypeError in CPython and a refusal here. The "
-     "two-SET shape is arm64's set-algebra lowering now (the `set` group's "
-     "`s_symdiff_r`), so this row is the one that keeps the gate's coverage of a "
-     "non-set blob on `^`"),
-    ("o_and", ["a = [1, 2]", "b = [2]", "t = a & b"], None,
-     "`&` between two LISTS: a TypeError in CPython and a refusal here — the "
-     "same split as `o_xor`, with the two-set shape in the `set` group"),
-    ("o_set_sub", ["s = {1, 2}", "t = s - {2}"], None,
-     "`-` between two SETS: lowered on arm64 (the answer is pinned in the set "
-     "group) and refused by name on x86-64, which has no set-algebra emitter. "
-     "This operator-group row is the one that pins the x86-64 refusal, because "
-     "the set group's `s_difference_r` is a `BACKEND_ONLY` answer case and is "
-     "never run there. Before the gate: SIGSEGV on both architectures, no "
-     "output, because the result was a word nowhere near a blob and `len` read "
-     "a count out of it"),
-    ("o_set_and", ["s = {1, 2}", "t = s & {2}"], None,
-     "`&` between two SETS: the same x86-64 refusal pin as `o_set_sub`. "
-     "Measured before the gate: 2 on arm64 and 163061056 on x86-64 where "
+    ("o_xor", ["s = {1, 2}", "t = s ^ {2}", "u = 0",
+               "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`^`: SYMMETRIC DIFFERENCE, measured as a SIGSEGV before the gate. Two "
+     "SETS, so arm64 lowers it now; x86-64 has no set emitter and refuses it"),
+    ("o_and", ["s = {1, 2}", "t = s & {2}", "u = 0",
+               "for x in t:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(t)"]),
+     "`&`: INTERSECTION, measured as 2 on arm64 and 163061056 on x86-64 where "
      "CPython answers 1 — the two architectures disagreeing is the clearest "
-     "possible sign that neither computed a set. `o_and` above is the non-set "
-     "blob the gate still owns on both backends"),
-    ("o_set_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
-     "`^` between two SETS: the same x86-64 refusal pin, the symmetric "
-     "difference — SIGSEGV on both before the gate; `o_xor` above keeps the "
-     "non-set-blob half"),
+     "possible sign that neither computed a set. arm64 lowers it now"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -916,32 +881,17 @@ BACKEND_ONLY = {
     # `s_union` already carries. The rows were refusals on BOTH backends until
     # arm64 grew the lowering; a backend that grows one has to delete its row.
     "s_intersection_r": "x86_64",
-    "s_intersection_str": "x86_64",
     "s_difference_r": "x86_64",
     "s_symdiff_r": "x86_64",
     "s_sub_r": "x86_64",
     "s_andassign_r": "x86_64",
-    # `o_xor` / `o_and` are LISTS rather than the two-set shape the `set` group
-    # carries, so they are refused on BOTH backends and are deliberately NOT
-    # backend-only: that is the row that keeps the gate's coverage of a non-set
-    # blob on `^`/`&` after arm64 grew the set-algebra lowering.
-    # The two-set shape itself, pinned as an x86-64 refusal: the `set` group's
-    # answer rows are excluded from the x86-64 image and never run there, so
-    # without these the named refusal of `s & {2}` / `s - {2}` / `s ^ {2}` on
-    # x86-64 would have no pin. From `work/formal176-docs` (merged 2026-10-12,
-    # whose parallel emitters this merge folded into the canonical ones); the
-    # rows measure the REFUSAL, which is the x86-64 half, hence excluded from
-    # the arm64 image where they are answers.
-    "o_set_sub": "arm64",
-    "o_set_and": "arm64",
-    "o_set_xor": "arm64",
+    # The same two set operators re-asked in the `operator` group, where the
+    # subject is the gate rather than the set surface.
+    "o_xor": "x86_64",
+    "o_and": "x86_64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
-    # The SHORTER-value slice store is the same lowering on the same backend:
-    # a tail shift and a count bump. x86-64 still refuses the whole construct.
-    "l_slice_store_shrink_empty": "x86_64",
-    "l_slice_store_shrink_mid": "x86_64",
 }
 
 

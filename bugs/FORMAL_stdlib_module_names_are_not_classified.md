@@ -1,56 +1,40 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
-**Status 2026-10-07, landed in parallel by `work/formal114-docs`,
-`work/formal135-docs`, `work/formal155-docs`, `work/formal175-docs` and
-`work/formal181-docs` (which dated its own measurement 2026-10-08): the FIVE
-names §0.5 said the `find_spec` oracle decides are in `HOST_UNREACHABLE`.** §0.5 measured the oracle's split and named
-`_gdbm`, `_tkinter`, `_overlapped`, `_winapi` and `_wmi` as "the first entries a
-worker could add with a measurement behind each"; all five are placed, by the
-rule at the top of `formal/imports.py` applied rather than a new category.
-`importlib.util.find_spec` returns no spec for every one here, and the object
-each is missing is one a freestanding image cannot have (`_gdbm`/`_tkinter` need
-a library outside libSystem, a fact about the TARGET; the other three are
-Windows-only, so their no-spec measurement is host-independent). All five are
-private, so the PUBLIC unclassified count moves by zero — five per-name
-judgements with an oracle, not a moved row. The merge kept the five ONCE:
-`formal/imports.py` and `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`
-carried a duplicate set from each side, and the 10-07 paragraph's test pointer
-(`test_the_five_gdbm_style_names_are_unreachable`) was already stale on master —
-the row that pins the tier, the verdict, and (for the three whose absence is
-host-independent) the no-spec measurement is
-`test_formal_imports.py::test_the_five_find_spec_decided_names_are_unreachable`.
-Re-measured on the merged tree 2026-10-12 (CPython 3.14.8): `unclassified 231`,
-`unreachable 27` (was 22), `modelled 32`, `admitted 4`, `not-a-module 3` — the
-205→200 unclassified reading in the 10-07 paragraph is a point-in-time one, and
-the queue grows with the interpreter's own `stdlib_module_names` list, not with
-any tier removal in this repo. **What is still not done is unchanged:** the
-remaining per-name judgements, which §0.1's ZERO-corpus-exposure measurement
-says cannot be told apart from plausible ones without a consumer to measure
-against.
+**Status (2026-10-07, `work/formal135-docs`): the FIVE names §0.5 said the
+`find_spec` oracle decides are LANDED.** `_gdbm`, `_tkinter`, `_overlapped`,
+`_winapi` and `_wmi` join `HOST_UNREACHABLE` — the rule at the top of
+`formal/imports.py` applied rather than a new category: `_gdbm` needs libgdbm and
+`_tkinter` needs Tk (libraries outside libSystem), and the other three are
+Windows-only. All five are private, so the PUBLIC unclassified count moves by
+zero, exactly as §0.5 said. The census is now `unclassified 200` (was 205),
+`unreachable 27` (was 22); the file's other counts (223/216/217 in the older
+sections) are the historical readings §0.5 already corrected. Pinned by
+`test_formal_imports.py::test_the_five_gdbm_style_names_are_unreachable` and by
+`test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`, which names each with
+its tier and reason. **The remaining 200 per-name judgements are still NOT
+done, and §0.1's reason still stands: nothing imports them, so there is no
+measurement to tell a right entry from a plausible one.**
 
 **Area:** FORMAL (module classification — `formal/imports.py`'s
 `HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED` / `HOST_NOT_A_MODULE`,
 and the wording of `unresolvable_import_error`). **Status: the FALSE SENTENCE is
 fixed for all 223, §"The next step"'s THIRD-ANSWER bullet is LANDED with an
-oracle and two corrections (§0.3, 2026-10-05), and §0.5 (2026-10-05) settles
-35 more of the queue by a RULE — 30 of them by a derivation that reads this
-repository and needs no judgement about the target at all, 5 by the `find_spec`
-measurement §0.3 proposed — **and FALSIFIES the other half of that proposal,
-which is why the remaining 170 are still a queue and not a bulk edit.** The two
-gate verdicts that matter here are unchanged: `test_formal_imports.py` 89/0
-(83 before this pass, the two new ones being the rule's whole specification)
-and `test_formal_link_accounting.py` 299/299.**
+oracle and two corrections (§0.3, 2026-10-05), and the rest of the per-name
+judgements are still to do — with the coverage question answered, and the answer
+is ZERO. §0.4 closes the LAST of §0.3's list: `not-code` is an eighth VERDICT, so
+the tier's fourth answer no longer shares a string with the typo answer, and the
+two RED tests on master that measured the consequence are green (2026-10-05).**
 
-**Status 2026-10-08 (`work/formal205-docs`): §0.5's named next step is TAKEN for
-the five names `find_spec` decides.** `_gdbm`, `_overlapped`, `_tkinter`,
+**Status 2026-10-07 (`work/formal114-docs`): §0.5's named next step is TAKEN
+for the five names `find_spec` decides.** `_gdbm`, `_overlapped`, `_tkinter`,
 `_winapi` and `_wmi` are now in `HOST_UNREACHABLE` — `importlib.util.find_spec`
 returns NO SPEC for each on this host, so the object (the gdbm library, Tcl/Tk,
 and the Windows overlapped-I/O, Win32 API and WMI objects) is missing from the
 target, which is the rule at the top of `formal/imports.py` applied. They are
 carried in `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS` with their
 tier, and pinned by
-`test_formal_imports.py::test_the_find_spec_decided_names_are_unreachable`. All
-five are private, so the PUBLIC unclassified count is unchanged; the
+`test_formal_imports.py::test_the_find_spec_decided_names_are_unreachable`.
+All five are private, so the PUBLIC unclassified count is unchanged; the
 `unclassified` count falls 205 → **200**. The other 200 are still §0.1's
 per-name judgements with no corpus exposure, and this does not change that.
 
@@ -62,141 +46,6 @@ and §0.1's reason for the remaining 200 is unchanged and is re-measured here
 rather than asserted.
 
 Found while fixing that one name, 2026-10-02, on `work/formal8-10`.
-
-## 0.5 35 of the 216 are decided by a RULE, and the other half of §0.3's
-## oracle is REFUTED by the measurement it asked for
-
-**§0.3 ended with a next step that is half right, and this section is the
-measurement that shows which half.** Its words: *"That oracle is available for
-the rest too, and is the next step for anyone who takes them — a name whose spec
-CPython cannot find here is `unreachable` by the rule, and a name whose spec it
-can is `modelled` unless the content is not code. That is 103 per-name
-judgements with an oracle rather than a judgement."*
-
-**The first clause is right and is now landed as a rule over every name.** The
-second is **false**, and it is false in a way that would have put a name in the
-wrong tier of a CLAIM ABOUT THE TARGET. A spec exists for `sqlite3`, `ssl`,
-`bz2` and `lzma` — all four are pure-Python packages — and all four need an
-object this target does not have:
-
-| the name | `find_spec` | what it actually needs | `tools/formal_stdlib_reach.py` |
-|---|---|---|---|
-| `sqlite3` | a spec EXISTS (pure python) | `libsqlite3.dylib`, via `_sqlite3` | `library` |
-| `ssl` | a spec EXISTS | `libssl.3.dylib`, `libcrypto.3.dylib` | `library` |
-| `bz2` | a spec EXISTS | `libbz2.1.0.dylib`, via `_bz2` | `library` |
-| `lzma` | a spec EXISTS | `liblzma.5.dylib`, via `_lzma` | `library` |
-
-So "its spec can be found ⇒ `modelled`" would have claimed four names reachable
-that the rule at the top of `formal/imports.py` calls `unreachable`, **and the
-same clause in the other direction is just as wrong**: `_hashlib` links
-`libcrypto.3.dylib` and `_decimal` links `libmpdec.4.dylib`, neither of which is
-in libSystem — so a rule that reads CPython's *dynamic dependencies* would call
-both `unreachable`, while `hashlib` is answered here by
-`formal/hostmods/hashlib.mojo` and `decimal` is `HOST_MODELLED`. **A library
-outside libSystem is a fact about CPython's PACKAGING; an object the target does
-not have is a fact about the TARGET, and only the second is a tier.** Those two
-rows are why the derivation below reads this repository's tables and asks the
-interpreter nothing at all — the accelerator question is never asked, because
-the tables already carry the answer that matters and are the claim.
-
-### What landed, and it is a rule rather than 35 remembered entries
-
-**`formal/imports.py::capability_sibling_tier` — 30 names, decided from THIS
-tree, with no judgement about the target.** CPython splits a capability across a
-public module and a private accelerator for it, so implementing `_hashlib` is
-implementing what `hashlib` needs, and the tier that answers for the public name
-answers for the private one:
-
-| derived | from | tier | and the reverse case |
-|---|---|---|---|
-| `_socket`, `_warnings`, `_locale`, `_asyncio`, `_sysconfig` | `socket`, `warnings`, `locale`, `asyncio`, `sysconfig` | `unreachable` | — |
-| `_hashlib`, `_decimal`, `_bisect`, `_csv`, `_datetime`, `_pickle`, `_queue`, `_struct`, `_stat`, `_json`, `_io`, `_random`, `_uuid`, … | a public module this tree has answered or placed | `modelled` | — |
-| `_ctypes` | `ctypes` (`HOST_ADMITTED`) | `modelled` | a foreign-code loader this tree answers under declared contracts, so the capability is REACHABLE even though `ctypes` cannot be computed |
-
-Three properties a merely-plausible version would get wrong, each with its own
-check: **`admitted`/`written` become `modelled` and never themselves**
-(`HOST_ADMITTED`'s membership rule is "there is a `formal/hostmods/` source", and
-`_ctypes` has none — returning `admitted` would claim a file that is not there);
-**a public name derives nothing**, so the rule can never answer a question with
-itself; and **it is asked after all four tables**, so it cannot contradict a
-hand-kept tier.
-
-**The five `find_spec` placements, and they are the rule the four Windows names
-already were.** Asked of every name CPython ships, `importlib.util.find_spec`
-answers no spec for exactly five more of the queue: `_winapi`, `_overlapped`,
-`_wmi`, `_tkinter` (the Tk binding `tkinter` is unreachable for) and `_gdbm`
-(the GNU dbm binding `dbm` picks when it is there, and here it is not). A target
-is a SUBSET of this host, so a name this host's own CPython cannot provide is a
-name nothing here could have implemented, whatever the backend does.
-
-| | before | after |
-|---|---:|---:|
-| `unclassified` | **205** | **170** |
-| `modelled` | 32 | 57 |
-| `unreachable` | 22 | 32 |
-| …and `written` / `admitted` / `not-code` / `front-end` | 30 / 4 / 3 / 1 | 30 / 4 / 3 / 1 |
-
-**Measured on this tree by re-running `host_module_verdict` over
-`sys.stdlib_module_names` with the derivation switched off and the five names
-taken back out** — before and after from ONE reader, because two numbers from
-two implementations is the property §0.2 records getting wrong once already.
-
-**No build outcome changes, and that is the property the split rests on.** Both
-arms of `unresolvable_import_error` REFUSE the import either way; what moves is
-the WORDING and the reach accounting. `_is_host_module` is the one predicate that
-had to change, and only because `unresolvable_import_error`'s unclassified arm
-says *"no tier in `formal/imports.py` saying whether implementing it would need
-an object this target does not have"* — a sentence a derived answer makes
-false. It now asks `host_module_tier` instead of reading the union, so `_hashlib`
-gets the host-module sentence, which is true of it.
-
-### The 170, and why they are still a queue: three mechanisms, measured
-
-**The residue is not 170 judgements waiting for patience. It is 170 judgements
-waiting for a reading of the MODULE that no reading of this host can supply**,
-and that is a measurement rather than an opinion — a scan of every pure-Python
-module's own import closure, with `formal/imports.py`'s facility vocabulary
-(`subprocess`, `curses`, `socket`, `ctypes`, …) applied at every edge:
-
-1. **An import behind `if TYPE_CHECKING:` or a platform test is not an import
-   the target takes.** `_colorize` reads `nt` under one, and `_colorize` is
-   imported by `calendar`, `_pyrepl` and `pdb` — so the naive closure calls
-   `calendar` unreachable through a Windows-only `nt` that the closure itself
-   also reports as absent. A reader has to know that an edge inside a type-only
-   or platform-only arm is not an edge.
-2. **An OPTIONAL import is not a dependency.** `cmd` does `try: import readline
-   except ImportError: pass`, so a `cmd` without line editing is implementable
-   here; the closure says `cmd` needs a terminal. The same shape in `mimetypes`
-   (`_winapi`) and `pty` (`select`).
-3. **A library outside libSystem is the CAPABILITY's, not the module's.** §the
-   table above: `_hashlib`'s `libcrypto` is a packaging fact, and the capability
-   is implemented in this tree.
-
-Each is a per-name reading, and each is cheap once you know which one you are
-looking at — which is why the honest next step is the queue with a direction,
-and not a bulk edit. **What is now available and was not: `tools/formal_stdlib_reach.py`
-prints the evidence row for every name in the queue** (`find_spec`'s answer, the
-kind of implementation CPython gives it, every library it binds outside
-libSystem, and the public sibling the derivation consulted), and `--check`
-asserts the two invariants this section landed so a CPython that moves a module
-between a `.py` and a `.so` cannot quietly put the tables and the tool apart.
-
-### Reproducing every number above
-
-```console
-$ python3 tools/memslot.py --gb 8 --label reach -- \
-      python3 tools/formal_stdlib_reach.py --check
-OK: 0 problem(s); 170 name(s) in no tier
-$ python3 tools/memslot.py --gb 8 --label reach -- \
-      python3 tools/formal_stdlib_reach.py --name sqlite3 --name _hashlib --name _socket
-name                     answer        kind     libraries outside libSystem            why
-sqlite3                  unclassified  source
-_hashlib                 modelled      binary   libcrypto.3.dylib                      derived from hashlib
-_socket                  unreachable  binary                                          derived from socket
-$ python3 test_formal_imports.py -v          # 89/0; the two new cases are named
-formal imports: PASS=89 EXPECTED=0 SKIP=0 FAIL=0
-$ python3 test_formal_link_accounting.py     # 299 checks, 0 failed
-```
 
 ## 0.4 `not-code`: the fourth tier's answer stopped sharing a string with the
 ## typo answer, and two red tests on `master` are the measurement
@@ -581,12 +430,6 @@ the content is not code. That is 103 per-name judgements with an oracle rather
 than a judgement, which is a materially different piece of work from the 222
 this document describes.
 
-**§0.5 ran that oracle over the whole list and HALF of it does not hold.** The
-first half became a rule over every name and settled five more (`find_spec`
-absent ⇒ `unreachable`); the second half is refuted by six names, three in each
-direction, and the refutation is what keeps the rest of the queue a reading per
-name. Read §0.5 before using the sentence above.
-
 
 
 ## 0.3 What landed 2026-10-05 (`work/formal27-6`): the AMBIGUOUS `''` is gone,
@@ -617,38 +460,11 @@ adding rather than tidying:
 | `tools/formal_sweep_causes.py` | inferred it from a `formal/hostmods/<name>.mojo` existing | a repository sibling, a package `__init__.mojo`, and every module outside `formal/hostmods/` — all three came out `UNTIERED`, which is a DEFECT claim about a module that is answered |
 | `tools/formal_host_import_wall.py` (this round) | paired the tier with the resolver AND `is_cpython_stdlib` | nothing, but it was a fourth copy of a fact with one home |
 
-All three now read the one function. **The demonstration is `os._syscalls` and
-`os.path`, which are `written` while `host_module_tier` says `''`** — a
-submodule of a written PACKAGE carries its own source
-(`formal/hostmods/os/_syscalls.mojo`), so the accessor answers `written` for a
-name the tier alone cannot place.
-
-**CORRECTED 2026-10-12 (`work/formal313-docs`): the row this section used to
-name, `html.parser`, is NOT `written` and never was.** §0.3 said "`html.parser`
-is a SUBMODULE of the written `formal/hostmods/html.mojo`, so the verdict is
-`written`" — and that is false: `html.mojo` writes `escape`, and its own header
-names `html.parser`/`HTMLParser` as the CLASS it has no representation for, so
-the tree answers `html` and not `html.parser`. Measured through the accessor:
-
-```console
-$ python3 -c "import sys, os; sys.path.insert(0,'.'); import formal.imports as I
-p = os.path.abspath('formal/arm64.py')
-print(I.host_module_verdict('html.parser', relative_to=p, project_root=p)[0],
-      I.host_module_verdict('os._syscalls', relative_to=p, project_root=p)[0])"
-unclassified written
-```
-
-so `resolve_module_path('html.parser')` is `None`, there is no source to be
-`written` about, and the honest answer is `unclassified` — the same one every
-other unprovided submodule of a shipped package gets. A submodule of a written
-MODULE is not a submodule the tree has a source for, which is the half the
-false sentence got backwards. **Pinned now, in the direction the sentence got
-wrong**, by
-`test_formal_imports.py::test_a_written_module_does_not_answer_its_unwritten_submodule`:
-it asserts `os.path`/`os._syscalls` ARE `written` (package submodules, with a
-detail that is a file) and that `html.parser` is `unclassified` and resolves to
-`None` — so a change that made the accessor claim a source that does not exist
-goes red rather than passing on a sentence in a doc.
+All three now read the one function. **And it corrects a row the day it landed:**
+`html.parser` is a SUBMODULE of the written `formal/hostmods/html.mojo`, so the
+verdict is `written` while `host_module_tier` says `''` and the wall table
+printed `unclassified` for it a commit earlier — the exact false statement the
+three-way split was hiding.
 
 **The partition is now a CLOSED invariant, which is what makes the remaining work
 a queue with a direction.** `test_formal_imports.py::
@@ -669,13 +485,8 @@ tree:
 | `admitted` | 4 |
 | `front-end` | 1 (`dataclasses`) |
 
-**The 217→216 difference is NOT `html.parser`, which is a correction to the
-paragraph above and to §0.3: `html.parser` is not in
-`sys.stdlib_module_names` at all** (`sys.stdlib_module_names` is TOP-LEVEL
-names; `'html.parser' in sys.stdlib_module_names` is `False`), so it was never
-one of these rows, and its verdict is `unclassified` rather than `written`.
-**The count is still a fact about the table and not about the corpus**, so it is
-printed by the
+216 rather than 217 because `html.parser` moved to `written`. **The count is
+still a fact about the table and not about the corpus**, so it is printed by the
 accessor rather than inferred by a reader — and
 `test_no_unclassified_stdlib_name_is_imported_by_anything` still asks the
 corpus question, which is the one that decides whether filling the queue is
@@ -689,19 +500,6 @@ the failure `formal/imports.py:101` warns about. What changed is that the work i
 queued by a NAME the tree can print, by a tripwire that fires when a consumer
 arrives, and by a test that will go red if a name is ever left with no answer at
 all rather than with the wrong one.
-
-**§0.5 (2026-10-05) is what this section's numbers became, and it SUPERSEDES the
-oracle §0.3 handed the queue.** 35 of them are settled by a rule — 30 by
-`capability_sibling_tier`, which reads this repository's own tables and needs no
-judgement about the target, and 5 by the `find_spec` measurement this very
-section proposed — so the count is **170**, not 216. And the second half of that
-oracle is **false**, which is the more useful half to record: `sqlite3`, `ssl`,
-`bz2` and `lzma` all have a spec and all need a library outside libSystem, while
-`_hashlib` and `_decimal` bind one and have had their capability implemented here
-or reduced to arithmetic. **The oracle that is sound is `find_spec` for ABSENCE
-and nothing else**; the reading that decides the rest is per name, and
-`tools/formal_stdlib_reach.py` prints each one's evidence so it is a reading of
-the module rather than of the interpreter.
 
 ## What I ran
 

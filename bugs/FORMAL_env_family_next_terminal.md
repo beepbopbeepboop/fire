@@ -1,51 +1,5 @@
 # FORMAL_env_family_next_terminal: where the 55-file family stands, and what the next reader needs
 
-**Status 2026-10-12 (`work/formal299-docs`): the family's own test was RED and
-it is GREEN again; the cause was a false `String` refusal, not a family
-construct.** `test_formal_external_call.py` — the file §"What this worker
-verified about the construct itself" names as the pin for the closed half, the
-whole of `std/os/env.mojo`'s three functions transcribed and run — was **50/2**.
-One of the two was `env_round_trip`, `env.mojo`'s own `getenv` shape:
-
-```mojo
-var ptr = external_call[
-    "getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]
-](name)
-if not ptr:
-    return default
-return String(unsafe_from_utf8_ptr=ptr)
-```
-
-`String(unsafe_from_utf8_ptr=ptr)` was refused by
-`model.string_conversion_refusal` with *"this build classifies ptr as 'int'"*.
-The classification is `ValueKinds._value_kind`'s "a word is an integer" DEFAULT
-for a call result (the callee is a SUBSCRIPT, so `kind_of` answers None and
-`_value_kind` fills it in), and the refusal is written to fire only on POSITIVE
-evidence — so it was refusing a `char *` on the strength of a default. The
-`unsafe_from_utf8_ptr=` keyword is not a conversion to judge at all: it STATES
-the operand is a pointer, which is what the `unsafe_` means. `model` now
-publishes `POINTER_ASSERTING_STRING_KEYWORDS`, `string_conversion_refusal` takes
-the keyword the operand was passed under and returns None for it, and both
-emitters pass it. The positional spelling is unchanged and still refused
-(`refuse_a_positional_string_conversion_of_a_number`), so the exemption is the
-keyword's and not a hole. Measured: `test_formal_external_call.py` **53/0**
-(was 50/2), `test_formal_run.py` 1209/0, `test_formal_value_model.py` 124/0.
-
-The second red was the same file's
-`no_module_level_name_is_bound_twice_in_model`: `formal/model.py` bound
-`SET_ALGEBRA_OPS = ("-", "&", "^")` **twice**, at the top of
-`CONTAINER_GATED_OPS` and again above `container_operator_refusal` with a second
-copy of the comment. The two were identical, so the second only shadowed the
-first; the two comment blocks are merged onto the one binding now. That is a
-code-quality defect the file's own model-level rule caught, not a family
-construct.
-
-**Nothing here moves the family's TERMINAL.** `env.mojo` still stops on
-`binary_heap.mojo` and `std.memory.alloc`'s template-inference gap (the
-Re-measured section below), and step 3 — the `formal_sweep.py
---stdlib-subtrees` re-run — is still the gate runner's. What changed is that the
-file's own transcription is once again a passing pin rather than a red one.
-
 **Status: SUPERSEDED IN PART (2026-10-05, `formal37-2`).** The terminal recorded
 below has **moved**: `binary_heap.mojo` is no longer in `env.mojo`'s refusal at
 all, and the family now stops on two *present* surfaces rather than on an absence.
@@ -290,36 +244,3 @@ untouched by this; nothing here re-measures the 55, and step 3 (the
 `formal_sweep.py --stdlib-subtrees` re-run) is still not done — it remains the
 gate runner's, for the reason this document gives: tens of minutes and hundreds
 of builds.
-
-## Status, 2026-10-08 (`formal229-docs`): the file's OWN round trip was red, and that is fixed
-
-`test_formal_external_call.py`'s `env_round_trip` is `env.mojo`'s three functions
-transcribed and compared against CPython's `os.environ`. It was **red on master**
-and this document did not know it: the case builds a `getenv` whose result
-
-```mojo
-var ptr = external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)
-…
-return String(unsafe_from_utf8_ptr=ptr)
-```
-
-and `string_conversion_refusal` — added by `c8d877e9` after the round trip was
-last measured — refused the `String(...)` because `ptr`'s KIND is the "a word is
-an integer" default (a call result is a fact about the callee, and the model's
-conservative answer for one is a word). Its exemption covered only a
-`deref_receiver` operand, so the NAMED-pointer spelling `String(unsafe_from_utf8_ptr=ptr)`
-— which is exactly how `std/os/env.mojo` itself writes it — fell through to the
-positive-evidence refusal. Measured both architectures: `String(ptr) is refused …
-this build classifies ptr as 'int'`. That is a regression in this family's own
-round trip, not in the real stdlib build's terminal, which is the two named
-capability questions above and is unchanged.
-
-**Fixed** by `model.string_conversion_pointer_intent`: a conversion whose operand
-is passed as the `unsafe_from_utf8_ptr` keyword is the identity the source asked
-for, so it is exempt from the kind refusal whatever the kind table says. The
-keyword name is a table row (`STRING_POINTER_CONVERSION_KWARGS`), read by both
-backends. `test_formal_external_call.py` is **52/52** (was 51/1) and
-`test_formal_value_model.py` is 122/122 — the latter is the check that the
-refusal it bounds (`a_string_conversion_of_an_integer_is_refused`, i.e. `str(n)`
-with no such keyword) still fires. The family's TERMINAL is untouched: step 3 is
-still the gate runner's.

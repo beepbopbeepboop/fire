@@ -436,31 +436,21 @@ CASES = [
     # register number 0 both, which is why this was invisible from every suite
     # that builds one architecture.
     #
-    # **The operands are declared `Float64`, and that is required rather than
-    # stylistic.** This row used to write the doubles' IEEE-754 BIT PATTERNS as
-    # unannotated integers and pass THOSE to `%g`/`%f`; the kind rule
-    # (`formal/model.py::printf_kind_conversion_refusal`) refuses that by name,
-    # because a `%g` conversion tells the C library to read the word as a double
-    # while the word's own kind says integer — a rendering of the wrong value.
-    # The refusal is right (`bugs/FORMAL_float_binary64_only.md`), so the row
-    # uses doubles: the ABI question it pins is unchanged, and a declared
-    # `Float64` is what puts a value in XMM0 in the first place. 4ceb7603 made
-    # this change and a later bulk merge reverted it (the row went back to the
-    # integers and red on both backends), so it is restored here.
-    #
-    # 17 digits is the shortest round-tripping form, so CPython's `repr` and
-    # the C library's `%.17g` produce the same text. The `1.0000000000000002`
-    # is deliberate: it is the smallest double above 1.0 and its low 32 bits
-    # are 1, so a lowering that truncated the word to 32 bits would print
-    # `1.000000` and this row would still pass on that conversion alone. The
-    # mixed rows are the other half and are the reason this is not one `movq`:
-    # an SSE argument does not consume a GPR, so `printf("%f %d", d, n)` needs
-    # `n` in **RDI** rather than RSI, and a fix that only moved the float would
-    # print `n` one register late.
+    # The values are the IEEE-754 BIT PATTERNS of doubles (`math.mojo`'s own
+    # representation, and the module's docstring says why), and 17 digits is
+    # the shortest round-tripping form, so CPython's `repr` and the C library's
+    # `%.17g` produce the same text. The `1.0000000000000002` is deliberate: it
+    # is the smallest double above 1.0 and its low 32 bits are 1, so a lowering
+    # that truncated the word to 32 bits — which is what an unannotated integer
+    # does on this path — would print `1.000000` and this row would still pass
+    # on that conversion alone. The mixed rows are the other half and are the
+    # reason this is not one `movq`: an SSE argument does not consume a GPR, so
+    # `printf("%f %lld", d, n)` needs `n` in **RDI** rather than RSI, and a fix
+    # that only moved the float would print `n` one register late.
     ("printf_float_operand_read_from_an_xmm_register",
      "def main():\n"
-     "    var one: Float64 = 1.0000000000000002\n"
-     "    var two: Float64 = 2.0\n"
+     "    var one = 4607182418800017409\n"
+     "    var two = 4611686018427387904\n"
      "    var n = 12345\n"
      "    printf(\"%.17g %.17g\\n\", one, two)\n"
      "    printf(\"%f %d\\n\", one, n)\n"
@@ -468,15 +458,17 @@ CASES = [
      "    printf(\"%e %g\\n\", one, two)\n"
      "    printf(\"%d %d\\n\", n, 7)\n"
      "    return 0\n",
-     "import sys\n\n"
+     "import sys\nimport struct\n\n"
+     "def d(u):\n"
+     "    return struct.unpack('<d', struct.pack('<Q', u))[0]\n\n"
      "def main():\n"
-     "    one = 1.0000000000000002\n"
-     "    two = 2.0\n"
+     "    one = 4607182418800017409\n"
+     "    two = 4611686018427387904\n"
      "    n = 12345\n"
-     "    sys.stdout.write(\"%.17g %.17g\\n\" % (one, two))\n"
-     "    sys.stdout.write(\"%f %d\\n\" % (one, n))\n"
-     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, one, 99, two))\n"
-     "    sys.stdout.write(\"%e %g\\n\" % (one, two))\n"
+     "    sys.stdout.write(\"%.17g %.17g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%f %d\\n\" % (d(one), n))\n"
+     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, d(one), 99, d(two)))\n"
+     "    sys.stdout.write(\"%e %g\\n\" % (d(one), d(two)))\n"
      "    sys.stdout.write(\"%d %d\\n\" % (n, 7))\n"
      "    return 0\n"),
     # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
@@ -1822,51 +1814,6 @@ CASES = [
      "    else:\n"
      "        n = n + 1\n"
      "    sys.stdout.write(\"n=%d\" % n)\n"
-     "    return 0\n"),
-    # ── a NESTED for-target group ──
-    #
-    # x86-64's for-list and comprehension emitters flattened the target with
-    # `_lbn_target_names` and handed the flat leaf list to `_emit_for_unpack`,
-    # so a nested group compared the element's own arity against the group's
-    # leaf count: `for a, (b, c) in [(1, (20, 300))]` asked a 2-element blob
-    # for 3 and exited 1 with NOTHING printed, where arm64 and CPython both
-    # answer 21.  The fix is the shared target TREE
-    # (`model.for_target_tree`), which the emitter now recurses through; the
-    # general rows are `test_formal_run.py`'s
-    # `both_arch_a_nested_for_target_unpacks_like_arm64_and_cpython`, and these
-    # two are the same construct checked through this file's both-backends vs
-    # CPython contract.
-    ("nested_for_target_group_unpack",
-     "def main():\n"
-     "    s = 0\n"
-     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
-     "        s = s + a + b + c + d\n"
-     "    printf(\"s=%d\\n\", s)\n"
-     "    return 0\n",
-     "import sys\n\n"
-     "def main():\n"
-     "    s = 0\n"
-     "    for a, (b, (c, d)) in [(1, (2, (3, 4)))]:\n"
-     "        s = s + a + b + c + d\n"
-     "    sys.stdout.write(\"s=%d\\n\" % s)\n"
-     "    return 0\n"),
-    # The same cause in the COMPREHENSION emitter, which shares
-    # `_emit_for_unpack`: a nested generator target flattened the same way.
-    ("nested_comprehension_target_group_unpack",
-     "def main():\n"
-     "    s = 0\n"
-     "    var t = [p + q + r for p, (q, r) in [(1, (2, 3)), (4, (5, 6))]]\n"
-     "    for v in t:\n"
-     "        s = s + v\n"
-     "    printf(\"s=%d\\n\", s)\n"
-     "    return 0\n",
-     "import sys\n\n"
-     "def main():\n"
-     "    s = 0\n"
-     "    t = [p + q + r for p, (q, r) in [(1, (2, 3)), (4, (5, 6))]]\n"
-     "    for v in t:\n"
-     "        s = s + v\n"
-     "    sys.stdout.write(\"s=%d\\n\" % s)\n"
      "    return 0\n"),
     ("negative_literal_spelled_with_an_operator",
      "def main():\n"

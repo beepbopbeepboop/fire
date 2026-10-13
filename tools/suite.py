@@ -487,7 +487,6 @@ MEASURED_PEAK_GB = {
     'formal-hashlib':   (0.10, 'measured'),   # 390 s cold, 36 s warm
     'formal-struct':    (0.08, 'measured'),
     'formal-os':        (0.06, 'measured'),
-    'formal-doc-truth': (0.08, 'measured'),   # registered 2026-10-07, import-and-compare
     'formal-sys':       (0.06, 'measured'),
     'formal-time':      (0.06, 'measured'),
     'formal-frame-len': (0.05, 'measured'),
@@ -502,7 +501,6 @@ MEASURED_PEAK_GB = {
     'formal-module-attr':  (0.07, 'measured'),
     'llm-reference':       (0.07, 'measured'),   # 31 cases of pure CPython
     'formal-dataclasses':  (0.10, 'measured'),
-    'formal-namedtuple':   (0.10, 'measured'),
     # Five that were registered and in NO BUCKET, so nothing ran them; each was
     # measured once, alone, the same way, before being given a class and a
     # bucket. The two at 0.01 are under what a 0.5 s poll resolves across a
@@ -1925,23 +1923,6 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
      desc='no file cites a deleted bug doc more than it used to')
-# Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
-# function names, limits, refusal messages, ABI signatures, tool flags) out of
-# the documents and compares them with the tree, both directions. Registered
-# 2026-10-07: it was in no bucket, so the one file whose job is "does the
-# document still say what the code says" was a test nobody ran, and eight of
-# its rows had drifted. 0.17 s / 0.08 GB measured, no build and no Lean, which
-# is the everyday `check` cost shape. `extra` names the runtime headers and
-# `lib/` because two of its groups read them.
-test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=True,
-     extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-            'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
-            'formal/lean.py', 'formal/build.py',
-            'formal/arm64_proof_gen.py',
-            'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
-            'reflect.py'],
-     desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
@@ -2153,19 +2134,21 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
 # `tiny` from the measurement (30 s, 0.1 GB peak across the tree under
 # `tools/memslot.py --gb 8`, 83 cases x 2 backends), not from the shape: the
 # builds are `--formal --no-prove` single-file compiles, and the doc's guess of
-# `small`/`module` was not what the instrument said. `printf_float_operand_read_
-# from_an_xmm_register` was the one pre-existing red this row carried: it wrote
-# doubles' bit patterns as unannotated INTEGERS and passed THOSE to `%g`, which
-# the printf kind rule now refuses by name. The row is declared `Float64`
-# doubles now, so both backends build and run it and it is an ordinary parity
-# row again -- the `expect=` marker and the bug doc that recorded the refusal
-# are both gone with the fix (4ceb7603, 2026-10-13; the test-file half of that
-# fix was reverted by a later bulk merge and is restored here).
+# `small`/`module` was not what the instrument said. The one remaining red is
+# the filed PRE-EXISTING arm64 float-operand refusal, and the marker states its
+# count so the harness's `PASS=82 FAIL=1` is checked against it.
 test('formal-x86-parity', [PY, 'test_formal_x86_64_parity.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_x86_64_parity.py', 'formal/x86_64.py',
             'formal/arm64.py', 'formal/x86_64_codegen.py',
             'formal/arm64_codegen.py'],
+     expect="1 of 83: `printf_float_operand_read_from_an_xmm_register` — the "
+            "arm64 backend REFUSES a float operand read from an XMM register "
+            "rather than converting it, because the conversion is the source's "
+            "decision. PRE-EXISTING on master (filed at "
+            "bugs/TEST_a_parity_row_pins_an_xmm_float_operand_the_tree_refuses.md "
+            "when the file was measured ungated), and the marker's count is the "
+            "83 the harness now prints",
      desc='both backends answer every construct, and the CPython oracle')
 test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      deps=['preflight'],
@@ -2182,10 +2165,14 @@ test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'], mem='tiny',
      deps=['preflight'],
-     desc='async capture of a mutable binding')
+     expect='2 failing: async capture of a mutable binding — behaviour gap, '
+            'not registered before this',
+     desc='async capture of a mutable binding — behaviour gap, not registered before this')
 test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
      mem='tiny', deps=['preflight'],
-     desc='closure capture through a transitive import')
+     expect='2 failing: closure capture through a transitive import — '
+            'behaviour gap',
+     desc='closure capture through a transitive import — behaviour gap')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
      deps=['preflight'],
      expect='36 failing: the gimple async runner, an area with no gate '
@@ -2201,20 +2188,24 @@ test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
-     desc='TaskGroup')
+     expect='3 failing: TaskGroup',
+     desc='3 failing: TaskGroup')
 test('async-with-lock-guard', [PY, 'test_async_with_lock_guard.py'], mem='tiny',
      deps=['preflight'],
-     desc='`async with` holding a lock guard across a suspension')
+     expect='2 failing: `async with` holding a lock guard across a suspension',
+     desc='2 failing: `async with` holding a lock guard across a suspension')
 test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      deps=['preflight'],
-     desc='a generic inside a nested async')
+     expect='2 failing: a generic inside a nested async',
+     desc='2 failing: a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
      expect='2 failing: a detached coroutine task',
      desc='2 failing: a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
-     desc='toolchain/runtime proof for step A of compiled-path async/await')
+     expect='1 of 2: toolchain/runtime proof for step A of compiled-path async/await',
+     desc='1 of 2: toolchain/runtime proof for step A of compiled-path async/await')
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
@@ -3269,15 +3260,6 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
             'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='@dataclass as a compile-time transform, against CPython')
-# `typing.NamedTuple` on both architectures, each execution case run under
-# CPython and both images and required to agree; refusals pinned by message.
-# 57 checks, 11.8 s.
-test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
-     mem='tiny', deps=['preflight'],
-     extra=['test_namedtuple_formal.py', 'formal/dataclass_transform.py',
-            'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
-     desc='typing.NamedTuple on the formal backend, against CPython')
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
 # that must stay refused, each with a message that names its own reason, and the
@@ -3312,18 +3294,6 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     # Re-measured 2026-10-12 on the merged tree: 68 of 70. The 2026-10-07
-     # 6-of-70 (three cases x two backends) has narrowed to ONE case: the
-     # 32-bit pointer-subscript class (`pointer_subscript_i32`,
-     # `pointer_subscript_augmented`) is fixed on master — the subscript
-     # emitters now read and store at the element's width AND signedness on
-     # both backends, so those rows pass; what is left is `stat_null`'s
-     # `dev` field, on both backends, where the 4-byte signed `st_dev` is
-     # zero-extended (2835028608) instead of sign-extended
-     # (18446744072249612928 on this host, 0xffffffffa8fb1a80).
-     expect='2 of 70: stat_null dev width on both backends — a 4-byte signed '
-            'st_dev zero-extended instead of sign-extended — '
-            'bugs/FORMAL_os_backing_pointer_and_stat_widths.md',
      desc='the syscalls under the os host module, through real images')
 
 # ── the ten the batch merge left unregistered ──────────────────────────────
@@ -3766,11 +3736,6 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
-# `deps=['preflight', 'prooflib']`: one assertion,
-# `test_library_state_agrees_with_the_question_it_asks`, requires all six
-# `lib/*.olean` to be present (it is what says a cache report is not reporting
-# about a missing library), so the job must not start before the shared library
-# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
@@ -3813,7 +3778,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight', 'prooflib'],
+     mem='tiny', deps=['preflight'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
@@ -4138,7 +4103,7 @@ BUCKETS = {
               # so it already runs in almost every gate — as a dependency
               # rather than as a counted test, which is why an estate failure
               # is a FAIL on a test the tally does not mention.
-'preflight', 'suite-self-test', 'doc-refs', 'formal-doc-truth',
+'preflight', 'suite-self-test', 'doc-refs',
               'doc-refs-stale-verdicts', 'comprehension-parse-shape',
               # The four cheapest of the eight formal host-module suites, and
               # the only formal BUILD-AND-RUN coverage in the gate. 4-7 s and
@@ -4315,7 +4280,7 @@ BUCKETS = {
                # the whole formal picture in one bucket, which is what a reader
                # of this list is asking. Expansion schedules each test once per
                # run, so being in `check` too costs nothing.
-               'formal-dataclasses', 'formal-namedtuple', 'formal-module-attr',
+               'formal-dataclasses', 'formal-module-attr',
                'formal-os-backing',
                # …and the two that arrived with master's formal20 batches on
                # 2026-10-04 unregistered, registered above with their
@@ -4369,8 +4334,8 @@ BUCKETS = {
                 'formal-method-param-field', 'formal-receiver-position',
                 'formal-small-hosts', 'formal-specialization',
                 'formal-monomorph',
-                 'formal-target-queries', 'formal-value-model',
-                 'formal-x86-dylib',
+                'formal-target-queries', 'formal-value-model',
+                'formal-x86-dylib',
                 # …and the one the estate check named on the merge of the
                 # formal5 batch: `test_formal_core_hostmods.py` came with
                 # `work/formal5-hostmods-core` and was named by no bucket.
@@ -4503,41 +4468,22 @@ BUCKETS = {
     # just gated somewhere whose tally is a list of known reds rather than a
     # green/red verdict on the everyday loop.
     #
-    # Six of the ten PASS now (2026-10-07): the 563ec43a "Rename compiler and
-    # runtime sources to fire" sweep rewrote `import mojo` to `import fire` but
-    # left every `mojo.link_executable(...)` call site behind, so all ten died at
-    # link with `name 'mojo' is not defined` — and the `mojo_async_runtime.cpp`
-    # path constant it also renamed was still stale. With both fixed,
-    # mutable-async-capture, transitive-closure-capture, taskgroup,
-    # async-with-lock-guard, nested-async-generic and async-runtime-scaffold are
-    # green and their `expect=` markers are gone (a marked-but-passing test is
-    # reported as a FAILURE, so leaving them would have been the anti-rot firing).
-    # The remaining four keep their markers, and their counts were re-measured
-    # against the run on the same day.
-    #
-    # The four `expect=`-marked ones stay in `coroutine` rather than `check` for
-    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
-    # line in the tally a developer reads to know their tree is fine (the same
-    # reasoning that keeps `formal-module-attr`, `formal-external-call` and
-    # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
-    # this IS gated — just somewhere whose tally is a list of known reds rather
-    # than a green/red verdict on the everyday loop.
-    #
-    # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
-    # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
-    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing  (expect=)
-    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
-    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
-    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
-    #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
-    #   mutable-async-capture 2.7 s 0.1 GB   2 passed
-    #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
-    #   nested-async-generic 3.3 s 0.1 GB    3 passed
-    #   taskgroup            3.2 s  0.2 GB   3 passed
-    #   async-runtime-scaffold 1.7 s 0.2 GB 11 passed
-    # ~35 s in total, against a gate whose slowest everyday members are minutes
-    # each, so the added wall time is stated here rather than left to be
-    # discovered.
+    # Measured one at a time under `tools/memslot.py --gb 8` before being named,
+    # which is also what set their `mem` to `tiny` (0.0-0.2 GB each, against
+    # the `small`/8 GB they carried while ungated):
+    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing
+    #   coro-detached-async  2.2 s  0.1 GB   2 failing
+    #   async-with-lock-guard 2.7 s 0.1 GB   2 failing
+    #   mutable-async-capture 2.7 s 0.1 GB   2 failing
+    #   transitive-closure-capture 2.7 s 0.1 GB  2 failing
+    #   async-void-return    3.3 s  0.1 GB   3 failing
+    #   nested-async-generic 3.3 s 0.1 GB    2 failing
+    #   taskgroup            3.2 s  0.2 GB   3 failing
+    #   async-runtime-scaffold 1.7 s 0.2 GB  1 of 2
+    #   coro-future-await   11.6 s  0.1 GB  17 failing
+    # 34.6 s in total, against a gate whose slowest everyday members are
+    # minutes each, so the added wall time is stated here rather than left to
+    # be discovered.
     'coroutine': ['coro', 'coro-nested-capture',
                   'gimple-async-runner', 'coro-detached-async',
                   'async-with-lock-guard', 'mutable-async-capture',

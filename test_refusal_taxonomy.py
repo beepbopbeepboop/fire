@@ -118,58 +118,6 @@ def _string_composition_messages():
 
 _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
-
-# The `%d` of a CONTAINER, which is the one direction of `printf`'s conversion
-# table that had no row anywhere until 2026-10-05 — a `%s` of a number was
-# refused by name and a `%d` of a container was not, so the corpus's largest
-# printf family was the one shape of it that got a wrong answer instead of a
-# diagnostic.
-#
-# **BUILT, not copied**, for the reason the pair above is: this file's own
-# docstring, point 2, says a hand-copied sample cannot catch a reword, because
-# the marker still matches the stale copy while the backend has moved on. So the
-# sample is the message `formal/model.py` emits when asked about a list at a
-# `%d`, and the node it is asked about is built too — a hand-built node would
-# not be the shape the emitters hand the function, and a refusal's spelling of
-# its operand comes from `model.spelled`.
-#
-# The refusal needs a `container_of` hook because that is its one evidence
-# reader, and the hook handed here is `model.printf_arg_container_evidence`
-# reading the kind off the node — which is the whole of the rule, and is why
-# this sample exercises the message rather than a transcription of it.
-class _Kinds:
-    """The `vk` the evidence readers take: anything with `kind_of(expr)`."""
-
-    def __init__(self, kind_of):
-        self.kind_of = kind_of
-
-
-def _printf_container_message():
-    """The `%d`-of-a-container refusal, built by asking for it."""
-    container = F.ListExpr(elements=[F.IntLiteral(1)])
-    msg = FM.printf_container_conversion_refusal(
-        "printf", "v=%d", [container],
-        lambda e: FM.printf_arg_container_evidence(
-            e, _Kinds(lambda _e: FM.list_kind(FM.INT_KIND))))
-    if msg is None:
-        raise AssertionError(
-            "formal/model.py no longer refuses a container at a number "
-            "conversion, so the family and cause rows below would classify "
-            "a message the backend cannot produce — a sample that can only "
-            "rot (this file's docstring, point 3). The row goes with the "
-            "refusal rather than outliving it.")
-    return msg
-
-
-_PRINTF_CONTAINER_REFUSAL = _printf_container_message()
-
-#: The family, in `formal_sweep._REFUSAL_FAMILIES`, and the cause, in
-#: `formal_sweep_causes.CAUSES`. Spelled independently in each file, which is
-#: the same duplication every other row of this table has and the reason the
-#: pair is asserted by value here rather than imported from either.
-PRINTF_CONTAINER_FAMILY = "a printf conversion of a container"
-PRINTF_CONTAINER_CAUSE = "a printf conversion of a container"
-
 def _frame_slot_message():
     """The FRAME-SLOT container refusal, built not copied.
 
@@ -718,14 +666,6 @@ SAMPLES = [
     # dead-marker failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
-    # The `%d` of a CONTAINER, from the message BUILT above. Its own family
-    # because the fix is in a different place from every other printf row: the
-    # `%s`-of-a-number row above is a missing `own_shape_kind` answer, the float
-    # axis has no row at all, and this one is a container KIND that both backends
-    # already held and nobody asked — so a planner who read it as "a printf
-    # conversion problem" would go to the conversion table rather than to the
-    # vararg placement, which is where the defect was.
-    (PRINTF_CONTAINER_FAMILY, _PRINTF_CONTAINER_REFUSAL),
     # A symbol this image BINDS and nothing provides, where the symbol is a
     # METHOD OF A STRUCT IN THE FILE THAT REFUSED. Its own family because the
     # fix is on this side of the boundary: the definition was never emitted into
@@ -1012,11 +952,10 @@ CAUSE_SAMPLES = [
     ("a repetition whose count this path cannot read",
      "[FloatLiteral] * m * k is a REPETITION, and this path can only lower "
      "one whose count it can read while emitting"),
-    # A comprehension ELEMENT that opens a container — the shape where the
-    # backend LOWERs the comprehension but a byte copy of the element's result
-    # is not sound, because the result holds a pointer to a blob built in the
-    # SAME emission (a flat element is materialized per iteration instead; see
-    # `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`). Two samples because
+    # A comprehension ELEMENT that opens a container — the one shape where this
+    # backend LOWERs the comprehension and still cannot give each iteration its
+    # own container, because the frame is one sequential ledger and the element
+    # site reserves through it once at compile time. Two samples because
     # `formal/model.py::comprehension_element_blob_refusal`'s element spelling
     # goes through `expr_spelling`, and a nested comprehension is spelled
     # `[…] for …` rather than as the AST type name; one sample would leave half
@@ -1291,13 +1230,6 @@ CAUSE_SAMPLES = [
     # failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
-    # The same BUILT message as its family row above, in the PLANNER's table —
-    # for the reason that row gives: the two tables are keyed on different
-    # things, so a construct one can name and the other cannot is a construct a
-    # planner cannot prioritise. `PRINTF_CONTAINER_CAUSE` is spelled
-    # independently in `formal_sweep_causes.py::CAUSES`, and this row is what
-    # proves the two spellings still agree.
-    (PRINTF_CONTAINER_CAUSE, _PRINTF_CONTAINER_REFUSAL),
     # The `try`-around-a-raise refusal, in the PLANNER's table as well as the
     # family's: its marker is the clause `formal/model.py` writes for it and
     # the arm refusal's message cannot contain, so the two rows cannot shadow
@@ -1694,39 +1626,8 @@ def main() -> int:
             "is the link audit's, four stages late, about symbols")
     checks += 1
 
-    # ── a refusal that can be BUILT is one that still reads as a refusal ──────
-    # `container_operator_refusal`'s message interpolated a name it never bound,
-    # so every program that reached it got a Python `NameError` traceback out of
-    # the compiler instead of a diagnostic: `a = [1, 2]; len(max(a, 0))` died
-    # inside the refusal rather than being refused with one. The two
-    # comprehension-element samples in SAMPLES above are HAND-COPIED, so nothing
-    # in this file constructed that message and nothing noticed — which is the
-    # one thing this file's docstring says a sample must not be able to do.
-    #
-    # So it is asked here, from `model` and with no build, in both directions
-    # that matter: the message exists, and it names the operator the DIAGNOSTIC
-    # should say (`spelled_op or op`) rather than the bare one the table is keyed
-    # on. Both backends pass no `spelled_op`, so `op` is what a reader sees.
-    #
-    # The blob is on the RIGHT, which is the side `max(a, 0)` reaches: `max`
-    # lowers to a select whose test is `0 < a`, so the container is the
-    # `right` operand of the compare and this is the sentence the corpus rows
-    # above (`an_extremum_of_a_container_and_a_literal_…` in
-    # `test_formal_value_model.py`, `a_container_and_a_literal` in
-    # `test_formal_builtins_conformance.py`) are keyed on.
-    _blob_msg = FM.container_operator_refusal(
-        ">", FM.INT_KIND, FM.list_kind(FM.INT_KIND))
-    if _blob_msg is None:
-        failures.append(
-            "formal/model.py::container_operator_refusal no longer refuses a "
-            "container compared with a number, so the family the SAMPLES rows "
-            "above classify is one the backend cannot produce")
-    elif not _blob_msg.startswith("'>' is refused when the right operand is a"):
-        failures.append(
-            "container_operator_refusal's message does not lead with the "
-            "operator the source spelled, so the two families a reader and this "
-            f"file's markers key on cannot be told apart: {_blob_msg[:90]!r}")
-    checks += 1
+    # The precedence rule, stated independently of the samples above so a
+    # future edit cannot satisfy SAMPLES by deleting a marker outright.
     pre = ("a X receiver is passed to foo(), which is a name with no "
            "definition in hand")
     if S._refusal_family(pre) != "callee has no definition on this path":

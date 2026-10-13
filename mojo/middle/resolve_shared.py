@@ -1796,24 +1796,12 @@ def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
             break
     if _all_quote:
         return prefix + val, ('1' if is_fstring else '')
-    # A NON-interpolated value reached here already stripped: the parser's
-    # `_strip_string_prefix_and_quotes` removes the prefix and the outer quote
-    # delimiters from every plain (non-f/t) STRING token, triple-quoted
-    # placeholder or not, so `val` is the literal's BODY. The only thing the
-    # block below can do to a body is remove CONTENT, and it is exactly what a
-    # body that both STARTS and ENDS with a quote character needs kept:
-    # `x = "'x'"` has the three-character body `'x'`, and `q = "'''x'''"` the
-    # seven-character body `'''x'''`; both satisfied every "still carries
-    # delimiters" test below and lost their outer characters, so the compiled
-    # path printed `x` where CPython prints `'x'` / `'''x'''` (measured; the
-    # interpreter and the formal path were already right). An interpolated
-    # (f/t) value is the ONE producer that keeps its prefix and quotes — see
-    # `_raw_string_is_ftstring`, which returns the token intact — so only it
-    # falls through to the strip.
-    if not is_fstring:
-        return prefix + val, ''
-    # val still carries quotes: an f/t-string (the only remaining producer —
-    # a plain value returned just above).
+    # val still carries quotes: an f/t-string, or a triple-quoted value handed
+    # back from the placeholder cache (`replace_multiline_strings` caches the
+    # literal source, quotes and all, under a `__MOJO_STR_n__` name — for an
+    # ordinary triple-quoted docstring that is the whole body with nothing else
+    # to tell it apart from a delimiter, which is why this arm is reachable
+    # without `is_interp`).
     # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
     # `"`, this file's own such literals) starts and ends with the quote but
     # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
