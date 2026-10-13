@@ -30753,11 +30753,11 @@ def comprehension_element_is_flat_container(element) -> bool:
     distinct outer lists over the same elements. Only a container the element
     position itself BUILDS is the defect.
 
-    The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    The shapes that return False keep `comprehension_element_blob_refusal`,
+    unless `comprehension_element_is_shallow_copyable` below accepts them: a
+    list of lists, a slice, a constructor call, and every non-literal
+    expression. Those are the cases whose per-iteration materialisation needs
+    the runtime blob base the refusal's own document describes.
     """
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
@@ -30769,29 +30769,79 @@ def comprehension_element_is_flat_container(element) -> bool:
     return not any(_expr_builds_a_container(c) for c in children)
 
 
+def _comprehension_emits_plain_values(c) -> bool:
+    """True when every value a comprehension emits is not a freshly-built
+    container, so its result blob holds values rather than addresses."""
+    values = [c.element]
+    if getattr(c, "kind", None) == "dict":
+        values.append(c.value)
+    return not any(_expr_builds_a_container(v) for v in values)
+
+
+def comprehension_element_is_shallow_copyable(element) -> bool:
+    """True when an element's blob can be SHALLOW-copied once per iteration.
+
+    The predicate both emitters ask before materialising an element per
+    iteration, and the one place the two architectures are kept in step about
+    which elements are representable. Two shapes qualify:
+
+      * a flat container literal (`comprehension_element_is_flat_container`);
+      * a NESTED COMPREHENSION whose own emitted values are plain words and not
+        containers (`_comprehension_emits_plain_values`). Its result blob is
+        `[count][value…]` (or `[count][key, value…]`), which is exactly the
+        layout a literal's blob has, so the same byte copy is sound. A nested
+        comprehension whose ELEMENT builds a container is refused: it emits the
+        ADDRESSES of its own per-iteration array, and copying that blob per
+        iteration would make every outer element point at the same inner
+        object — the same aliasing defect, one level down. That is why the test
+        recurses on the emitted value rather than looking at the node type.
+
+    `bytes_` remains the element's whole footprint (measured on the emitters'
+    ledger), so a nested comprehension's copy also carries the scratch its own
+    generator iterables used. That is harmless: a slot's meaningful prefix is
+    the result blob, whose offset IS the start of the element's scratch, and
+    the copy is the same length as the slot stride.
+    """
+    if comprehension_element_is_flat_container(element):
+        return True
+    return (isinstance(element, F.Comprehension)
+            and _comprehension_emits_plain_values(element))
+
+
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
-    """The diagnostic for a comprehension ELEMENT that opens a container.
+    """The diagnostic for a comprehension ELEMENT whose shallow copy is unsound.
 
     **A silent wrong answer, and the reason this is a refusal rather than an
-    allocation scheme.** A container on this path is a blob in the frame, and the
-    frame is ONE sequential ledger: `_reserve_blob` steps `_list_cursor` along
-    `_blob_cap`, so a site's reservation happens ONCE at compile time. A
-    comprehension's element is one site that runs `cap` times, so the blob is one
-    allocation shared by every iteration and each iteration overwrites the last
-    one's contents. Measured on both architectures, CPython 3.14 against the
-    same source:
+    allocation scheme for these shapes.** A container on this path is a blob in
+    the frame, and the frame is ONE sequential ledger: `_reserve_blob` steps
+    `_list_cursor` along `_blob_cap`, so a site's reservation happens ONCE at
+    compile time. A comprehension's element is one site that runs `cap` times, so
+    without per-iteration storage the blob is one allocation shared by every
+    iteration and each iteration overwrites the last one's contents. Measured on
+    both architectures, CPython 3.14 against the same source, before the
+    per-iteration copy landed:
 
         [[y, y + 1] for y in [10, 20, 30]]     CPython: 11 21 31
-                                              this path: 31 31 31
+                                              was: 31 31 31
         [[x + y for x in [1, 2]] for y in [10, 20, 30]] and then v[0] summed
-                                              CPython: 63   this path: 93
+                                              CPython: 63   was: 93 (exit 1)
 
-    The second is worse than a wrong number: it exits 1 as well, because the
-    count the third iteration writes lands one word past a blob sized for one
-    element. And the first is silent in the way this repository's rules call out
-    — a caller that appends to element 0 gets element 1's list too, which no
+    The second was worse than a wrong number: it exited 1 as well, because the
+    count the third iteration wrote landed one word past a blob sized for one
+    element. And the first was silent in the way this repository's rules call
+    out — a caller that appends to element 0 gets element 1's list too, which no
     assertion in the program can notice.
+
+    **Both rows are now materialised per-iteration**
+    (`comprehension_element_is_shallow_copyable`): the element's blob is copied
+    into a slot of a `cap`-sized array indexed by the result count, which is
+    sound whenever the blob holds plain words. This message therefore fires only
+    where a shallow copy would carry a nested ADDRESS — a literal whose child
+    opens a container (`[[y]]`), a nested comprehension whose own element builds
+    one, a slice, a constructor call. Their copy would make every iteration's
+    outer container point at one inner object, the same aliasing defect one level
+    down.
 
     **`bytes_` is the ELEMENT's own footprint, measured by the ledger.** The
     emitters ask for the delta across the element's own emission and refuse when

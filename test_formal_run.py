@@ -17413,11 +17413,20 @@ COMPREHENSION_ELEMENT_CASES = [
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
+    # A NESTED COMPREHENSION whose own emitted values are plain words is the
+    # next shape, and it is per-iteration for the same reason: its result blob
+    # is `[count][value…]`, exactly the layout a literal's blob has, so the
+    # same copy is sound. `model.comprehension_element_is_shallow_copyable`
+    # is the shared predicate that accepts both, and the row below reads the
+    # CONTENT of every iteration to tell the copies apart.
+    #
     # The rows after them are the shapes whose per-iteration materialisation
     # needs a runtime blob base and is still refused (see
-    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
-    # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
-    # anything else fails the case.
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`):
+    # a nested comprehension whose ELEMENT builds a container (it emits the
+    # ADDRESSES of its own per-iteration array), a list of lists, a slice, a
+    # constructor call. The refusal needle is the CONSTRUCT and not the remedy,
+    # so a refusal about anything else fails the case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -17445,13 +17454,29 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one with PLAIN-WORD values, which is the reproducer the
+    # old refusal named as exiting 1. `v[0]` sums 11 + 21 + 31 = 63, which three
+    # aliases of one scratch would not: they would all read the last iteration's
+    # 31 and the inner count word would run past a one-element blob (the exit 1
+    # the refusal quoted).
+    ("a_nested_comprehension_with_plain_values_is_per_iteration",
      "def main() -> Int:\n"
      "    var s = 0\n"
      "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
      "        s = s + v[0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "63"),
+    # …and a nested comprehension whose OWN element opens a container, which is
+    # the one shape left: it emits the ADDRESSES of its per-iteration array, so
+    # copying its blob per iteration would share that array across every outer
+    # element — the same aliasing defect one level down, and the reason the
+    # predicate recurses on the emitted value rather than keying on the node.
+    ("a_container_building_nested_comprehension_as_the_element_is_refused",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [[[z] for z in [1, 2]] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0][0]\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      "refuse:the element `[…] for …` opens a container", None),

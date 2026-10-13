@@ -610,8 +610,14 @@ CAUSES = (
     # compile-time frame reservation for a site that runs N times would do.
     # Measured on both architectures: `[[y, y + 1] for y in [10, 20, 30]]`
     # printed `31 31 31` where CPython prints `11 21 31`, and the nested
-    # comprehension printed `93` and exited 1 where CPython prints `63`. So a
-    # file refused here is refused by a decision with a stated remedy (build the
+    # comprehension printed `93` and exited 1 where CPython prints `63`.
+    # **Both of those are now FIXED**: a flat container literal AND a nested
+    # comprehension whose emitted values are plain words are copied into a
+    # per-iteration slot (`model.comprehension_element_is_shallow_copyable`), so
+    # the row below fires only for the shapes whose shallow copy would carry a
+    # nested ADDRESS — a literal whose child opens a container, a nested
+    # comprehension whose own element does, a slice, a constructor call. A file
+    # refused here is refused by a decision with a stated remedy (build the
     # containers in an explicit loop, whose `append` allocates per iteration),
     # not by a missing feature — which is the distinction `other refusal`
     # cannot express and the reason this row exists.
