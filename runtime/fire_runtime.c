@@ -781,7 +781,11 @@ static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
         i = (i + 1) & mask;
     }
+    /* A new row describes nothing yet, whatever a deleted row left here. */
     _reg_kinds.rows[i].addr = addr;
+    _reg_kinds.rows[i].kinds = NULL;
+    _reg_kinds.rows[i].boxes = NULL;
+    _reg_kinds.rows[i].repr_fn = NULL;
     _reg_kinds.used++;
     *fresh = 1;
     return &_reg_kinds.rows[i];
@@ -907,6 +911,13 @@ static void _kinds_forget(uint64_t addr)
     _reg_kinds.rows[i].addr = 0;
     _reg_kinds.rows[i].kinds = NULL;
     _reg_kinds.rows[i].boxes = NULL;
+    /* `repr_fn` too. It was the one field left behind, so the NEXT row
+     * created in this slot -- for any list at all -- inherited the dead
+     * list's element repr: a fresh `(filename, line)` tuple in the
+     * self-hosted compiler came out with a `ClosureInfo` repr shim, and
+     * rendering it (a tuple set key, a print) ran that struct's repr over a
+     * string. */
+    _reg_kinds.rows[i].repr_fn = NULL;
     _reg_kinds.used--;
 }
 
@@ -5893,8 +5904,10 @@ void mojo_set_init(MojoSet *s)
 void mojo_set_destroy(MojoSet *s)
 {
     _pr_del(&_reg_set, (uint64_t)(uintptr_t)s);
+    /* Every live slot's `val_s` is owned: a str/bytes element's copy, or a
+     * tuple element's content key (tag 0; NULL for a plain word). */
     for (int64_t i = 0; i < s->cap; i++)
-        if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+        if (s->slots[i].tag >= 0 && s->slots[i].val_s) free(s->slots[i].val_s);
     if (s->slots != s->inl) free(s->slots);
 }
 
@@ -5917,7 +5930,7 @@ void mojo_set_clear(MojoSet *s)
 {
     if (!s) return;
     for (int64_t i = 0; i < s->cap; i++) {
-        if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+        if (s->slots[i].tag >= 0 && s->slots[i].val_s) free(s->slots[i].val_s);
         s->slots[i].tag = -1;
         s->slots[i].val_i = 0;
         s->slots[i].val_s = NULL;
@@ -5933,64 +5946,62 @@ static char *_container_key_str(int64_t v);
 
 /* An int-domain set element that is a registered LIST word is a TUPLE (a
  * Python list is unhashable, so a set never legitimately holds one), and a
- * tuple is equal to every other tuple of the same contents. Hashing and
- * comparing it by ADDRESS made every freshly built tuple a new element:
+ * tuple is equal to every other tuple of the same contents. Hashed and
+ * compared by ADDRESS, every freshly built tuple was a new element:
  * `s.add(('x', 1)); ('x', 1) in s` was False, and the self-hosted compiler's
  * own `(filename, line)` dedup set and `(struct, method)` membership tests
- * never matched. So such a word is hashed and compared by its content key --
- * the same text a tuple DICT key already uses (`_container_key_str`), which
- * keeps "equal for a set" and "equal for a dict" one rule. Every other word
- * (ints, identity registries keyed by heap pointer) keeps the address
- * semantics it always had; the registry probe is the whole cost for them. */
-static uint64_t _set_int_hash(int64_t v)
+ * never matched.
+ *
+ * So a tuple element is keyed by its CONTENT KEY -- the same text a tuple
+ * DICT key uses (`_container_key_str`), which keeps "equal for a set" and
+ * "equal for a dict" one rule -- and the key is taken ONCE, when the element
+ * goes in, and kept in the slot's otherwise-unused `val_s` (a tag-0 slot
+ * never had one). Computing it again from the stored pointer at every probe
+ * was the first version of this, and it is unsound in this runtime: nothing
+ * keeps a set's element alive, so a probe that collided with a slot whose
+ * tuple had since been freed and its address reused (by a `dict.items()` pair
+ * carrying an element-repr shim, measured) walked that stranger's memory.
+ * A tuple is immutable, so the key at insertion IS its key. Every other word
+ * (ints, identity registries keyed by heap pointer) keeps `val_s == NULL` and
+ * the address semantics it always had. */
+static uint64_t _set_word_hash(int64_t v, const char *key)
 {
-    if (mojo_is_registered_list(v)) {
-        char *k = _container_key_str(v);
-        uint64_t hk = _str_hash(k);
-        free(k);
-        return hk;
-    }
+    if (key) return _str_hash((char *)key);
     uint64_t h = (uint64_t)v * 2654435761ULL;
     h ^= h >> 32;
     return h;
 }
 
-static int _set_int_eq(int64_t a, int64_t b)
+/* The content key for an int-domain word: an owned string for a tuple, NULL
+ * for every other word. */
+static char *_set_word_key(int64_t v)
 {
-    if (a == b) return 1;
-    if (!mojo_is_registered_list(a) || !mojo_is_registered_list(b)) return 0;
-    char *ka = _container_key_str(a);
-    char *kb = _container_key_str(b);
-    int eq = strcmp(ka, kb) == 0;
-    free(ka);
-    free(kb);
-    return eq;
+    return mojo_is_registered_list(v) ? _container_key_str(v) : NULL;
 }
 
-static int64_t _set_slot_int(MojoSet *s, int64_t v)
+/* Probe the int domain for word `v` whose content key is `key` (NULL for a
+ * plain word). Find-or-insert, like every probe here. */
+static int64_t _set_slot_int_k(MojoSet *s, int64_t v, const char *key)
 {
-    uint64_t h = _set_int_hash(v);
-    /* `% s->cap` (always a power of two) keeps only h's LOW bits - the
-     * weakest bits of a plain multiplicative hash. Values from
-     * mojo_set_add_int(registry, (int64_t)(intptr_t)ptr) (this runtime's
-     * only int-keyed-set use case: object-identity/type-tag registries
-     * keyed by heap pointer) are typically 16-byte aligned, i.e. always
-     * divisible by 16 - and since 2654435761 is odd, v's low 4 zero bits
-     * survive the multiply into h, so every such key collides on the same
-     * 1-in-16 slots instead of spreading across the table: a real
-     * clustering pathology that degrades this from O(1) amortized toward
-     * O(n) per insert as a registry accumulates many pointers, exactly the
-     * "self-hosted compiler processing its own large source" scenario that
-     * exposed it. Fold the high bits down before the modulo (matches the
-     * mixing step in xxhash/murmur's finalizers) so pointer alignment
-     * doesn't determine which slots ever get used as probe starts. */
+    uint64_t h = _set_word_hash(v, key);
     for (int64_t i = 0; i < s->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)s->cap);
         _SetSlot *sl = &s->slots[idx];
         if (sl->tag == -1) return idx;
-        if (sl->tag == 0 && _set_int_eq(sl->val_i, v)) return idx;
+        if (sl->tag != 0) continue;
+        if (key ? (sl->val_s && strcmp(sl->val_s, key) == 0)
+                : (!sl->val_s && sl->val_i == v))
+            return idx;
     }
     return -1;
+}
+
+static int64_t _set_slot_int(MojoSet *s, int64_t v)
+{
+    char *k = _set_word_key(v);
+    int64_t idx = _set_slot_int_k(s, v, k);
+    free(k);
+    return idx;
 }
 
 /* Probe for `v` among slots of DOMAIN `tag` only (1 = str, 2 = bytes). Both
@@ -6067,12 +6078,14 @@ static void _set_replay_entry(MojoSet *s, int tag, int64_t val_i,
                               char *val_s, int64_t seq)
 {
     int64_t idx;
-    if (tag == 0) idx = _set_slot_int(s, val_i);
+    if (tag == 0) idx = _set_slot_int_k(s, val_i, val_s);
     else          idx = _set_slot_str_tag(s, val_s, tag);
     if (idx < 0) return;
     s->slots[idx].tag   = tag;
     s->slots[idx].val_i = (tag == 0) ? val_i : 0;
-    s->slots[idx].val_s = (tag == 0) ? NULL : strdup(val_s ? val_s : "");
+    /* A tag-0 slot's `val_s` is a tuple's content key (or NULL); the caller
+     * hands its ownership over rather than copying it. */
+    s->slots[idx].val_s = (tag == 0) ? val_s : strdup(val_s ? val_s : "");
     s->slots[idx].seq   = seq;
     s->used++;
 }
@@ -6092,7 +6105,7 @@ static void _set_grow(MojoSet *s)
      * writes `seq` straight into the slot, so nothing here can perturb it. */
     for (int64_t i = 0; i < old_cap; i++) {
         if (old[i].tag == 0) {
-            _set_replay_entry(s, 0, old[i].val_i, NULL, old[i].seq);
+            _set_replay_entry(s, 0, old[i].val_i, old[i].val_s, old[i].seq);
         } else if (old[i].tag == 1 || old[i].tag == 2) {
             _set_replay_entry(s, old[i].tag, 0, old[i].val_s, old[i].seq);
             free(old[i].val_s);
@@ -6103,12 +6116,16 @@ static void _set_grow(MojoSet *s)
 
 void mojo_set_add_int(MojoSet *s, int64_t v)
 {
+    char *k = _set_word_key(v);
     if (s->used * 2 >= s->cap) _set_grow(s);
-    int64_t idx = _set_slot_int(s, v);
-    if (idx < 0) { _set_grow(s); idx = _set_slot_int(s, v); }
+    int64_t idx = _set_slot_int_k(s, v, k);
+    if (idx < 0) { _set_grow(s); idx = _set_slot_int_k(s, v, k); }
     if (s->slots[idx].tag == -1) {
         s->slots[idx].tag = 0; s->slots[idx].val_i = v;
+        s->slots[idx].val_s = k;    /* the slot owns the content key */
         s->slots[idx].seq = s->next_seq++; s->used++;
+    } else {
+        free(k);
     }
 }
 
@@ -6175,7 +6192,7 @@ static int64_t _set_home_slot(MojoSet *s, int64_t idx)
 {
     _SetSlot *sl = &s->slots[idx];
     if (sl->tag == 0)
-        return (int64_t)(_set_int_hash(sl->val_i) % (uint64_t)s->cap);
+        return (int64_t)(_set_word_hash(sl->val_i, sl->val_s) % (uint64_t)s->cap);
     return (int64_t)(_str_hash(sl->val_s ? sl->val_s : "") % (uint64_t)s->cap);
 }
 
@@ -6190,7 +6207,7 @@ static int64_t _set_home_slot(MojoSet *s, int64_t idx)
  * needs each slot's own home position, not its value's type. */
 static void _set_erase_slot(MojoSet *s, int64_t i)
 {
-    if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+    if (s->slots[i].val_s) free(s->slots[i].val_s);
     s->slots[i].tag = -1;
     s->slots[i].val_s = NULL;
     s->used--;

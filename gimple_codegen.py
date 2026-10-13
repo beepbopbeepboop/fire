@@ -415,6 +415,21 @@ from mojo.middle.exprtypes import (
 
 
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
+# The self-hosted binary has no source location of its own: `__file__` is
+# the `<bootstrap>` placeholder in every compiled module, so the line above
+# answers the process CWD. That made every compiler-source decision that
+# keys on this directory (the self-host struct layouts, the GimpleGen
+# function index built from `_selfhost_impl_py_files`) depend on WHERE the
+# binary was run: `stage2/mojo --dump ../fire_main.py` from `stage2/` saw no
+# compiler sources at all, while the python reference compiling the same file
+# from `stage1/` saw them, and the stage trees diverged on that alone.
+# `MOJO_HOME` is the project root every runner of the binary already names
+# (the bootstrap stages, `test_ab_native`); honouring it is what makes the
+# binary's answer the reference's. Unset, the CWD answer stands as before.
+if __file__ == '<bootstrap>':
+    _mojo_home_dir = os.environ.get('MOJO_HOME', '')
+    if _mojo_home_dir:
+        _SELFHOST_DIR = os.path.abspath(_mojo_home_dir)
 
 
 def _selfhost_impl_py_files(sd: str) -> list[str]:
