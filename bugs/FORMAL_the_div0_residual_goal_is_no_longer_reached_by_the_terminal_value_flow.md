@@ -2,10 +2,28 @@
 
 **Area:** `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean`
 and whatever in `formal/arm64_proof_gen.py` decides which goals the terminal
-value flow reaches. **Status: OPEN, measured 2026-10-05 on the tree of this
-merge. NOT reproduced on `master`, and the difference is the library, not the
-code** — see §1. **Needs a Lean-backed read, so it is filed rather than
-guessed at**; this session is a light worker and may not launch lean.
+value flow reaches. **Status: OPEN and now BLOCKED, re-measured 2026-10-08 on
+this tree (library built, all seven `.olean` current).** The class no longer
+reaches the three red rows at all: `setUpClass` calls `_symbolic_divisor_proof`,
+whose `compile_formal(..., prove=True)` now RAISES
+
+```
+universal theorem: 2 calls this walk cannot follow
+  (0x100000424 -> 0x10000088c (opaque), 0x100000514 -> 0x100000880 (opaque)),
+every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge them.
+```
+
+so there is no generated `q_compiles_correctly_universal` body to read. That is
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md`'s subject on the merged tree (the branch's
+branch named the same subject `FORMAL_the_stack_guards_getrlimit_is_counted_as_
+a_program_call.md`, which master deleted as fixed in `23350e6e`); the guard's
+`getrlimit` in every arm64 prologue is counted as a program
+CALL by `_calls`/`_opaque`, and it must be fixed before this document's step 1
+can run at all — **this doc's Lean read is downstream of that one.** §1.1 has
+the measurement and the one check that shows it is not this document's own
+cause. (Previously: OPEN, measured 2026-10-05, three `FAIL`s on a tree with a
+built library; `master` is green only because `setUpClass` skips without one.)
 
 **Status 2026-10-09 (this worktree): the route is now doubly gone, and the
 class has been taught to say so by name.** Re-measured on this tree with
@@ -31,6 +49,32 @@ because arm64 `compiler_traps` is published and empty) and the conditional-halt
 walk gap (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_
 path.md`) both have to land before `a // b` again reaches a terminal value
 flow, and neither is a `test_formal_*` change.
+
+**merged 2026-10-13 (merging `work/formal199-docs`): re-measured on the merged
+tree, the generation refusal of both dated records above is gone, and the shape
+the class meets is new.** The probe `setUpClass` performs — `compile_formal(
+symdiv.mojo, arch="arm64", prove=True, check=False)` on `def q(a, b): return
+a // b` — SUCCEEDS here (generation-only, no Lean): the "2 calls this walk
+cannot follow" rejection of the 2026-10-08 and 2026-10-09 records is no longer
+raised, because the guard's `getrlimit` is no longer a prologue `BL` the walk
+counts (`70b76755`'s startup stub, in HEAD — `bugs/FORMAL_arm64_the_
+universal_theorem_cannot_follow_a_call_into_the_same_image.md`'s merged
+2026-10-13 note re-measures the same subtraction). What moved is the shape: the
+file the probe writes contains NO `q_compiles_correctly_universal`. In its
+place the generator emits `q_reaches_call_at_0x100000504` — the reachability
+theorem — with a comment that names the boundary: "the function calls out of
+the image at 0x100000504, so the model cannot execute the call and
+`arm64_exec_go` stops there … A caller asked for `q_compiles_correctly_
+universal`, whose proposition is about what the function RETURNS, and that
+theorem is NOT emitted", and "Two out-of-image calls are REFUSED by name
+(`_cfg_decomposition_refusal`) rather than substituted, because the walk halts
+on one address only". So on a tree with a built library the class neither
+ERRORS in `setUpClass` (the 2026-10-08 state) nor reaches the div0 residual
+(the 2026-10-05 state): it partitions a file that has no value theorem to read
+and reports the mechanism blind by name, as the 2026-10-09 repair taught it. In
+THIS environment the class skips (no `lib/ProofLib.olean`), which is the honest
+report of a six-case class whose subject needs a 52 MB library. The branch
+lands no code on the merged tree.
 
 ## 0. Re-measured 2026-10-08: the failure MOVED, and it is now EARLIER than §3 describes
 
@@ -97,6 +141,44 @@ been built**, and it is invisible everywhere else. That is itself a fact about
 the class worth recording — a six-case class whose entire subject is
 unobservable without a 52 MB artifact, and which therefore reports green in
 every context that does not build one.
+
+## 1.1 Re-measured 2026-10-08: the class now ERRORS in `setUpClass`, and it is not this doc's cause
+
+```console
+$ ls lib/*.olean          # all seven present and current (built this tree)
+$ python3 tools/memslot.py --gb 8 --label div0 -- \
+    python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean
+setUpClass ... ERROR
+NotImplementedError: universal theorem: 2 calls this walk cannot follow
+  (0x100000424 -> 0x10000088c (opaque), 0x100000514 -> 0x100000880 (opaque)),
+  every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge them.
+Ran 0 tests ...
+```
+
+The addresses move when the emitter changes, so the two calls are the guard's
+`getrlimit` (emitted in every arm64 prologue, `_emit_stack_floor_guard`) and the
+program's own call; on the merged tree that subject lives in
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` (the branch's name for it,
+`FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, was deleted
+as fixed on master in `23350e6e`), and it has the reproduction of this exact
+refusal and the two candidate fixes. **The check that it is not caused by this
+document's subject:** the same
+error appears when the only recent arm64 change (the guard's `LDR X13, [scratch]`
+read, `work/formal199-docs`) is reverse-applied with `git apply -R` — the
+addresses shift (`…0x88c` → `…0x894`) and the error class is identical, so the
+walk's opaque-call rule, not the guard arithmetic and not the div0 residual, is
+what stops the read.
+
+**So the next step for THIS doc changes:** it is downstream of
+`FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` (the branch's own name for that subject,
+`FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, was deleted
+as fixed on master in `23350e6e`). Until that
+one teaches the walk to step a returning extern call (its option 1) and subtracts
+the compiler's calls from `_calls`/`_opaque`, `_symbolic_divisor_proof` cannot
+produce the theorem this document exists to read, and the "goal CLOSED vs walk
+no longer REACHES it" question stays unanswerable.
 
 ## 2. The library is CURRENT, so the change is real
 

@@ -20621,8 +20621,14 @@ def load_dylib_manifests(dylib_paths: list) -> list:
 
 
 def dylib_export_lists(dylibs: list) -> list:
-    """The `[{"module", "exports", "reexports", "constants", "variables",
-    "containers"}]` view of a link line.
+    """The `[{"module", "source", "exports", "reexports", "constants",
+    "variables", "containers"}]` view of a link line.
+
+    `source` is the file the library was BUILT from, carried so a refusal that
+    has only a module NAME can ask `model.export_rule_for` why the module does
+    not export a name — the same bytes the export table was filtered from.
+    Dropped here, the export-rule sentence has no path to read and can only list
+    its four candidate reasons, which is what it did until this key landed.
 
     What both emitters are constructed with, and one iteration over the link
     line rather than the two it used to be: `_dylib_syms` (the flat bare-name

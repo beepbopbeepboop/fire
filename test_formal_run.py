@@ -15794,6 +15794,93 @@ def reduced_stack_cases(tmpdir, verbose=False):
     return out_rows
 
 
+#: The reduced-`ulimit -s` threshold for the `deep` one-branch shape, per
+#: backend, as `(depth that must REFUSE at ulimit -s 2048, depth that must still
+#: ANSWER)`.
+#:
+#: These are chosen so the row distinguishes a threshold that READS
+#: `RLIMIT_STACK` from one that uses the compile-time
+#: `STACK_FLOOR_BUDGET_BYTES`: that constant is 7.5 MiB, so at 2 MiB of real
+#: stack a constant-budget guard answers BOTH depths and the process dies of
+#: SIGSEGV (exit 139) instead of the status 2 a reading guard returns. The
+#: frames differ (arm64 128 KiB, x86-64 16 KiB), so the depths do too, and each
+#: deep depth is well inside its architecture's `budget // frame` so it is not a
+#: boundary row.
+_REDUCED_STACK_READ = {
+    "arm64": (20, 5),
+    "x86_64": (200, 20),
+}
+
+
+def reduced_stack_reads_the_limit(tmpdir, verbose=False):
+    """The threshold DEPENDS on the limit: one build, two limits, two answers.
+
+    The `reduced_stack_cases` group above pins the outcome at one limit; this
+    pins the dependence. `bugs/FORMAL_arm64_the_compiler_trap_recording_is_
+    lost_and_the_stack_guards_getrlimit_is_a_program_call.md` is the
+    model/proof side of the same read on the merged tree (the branch named the
+    same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
+    every_function.md`), and the sEGV this row was written against is the guard
+    that read `RLIMIT_STACK`
+    into the wrong register: it stored getrlimit's `int` STATUS (zero) instead
+    of `rlim_cur`, so the budget underflowed, was clamped to the 7.5 MiB
+    constant, and never fired on a process whose real stack was smaller — the
+    process ran off the end of its stack. So the deep depth here must refuse at
+    2 MiB AND answer at 4 MiB, while a constant budget would answer it at both
+    (and then die wherever the real stack ends).
+    """
+    rows = []
+    for arch, (deep, shallow) in sorted(_REDUCED_STACK_READ.items()):
+        for depth in (shallow, deep):
+            src = ("def deep(n: Int) -> Int:\n"
+                   "    if n <= 0:\n"
+                   "        return 0\n"
+                   "    return deep(n - 1) + 1\n"
+                   "\n"
+                   "def main(n: Int) -> Int:\n"
+                   '    printf("%%d\\n", deep(%d))\n'
+                   "    return 0\n" % depth)
+            path = os.path.join(tmpdir, "rsl_%s_%d.mojo" % (arch, depth))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            out = os.path.join(tmpdir, "rsl_%s_%d" % (arch, depth))
+            rc, text = build_formal(path, out, backend=arch)
+            if rc != 0 or not os.path.isfile(out):
+                rows.append((arch, depth, False,
+                             "build failed: " + text.strip()[-200:]))
+                continue
+            want = 2 if depth == deep else 0
+            # 2048 KiB is below the 7.5 MiB budget; 4096 KiB is above both the
+            # deep depth and the arm64 frame that would otherwise be the story.
+            for limit, want_here in (("2048", want), ("4096", 0)):
+                run = subprocess.run(
+                    ["/bin/sh", "-c", "ulimit -s %s; exec \"$0\"" % limit,
+                     out], capture_output=True, text=True, timeout=RUN_TIMEOUT)
+                if run.returncode != want_here:
+                    rows.append((
+                        arch, depth, False,
+                        "depth %d under ulimit -s %s exited %d, want %d%s"
+                        % (depth, limit, run.returncode, want_here,
+                           ("; stderr: " + run.stderr.strip()[:120])
+                           if run.stderr.strip() else "")))
+                    break
+                if want_here == 2 and ("RecursionError" not in run.stderr
+                                       or "stack budget" not in run.stderr):
+                    rows.append((
+                        arch, depth, False,
+                        "refused with status 2 but stderr does not name the "
+                        "bound: %r" % run.stderr.strip()[:120]))
+                    break
+                if want_here == 0 and str(depth) not in run.stdout:
+                    rows.append((
+                        arch, depth, False,
+                        "stdout %r does not answer" % run.stdout[:80]))
+                    break
+            else:
+                rows.append((arch, depth, True, ""))
+    return rows
+
+
 def run_both_arch_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     """Build and RUN on BOTH backends, and require the same answer from each.
 
@@ -25639,6 +25726,17 @@ def main():
                 else:
                     failed += 1
                     print(f"  FAIL  {rname} [{rarch}, ulimit -s 2048]: {rdetail}")
+        if not args.cases or (reduced_names & set(args.cases)):
+            for rarch, rdepth, rok, rdetail in reduced_stack_reads_the_limit(
+                    tmpdir, args.verbose):
+                if rok:
+                    passed += 1
+                    print(f"  PASS  reduced_stack_reads_the_limit "
+                          f"[{rarch}, depth {rdepth}]")
+                else:
+                    failed += 1
+                    print(f"  FAIL  reduced_stack_reads_the_limit "
+                          f"[{rarch}, depth {rdepth}]: {rdetail}")
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")
             with open(src, "w") as f:
