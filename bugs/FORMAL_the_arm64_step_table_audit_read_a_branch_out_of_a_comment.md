@@ -24,11 +24,11 @@ one row from green: `wdiff` refuses in the loop contract because the stack-floor
 guard's `getrlimit` (`bfeec991`, every arm64 prologue) is counted as a program
 call and becomes the theorem's halt boundary, and because the arm64 half of
 `38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
-by a merge. Both are filed as
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
-"all twelve generate" below is true of the ten recursive examples and false of
-`wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
-row).
+by a merge. Both landed FIXED on 2026-10-07 (`806e72cb` and `70b76755`: the
+`RLIMIT_STACK` read moved into the startup stub, so the guard's prologue has no
+call, and the arm64 trap flush was restored), so the pin class is green and "all
+twelve generate" below is true of `wdiff` too; `sum_range` refuses by design (the
+signed-loop contract, its `REFUSED` row).
 
 **Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
 not this doc's fix that regressed.** The census this doc pins — "all twelve
