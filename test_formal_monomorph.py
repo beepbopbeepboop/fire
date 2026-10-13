@@ -292,11 +292,14 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
     Pair` then `Pair[Int]()`, one instantiation, two fields, and CPython's
     `PAIR_CPYTHON`/`PAIR_CPYTHON_MAIN` reference run at test time.
 
-    **The remedy is the NON-aliased spelling, and that is measured rather than
-    assumed**: `from pairlib import Pair as P` then `P[Int]()` is still refused
-    on this tree (the demand walk reads `P` where the template is `Pair`), so
-    the message names the module's own name and says so. This row is what
-    makes that claim worth making.
+    **The remedy is the NON-aliased spelling, and it is one of two spellings
+    that work**: the ALIASED import of the same template — `from pairlib import
+    Pair as P` then `P[Int]()` — lowers too and has its own row below
+    (`test_an_aliased_import_of_a_template_is_instantiated`), because the
+    call-site spelling is resolved through the same import table the emitters
+    use. What the DOTTED message still names as refused is the module-alias
+    DOTTED spelling (`import pairlib as L` then `L.Pair[Int]()`), which is a
+    different gap (§2 of the doc).
     """
     bare = PAIR_PROG.replace("import pairlib", "from pairlib import Pair")
     for arch in ARCHES:
@@ -306,7 +309,59 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
         check(got == "7\n1\n3\n",
               f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
               f"not the three answers this case is about — so the message is "
-              f"recommending a spelling nothing checks")
+              f"recommending a spelling nobody checks")
+
+
+def test_an_aliased_import_of_a_template_is_instantiated(tmpdir):
+    """`from pairlib import Pair as P` then `P[Int]()` lowers, vs CPython.
+
+    §2a measured this spelling as refused "because the demand walk reads `P`
+    where the template is `Pair`, and a struct template's instantiation is
+    emitted under the mangled name".  Both halves are the SAME defect and both
+    are fixed by naming the template the way its module did: the call site
+    spells `P`, the demand and the rewrite have to spell `Pair`, and the table
+    that says so already exists (`formal/imports.py::imported_bindings`, which
+    both backends resolve a call site through).  A spelling the compiler's own
+    import resolver can read and the demand walk cannot is a reader that
+    disagrees with itself, and the wrong answer that buys is exactly the one
+    the doc forbids: a call bound to another module's instantiation.
+
+    TWO type arguments, and a FUNCTION template on top of the struct, because
+    the two halves of this fix are the DEMAND (does the library publish
+    `Pair_1_T_3_Int`?) and the REWRITE (does the call site name it?), and a
+    case with one instantiation and no function cannot tell a rewritten call
+    from an unrewritten one that happened to be correct.
+    """
+    aliased = PAIR_PROG.replace("from pairlib import Pair", "from pairlib imp"
+                                "ort Pair as P").replace("Pair[", "P[")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, aliased,
+                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] the aliased import printed {got!r}, not CPython's "
+              f"three answers — the demand and the rewrite read the call site "
+              f"by a different name than the import binds")
+        # …and the FUNCTION template's alias, which is the same table and a
+        # different declaration: the demand is a boundary symbol and the rewrite
+        # is a plain call, with no struct layout involved.
+        fresh_cas()
+        lib = ("def twice[T](x: T) -> T:\n"
+               "    return x + x\n")
+        prog = ("from fnlib import twice as tw\n"
+                "\n"
+                "def main():\n"
+                "    print(tw[Int](21))\n")
+        cpython = ("def twice(x):\n"
+                   "    return x + x\n"
+                   "\n"
+                   "def main():\n"
+                   "    print(twice(21))\n")
+        got = run_pair_case(tmpdir, arch, "mm_aliasfn", lib, prog, cpython,
+                            libname="fnlib.mojo")
+        check(got == "42\n",
+              f"[{arch}] the aliased FUNCTION template printed {got!r}, "
+              f"expected 42")
 
 
 # ── behavioural: the boundary symbols ───────────────────────────────────────
@@ -2998,6 +3053,8 @@ TESTS = [
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
+    ("an aliased import of a template is instantiated",
+     test_an_aliased_import_of_a_template_is_instantiated),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library that applies another module's template instantiation",

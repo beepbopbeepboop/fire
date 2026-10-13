@@ -669,6 +669,10 @@ def all_instantiation_calls(consumer_src: str) -> dict:
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
         module_level = set(M.collect_module_symbols(stmts) or {})
+        # The call site spells the name AS BOUND in this unit (`P` for
+        # `from pairlib import Pair as P`), and the demand has to name the
+        # template the DEFINING module gave it — see `local_defining_names`.
+        defining = local_defining_names(stmts)
         found: dict = {}
         for st in stmts:
             values = _names_bound_in(st) \
@@ -679,6 +683,7 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                 base = _callee_base(node)
                 if base is None:
                     continue
+                base = defining.get(base, base)
                 args = _bracket_type_args(node.func, values)
                 if args:
                     found.setdefault(base, set()).add(tuple(args))
@@ -932,6 +937,10 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
+    # The demand was recorded under the DEFINING name (see
+    # `local_defining_names`), so a call site's own spelling has to be mapped
+    # through the same table before it can name that demand's table entry.
+    defining = local_defining_names(stmts)
     n = 0
     for st in stmts:
         if isinstance(st, F.FunctionDef):
@@ -944,8 +953,10 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
         for node in M.iter_nodes(st):
             if isinstance(node, F.MemberExpr) \
                     and isinstance(node.obj, F.IdentExpr):
-                mangled = uniq.get(node.obj.name)
-                if mangled is None or node.obj.name in shadowed:
+                if node.obj.name in shadowed:
+                    continue
+                mangled = uniq.get(defining.get(node.obj.name, node.obj.name))
+                if mangled is None:
                     continue
                 node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
                                        col=node.obj.col)
@@ -954,10 +965,10 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             if not isinstance(node, F.CallExpr):
                 continue
             base = _callee_base(node)
-            if base is None:
+            if base is None or base in shadowed:
                 continue
             args = tuple(_bracket_type_args(node.func, values))
-            mangled = demap.get((base, args))
+            mangled = demap.get((defining.get(base, base), args))
             if mangled is None:
                 continue
             node.func = F.IdentExpr(name=mangled,
@@ -1027,6 +1038,43 @@ def _callee_base(call):
     """
     import mojo.middle.comptime as comptime_eval    # lazy — module docstring
     return comptime_eval.specialization_name(getattr(call, "func", None))
+
+
+def local_defining_names(stmts) -> dict:
+    """`{local spelling: the DEFINING name}` for this unit's imports.
+
+    `from pairlib import Pair as P` binds `P`, and both the DEMAND this unit
+    produces for `P[Int]()` and the REWRITE of that call site have to name the
+    template by the name its module gave it (`Pair`), because that is the
+    export-table key and the key `instantiate_all` looks the declaration up
+    under.  Read off the same table the emitters resolve a call site through —
+    `formal/imports.py::imported_bindings`, which `formal/build.py`'s
+    `_import_aliases` hands to both backends — so the spelling at the call
+    site, the demand it produces and the symbol it binds are ONE decision read
+    three times rather than three spellings that agree until they do not.
+
+    A local definition wins over an import of the same name
+    (`imported_bindings`' own rule), which is the precedence
+    `imported_struct_defs` states for the declarations too.  A name with no
+    alias is present as itself (`from m import f` reports `f`), so mapping
+    through this table is a no-op for every non-aliased spelling, which is
+    every case that already lowers.
+
+    A MODULE import is left out, and the filter is the dot rather than a kind
+    test: `imported_bindings` reports `import a.b` as `a` bound to the module
+    spelling `a.b`, which is a module and not a name anything declares — a
+    defining name is always one identifier, so a value with a dot in it is the
+    only shape this table must not carry.  (`import m as n` reaches this table
+    as `m` rather than `n` today because `formal/model.py::import_bindings`
+    reads `asname` for the `ImportStmt` alias and the parser sets `alias`;
+    module aliases are refused much earlier on this path, so that is not a
+    spelling this table has to answer for.)
+    """
+    from formal.imports import imported_bindings     # lazy — cycle
+    return {local: defining
+            for local, (_module, defining)
+            in imported_bindings(stmts or ()).items()
+            if isinstance(defining, str) and "." not in defining}
 
 
 def _bracket_type_args(sub, values=()) -> list:

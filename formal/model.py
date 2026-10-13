@@ -7064,16 +7064,17 @@ def dotted_specialization_refusal(name: str) -> str:
     `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
     the ABI decision it needs.
 
-    **The remedy is the one spelling measured to work, and nothing else is
-    claimed.** `from pairlib import Pair` — the module's OWN name — then
-    `Pair[Int]()`, which builds, runs and answers CPython on both architectures
-    (`test_formal_monomorph.py`'s two rows here). The ALIASED form is NOT
-    claimed: `from pairlib import Pair as P` then `P[Int]()` was measured on
-    this tree and is refused with `specialization_call_refusal`, because the
-    demand walk reads `P` where the template is `Pair` and a struct template's
-    instantiation is emitted under the mangled name. §2 of the doc says the
-    alias "maps back" for a FUNCTION template's demand; it is not true of this
-    one, so the message does not say it.
+    **Both spellings of the BARE template name work, and the message says so.**
+    `from pairlib import Pair` then `Pair[Int]()`, and the ALIASED form of the
+    same import (`from pairlib import Pair as P` then `P[Int]()`), both build,
+    run and answer CPython on both architectures
+    (`test_formal_monomorph.py`'s three rows here). The call site's own
+    spelling is resolved to the DEFINING module's name through the same import
+    table both backends use (`formal/imports.py::imported_bindings`), so the
+    demand the library satisfies and the symbol the call site binds name one
+    template. What is NOT claimed — and what this message is about — is the
+    module-alias DOTTED spelling, which is a gap in the recogniser rather than
+    in a name resolution.
     """
     module, _, leaf = name.rpartition(".")
     return (
@@ -7091,9 +7092,11 @@ def dotted_specialization_refusal(name: str) -> str:
         f"`from <the module> import {leaf}`, spelled with the MODULE'S OWN name "
         f"rather than the `{module}` alias — and call `{leaf}[…](…)`. That is "
         f"the same program, and it builds, runs and answers CPython on both "
-        f"architectures; the ALIASED form (`import … as {module}` then "
-        f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
-        f"measured on this tree and is still refused, so do not stop there. "
+        f"architectures; the ALIASED form of that BARE spelling — "
+        f"`from <the module> import {leaf} as <X>` — lowers too (measured on "
+        f"this tree), because the call site is resolved through the import "
+        f"table; what is still refused is the module-alias DOTTED spelling "
+        f"this message is about. "
         f"The dotted application itself, and the ABI question a fix needs, are "
         f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
         f"emitted with the brackets dropped: that builds, runs, and returns a "
