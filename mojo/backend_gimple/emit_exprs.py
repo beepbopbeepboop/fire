@@ -5840,6 +5840,19 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         kv_tmp = gen._new_val('char *', f"{kv}")
         kv = kv_tmp
         kt = 'char *'
+    elif kt == 'int64_t' and (
+            kv in gen._dyn_word_vals
+            or (isinstance(key_expr, IdentExpr)
+                and key_expr.name in gen._dyn_word_locals)):
+        # A word of unknown kind (an untyped attribute read, an unpacked slot
+        # with no record): a string as often as an int. The runtime's own
+        # discriminator keys a string by its text and an int by its decimal;
+        # `mojo_str_from_int` keyed EVERY such word by its decimal, so
+        # `{st.name: st for st in defs}` over StructDefs built a dict of
+        # address strings and every `name in d` missed (the self-hosted
+        # compiler then minted each method of a class as a phantom field).
+        # Transient: released right after the one store that copies it.
+        kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
         # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
