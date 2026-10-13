@@ -1,5 +1,39 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Re-measured 2026-10-12 on this tree (`work/formal315-docs`): the surface grew
+by ONE and the two gap counts did not move — and the re-measurement exposed a
+defect in this document's own published figures rather than in the backend.**
+The triple is now **273 word-shaped / 217 exported / 177 reachable** against
+§0.3's 272 / 216 / 176. The one addition is `mojo_str_register`, declared in
+`runtime/fire_runtime.h` by `38d19a52` (the registration a codegen-emitted
+`_mojo_register_str_pool` startup constructor makes once per literal); it is
+word-shaped, the dylib exports it, and it needs no heap handle, so both gaps are
+**56** (`273 − 217`) and **40** (`217 − 177`) exactly as they were. This is the
+same shape every re-measurement in this file has: the payoff grows and the
+ceilings below do not close.
+
+**What was a defect is that `FORMAL.md` published the OLD triple in two of the
+three places this document owns, and the two registered jobs that check it were
+RED on master.** `791ca1d5`'s `--fix` sweep rewrote `FORMAL.md` §2.2 and the
+prose quotes it lists from the same scan, but missed §6 phase 2's three-row
+table and §1's `fire_runtime.c` size — so `formal-runtime-link`
+(`test_formal_runtime_link.py`'s 6 per-architecture count checks) and
+`test_formal_doc_truth.py` were failing on `master` **before this branch's first
+change**, for a number the tree had already moved. Fixed by rewriting §6's row
+and §1's KB from the same census (`273 / 217 / 177`, `528 KB`), and by making
+the doc-truth pin **read** §6's row instead of carrying a second, hard-coded copy
+of the number — which is exactly how it rotted, since §2.2's copy was bumped and
+the test's literal was not. Verified: `formal-runtime-link` 189/189 and
+`test_formal_doc_truth.py` 434/0.
+
+**The three ceilings below are unchanged and still open.** Ceiling 1 (56
+word-shaped entry points the dylib does not export) still needs a
+`runtime_dylib` variant in `build_stdlib_dylib.py`, which is on this project's
+do-not-run list; ceiling 3 (40 linked entry points needing a `void *` handle)
+is still FORMAL.md phase 6. Neither is a light worker's to close, and this
+re-measurement moves no row of §0.1's table.
+
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
