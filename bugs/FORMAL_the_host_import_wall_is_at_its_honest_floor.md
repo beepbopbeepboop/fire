@@ -7,6 +7,34 @@ This is the wave note for three modules written (`formal/hostmods/{traceback,
 signal,operator}.mojo`) and it is the queue for everything the wave could not
 write, which is most of what is left.
 
+**Status 2026-10-13 (`work/formal371-docs`): the SIBLING ranking
+`FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`
+is DELETED and folded here — every item in its queue has closed, and this is
+the census that survives as `tools/formal_host_import_wall.py`'s reference.**
+That doc ranked the rows after `glob` by files blocked; what it established
+that is not just its own numbers:
+
+* **`glob`** — `formal/hostmods/glob.mojo`, the 50-file row: **42 of 50 files
+  changed class, 0 reached `pass`**, and 35 of the 42 land on ONE row,
+  `cas.py:164`'s handler arm (`FORMAL_a_try_handler_arm_is_still_never_emitted`
+  — a CORRECT refusal, because `formal` has no unwinder).
+* **`shlex.quote`** — the cheapest row in its census (1 file):
+  `formal/hostmods/shlex.mojo`, `test_formal_shlex.py`.
+* **`random`** — `formal/hostmods/random.mojo`, `test_formal_random.py`, over
+  the premise §1a of the deleted doc measured: a module's OWN `global` has
+  storage and survives across calls inside one image, which is what made the
+  row reachable at all.
+
+Its conclusion — the task's "next 4-6 modules by files blocked" does not exist
+as stated — is what §3's per-name table below repeats.
+`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §0 measures
+the same thing a second time with a per-use shape column. One of the deleted
+doc's own findings was a TOOL defect: its `types` row read `0 uses — pure
+closure` because `tools/formal_sweep_causes.py::_host_declared_names` walked
+`ast.parse(...).body` and stopped there, fixed in `6a7c36bb` with a regression
+test in `test_refusal_taxonomy.py`. No part of its queue is open, which is why
+it is deleted rather than kept as a second census of the same wall.
+
 **Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
 §3 has been re-measured on this tree by it. The queue itself is unchanged: 20
 names, six capabilities, and every one of them still a project rather than a
