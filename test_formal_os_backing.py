@@ -354,6 +354,37 @@ def main(n):
     {"a": "100", "b": "97"},
 ))
 
+# `st_dev` is an `int32` in the `struct stat` layout, and a device number whose
+# high bit is set is NEGATIVE: CPython sign-extends it into the 64-bit word it
+# returns. This is the machine-INDEPENDENT pin for the reader that does that
+# (`_syscalls.mojo::le32s`), asked with bytes rather than through a `/dev/null`
+# whose `st_dev` happens to have its high bit set. `0xa8fb1a80` is
+# `-1459938688` and is `os.stat("/dev/null").st_dev` on a host that reads it as
+# the word it is; the second record is the high-bit-CLEAR case, and it is the
+# control that says the reader did not simply negate everything.
+CASES.append(Case(
+    "stat_field32_signed",
+    '''\
+from os._syscalls import le32s
+
+
+def main(n):
+    var b: Pointer[UInt8] = malloc(8)
+    b[0] = 128
+    b[1] = 26
+    b[2] = 251
+    b[3] = 168
+    printf("neg=%d@@", le32s(b, 0))
+    b[0] = 14
+    b[1] = 0
+    b[2] = 0
+    b[3] = 1
+    printf("pos=%d@@", le32s(b, 0))
+    return 0
+''',
+    {"neg": "-1459938688", "pos": "16777230"},
+))
+
 # ── 2b. `listdir` as a PYTHON-LEVEL list ───────────────────────────────────
 #
 # The three shapes above read a blob through the module's own accessors,
@@ -760,6 +791,21 @@ def main(n):
 '''
 
 
+def _word64(v):
+    """`v` as the 64-bit machine word the image holds.
+
+    Every integer conversion the programs use is widened to `%lld`/`%llu`
+    (`formal/model.py::printf_widened_format`), so a stat field the image reads
+    into its 64-bit word is printed as that word's SIGNED value. CPython's
+    `st_dev` (and `st_ino`) are unbounded Python ints: a device number whose
+    high bit is set comes back as `18446744072249612928`, which is the SAME word
+    as the image's `-1459938688` (`0xffffffffa8fb1a80`). The differential domain
+    is the word, so the oracle renders CPython's value in it — a uniform
+    reinterpretation of every stat field rather than a correction for one path.
+    """
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 
@@ -767,7 +813,8 @@ def _stat_oracle(p):
     and `os.stat` for the rest. A path CPython cannot stat is answered as
     -1/`0` rather than raising, because this path has no exception to raise and
     a case that raised would be testing CPython's error handling rather than the
-    module.
+    module. Each field is compared as the target's 64-bit word (`_word64`),
+    which is the domain the image prints in.
     """
     out = {}
     out["pred"] = "isfile=%d isdir=%d islink=%d lexists=%d exists=%d" % (
@@ -784,7 +831,7 @@ def _stat_oracle(p):
         pass
 
     def field(st, name):
-        return -1 if st is None else getattr(st, name)
+        return -1 if st is None else _word64(getattr(st, name))
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),

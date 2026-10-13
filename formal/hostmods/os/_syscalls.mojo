@@ -1242,6 +1242,22 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The SIGNED little-endian 32-bit field at byte `i` of `b`.
+
+    The layout above spells `st_dev` and `st_rdev` `int32`, so the field's high
+    bit is a sign and not magnitude: `0xa8fb1a80` denotes `-1459938688`, which
+    as a 64-bit word is `0xffffffffa8fb1a80`. CPython's `os.stat` returns the
+    SIGN-EXTENDED word for a negative `dev_t` (measured on this host:
+    `os.stat("/dev/null").st_dev` is `18446744072249612928`), so a zero-extended
+    read is a different number to every reader that compares the whole word.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        v = v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1603,6 +1619,22 @@ def fs_stat_field32(p, follow, at) -> int:
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_dev` is the one field this module reads that the layout above declares
+    `int32` AND whose sign a caller can observe: a device number with its high
+    bit set is negative and CPython sign-extends it into the 64-bit word, so
+    `fs_stat_field32`'s zero-extended read is a different number from the one
+    `os.stat` reports. `st_uid`/`st_gid` stay on the unsigned reader — they are
+    `uint32` and their high bit is magnitude.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
