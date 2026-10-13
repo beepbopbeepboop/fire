@@ -4752,6 +4752,76 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertEqual(_program_extern_calls({}), [])
 
 
+class TestTheCompilerCallIsNotTheUniversalHalt(unittest.TestCase):
+    """The guard's `getrlimit` is the compiler's call, so the universal theorem
+    is about the PROGRAM and not about reaching the stack guard.
+
+    The bug doc this class retires recorded two arm64-only defects: the exit
+    flush's compiler-trap recording dropped by the merge `b578b915`, and the
+    stack-floor guard's `getrlimit` read in every guarded PROLOGUE, where the
+    universal walk's `[entry, func_end)` contains it.  Together they made the
+    walk's halt address the guard at `0x10000041c`, so a program that computes
+    correctly got a theorem saying only "control reached the stack guard", and a
+    program with one more real call was refused before a proof existed.
+
+    Both halves are landed: `_emit_trap_flush` fills `info["compiler_traps"]`
+    again, and the guard's `getrlimit` moved into the startup STUB below
+    `func_offset`, which is why the walk no longer sees it.  The census the
+    doc's anti-rot names is what this pins — `main`, `count`, `sum` and `fact`
+    each emit a REAL `..._compiles_correctly_universal` whose branch is
+    `s.x0 = mojo n`, not a placeholder.  Proof GENERATION only, no Lean.
+    """
+
+    #: entry FUNCTION name -> source.  The universal theorem is named for the
+    #: entry function, so the key is the name the theorem carries.
+    PROGRAMS = {
+        "main": "def main(n) -> Int:\n    return 7\n",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-univ-")
+        cls.texts = {}
+        for name in ("count", "sum", "fact"):
+            path = os.path.join(HERE, "formal", "examples", name + ".mojo")
+            if os.path.exists(path):
+                cls.PROGRAMS[name] = open(path).read()
+        for name, src in cls.PROGRAMS.items():
+            try:
+                p, err = _generate(cls.tmp, src, name)
+            except Exception as e:      # noqa: BLE001 -- report it
+                err, p = f"{type(e).__name__}: {e}", None
+            cls.texts[name] = (open(p).read() if p else "") if err is None else ""
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_each_program_has_a_real_universal_theorem(self):
+        for name in self.PROGRAMS:
+            with self.subTest(program=name):
+                self.assertTrue(
+                    f"theorem {name}_compiles_correctly_universal"
+                    in self.texts[name],
+                    f"{name} emits no universal theorem, so the walk refused it "
+                    f"(the doc's §3 census)")
+
+    def test_the_universal_theorem_states_the_program_and_not_a_placeholder(self):
+        """The halt is the program's own result, not the stack guard.
+
+        A guard-as-halt theorem is `some s => True` or a reachability of the
+        guard address; both elaborate and both say nothing about the program.
+        The branch this pins is the machine's result register equal to `mojo n`.
+        """
+        for name in self.PROGRAMS:
+            with self.subTest(program=name):
+                text = self.texts[name]
+                self.assertNotIn("some s => True", text,
+                                 f"{name}'s universal is a placeholder")
+                self.assertTrue("s.x0 = mojo n" in text,
+                                f"{name}'s universal does not state the result")
+
+
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
