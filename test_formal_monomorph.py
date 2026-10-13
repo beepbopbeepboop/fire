@@ -2236,6 +2236,63 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
               f"elements are 1, 7 and 4 over a base of 10")
 
 
+def test_a_struct_templates_comptime_value_argument_instantiates(tmpdir):
+    """`struct Tagged[T, origin: Int]` + `Tagged[Int, 7]()` in ONE file.
+
+    A bare literal at the top level of a STRUCT template's bracket is a comptime
+    VALUE argument, and it is a demand: a struct instantiation is emitted under
+    a mangled name nothing else emits.  `own_demands` reads it for the struct
+    half only (a FUNCTION template's value specialisation is the local
+    machinery's, `tile[2, 3](…)`), and `instantiate_all`'s gate refuses to
+    substitute it into a parameter the declaration does not annotate as a value
+    type.
+
+    Both halves matter because the gate's failure mode is a wrong-but-exit-0
+    image rather than a refusal: without it `Pair[2]` on `struct Pair[T]` became
+    `var first: 2`, which this backend ACCEPTS and runs.  `origin` is READ in the
+    body, so a value substituted into the wrong position answers a different
+    number rather than merely failing to build.  Python has no comptime
+    parameter, so the twin states the same program field by field.
+    """
+    src = ("struct Tagged[T, origin: Int]:\n"
+           "    var v: T\n"
+           "\n"
+           "    def get(self) -> Int:\n"
+           "        return origin\n"
+           "\n"
+           "def main():\n"
+           "    var a = Tagged[Int, 7]()\n"
+           "    var b = Tagged[Bool, 4]()\n"
+           "    print(a.get())\n"
+           "    print(b.get())\n")
+    cpython = ("def main():\n"
+               "    print(7)\n"
+               "    print(4)\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_struct_value", None, src, cpython)
+        check(got == "7\n4\n",
+              f"[{arch}] printed {got!r}; each value-parameter instantiation "
+              f"must read its own `origin`")
+
+    # …and the GATE, as a pure function of the source: a literal in a TYPE
+    # parameter's position is not a demand at all, so nothing is substituted
+    # and nothing is reported as a demand that failed.
+    from formal import monomorph as MM
+    pair = ("struct Pair[T]:\n"
+            "    var first: T\n"
+            "\n"
+            "def main():\n"
+            "    var p = Pair[2]()\n"
+            "    return p.first\n")
+    made, failed = MM.instantiate_all(pair, MM.own_demands(pair))
+    check(not made and not failed,
+          f"a literal on a one-TYPE-parameter struct was instantiated "
+          f"({made!r}) or reported as a failed demand ({failed!r}); it is not a "
+          f"demand at all, and the call site must keep its brackets to be "
+          f"refused with the sentence about the construct")
+
+
 # ── the artifact's identity ─────────────────────────────────────────────────
 
 
@@ -3034,6 +3091,9 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a struct template's comptime value argument instantiates, and a type "
+     "parameter's literal does not",
+     test_a_struct_templates_comptime_value_argument_instantiates),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",

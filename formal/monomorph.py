@@ -927,8 +927,7 @@ def _param_annotations(template_src: str) -> dict:
     `Bool`. It is used only by `_undeclared_literal_arg` and only for the
     value/type question.
     """
-    import elaborate                                # lazy
-    import monomorphize as mm                       # lazy
+    import monomorphize as mm                       # lazy — see module docstring
     from fire_compiler import split_top_level_commas
     m = mm.head_match(template_src)
     if not m:
