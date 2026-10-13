@@ -9,6 +9,24 @@ now REFUSED whenever the build can fold the value. This is the half it cannot
 fold, stated rather than hidden, because the alternative was refusing a host
 module the corpus depends on.
 
+**Update 2026-10-13 (`work/formal392-docs`): the FOLDABLE half was STILL
+incomplete one shape further out, and is now complete for a third kind.**
+`len(<string literal>)` — a foldable CALL rather than a literal, so
+`fold_literal_expr`'s `len` arm (which is over a DISPLAY, and is the WORD
+reader shared with the struct-field and class-constant readers) did not reach
+it — was let through: `return len("abc")` built, printed `enter / body 7 /
+exit` and exited 1 where CPython prints `after` and exits 0. `_literal_return_
+truthiness` now decides it from the literal's own text (a non-empty string is
+truthy under `len` exactly as it is under the string itself, and a non-empty
+source cannot decode to an empty string, so the raw value answers the
+truthiness), with `is_interpolated_literal` and `is_bytes` excluded because the
+first's value is its SOURCE TOKEN and the second is not a `str`. Falsy
+siblings `return len("")` and `return ""` still lower, as before. Pinned by
+`test_formal_with.py`'s
+`an_exit_returning_len_of_a_nonempty_string_is_refused` and
+`an_exit_returning_len_of_an_empty_string_still_runs_the_protocol`. **§2's
+computed case is untouched and is still the whole of what is left.**
+
 **Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself
 incomplete, and is now complete.** The gate's own docstring said the test was the
 returned value's truthiness, but the code tested `isinstance(value, int)` over

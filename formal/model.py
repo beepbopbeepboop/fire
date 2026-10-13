@@ -49119,10 +49119,12 @@ def _literal_return_truthiness(node):
     `int(0.5)` is 0 while CPython reads the returned 0.5 as TRUE, so a gate
     built on it would answer the wrong way for every fraction.  So a float
     literal is decided from its own value here, a unary `+`/`-` over one
-    following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), and
-    everything else is None — which every caller reads as "not decided" and
-    leaves the return where it was, the one-sided direction this gate is
-    deliberately in.
+    following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), a
+    `len(<string literal>)` from its own text (the third foldable shape, and a
+    CALL rather than a literal, so `fold_literal_expr`'s `len` arm — which is
+    over a display — does not reach it), and everything else is None — which
+    every caller reads as "not decided" and leaves the return where it was, the
+    one-sided direction this gate is deliberately in.
     """
     if isinstance(node, F.FloatLiteral):
         try:
@@ -49131,6 +49133,29 @@ def _literal_return_truthiness(node):
             return None
     if isinstance(node, F.UnaryOp) and node.op in ("+", "-"):
         return _literal_return_truthiness(node.operand)
+    # `len(<string literal>)` is the third foldable shape, and the reader is
+    # THIS one rather than `fold_literal_expr` for the reason the float arm
+    # gives: that folder's `len` arm is deliberately over a DISPLAY only, and it
+    # is the WORD reader shared with the struct-field, class-constant and
+    # default-parameter readers, where `len("abc")` is not an integer word the
+    # source plainly wrote. A non-empty string literal is TRUTHY under `len`
+    # exactly as the string itself is (`return "yes"` above), so the same
+    # suppression applies and the same refusal is right. The RAW value answers
+    # the truthiness even where it is not the decoded length (`"a\nb"` is 4 raw
+    # and 3 decoded, both non-zero): decoding an escape cannot turn a non-empty
+    # source into an empty string, so `bool(raw)` is `bool(decoded)`. A
+    # `bytes` literal and an f-string/t-string are excluded — the first is not a
+    # `str`, and the second's value is its SOURCE TOKEN (`interpolated_literal_
+    # refusal` owns it), so reading its length would decide the wrong question.
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr) \
+            and node.func.name == "len" and not (node.kwargs or []) \
+            and len(node.args or []) == 1:
+        arg = node.args[0]
+        if isinstance(arg, F.StringLiteral) \
+                and not getattr(arg, "is_bytes", 0) \
+                and isinstance(arg.value, str) \
+                and not is_interpolated_literal(arg):
+            return bool(arg.value)
     value = fold_literal_expr(node)
     if value is None:
         return None

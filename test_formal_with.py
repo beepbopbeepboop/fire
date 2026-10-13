@@ -746,6 +746,27 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+     # …and `len(<string literal>)`, which is the third foldable shape and the
+     # FALSY end of its pair below: CPython's `len("")` is 0, so the exception
+     # still propagates.  It is a CALL and not a literal, so the refusal that
+     # must catch `len("abc")` had to be widened in `_literal_return_truthiness`
+     # rather than in `fold_literal_expr` — whose `len` arm is over a DISPLAY,
+     # and is the WORD reader shared with the field/class-constant readers.
+     ("an_exit_returning_len_of_an_empty_string_still_runs_the_protocol",
+      SUPPRESSING_EXIT.replace("return True", 'return len("")') +
+      "def main(n):\n"
+      "    with Suppressor() as v:\n"
+      "        print('body', v)\n"
+      "        raise ValueError('m')\n"
+      "    print('after')\n"
+      "    return 0\n",
+      SUPPRESSING_EXIT_PY.replace("return True", 'return len("")') +
+      "def main(n):\n"
+      "    with Suppressor() as v:\n"
+      "        print('body', v)\n"
+      "        raise ValueError('m')\n"
+      "    print('after')\n"
+      "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1050,6 +1071,21 @@ REFUSALS = [
     # same value behind a `UnaryOp` and is covered by the same reader.
     ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", "return 0.5") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and `len("abc")` — the same wrong answer reached through a foldable CALL
+    # rather than a literal, so `_literal_return_truthiness` had to learn the
+    # shape rather than `fold_literal_expr`, whose `len` arm is over a display
+    # and is the WORD reader.  Measured: the image built, printed
+    # `enter / body 7 / exit` and exited 1 where CPython prints `after` and
+    # exits 0.  The FALSY sibling (`len("")`) is an ANSWERED row above.
+    ("an_exit_returning_len_of_a_nonempty_string_is_refused",
+     SUPPRESSING_EXIT.replace("return True", 'return len("abc")') +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
