@@ -12443,6 +12443,27 @@ def _export_extent(exports: list, entry: int, base: int, code_size: int) -> int:
     return later[0] if later else base + code_size
 
 
+def _export_body_end(words: dict, entry: int, extent: int) -> int:
+    """One past the last `RET` in `[entry, extent)`, or `extent` if there is none.
+
+    The RANGE a walk or a `Block` may decompose for one export, which is not the
+    same number as its `_export_extent` for the LAST export. `extent` is
+    `DylibExport.exportEnd` — the address the export's own `RET` returns to, and
+    for the last export `base + codeSize` — but interned strings sit after the
+    code in `__TEXT` (`_emit_stack_trap_message` and every diagnostic string), so
+    `extent` runs past the code into bytes that decode as instructions. Measured
+    on `test_formal_dylib.py`'s `branched`: `base + codeSize` is `0x…69c` while
+    the last `RET` is at `0x…350`, and the words between decode as a `cbz` whose
+    target is below `base` — a back edge that is not there, which refused the
+    export's `Total` walk and its contract. The run cannot reach those words (the
+    terminal `RET` sets `pc` to `extent`), so the range stops at the last `RET`
+    and `extent` stays the address the facts are stated at.
+    """
+    rets = [pc for pc, w in words.items()
+            if w == 0xd65f03c0 and entry <= pc < extent]
+    return max(rets) + 4 if rets else extent
+
+
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
                        exports: list) -> str:
     """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
@@ -12464,6 +12485,20 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     that no proof could ever fill.
     """
     func_end = _export_extent(exports, entry, base, len(code))
+    # **The WALK's range is the export's CODE, which is not `exportEnd` for the
+    # last export, and the two are separate arguments for exactly that reason.**
+    # Interned strings live after the code in `__TEXT` (`_emit_stack_trap_message`
+    # and every diagnostic), so the last export's `exportEnd` — `base + codeSize`,
+    # fixed by `DylibExport.exportEnd` — runs past the code into bytes that decode
+    # as instructions (measured: a `cbz` whose target is below `base`). A walk over
+    # `[entry, exportEnd)` then sees a back edge that is not there and refuses the
+    # export, which is the hole `test_formal_dylib.py`'s `branched` and `pick`
+    # carry. The run never reaches those words — the terminal `RET` sets `pc` to
+    # `exportEnd` — so the range stops at the export's last `RET` and `exit_at`
+    # stays `exportEnd`.
+    _words = {base + i: int.from_bytes(code[i:i + 4], "little")
+              for i in range(0, len(code) - len(code) % 4, 4)}
+    body_end = _export_body_end(_words, entry, func_end)
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -12483,7 +12518,11 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
             # `total_of_halts` rejected it as a type mismatch.  For a one-export
             # image the two are the same number, so that case is unchanged.
             exit_at=func_end,
-            frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
+            # The CFG RANGE and the halt address are two numbers (see `body_end`
+            # above): `func_end` is `DylibExport.exportEnd`, the address the
+            # export's own `RET` returns to and the one `total_of_halts` states
+            # the run at; `body_end` is where this export's code stops.
+            frame={"func_end": body_end}, thm=f"{ident}_halts", prop="True",
             no_change=True, halt_only=True, fuel=_EXPORT_FUEL_BASE,
             # The fuel is emitted in its ARITHMETIC form, `BASE + PATH * n`, not
             # as a call to the library's `exportFuel`. Two reasons, and the
@@ -12767,13 +12806,19 @@ def _dylib_spec_lean(fn) -> str:
 
 
 def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
-                          spec: str, func_end: int) -> str:
+                          spec: str, func_end: int,
+                          exit_pc: int = None) -> str:
     """Emit a PROVED per-export contract for one dylib export.
 
     `spec` is Lean source for `fun n => <expr>`, from `_dylib_spec_lean`.
-    `func_end` is the end of THIS export's own code — the next export's entry,
-    or the image's end for the last one, which is `DylibExport.exportEnd`.  Four
-    parts, deliberately not fused into one opaque term:
+    `func_end` is the end of THIS export's own CODE — past its last `RET`, which
+    for the last export is NOT `DylibExport.exportEnd`: interned strings sit
+    after the code in `__TEXT`, so `exportEnd` (`base + codeSize`) runs past them
+    and a `Block` over `[entry, exportEnd)` contains instructions the export
+    never runs.  `exit_pc` (default `func_end`) is where the block exits: the
+    export's own `RET` returns to `x30`, which `runExport`/`startState` set to
+    `DylibExport.exportEnd`, so that is the address `exportEnd_here` must prove.
+    Four parts, deliberately not fused into one opaque term:
 
       * the body's composed effect, as a `Block` plus a `BlockCert` -- a chain
         of `m` one-step rewrites, each applying the `dylib_sr_i` lemma the
@@ -12825,7 +12870,8 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # premise below is about. `Contracts.noEarly`'s `u < pcs.length` is what
     # makes these the addresses a caller can reason about.
     pcs = [entry + i * 4 for i in range(m)]
-    exit_pc = func_end
+    if exit_pc is None:
+        exit_pc = func_end
     rhss = []
     for w in words:
         idx = _step_branch_index(w)
@@ -13263,12 +13309,20 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # absence into a believed falsehood.
         spec = specs.get(export["name"])
         entry = export["entry"]
-        # The export's own extent, `DylibExport.exportEnd`: the contract's
-        # `Block` is `pcs` over that range AND the address its `atExit` and
-        # `noEarly` are stated at, so it has to be told.
+        # Two ends, and they differ for the LAST export (see
+        # `_export_body_end`): `func_end` is `DylibExport.exportEnd`, the address
+        # the contract's `atExit`/`noEarly` are stated at and `exportEnd_here`
+        # must prove; `body_end` is past this export's last `RET`, which is the
+        # range the `Block` may step (the last export's `exportEnd` runs into the
+        # interned strings after the code).
         func_end = _export_extent(exports, entry, base, len(code))
+        body_end = _export_body_end(
+            {base + i: int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)},
+            entry, func_end)
         contract = (_dylib_contract_proof(ident, base, entry, code, spec,
-                                         func_end) if spec else "")
+                                         body_end, exit_pc=func_end)
+                    if spec else "")
         if not contract and spec:
             # A spec WAS derived from the source and the contract still could
             # not be emitted -- its body is not straight-line, so

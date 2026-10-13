@@ -2254,6 +2254,73 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
+def test_a_last_export_contract_stops_at_its_own_ret(tmpdir, shared):
+    """A LAST export's `Block` and CFG walk stop at its own `RET`, not at `exportEnd`.
+
+    `DylibExport.exportEnd` for the last export of an image is `base + codeSize`,
+    and the interned diagnostic strings live in `__TEXT` AFTER the code, so both
+    a `Block` and a CFG walk over `[entry, exportEnd)` decode the string as
+    instructions.  Measured on this image: `base + codeSize` is `0x…6a4` while
+    the last `RET` is at `0x…358`, and the string bytes decode as a `cbz` whose
+    target is below `base` — a back edge that is not there.  It refused the
+    export's `Total` walk (a named `sorry`) and its contract (a `_spec` `sorry`),
+    which was the two-red state `test_formal_dylib.py` reported before the fix.
+
+    `rec` is recursive, so the image carries the stack-trap message after the
+    code (`_emit_stack_trap_message`); `add1` is the LAST export and is
+    straight-line with a derivable spec, which is the shape where the walk's code
+    end and the contract's exit address differ.  Both facts are checked by Lean:
+    `add1` gets a PROVED contract and the ONLY hole left is `rec`'s own `Total`
+    (a recursive export is not the acyclic, call-free shape the fixed-fuel walk
+    proves).  Before the fix `add1` had a `_spec` obligation instead, and this
+    image stood at two holes.
+    """
+    import re as _re
+    from formal.lean import find_lean
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    root = HERE
+    src = os.path.join(tmpdir, "reclast.mojo")
+    with open(src, "w") as f:
+        f.write("def rec(n):\n  if n > 0:\n    return rec(n - 1) + 1\n"
+                "  return 0\n\n\n"
+                "def add1(n):\n  return n + 1\n")
+    out = os.path.join(tmpdir, "reclast.dylib")
+    built = compile_formal_dylib([src], output=out, prove=False)
+    names = [e["name"] for e in built["exports"]]
+    check(names and names[-1] == "add1",
+          f"the LAST export is not the straight-line one ({names}), so this "
+          f"case is not measuring the shape it is about")
+    check(call_exported_by_name(out, "add1", 41) == 42,
+          "the image does not compute what the spec below claims, so the "
+          "obligation would be stated over a falsehood")
+    path = os.path.join(tmpdir, "reclast_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(built["code"], built["info"],
+                                     built["exports"],
+                                     {"add1": "(fun n => (n + (1 : UInt64)))"}))
+    text = open(path).read()
+    idx = built["exports"].index(
+        next(e for e in built["exports"] if e["name"] == "add1"))
+    ident = f"dylib_export_{idx}_add1"
+    check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                     text),
+          "the LAST export's contract was not emitted: a `Block` over "
+          "`[entry, exportEnd)` reaches the interned strings after the code")
+    check(_re.search(rf"theorem {ident}_spec\b", text) is None,
+          "the LAST export has a PROVED contract and also a named obligation")
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof_cached
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, "lean rejected the last export's contract: "
+              f"{detail[-400:]}")
+    check(n == 1, f"the proof admits {n} hole(s); the last export's contract "
+                  f"should be proved, so the only hole left is the recursive "
+                  f"export's named `Total`")
+
+
 TESTS = [
     ("every unordered pair of segments is visited exactly once",
      test_segment_pairs_are_covered_exactly_once),
@@ -2277,6 +2344,8 @@ TESTS = [
      test_a_conditional_expression_derives_a_spec),
     ("a conditional value is not a branch",
      test_a_conditional_value_is_not_a_branch),
+    ("a last export's contract stops at its own RET",
+     test_a_last_export_contract_stops_at_its_own_ret),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
