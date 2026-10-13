@@ -6520,6 +6520,195 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
 
+    def _maybe_emit_set_binop(self, left, right, op: str) -> bool:
+        """Lower `left {op} right` when it is SET ALGEBRA, else return False.
+
+        arm64's `_maybe_emit_set_binop`, and the same contract: `&`, `^` and
+        `-` between two SETS are intersection, symmetric difference and
+        difference, and they are lowered rather than passed to the shared
+        `container_operator_refusal` gate that refuses them for every other
+        blob. Only two SETS qualify, so `[1] - [2]` still reaches that gate and
+        is refused with CPython's TypeError reason — the operator IS defined
+        for two sets and for nothing else, which is the whole of the split.
+        `_expr_is_set_like` is the flow-sensitive reader `|` already uses, so
+        the three operators cannot disagree about which name is a set, and it
+        is the SAME predicate on both architectures, which is what keeps
+        `s & {2}` from lowering here and being refused there.
+
+        ONE predicate for the binary and the augmented spelling, because they
+        are separate emitters and the augmented one reaches this through
+        `aug_assign_operands_are_blobs`' desugaring: `s -= {2}` and
+        `s = s - {2}` are the same source operator and must not get one answer
+        from one path and a refusal from the other.
+        """
+        if op not in ("&", "^", "-"):
+            return False
+        if not (M.container_operand_is_blob(self._expr_str_kind(left))
+                or M.container_operand_is_blob(self._expr_str_kind(right))):
+            return False
+        if not (self._expr_is_set_like(left) and self._expr_is_set_like(right)):
+            return False
+        self._emit_set_op(left, right, op)
+        return True
+
+    def _emit_set_filter_pass(self, offset: int, src: Reg, other: Reg,
+                              keep_present: bool) -> None:
+        """Append every `src[i]` whose membership in `other` matches the
+        predicate to the result blob at `offset`, whose count is R8.
+
+        This is the inner half of the set operators, factored out because three
+        operators are it with a different predicate and one of them runs it
+        twice:
+
+            `a & b`   keep the left elements the right holds  (keep_present)
+            `a - b`   keep the left elements the right lacks  (not keep_present)
+            `a ^ b`   (a - b) then (b - a)                     (twice, swapped)
+
+        `src`/`other` are register numbers (RSI for the left operand, RDX for
+        the right, as `_emit_set_op` loads them) and NEITHER is written, which is
+        what lets the symmetric difference swap them for its second pass. R8 is
+        the result count and the caller owns it, because the two passes append
+        into ONE result and the count has to survive the first.
+
+        The scan is over `other`'s own elements and the element is read as a
+        whole 8-byte slot, which is `_emit_list_concat`'s copy and the same
+        thing CPython means by membership here — a set lowers as a list on this
+        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
+        the compare is a word compare.
+
+        Register plan, and there is no call inside either loop so the
+        caller-saved set is free: R11 walks the source (R9 its remaining count),
+        RCX walks `other` (R10 its remaining count, reloaded from `other`'s own
+        count word each outer iteration because `other` restarts for every
+        source element), RAX holds the source element under test, RDI is the
+        inner-scan temp and is reloaded as the result base at the append, and R8
+        is the running result count.
+        """
+        self._while_counter += 1
+        n = self._while_counter
+        lp = f"{self.func_name}_sfp{n}"
+        lpd = f"{self.func_name}_sfd{n}"
+        lk = f"{self.func_name}_sfk{n}"
+        lkf = f"{self.func_name}_sff{n}"
+        lkn = f"{self.func_name}_sfn{n}"
+        laf = f"{self.func_name}_sfa{n}"
+        lkx = f"{self.func_name}_sfx{n}"
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, src))
+        self.asm.emit(encode_add_r64_imm32(Reg.R11, 8))      # src walk = base + 8
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, src, 0))   # source count
+        self.asm.label(lp)
+        self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
+        self._emit_jcc(COND_E, lpd)                          # no elements left
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, 0))  # elem = *src
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R9, 1))
+        # Restart the scan of `other` for this element.
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, other, 0))   # other count
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, other))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))         # other walk
+        self.asm.label(lk)
+        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
+        self._emit_jcc(COND_E, lkn)                             # absent
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RCX, 0))  # *other
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R10, 1))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_jcc(COND_E, lkf)                             # present
+        self._emit_jmp(lk)
+        self.asm.label(lkn)
+        self._emit_jmp(laf if not keep_present else lkx)
+        self.asm.label(lkf)
+        self._emit_jmp(laf if keep_present else lkx)
+        self.asm.label(laf)
+        # result[count] = elem; count++.  The count word is re-stored here
+        # because it IS the result's length: a pass that only incremented R8
+        # would leave [result] at the zero `_emit_set_op` wrote and every `len`
+        # would read 0 — which is exactly how the empty-set answer was measured
+        # the first time this emitter ran.
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R8))
+        self.asm.emit(encode_imul_r64_r64_imm(Reg.RCX, Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RDI, Reg.RCX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        self.asm.label(lkx)
+        self._emit_jmp(lp)
+        self.asm.label(lpd)
+
+    def _emit_set_op(self, left, right, op: str) -> None:
+        """`a & b`, `a - b` and `a ^ b` as set operations over list blobs.
+
+        Result is a fresh list blob in RAX: the left's elements the right holds
+        (`&`), the left's the right lacks (`-`), or the elements exactly one
+        side holds (`^`). arm64's `_emit_set_op` is the same algorithm; what
+        differs is the register discipline, and it is the discipline
+        `_emit_list_concat` already uses rather than a second one. Before this,
+        the three were refused here by name while arm64 lowered them, which the
+        corpus recorded as `BACKEND_ONLY` rows.
+
+        **The capacity and the guard are the union's, with one difference.** An
+        intersection or a difference can hold at most `nL` elements, so the
+        reservation is `_blob_est(left)` and the guard's total is `nL`; a
+        symmetric difference is the union of two disjoint differences and can
+        hold `nL + nR`, so its reservation and guard are the union's `nL + nR`.
+        Reserving `nL + nR` for all three would be safe but would spend the
+        frame's remaining blob area for nothing, and the frame is the resource
+        `frame_blob_refusal` exists to bound.
+
+        The elements are compared as whole 8-byte slots for the reason
+        `_emit_list_concat`'s copy gives: a set lowers as a list here, so an
+        element is a word and `1 in {1, 2}` is a word compare.
+        """
+        symdiff = op == "^"
+        legacy = max(1, self._blob_est(left)
+                     + (self._blob_est(right) if symdiff else 0))
+        exact = max(1, self._blob_est(left, exact=True)
+                    + (self._blob_est(right, exact=True) if symdiff else 0))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                              # [rsp] = left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))  # left
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left, exactly as `_emit_list_concat` does.
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a set operation", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a set operation")
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RDX, 0))  # nR
+        self._emit_blob_base(offset, Reg.RDI)                    # result base
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R9))
+        if symdiff:
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R10))  # nL + nR
+            what, tag = "a set symmetric difference", "ssd"
+        else:
+            what = "a set intersection" if op == "&" else "a set difference"
+            tag = "sin" if op == "&" else "sdf"
+        self._emit_blob_growth_guard(what, Reg.RAX, cap, tag)
+        self._emit_mov_imm(Reg.R8, 0)                            # result count
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        if symdiff:
+            # (a - b) then (b - a); the two are disjoint by construction, so
+            # appending the second to the first is the whole of `^` and no
+            # dedup pass is needed. R8 carries the count across both.
+            self._emit_set_filter_pass(offset, Reg.RSI, Reg.RDX, False)
+            self._emit_set_filter_pass(offset, Reg.RDX, Reg.RSI, False)
+        else:
+            self._emit_set_filter_pass(offset, Reg.RSI, Reg.RDX, op == "&")
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` / `needle not in haystack`, list blob or string.
 
@@ -7534,20 +7723,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if reason is not None:
                 raise CodegenError(reason)
         # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
-        # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
-        # both the two-set case (which arm64 lowers) and the not-two-sets case
-        # (a CPython `TypeError`).  Without this the deferral would let the
-        # operands reach the integer ALU as two blob ADDRESSES, which is the
-        # measured bug the gate exists for (`s & {2}` answered 2 on arm64 and
-        # 163061056 here; `s - {2}` SIGSEGVed on both).
+        # now DEFERS them (see `model.SET_ALGEBRA_OPS`), so this is the site
+        # that decides.  `_maybe_emit_set_binop` lowers the two-SET case — the
+        # one CPython defines these for — and the not-two-sets case is refused
+        # by name, which is a CPython `TypeError` and not a missing lowering.
+        # Without this the deferral would let the operands reach the integer
+        # ALU as two blob ADDRESSES, which is the measured bug the gate exists
+        # for (`s & {2}` answered 2 on arm64 and 163061056 here; `s - {2}`
+        # SIGSEGVed on both).  The set case used to be refused here for the
+        # same reason as the other, because this backend had no set emitter;
+        # `_emit_set_op` is that emitter now, and `_maybe_emit_set_binop` is
+        # the ONE predicate both the binary and the augmented spelling ask, so
+        # the two can no longer answer one operator differently.
         if op in M.SET_ALGEBRA_OPS and (
                 M.container_operand_is_blob(self._expr_str_kind(e.left))
                 or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            if self._maybe_emit_set_binop(e.left, e.right, op):
+                return
             raise CodegenError(M.set_algebra_refusal(
                 op, M.spelled(e.left), M.spelled(e.right),
                 self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                backend_has_emitter=False))
+                backend_has_emitter=True))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -8580,7 +8776,7 @@ preference.
             raise CodegenError(M.set_algebra_refusal(
                 op, M.spelled(target), M.spelled(stmt.value),
                 self._expr_is_set_like(target),
-                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
+                self._expr_is_set_like(stmt.value), backend_has_emitter=True))
         self._emit_subscript_addr(target)             # RAX = address
         # The element's width belongs to the TARGET, and the RHS below can
         # itself be a subscript (`q[0] += r[1]`) whose address computation

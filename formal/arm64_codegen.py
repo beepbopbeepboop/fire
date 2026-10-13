@@ -6159,7 +6159,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(M.set_algebra_refusal(
                 op, M.spelled(target), M.spelled(stmt.value),
                 self._expr_is_set_like(target),
-                self._expr_is_set_like(stmt.value), backend_has_emitter=False))
+                self._expr_is_set_like(stmt.value), backend_has_emitter=True))
         self._emit_subscript_addr(target)
         # The element's width and sign belong to the TARGET, and the RHS below
         # can itself be a subscript (`q[0] += r[1]`) whose address computation
@@ -13339,8 +13339,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         difference and difference, and they are lowered rather than passed to the
         shared `container_operator_refusal` gate that refuses them for every
         other blob. Only two SETS qualify, so `[1] - [2]` still reaches the gate
-        and is refused with CPython's TypeError reason, and x86-64 — which has no
-        set emitter at all — keeps refusing all three.
+        and is refused with CPython's TypeError reason — on both backends, now
+        that x86-64's `_emit_set_op` is its twin here.
         `_expr_is_set_like` is the flow-sensitive reader `|` already uses, so the
         two set operators cannot disagree about which name is a set.
 
@@ -13443,9 +13443,9 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         Result is a fresh list blob in X0: the left's elements the right holds
         (`&`), the left's the right lacks (`-`), or the elements exactly one side
-        holds (`^`). arm64 is the backend that lowers these; x86-64 has no set
-        emitter at all and refuses them, which is `BACKEND_ONLY` in
-        `test_formal_container_methods.py` and the same split `|` already has.
+        holds (`^`). x86-64's `_emit_set_op` is the same algorithm in that
+        backend's register discipline, so the three are no longer `BACKEND_ONLY`
+        in `test_formal_container_methods.py`; only `|` (the union) still is.
 
         **The capacity and the guard are the union's, with one difference.**
         An intersection or a difference can hold at most `nL` elements, so the
