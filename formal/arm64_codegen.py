@@ -3835,9 +3835,9 @@ dylib_exports: list = None, globals_base: int = None,
         """Build rest blob under `name` from [src_base, n_fixed] on stack.
 
         Stack layout on entry (stp_pre X6=n_fixed, X9=src): [SP+0]=n_fixed,
-        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap 64;
-        overflow → exit(1). Pops both slots."""
-        rest_cap = 64
+        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap
+        `M.STAR_REST_CAP`; overflow → exit(1). Pops both slots."""
+        rest_cap = M.STAR_REST_CAP
         nbytes = 8 + 8 * rest_cap
         if self._list_cursor + nbytes > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
@@ -3849,7 +3849,13 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        # `n_fixed` lives in X6, so this is the REGISTER form: the immediate
+        # form here (`encode_sub_xd_xn_imm(3, 3, 6)`) encoded `sub X3, X3, #6`,
+        # subtracting the literal 6 — the register NUMBER passed as the
+        # immediate — so `rest_count` came out as `count - 6` for every star
+        # target rather than `count - n_fixed`.  That is why a rest binding was
+        # empty, over-long by six, or walked off the end depending on arity.
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))     # rest_count
         self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
@@ -3860,7 +3866,14 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(4, 3))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        # `done` when `i >= rest_count`: cbz here read the WRONG way round.  X0
+        # is 1 exactly when the loop is FINISHED (`i >= rest_count`), so the
+        # branch that leaves the loop is the non-zero one.  A `cbz` left the
+        # body running past the end: with a non-empty rest it exited on the
+        # FIRST iteration (an empty, never-filled rest blob), and with
+        # `rest_count == 0` it walked `i` to the cap and exited(1) — the
+        # "builds and then exits 1 with nothing printed" both backends showed.
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))

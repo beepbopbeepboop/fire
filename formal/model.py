@@ -74,6 +74,13 @@ BYTE_ELEM_STRIDE = 1       # a BYTE blob's element stride (see `blob_elem_stride
 PAIR_STRIDE = 16           # key+value pair stride (also the key-address step)
 VALUE_OFFSET = 8           # key -> value within a pair
 
+# The element cap on the rest blob a `for a, *rest in …` target binds.  Both
+# backends reserve `BLOB_HEADER_BYTES + ELEM_STRIDE * STAR_REST_CAP` for it and
+# exit(1) when the source has more elements than that, so the cap is one shared
+# number rather than two literals: a program must not build on one architecture
+# and refuse on the other at a rest length of, say, 65.
+STAR_REST_CAP = 64
+
 
 def blob_elem_stride(kind) -> int:
     """Byte step between a blob's own elements, for a blob of value `kind`.

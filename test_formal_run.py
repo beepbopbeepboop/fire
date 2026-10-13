@@ -6342,6 +6342,88 @@ ASSIGNED_TYPE_CASES = [
      "    var xs = [a + b + c for a, (b, c) in [(1, (2, 3)), (10, (20, 30))]]\n"
      "    printf(\"n=%d s=%d\\n\", len(xs), xs[0] + xs[1])\n"
      "    return 0\n", 0, "n=2 s=66"),
+    # The STAR half of the same for-target, and the reason every one of these
+    # rows is in this group rather than beside the answered rows: a `for a,
+    # *rest in …` target BUILT on arm64 and x86-64 and then exited 1 with
+    # nothing printed, while CPython and the interpreter bind `a` and a tail
+    # blob.  Arm64 had two defects in its rest loop — a `cbz` that left on the
+    # WRONG side of `i >= rest_count` (so the loop exited on the first
+    # iteration for a non-empty rest, and ran off the end into `exit(1)` for an
+    # EMPTY one) and an immediate `sub X3, X3, #6` where the register `n_fixed`
+    # was meant (`rest_count` came out `count - 6`).  x86-64 had no star arm at
+    # all: it stripped the star and treated `*rest` as an ordinary leaf, so it
+    # either refused "'*rest' has no home" or checked arity `count == 2` and
+    # exited 1.  The three rows below are the empty rest, a non-empty rest, and
+    # both arities in one loop; `rest[0]` and `len(rest)` together read the rest
+    # blob as a blob (its count and an element), so a binding that produced a
+    # wrong shape rather than merely failing to build would show as a different
+    # number — 1 + 2 + 2 = 5 for the first, 7 + 0 = 7 for the empty one, and
+    # (1 + 2 + 1) + (10 + 20 + 3) = 37 across the two elements.
+    ("both_arch_a_starred_for_target_binds_a_rest_blob",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2, 3)]:\n"
+     "        s = s + a + rest[0] + len(rest)\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=5"),
+    ("both_arch_a_starred_for_target_with_an_empty_rest",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(7,)]:\n"
+     "        s = s + a + len(rest)\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=7"),
+    ("both_arch_a_starred_for_target_over_elements_of_different_arity",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2), (10, 20, 30, 40)]:\n"
+     "        s = s + a + rest[0] + len(rest)\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=37"),
+    # A star nested one group deep, so the arity check and the rest binding both
+    # run against the INNER element's blob rather than the outer one.  The
+    # answer is 1 + 2 + 3 + 4 + 3 = 13, and reading the outer element as the
+    # rest source would bind `b` or `rest` to the wrong blob and print a
+    # different number rather than failing to build.
+    ("both_arch_a_starred_for_target_nested_in_a_group",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, *rest) in [(1, (2, 3, 4, 5))]:\n"
+     "        s = s + a + b + rest[0] + rest[1] + len(rest)\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=13"),
+    # …and the same star as a COMPREHENSION generator target.  x86-64's
+    # comprehension path stripped the star (its own separate `_strip_stars`)
+    # and so refused or mis-arity'd here too; both backends now read the star
+    # through the same `M.for_target_tree` the emitters share.  1 + 2 = 3 and
+    # 10 + 20 = 30.
+    ("both_arch_a_starred_comprehension_target_binds_a_rest_blob",
+     "def main():\n"
+     "    var xs = [a + rest[0] for a, *rest in [(1, 2, 3), (10, 20, 30, 40)]]\n"
+     "    printf(\"x=%d y=%d\\n\", xs[0], xs[1])\n"
+     "    return 0\n", 0, "x=3 y=30"),
+    # The rest blob is a fixed-size reservation (`M.STAR_REST_CAP` elements),
+    # so a longer tail has nowhere to go and both backends exit(1) rather than
+    # writing past it.  This row is the AGREEMENT that matters: a cap that were
+    # a literal per backend could let one architecture build-and-lie where the
+    # other refused.  65 elements leave a 64-element rest (the cap, and it
+    # fits); 66 leave 65 (one past) and must refuse on both.
+    ("both_arch_a_starred_rest_at_the_cap_fits",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(" + ", ".join(str(i) for i in range(1, 66))
+     + ",)]:\n"
+     "        s = s + a + len(rest)\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 0, "s=65"),
+    ("both_arch_a_starred_rest_past_the_cap_exits_1",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(" + ", ".join(str(i) for i in range(1, 67))
+     + ",)]:\n"
+     "        s = s + a\n"
+     "    printf(\"s=%d\\n\", s)\n"
+     "    return 0\n", 1, None),
 ]
 
 # Positive cases built and RUN on BOTH backends, which is what
