@@ -9,7 +9,7 @@ its own document now:**
 
 | defect | document |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — the `0xab000000` arm now reads and writes `Rd`, `work_step_cmn` states both facts, and the generator's `_step_rhs`/`_regs_written` rows mirror it; pinned by `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` (`adds x11, x1, x15` beside `cmn`) |
 | the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
 
 Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are

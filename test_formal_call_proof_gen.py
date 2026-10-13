@@ -7194,5 +7194,51 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
 
 
+class TestTheStackFloorReadIsOffTheWalkedPath(unittest.TestCase):
+    """The stack-floor `getrlimit` used to be the ONE opaque call in every
+    guarded function, so the arm64 proof corpus had no value theorem left.
+    This is the pin for that fix.
+
+    `_emit_stack_floor_guard` reads `RLIMIT_STACK` with a `getrlimit` `BL`, and
+    that read used to sit in every guarded PROLOGUE — i.e. on a path the proof
+    walk follows. The walk cannot follow a call out of the image, so EVERY
+    guarded program's theorem stopped at the call: `either.mojo`, `absval.mojo`
+    and the whole conditional corpus emitted a `<fn>_reaches_call_at_…`
+    placeholder and NO value theorem, and none of the arm64 examples had one.
+
+    The read is now emitted once in `compile`'s startup stub
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), BELOW `func_offset`,
+    where no run test starts and no path tree walks it — which is the same
+    asymmetry x86-64 already had (`_emit_stack_floor_init` there). So the pin is
+    the VALUE theorem on the two shapes that measure it, and generation is
+    enough: the defect was in the text the generator emits, and a
+    `_reaches_call_at_` is text.  `mod_by_var.mojo` is deliberately NOT here —
+    its `%` is a genuine out-of-image call that takes the ordinary reachability
+    path, pinned in `TestExternCallTheRunDoesNotReach`.
+    """
+
+    STEMS = ("either", "absval")
+
+    def test_a_conditional_program_gets_a_value_theorem(self):
+        for stem in self.STEMS:
+            with self.subTest(stem=stem):
+                src = os.path.join(HERE, "formal", "examples", stem + ".mojo")
+                with open(src, encoding="utf-8") as f:
+                    source = f.read()
+                with tempfile.TemporaryDirectory() as td:
+                    proof, err = _generate(td, source, stem)
+                    self.assertIsNone(err, f"{stem}: {err}")
+                    with open(proof, encoding="utf-8") as f:
+                        text = f.read()
+                self.assertNotIn(
+                    "_reaches_call_at_", text,
+                    f"{stem}: the theorem is a reachability placeholder again, "
+                    f"so a call is back on a path the walk follows")
+                self.assertIn(
+                    f"theorem {stem}_compiles_correctly_universal", text,
+                    f"{stem}: no value theorem — the stack-floor `getrlimit` "
+                    f"is being walked again")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
