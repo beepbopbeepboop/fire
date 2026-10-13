@@ -14100,10 +14100,24 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     `-`, `&` and `^` are NOT in this gate.  Their CPython answer is a real
     lowering when BOTH operands are sets, and set-ness is flow-sensitive, so
-    they have their own gate — `container_set_algebra_refusal` below — asked at
+    they have their own gate — `set_algebra_refusal` below — asked at
     the same site, exactly as `container_union_refusal` is asked for `|`.  The
     numbers quoted above for `s - {2}`, `s ^ {2}` and `s & {2}` are that gate's
     measurements.
+
+    `==`/`!=` are in the gate for EVERY element kind, and the backends lower the
+    one shape whose CPython answer is a plain word compare — two sequence blobs
+    of INTEGER elements — through `container_equality_is_lowered` beside this
+    function, asked BEFORE this gate at the same site, exactly as
+    `set_algebra_refusal` is asked for `&`/`-`/`^`.  A set (order-independent), a
+    dict (a pair blob), a nested blob and a string element keep reaching this
+    gate, so the two operators are deliberately NOT removed from
+    `CONTAINER_GATED_OPS`: that table is shared by both backends and by every
+    element kind, and dropping them would send all four of those shapes into the
+    address comparison this gate exists to prevent.  The measurement above is
+    the element-wise compare the gate's sentence is about; the lowering that
+    landed is item 1 of
+    `bugs/FORMAL_container_operators_that_need_a_per_element_stride.md`.
     """
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
