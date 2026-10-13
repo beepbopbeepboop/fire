@@ -355,10 +355,8 @@ all.
 **Area:** FORMAL (the value model). Found 2026-10-03 on
 `work/formal18-tile-specialization`, while landing the lowering this file is
 the boundary of — a function value is a CODE ADDRESS and `f[a, b](x)` through
-a word is one `BLR` / `CALL r64`
-(`bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
-§"What landed"). **The residual below is what is NOT FIXED; the decidable half
-is.**
+a word is one `BLR` / `CALL r64` (`work/formal18-tile-specialization`). **The
+residual below is what is NOT FIXED; the decidable half is.**
 
 ## What is refused, and what is not
 

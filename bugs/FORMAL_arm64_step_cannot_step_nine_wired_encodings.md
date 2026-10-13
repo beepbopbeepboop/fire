@@ -292,9 +292,9 @@ $ python3 -c "import importlib.util as u; s=u.spec_from_file_location('a',
   list blob past 32760 bytes needs
   (`encode_ldr_xt_xn_xm`'s own docstring), so the reachability is not
   theoretical.
-* **`BLR`** — the call through a function value, which
-  `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
-  says a lowering emits. It needs the `Callee` table machinery
+* **`BLR`** — the call through a function value, which the
+  `work/formal18-tile-specialization` lowering emits. It needs the `Callee`
+  table machinery
   (`arm64_step_call`), not just a decode arm, so it is the one row here that is
   not "three lines".
 
@@ -445,8 +445,8 @@ in:**
    than a path), so they are shared work rather than this doc's alone.
 3. The eight memory arms, one encoding at a time, each with its `_STEP_CONDS`
    row, its `work_step_*` lemma and its `_step_rhs` row in the SAME commit.
-4. `CSEL` and `BLR` last, behind their own docs' blockers
+4. `CSEL` and `BLR` last, behind their own blockers
    (`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it`,
-   `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value`).
+   and BLR's own `Callee`-table machinery, `work/formal18-tile-specialization`).
 5. Drop `CMN` and `TST` from the list, or wire them and then add the arms — the
    honest state today is "no image contains them".
