@@ -2,21 +2,20 @@
 
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py` and
 `lib/ProofLib.lean`'s `arm64_step` arms. **Status: PARTIALLY FIXED
-(2026-10-12, `work/formal319-docs`) — items 1, 2 and 3 are FIXED; items 4 and 5
-remain, and they are pre-existing (this doc said so for both). §"the most likely
-cause" below is measured wrong about items 1–3.** The merge itself is complete;
-these are the failures the narrow `test_formal_call_proof_gen.py` run still
-shows after every *mechanical* merge artifact was fixed (undefined
-`_RLIMIT_STACK`, the `_flush_push_depth` epilogue variant, a duplicated
-`for_target_tree`, a test whose `setUpClass` never populated `cls.infos`, and so
-on — all fixed and committed on that branch).
+(2026-10-12, `work/formal319-docs`) — items 1, 2, 3 and 4 are FIXED; only item 5
+remains, which the filing already called pre-existing. §"the most likely cause"
+below is measured wrong about items 1–4.** The merge itself is complete; these
+are the failures the narrow `test_formal_call_proof_gen.py` run still shows
+after every *mechanical* merge artifact was fixed (undefined `_RLIMIT_STACK`,
+the `_flush_push_depth` epilogue variant, a duplicated `for_target_tree`, a test
+whose `setUpClass` never populated `cls.infos`, and so on — all fixed and
+committed on that branch).
 
-## 2026-10-12, second pass: items 1 and 2 are the `runs` side condition, and it is NOT `arm64_ext_imm12`
+## 2026-10-12, second pass: items 1, 2 and 4 are the `runs` side condition and the shifted immediate, and NEITHER is `arm64_ext_imm12` mis-stated
 
-With `lib/ProofLib.olean` built, the Lean rows run and items 1 and 2 reproduce
-exactly as written: `mod_proof.lean:4899:68: error: maximum recursion depth has
-been reached` (and the same in `same_image_leaf_proof.lean`). **The cause is the
-argument to `runs_cons_seq`, not the step lemma or `arm64_ext_imm12`:**
+With `lib/ProofLib.olean` built, the Lean rows run and items 1, 2 and 4
+reproduce exactly as written. **The recursion depth is the argument to
+`runs_cons_seq`, not the step lemma or `arm64_ext_imm12`:**
 
 * the error column is the `rfl` in
   `rw [runs_cons_seq st (mod_by_var_b6_qT0 st) mod_by_var_code 0 hs0 rfl, …]`,
@@ -37,18 +36,33 @@ is now `(by simp only [<qS>, <qT>, arm64_set_reg])` instead of `rfl`, at the six
 `runs_cons_seq`/`runs_cons_jump` sites (`arm64_proof_gen.py`'s block run-theorem
 emission). Unfolding `qS`/`qT` closes the `{ … with sp := … }` shape by
 projection without reducing the `sp` term, and unfolding `arm64_set_reg` is what
-keeps the register-setting transitions `rfl` DID handle working. Verified:
-`mod_by_var` and `same_image_leaf` now elaborate; running
-`test_formal_call_proof_gen.py` drops from 8 failures to 6, and the two that go
-are exactly items 1 and 2. Pinned by
-`TestARunsSideConditionUnfoldsItsBlocks` (generation only, no Lean) and by the
-two Lean rows that now pass (`TestExternCallTheRunDoesNotReach.test_the_corpus_
-example_that_was_false_is_proved`, `TestSameImageCallLean.test_the_followed_
-call_proves_with_no_admission`).
+keeps the register-setting transitions `rfl` DID handle working.
+
+**Item 4 (`sgt8`) is the OTHER half of the same `sh`-field fix**: the model and
+`_step_rhs`/`_cbz_reg_const` read the shift, but the Python spill-address
+decoders (`_hcond_mem_rws`, `_frame_read_addrs`, `_frame_ldp_addrs`,
+`_sp_stores`) did not, so a `#32, lsl #12` frame adjust was tracked as `+32`
+where the code does `+131072` and the condition proof emitted a
+`mem_read_two_writes_adj_uint` rewrite for an address the goal does not contain
+(`Tactic 'rewrite' failed: Did not find an occurrence of the pattern …
+⊢ arm64_matches_condition 13`). They now share `_addsub_imm12`. That one fix is
+also what makes `sign`, `twoifs` and `elif3` elaborate again — examples the
+committed baseline records as `proved`, so this was a live regression outside
+this doc's table. See
+`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` for the
+model half.
+
+Verified: `mod_by_var`, `same_image_leaf`, `sign`, `twoifs`, `elif3` and `sgt8`
+now elaborate; running `test_formal_call_proof_gen.py` drops from 8 failures to
+**5**, and the five that remain are all item 5's
+(`TestTheZeroDivisorGuardAgainstLean`). Pinned by
+`TestARunsSideConditionUnfoldsItsBlocks` and
+`TestTheImmediateShiftReachesTheSpDecoders` (generation only, no Lean) and by the
+Lean rows that now pass.
 
 ## 2026-10-12: item 3 is a miscalibrated TEST, not the generator
 
-The one non-Lean red, and it is not the `arm64_ext_imm12` change either:
+The first non-Lean red, and it is not the `arm64_ext_imm12` change either:
 
 * the `hprior_*` emission is **byte-identical** to `cfd550b5` (the commit that
   introduced the per-path memo and where the bound was calibrated), verified by
@@ -75,14 +89,12 @@ program**; the two classes above still build their own programs from it.
 
 ## What is NOT fixed, and whose it is
 
-Item 4 (`sgt8`'s `rewrite` that no longer finds its pattern) and item 5
-(`TestTheZeroDivisorGuardAgainstLean`'s rows) remain, **and the filing already
-marked both pre-existing** ("did not typecheck before this fix either", and "the
-class's state on the base tree"). They are Lean elaboration failures, not the
-`runs` side condition, and the six remaining failures of the file are exactly
-these two rows' subtests. Measured after the fix: **180 tests, 6 failures** (all
-in `TestANarrowTypedParameterGetsItsRange` and
-`TestTheZeroDivisorGuardAgainstLean`), down from 8.
+Item 5 (`TestTheZeroDivisorGuardAgainstLean`'s rows) remains, **and the filing
+already called it pre-existing** ("the class's state on the base tree"). It is
+the div0 residual `FORMAL_a_conditions_operand_read_through_an_earlier_stores_
+slot.md` owns, not this doc's, and the five remaining failures of the file are
+exactly its subtests. Measured after the fixes: **183 tests, 5 failures**, down
+from 8.
 
 
 ## What was run

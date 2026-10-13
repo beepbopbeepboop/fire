@@ -3264,6 +3264,23 @@ _STEP_CONDS = [
 ]
 
 
+def _addsub_imm12(w: int) -> int:
+    """An ADD/SUB/CMP `#imm12` with its `sh` field applied — bits 21:10 shifted
+    left by `12 * bit22`.
+
+    The model reads the shift (`lib/ProofLib.lean`'s `arm64_ext_imm12`), so
+    every PYTHON decoder that turns one of these instructions into a stack or
+    register offset has to apply it too.  Missing it tracked
+    `ADD sp, sp, #32, lsl #12` as `+32` where the code does `+131072`, and
+    `_hcond_mem_rws` then emitted a `mem_read_…` rewrite for an address the goal
+    does not contain: `sign`, `twoifs` and `elif3` stopped elaborating with
+    "Did not find an occurrence of the pattern … ⊢ arm64_matches_condition 13".
+    `_cbz_reg_const` already carried this shift; this helper is the one reader
+    the rest share.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _step_branch_index(w: int):
     """Return the index of the arm64_step branch that matches word w, or None."""
     for i, (mask, base) in enumerate(_STEP_CONDS):
@@ -3993,10 +4010,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_addsub_imm12(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_addsub_imm12(w)})"
     return addrs
 
 
@@ -4493,10 +4510,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm12(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm12(w)})"
     return out
 
 
@@ -4530,10 +4547,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm12(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm12(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4590,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _addsub_imm12(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _addsub_imm12(w)
     return sp_off
 
 

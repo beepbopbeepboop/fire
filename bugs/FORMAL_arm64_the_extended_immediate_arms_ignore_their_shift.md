@@ -1,5 +1,33 @@
 # The `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12`
 
+**Status update 2026-10-12 (`work/formal319-docs`): the PYTHON half of the same
+fix is done too, and it was a LIVE regression.** The model and
+`_step_rhs`/`_cbz_reg_const` read the shift, but four spill-address decoders in
+`formal/arm64_proof_gen.py` did not — `_hcond_mem_rws`, `_frame_read_addrs`,
+`_frame_ldp_addrs`, `_sp_stores` all decoded `(w >> 10) & 0xfff` directly. A
+block whose frame adjust is `sub sp, sp, #32, lsl #12` (the div0 guard's arm) was
+therefore tracked as `+32` where the code does `+131072`, and the condition proof
+emitted a `mem_read_two_writes_adj_uint` rewrite for an address the goal does not
+contain:
+
+    x_proof.lean:4729:10: error: Tactic `rewrite` failed: Did not find an occurrence of the pattern
+      mem_read_u64 (mem_write_u64 (mem_write_u64 ?m … (s_0.sp - UInt64.ofNat 32 - UInt64.ofNat 16).toNat …) …) …
+    in the target expression
+      arm64_matches_condition 13 (arm64_subs_flags (mem_read_u64 (mem_write_u64 (mem_write_u64 s_0.mem
+        (s_0.sp - UInt64.ofNat 131072 - UInt64.ofNat 16).toNat …) …) …) …
+
+`formal/examples/sign.mojo`, `twoifs.mojo` and `elif3.mojo` all failed to
+elaborate this way, and the committed `tools/formal_proof_census_baseline.json`
+records all three as `proved` — so **this was a regression the census ratchet
+would have reported**, not a limit. The four decoders now share one helper,
+`_addsub_imm12(w) = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 1))`, and
+`sign`/`twoifs`/`elif3` elaborate again; `test_formal_call_proof_gen.py`'s
+`TestTheImmediateShiftReachesTheSpDecoders` is the generation-only pin. The
+`_frame_stack_depths`/`_frame_slot_accesses`/`_frame_store_depths`/
+`_frame_store_writes` siblings still spell the immediate with a separate `* 8`;
+they were NOT touched here because no measured proof exercises a shifted adjust
+through them, and that `* 8` is a question of its own.
+
 **Status update 2026-10-07 (`work/formal125-docs`): FIXED IN SOURCE; the
 `lib/ProofLib.lean` build is still owed to the integrator.** One helper,
 `arm64_ext_imm12 (insn : UInt32) : Nat := (((insn >>> 10) &&& 0xfff).toNat) <<< (((insn >>> 22) &&& 0x3).toNat * 12)`,

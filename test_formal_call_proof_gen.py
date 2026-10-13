@@ -2473,6 +2473,58 @@ class TestARunsSideConditionUnfoldsItsBlocks(unittest.TestCase):
                       "the side condition does not unfold `arm64_set_reg`")
 
 
+class TestTheImmediateShiftReachesTheSpDecoders(unittest.TestCase):
+    """`ADD/SUB sp, sp, #imm, lsl #12` is tracked SHIFTED by every Python decoder
+    that turns it into a stack offset, not only by the model.
+
+    `lib/ProofLib.lean`'s `arm64_ext_imm12` reads bits 21:10 AND the `sh` field,
+    and `_step_rhs`/`_cbz_reg_const` apply it — but the spill-address decoders
+    (`_hcond_mem_rws`, `_frame_read_addrs`, `_frame_ldp_addrs`, `_sp_stores`)
+    did not, so a block whose frame adjust is `#32, lsl #12` was tracked as `+32`
+    where the code does `+131072`.  The condition proof then emitted a
+    `mem_read_two_writes_adj_uint` rewrite for an address the goal does not
+    contain, and `sign`, `twoifs` and `elif3` failed to elaborate with "Did not
+    find an occurrence of the pattern".  Generation only, no Lean; the Lean rows
+    that prove it end to end are `sign`/`twoifs`/`elif3` through
+    `compile_formal(check=True)`.
+    """
+
+    # `sign`'s epilogue reserves `#32, lsl #12`.
+    PROGRAM = ("def sign(n):\n    if n > 0:\n        return 1\n"
+               "    elif n == 0:\n        return 0\n    else:\n"
+               "        return 1\n")
+
+    def test_the_helper_shifts_by_the_sh_field(self):
+        import formal.arm64_proof_gen as G
+        # SUB sp, sp, #32: sf=1 op=1 S=0 100010 sh=0 imm12=32 Rn=31 Rd=31.
+        w = 0xd1000000 | (32 << 10) | (31 << 5) | 31
+        self.assertEqual(G._addsub_imm12(w), 32)
+        self.assertEqual(G._addsub_imm12(w | (1 << 22)), 32 << 12)
+
+    def test_a_shifted_frame_adjust_emits_the_shifted_spill_address(self):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-imm12-")
+        try:
+            src = os.path.join(tmp, "s.mojo")
+            with open(src, "w") as fh:
+                fh.write(self.PROGRAM)
+            r = fb.compile_formal(src, arch="arm64",
+                                  output=os.path.join(tmp, "s.aout"),
+                                  prove=True, check=False)
+            with open(r["proof_path"], encoding="utf-8") as fh:
+                text = fh.read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        rewrites = [ln for ln in text.split("\n")
+                    if "mem_read_two_writes_adj_uint " in ln]
+        self.assertTrue(rewrites, "no adjacent-writes rewrite emitted")
+        joined = "\n".join(rewrites)
+        self.assertIn("UInt64.ofNat 131072", joined,
+                      "the spill address is not the SHIFTED frame adjust")
+        self.assertNotIn("- UInt64.ofNat 32 - UInt64.ofNat 16", joined,
+                         "the spill address still uses the UNSHIFTED immediate")
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
