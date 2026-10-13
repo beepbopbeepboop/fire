@@ -2230,6 +2230,69 @@ def test_the_find_spec_decided_names_are_unreachable(tmpdir, _shared):
               "the target and the entry is wrong")
 
 
+def test_a_written_module_does_not_answer_its_unwritten_submodule(tmpdir,
+                                                                  _shared):
+    """A submodule is `written` only where THIS TREE has a source for it.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.3 records the
+    accessor "correcting a row the day it landed", and names `html.parser` as
+    the row: it is `written`, the doc says, because `formal/hostmods/html.mojo`
+    is. **That is false, and the module says so in its own header** — it writes
+    `escape` and names `html.parser`/`HTMLParser` as the CLASS it has no
+    representation for, so the tree answers `html` and not `html.parser`. The
+    measured verdict is `unclassified` (CPython ships it and no tier says
+    whether it is `modelled` or `unreachable`), and the distinction this row
+    pins is the one the accessor exists for:
+
+      * a submodule of a written PACKAGE carries its OWN source
+        (`os/path/__init__.mojo`, `os/_syscalls.mojo`), so it is `written`;
+      * a submodule of a written MODULE has none (`html.mojo` answers `html`
+        alone), so it is NOT.
+
+    A row that asserted `written` for `html.parser` would pass while a name
+    CPython ships was reported as a source this tree has — a claim about the
+    repository rather than about the target, which is the direction §0.4's
+    `not-code` split exists to keep out of the typo answer.
+    """
+    import formal.imports as I
+    probe = os.path.join(HERE, "formal", "arm64.py")
+
+    def verdict(name):
+        return I.host_module_verdict(name, relative_to=probe,
+                                     project_root=probe)
+
+    # The premise: `html` itself is answered by this tree, so the counterexample
+    # below is about a written parent and not about a missing one.
+    answer, detail = verdict("html")
+    check(answer == "written" and bool(detail) and os.path.isfile(detail),
+          f"precondition: `html` should be answered by "
+          f"formal/hostmods/html.mojo, and verdict() said {answer!r} "
+          f"({detail!r})")
+
+    # A package submodule carries its own source, so it is written too.
+    for name in ("os.path", "os._syscalls"):
+        answer, detail = verdict(name)
+        check(answer == "written",
+              f"{name} is a submodule of a written package and this tree has "
+              f"its source, so the answer is `written`; got {answer!r}")
+        check(bool(detail) and os.path.isfile(detail),
+              f"{name} answered `written` with a detail that is not a file: "
+              f"{detail!r}")
+
+    # The counterexample the doc got wrong, pinned in the measured direction.
+    check(I.resolve_module_path("html.parser", relative_to=probe,
+                                project_root=probe) is None,
+          "this tree now has a source for `html.parser`; if that is true the "
+          "assertion below is stale, not the code")
+    answer, _detail = verdict("html.parser")
+    check(answer == "unclassified",
+          f"`html.parser` has no source here — formal/hostmods/html.mojo "
+          f"writes `escape` and names `html.parser` as a class it cannot "
+          f"represent — so the honest answer is `unclassified`, which is what "
+          f"the other unprovided submodules of a shipped package get; "
+          f"verdict() said {answer!r}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5352,6 +5415,8 @@ TESTS = [
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
     ("the names find_spec decides are unreachable, not unclassified",
      test_the_find_spec_decided_names_are_unreachable),
+    ("a written module does not answer its unwritten submodule",
+     test_a_written_module_does_not_answer_its_unwritten_submodule),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

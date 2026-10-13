@@ -460,11 +460,38 @@ adding rather than tidying:
 | `tools/formal_sweep_causes.py` | inferred it from a `formal/hostmods/<name>.mojo` existing | a repository sibling, a package `__init__.mojo`, and every module outside `formal/hostmods/` — all three came out `UNTIERED`, which is a DEFECT claim about a module that is answered |
 | `tools/formal_host_import_wall.py` (this round) | paired the tier with the resolver AND `is_cpython_stdlib` | nothing, but it was a fourth copy of a fact with one home |
 
-All three now read the one function. **And it corrects a row the day it landed:**
-`html.parser` is a SUBMODULE of the written `formal/hostmods/html.mojo`, so the
-verdict is `written` while `host_module_tier` says `''` and the wall table
-printed `unclassified` for it a commit earlier — the exact false statement the
-three-way split was hiding.
+All three now read the one function. **The demonstration is `os._syscalls` and
+`os.path`, which are `written` while `host_module_tier` says `''`** — a
+submodule of a written PACKAGE carries its own source
+(`formal/hostmods/os/_syscalls.mojo`), so the accessor answers `written` for a
+name the tier alone cannot place.
+
+**CORRECTED 2026-10-12 (`work/formal313-docs`): the row this section used to
+name, `html.parser`, is NOT `written` and never was.** §0.3 said "`html.parser`
+is a SUBMODULE of the written `formal/hostmods/html.mojo`, so the verdict is
+`written`" — and that is false: `html.mojo` writes `escape`, and its own header
+names `html.parser`/`HTMLParser` as the CLASS it has no representation for, so
+the tree answers `html` and not `html.parser`. Measured through the accessor:
+
+```console
+$ python3 -c "import sys, os; sys.path.insert(0,'.'); import formal.imports as I
+p = os.path.abspath('formal/arm64.py')
+print(I.host_module_verdict('html.parser', relative_to=p, project_root=p)[0],
+      I.host_module_verdict('os._syscalls', relative_to=p, project_root=p)[0])"
+unclassified written
+```
+
+so `resolve_module_path('html.parser')` is `None`, there is no source to be
+`written` about, and the honest answer is `unclassified` — the same one every
+other unprovided submodule of a shipped package gets. A submodule of a written
+MODULE is not a submodule the tree has a source for, which is the half the
+false sentence got backwards. **Pinned now, in the direction the sentence got
+wrong**, by
+`test_formal_imports.py::test_a_written_module_does_not_answer_its_unwritten_submodule`:
+it asserts `os.path`/`os._syscalls` ARE `written` (package submodules, with a
+detail that is a file) and that `html.parser` is `unclassified` and resolves to
+`None` — so a change that made the accessor claim a source that does not exist
+goes red rather than passing on a sentence in a doc.
 
 **The partition is now a CLOSED invariant, which is what makes the remaining work
 a queue with a direction.** `test_formal_imports.py::
@@ -485,8 +512,13 @@ tree:
 | `admitted` | 4 |
 | `front-end` | 1 (`dataclasses`) |
 
-216 rather than 217 because `html.parser` moved to `written`. **The count is
-still a fact about the table and not about the corpus**, so it is printed by the
+**The 217→216 difference is NOT `html.parser`, which is a correction to the
+paragraph above and to §0.3: `html.parser` is not in
+`sys.stdlib_module_names` at all** (`sys.stdlib_module_names` is TOP-LEVEL
+names; `'html.parser' in sys.stdlib_module_names` is `False`), so it was never
+one of these rows, and its verdict is `unclassified` rather than `written`.
+**The count is still a fact about the table and not about the corpus**, so it is
+printed by the
 accessor rather than inferred by a reader — and
 `test_no_unclassified_stdlib_name_is_imported_by_anything` still asks the
 corpus question, which is the one that decides whether filling the queue is
