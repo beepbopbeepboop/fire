@@ -6099,11 +6099,30 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 cls.out[label] = ""
                 continue
             if _ADMIT not in tail:
-                cls.blind[label] = (
-                    f"the fixture generates no `q_compiles_correctly_universal` "
-                    f"carrying `{_ADMIT}`, so `tail.replace(_ADMIT, _TRACE)` is "
-                    f"a no-op and no goal can be traced: whatever the div0 "
-                    f"residual is today, this class is not looking at it")
+                # Two ways to have no admission, and they are different news:
+                # the generator SUBSTITUTED the universal theorem (announced,
+                # one out-of-image call), or it did not and the tail is empty
+                # for a reason nothing names.  Naming the substitution here is
+                # what makes the failure message actionable.
+                if "_reaches_call_at_" in (head + tail):
+                    cls.blind[label] = (
+                        f"the generator SUBSTITUTED `q_compiles_correctly_"
+                        f"universal` with the announced reachability theorem "
+                        f"(`q_reaches_call_at_…`), because the div0 arm's exit "
+                        f"`fflush` is the one out-of-image call and one halt "
+                        f"address cannot carry a value theorem: there is no "
+                        f"`{_ADMIT}` in the tail for `tail.replace(_ADMIT, "
+                        f"_TRACE)` to patch, so this class cannot trace the "
+                        f"div0 residual until the walk can discharge a call on "
+                        f"a conditional path")
+                else:
+                    cls.blind[label] = (
+                        f"the fixture generates no `q_compiles_correctly_"
+                        f"universal` carrying `{_ADMIT}` and does not announce "
+                        f"a substitution either, so `tail.replace(_ADMIT, "
+                        f"_TRACE)` is a no-op and no goal can be traced: "
+                        f"whatever the div0 residual is today, this class is "
+                        f"not looking at it")
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)

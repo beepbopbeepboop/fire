@@ -28,8 +28,13 @@ unreachable on this tree rather than merely unpicked.**
   `python3 tools/memslot.py --gb 8 --label t -- python3
   test_formal_call_proof_gen.py` → **178 tests, 0 failures, 13 skipped** (was
   177 tests / 1 failure, the pin). With a built `lib/ProofLib.olean` the class's
-  four Lean rows still run and still fail, by NAME (`cls.blind`), as the last
-  section of this file records.
+  Lean rows still run and still fail, by NAME (`cls.blind`) — and `setUpClass`
+  now records the substitution specifically ("the generator SUBSTITUTED
+  `q_compiles_correctly_universal` with the announced reachability theorem
+  (`q_reaches_call_at_…`) …"), so the failure says which of the three states the
+  fixture is in rather than "no `_ADMIT`". Measured:
+  `… test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean` → 5
+  failures, every one carrying that sentence.
 * **Step 2's option 2 — "change the fixture to a literal divisor, where the
   model can step the divide" — is REFUTED.** Measured, generation only, on this
   tree:
