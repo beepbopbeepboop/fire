@@ -455,6 +455,53 @@ CASES = [
      "    print(last)\n"
      "    return 0\n", "30\n50\n"),
 
+    # A container REPETITION at module level, which is the spelling every table
+    # big enough to write as `[0] * N` uses. `[0] * 3` IS `[0, 0, 0]`: it is
+    # static data the linker places, not a store the module body has to run — so
+    # it must be recognised as container storage for exactly the reason
+    # `rebound_list_global` above is.
+    #
+    # It was not, and the failure was silent: `collect_global_slots` gave the
+    # repetition no slot, so the store stayed in `__module_body__`, the body
+    # became the entry point, and `main` was never called — the image printed
+    # NOTHING and exited 0 while the interpreter called `main` and printed
+    # `7` then `9`. There is deliberately NO `main(0)` at the end: with the
+    # store exempt from the body (the fix), the body is empty, `main` is the
+    # entry, and the program runs — which is a thing the interpreter comparison
+    # can see and a build-only test cannot.
+    ("repeat_list_global",
+     "NUMS = [0] * 3\n"
+     "\n"
+     "def main(n):\n"
+     "    NUMS[0] = 7\n"
+     "    NUMS[1] = 8\n"
+     "    NUMS[2] = 9\n"
+     "    first: Int = NUMS[0]\n"
+     "    last: Int = NUMS[2]\n"
+     "    print(first)\n"
+     "    print(last)\n"
+     "    return 0\n", "7\n9\n"),
+
+    # The multi-element half: `[e0, e1] * N` is the element LIST repeated, not
+    # one element `N` times — `[1, 2] * 3` is `[1, 2, 1, 2, 1, 2]`. A fix that
+    # repeated the whole container's single element would pass the row above
+    # (`[0] * 3` has one element) and answer `[3]` here, so this row is the
+    # control that makes the first one mean "a repetition" rather than "`[0]`
+    # is special".
+    ("repeat_multi_element_list_global",
+     "NUMS = [1, 2] * 3\n"
+     "\n"
+     "def main(n):\n"
+     "    NUMS[0] = 30\n"
+     "    NUMS[3] = 40\n"
+     "    a: Int = NUMS[0]\n"
+     "    b: Int = NUMS[1]\n"
+     "    c: Int = NUMS[3]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    return 0\n", "30\n2\n40\n"),
+
     # Bound to a local first. This is the shape that most exposed the lazy
     # initializer: the load of the slot happens once, in the prologue's shadow,
     # and every later use goes through the register — so a slot filled after

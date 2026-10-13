@@ -23450,6 +23450,12 @@ def container_literal_elem_kind(node) -> str | None:
     deleted `FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md`
     carried, and the reason this arm exists.
     """
+    repeated = _repeated_container(node)
+    if repeated is not None:
+        # `[e0, e1] * N` writes every element of its left operand, N times, so
+        # the element-kind question is the same one the written-out literal
+        # answers — asked of that operand's own elements.
+        return _list_literal_elem_kind(list(repeated[0].elements or []))
     if isinstance(node, F.DictExpr):
         values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
         return _kind_of_elements(values)
@@ -43439,7 +43445,7 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         name = _module_binding_name(stmt)
         if name is None:
             return False
-        return _is_container_literal(getattr(stmt, "value", None))
+        return _is_static_container(getattr(stmt, "value", None))
 
     def _is_real_store(stmt) -> bool:
         return not (_is_folded_constant(stmt) or _is_image_initialized(stmt))
@@ -46889,13 +46895,17 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         existed: `G = 5` with `bump()` called twice printed `G=5` where CPython
         prints `G=7` — a silently wrong answer, because the read was the folded
         5 and the write went into a register nothing else named.
-      * **its value is a CONTAINER literal.** `[1,2,3]` is not a value the
-        substitution path can express at all — there is no literal to put at the
-        read — but it IS static data: the blob is a flat run of words whose first
-        word is the count, so the linker can place it in `__DATA` and the slot
-        can hold its address. `NUMS = [10,20,30]` read from a function is the
-        case `bugs/FORMAL_module_state_no_storage.md` §1 measured as the first
-        one, and it builds and runs correctly now.
+      * **its value is a CONTAINER literal, or a repetition of one.** `[1,2,3]`
+        is not a value the substitution path can express at all — there is no
+        literal to put at the read — but it IS static data: the blob is a flat
+        run of words whose first word is the count, so the linker can place it in
+        `__DATA` and the slot can hold its address. `NUMS = [10,20,30]` read from
+        a function is the case `bugs/FORMAL_module_state_no_storage.md` §1
+        measured as the first one, and it builds and runs correctly now.
+        `[0] * 624` is the same value as the written-out literal, and
+        `_is_static_container` asks the same question of it — see
+        `_repeated_container` for why missing that spelling was a silent wrong
+        image rather than a refusal.
       * **the MODULE BODY writes it.** `G = compute()` at file level is the
         module's own top-level statement, compiled as the synthetic
         `__module_body__` and run before anything else — so it is a store, not
@@ -46970,9 +46980,9 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         value = getattr(stmt, "value", None)
         is_frame = name in frame_slots
         filled_by_body = (name in body_written and not is_frame
-                          and not _is_container_literal(value))
+                          and not _is_static_container(value))
         if name not in written and not filled_by_body \
-                and not is_frame and not _is_container_literal(value):
+                and not is_frame and not _is_static_container(value):
             continue
         if name not in finals:
             order.append(name)
@@ -47093,6 +47103,51 @@ def _is_container_literal(value) -> bool:
     by `_static_container_words` — this only asks whether the shape is one a
     `__DATA` slot can point at."""
     return isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr))
+
+
+def _repeated_container(value):
+    """`(container, count)` for a container REPETITION `[e0, e1] * N`, or None.
+
+    `[0] * 4` IS `[0, 0, 0, 0]`: the repetition evaluates to a fresh container
+    of `N` copies, and a module-level binding to one is the same static data a
+    written-out literal is. That is the spelling this exists for — a 624-word
+    table is `[0] * 624` and not 624 commas in the source — and the failure of
+    not recognising it is a SILENT one rather than a refusal: with the
+    repetition unclassified, `collect_global_slots` gave it no slot and
+    `module_body` kept the store, so `__module_body__` became the entry point,
+    `main` was never called, and the image printed nothing and exited 0. That is
+    the same failure `_is_image_initialized`'s docstring records for `NUMS =
+    [10, 20, 30]`, one spelling over.
+
+    Either operand order is accepted, because `4 * [0]` is the same container.
+    `N` must be a word this can read (an int literal, or a unary sign of one),
+    and a count or element this cannot compute answers None — the caller's
+    fallbacks then refuse rather than guess, which is deliberately NOT a partial
+    expansion."""
+    if not isinstance(value, F.BinaryOp) or value.op != "*":
+        return None
+    for container, count in ((value.left, value.right),
+                             (value.right, value.left)):
+        if isinstance(container, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            n = _static_word(count)
+            if isinstance(n, int) and n >= 0:
+                return container, n
+    return None
+
+
+def _is_static_container(value) -> bool:
+    """True for a value the linker can place as a container blob in `__DATA`.
+
+    A container literal (`_is_container_literal`) OR a repetition of one
+    (`_repeated_container`), which is the wider question the module-slot and
+    module-body paths have to ask: both are storage-shaped data and neither is a
+    value the substitution path can fold. Kept beside `_is_container_literal`
+    rather than widening it, because that predicate has a second reader —
+    `ValueKinds._value_kind`, where "is a container" decides whether an
+    unclassified local keeps its blob kind or falls to the word default — and a
+    repetition local is bound by a `BinaryOp` that `kind_of` already answers, so
+    widening it there would change a local's classification for no reason."""
+    return _is_container_literal(value) or _repeated_container(value) is not None
 
 
 # The names a `None` VALUE is spelled with, read as a bare name because that is
@@ -47377,6 +47432,12 @@ def _static_container_words(value):
     slot holds its address: the blob then has STATIC STORAGE DURATION, which is
     exactly what a frame blob does not have and exactly what a global needs.
 
+    A REPETITION of a container (`[e0, e1] * N`) is the same static data — it is
+    the element list written `N` times and nothing about it is computed at run
+    time — so it is expanded here rather than left to the caller. That is the
+    spelling a table too long to write out uses, and `_repeated_container` is the
+    one place that decides when the count and elements are all readable.
+
     A word may be a STRING rather than an int, and that is the whole of the
     second kind: a string on this path is a `char *`, so a string element is a
     word holding a pointer, and the pointer is filled in from code at first call
@@ -47396,6 +47457,23 @@ def _static_container_words(value):
     is a word this cannot compute, and a container that is not all-words has no
     initializer to write into the slot. That is said by name from
     `static_initializer_refusal_reason`."""
+    repeated = _repeated_container(value)
+    if repeated is not None:
+        # `[e0, e1] * N` is the element LIST repeated, not one element: `[1, 2]
+        # * 3` is `[1, 2, 1, 2, 1, 2]`. One `_static_word` call PER COPY, so a
+        # nested container element is laid out as `count` separate blobs rather
+        # than one shared by every pointer — a subscript store into one element
+        # must not change the others.
+        container, count = repeated
+        elements = list(container.elements or [])
+        words = [len(elements) * count]
+        for _ in range(count):
+            for el in elements:
+                word = _static_word(el)
+                if word is None:
+                    return None
+                words.append(word)
+        return words
     if isinstance(value, F.DictExpr):
         words = []
         pairs = [p for p in (value.pairs or []) if len(p) >= 2]
@@ -47465,7 +47543,7 @@ def _static_word(node):
         if isinstance(n, (str, StaticNestedBlob)):
             return None
         return None if n is None else (-n if node.op == "-" else n)
-    if _is_container_literal(node):
+    if _is_static_container(node):
         words = _static_container_words(node)
         return None if words is None else StaticNestedBlob(words)
     return None
