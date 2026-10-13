@@ -1,11 +1,23 @@
 # FORMAL_arm64_the_proof_generators_sp_trackers_drop_the_imm12_shift: the model shifts, the generator does not, so `hcond` rewrites miss
 
 **Area:** FORMAL — `formal/arm64_proof_gen.py`'s `sp`-tracking decoders, against
-`lib/ProofLib.lean`'s `arm64_ext_imm12`. **Status: OPEN, filed 2026-10-12 on
-`work/formal315-docs` while running the narrow suites for
-`FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`.** Not this branch's
-regression: nothing here changed `formal/` or `lib/`, and the failures reproduce
-on the base tree.
+`lib/ProofLib.lean`'s `arm64_ext_imm12`. **Status: FIXED for the five byte-form
+decoders (`a76dae35`, 2026-10-12, `work/formal315-docs`); the four
+frame-analysis helpers that read the same bits with a `* 8` unit still drop the
+shift and are left for their own measurement (below).** Filed 2026-10-12 while
+running the narrow suites for
+`FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`. Not this branch's
+regression: nothing here changed `formal/` or `lib/` before the fix, and the
+failures reproduced on the base tree.
+
+**What landed.** `_imm12_shifted(w)`, one reader mirroring `arm64_ext_imm12`
+(`((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))`), called by `_step_rhs`
+(consolidation), `_frame_ldp_addrs`, `_frame_read_addrs`, `_hcond_mem_rws` and
+`_sp_stores`. Measured after: `test_formal_eval_eq_mojo_bridge.py`'s three
+typechecks (`ifonly`/`elif3`/`condassign`) close, `test_formal_call_proof_gen.py`
+goes 9 -> 8 red (the `sgt8` rewrite was the same shift), and
+`test_formal_run.py` (1209/0), `test_formal_short_circuit_cond.py` (15 OK) and
+`test_formal_proof_shape.py` (24 OK) are unmoved.
 
 ## What I ran
 
@@ -62,34 +74,33 @@ model-side fix, landed). `formal/arm64_proof_gen.py`'s `_step_rhs` mirrors it
 (`:3409`/`:3415`), so an emitted STEP lemma states the shifted value — but the
 `sp`-TRACKING decoders still read `(w >> 10) & 0xfff` and drop bits 23:22:
 
-| site | line | note |
+| site | line (pre-fix) | note |
 |---|---|---|
-| `_hcond_mem_rws` | `:4533` / `:4536` | tracks `sp` to place a condition block's spill reads — **this is the failing one** |
-| `_sp_stores` | `:4576` / `:4578` | tracks the caller's frame slots for `FrameOk` |
-| `_frame_...`/sp-walk helper | `:3996` / `:3999` | the same ADD/SUB-immediate arms |
-| sp-walk helper | `:4496` / `:4499` | the same |
-| `:9517` / `:9520`, `:11637` | | **different units** (`((w >> 10) & 0xfff) * 8`): decide whether these are the byte form or a slot form before touching them |
+| `_hcond_mem_rws` | `:4533` / `:4536` | tracks `sp` to place a condition block's spill reads — **this was the failing one** — FIXED |
+| `_sp_stores` | `:4576` / `:4578` | tracks the caller's frame slots for `FrameOk` — FIXED |
+| `_frame_ldp_addrs` | `:3996` / `:3999` | the same ADD/SUB-immediate arms — FIXED |
+| `_frame_read_addrs` | `:4496` / `:4499` | the same — FIXED |
+| `_step_rhs` | `:3409` / `:3415` | already shifted; now calls the helper — consolidation |
+| `_frame_stack_depths`, `_frame_slot_accesses`, `_frame_store_depths`, `_frame_store_writes` | `((w >> 10) & 0xfff) * 8` | **OPEN** — these also drop the shift, but they scale the result by 8 as well; the unit is a separate question from the shift and needs a re-measurement of the method/export contracts that read them before they are touched |
 
-So a `lsl #12` frame reservation is tracked as its unshifted immediate, the
-addresses the rewrite names are wrong by `(imm << 12) − imm`, and the proof's
-`rw` finds no occurrence.
+So a `lsl #12` frame reservation was tracked as its unshifted immediate, the
+addresses the rewrite names were wrong by `(imm << 12) − imm`, and the proof's
+`rw` found no occurrence.
 
 ## The exact next step
 
-**One read, not six copies** — the shape
-`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` §4 prescribes
-for the model:
+**Done for the byte form (`a76dae35`).** What is left is the `* 8` half:
 
-1. one Python helper beside the other decode helpers, mirroring
-   `arm64_ext_imm12` exactly (`& 0x1`, the model's own reading of `sh`), and call
-   it at `:3996`, `:4496`, `:4533`, `:4576` (the four byte-form sites);
-2. audit `:9517`/`:9520` and `:11637` for the `* 8` unit and fix them the same
-   way **only if** they are the byte form;
-3. verify with `test_formal_eval_eq_mojo_bridge.py` (the three programs should
-   typecheck) and re-run `test_formal_call_proof_gen.py` to check the `mod_by_var`
-   / `same_image_leaf` reds
-   (`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`) do not get
-   worse — they are the same `lsl #12` frame shape at the STEP-lemma layer.
+1. decide whether `_frame_stack_depths`, `_frame_slot_accesses`,
+   `_frame_store_depths` and `_frame_store_writes` track `sp` in BYTES (then the
+   `* 8` is wrong and the shift must be added) or in 8-byte SLOTS (then the `* 8`
+   is right and only the shift is missing). Every one reads STP/LDP `imm7 * 8`
+   as bytes in the same loop, which is the evidence for BYTES, but a method's
+   contract is the only thing that reads them and no narrow suite has been shown
+   to exercise an `lsl #12` ADD/SUB there;
+2. if they are the byte form, call `_imm12_shifted(w)` and drop the `* 8`;
+3. verify against the method/export contract suites (`test_formal_dylib.py`,
+   `test_formal_cross_module.py`).
 
 The literal `32` versus `131072` is the whole diagnosis; no Lean reasoning about
 the model is needed to confirm it, and the proof's own address is the evidence.
