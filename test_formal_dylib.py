@@ -2305,6 +2305,133 @@ def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
           f"{m.group(2).strip()!r}")
 
 
+
+def _segment_flags_and_section_metadata(data):
+    """Header flags, and per-segment `segflags` + per-section flags/reserved1/
+    reserved2, walked here rather than through `parse_macho`.
+
+    `parse_macho` is the file's shared reader and does not carry these fields;
+    this walk exists so the pin below is independent of the reader whose
+    omissions it is checking.
+    """
+    magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, headflags, _ = \
+        struct.unpack_from("<8I", data, 0)
+    check(magic == MH_MAGIC_64, f"not a 64-bit Mach-O (magic {magic:#x})")
+    segments = {}
+    pos = 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, pos)
+        if cmd == LC_SEGMENT_64:
+            name = data[pos + 8:pos + 24].rstrip(b"\0").decode("ascii")
+            nsects, = struct.unpack_from("<I", data, pos + 64)
+            segflags, = struct.unpack_from("<I", data, pos + 68)
+            sections = []
+            sect = pos + 72
+            for _ in range(nsects):
+                sname = data[sect:sect + 16].rstrip(b"\0").decode("ascii")
+                sflags, reserved1, reserved2 = struct.unpack_from(
+                    "<3I", data, sect + 64)
+                sections.append({"sectname": sname, "flags": sflags,
+                                 "reserved1": reserved1,
+                                 "reserved2": reserved2})
+                sect += 80
+            segments[name] = {"segflags": segflags, "sections": sections}
+        pos += cmdsize
+    return headflags, segments
+
+
+def test_the_dylib_header_and_stub_metadata_match_ld(tmpdir, _shared):
+    """The three Mach-O spec details only a byte-level check can see.
+
+    Each is a place this tree disagreed with `ld` for the same dylib, none of
+    which changes whether the image runs (the loader ignores the stub
+    `reserved*` fields unless it consults an indirect symbol table, which these
+    images do not carry), so nothing else in this file can catch a regression:
+
+      * the mach_header's flags: `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS`
+        = 0x100085. The buggy literal was 0x800005 — missing MH_TWOLEVEL (0x80)
+        and instead setting MH_HAS_TLV_DESCRIPTORS (0x800000);
+      * a `S_SYMBOL_STUBS` section's `reserved1` is the indirect-symbol-table
+        index (0 here) and `reserved2` is **the size of one stub**, which is 12
+        on arm64 — not the other way round;
+      * a GOT-carrying __DATA_CONST is `SG_READ_ONLY` (0x10), so dyld remaps it
+        read-only once it has applied the bind fixups.
+
+    Where `ld` is present the header flags and __DATA_CONST segflags are also
+    compared against a `clang -dynamiclib` library built for the same shape, so
+    the expected value is read off the linker rather than restated here.
+    """
+    lib = os.path.join(tmpdir, "stubmeta.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("hi\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libstubmeta.dylib")
+    rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out, lib]).returncode
+    check(rc == 0, f"dylib with an extern failed to build: {rc}")
+
+    with open(out, "rb") as f:
+        headflags, segments = _segment_flags_and_section_metadata(f.read())
+
+    MH_TWOLEVEL = 0x80
+    MH_DYLDLINK = 0x4
+    MH_NO_REEXPORTED_DYLIBS = 0x100000
+    MH_HAS_TLV_DESCRIPTORS = 0x800000
+    check(headflags & MH_TWOLEVEL,
+          f"MH_TWOLEVEL is not set (flags {headflags:#x}); dyld then reads the "
+          f"library's symbols in flat-namespace mode")
+    check(not (headflags & MH_HAS_TLV_DESCRIPTORS),
+          f"MH_HAS_TLV_DESCRIPTORS is set (flags {headflags:#x}) on a library "
+          f"that carries no thread-local descriptors")
+    check(headflags & MH_NO_REEXPORTED_DYLIBS,
+          f"MH_NO_REEXPORTED_DYLIBS is not set (flags {headflags:#x})")
+    check(headflags & MH_DYLDLINK,
+          f"MH_DYLDLINK is not set (flags {headflags:#x})")
+
+    text = segments.get("__TEXT", {})
+    stubs = [s for s in text.get("sections", [])
+             if s["sectname"] == "__stubs"]
+    check(len(stubs) == 1, "the `printf` in the library emitted no __stubs")
+    check(stubs[0]["reserved1"] == 0,
+          f"__stubs reserved1 is {stubs[0]['reserved1']}, not the "
+          f"indirect-symbol-table index 0")
+    check(stubs[0]["reserved2"] == 12,
+          f"__stubs reserved2 is {stubs[0]['reserved2']}, not the arm64 stub "
+          f"size 12 — the size belongs in reserved2, not reserved1")
+
+    check("__DATA_CONST" in segments,
+          "the library calls out but carries no __DATA_CONST GOT segment")
+    dc_flags = segments["__DATA_CONST"]["segflags"]
+    check(dc_flags & 0x10,
+          f"__DATA_CONST has no SG_READ_ONLY (segflags {dc_flags:#x}); it is "
+          f"not remapped read-only after the bind fixups")
+
+    # …and the same three against `ld`, when it is available, so "matches ld"
+    # is measured rather than asserted. `clang` is a normal part of this tree's
+    # toolchain (the gate builds C), but its absence must not fail the pin.
+    csrc = os.path.join(tmpdir, "ldref.c")
+    with open(csrc, "w") as f:
+        f.write('#include <stdio.h>\n'
+                'int ldref_shout(long x) { printf("hi\\n"); return x + 1; }\n')
+    ref = os.path.join(tmpdir, "libldref.dylib")
+    try:
+        built = subprocess.run(["clang", "-dynamiclib", "-o", ref, csrc],
+                               capture_output=True, text=True)
+    except OSError:
+        return          # no `clang`: the spec assertions above still stand
+    if built.returncode == 0:
+        with open(ref, "rb") as f:
+            ref_flags, ref_segments = _segment_flags_and_section_metadata(
+                f.read())
+        check(headflags == ref_flags,
+              f"the formal dylib's header flags are {headflags:#x}; `ld`'s "
+              f"are {ref_flags:#x} for the same shape")
+        if "__DATA_CONST" in ref_segments:
+            check(segments["__DATA_CONST"]["segflags"]
+                  == ref_segments["__DATA_CONST"]["segflags"],
+                  f"__DATA_CONST segflags are "
+                  f"{segments['__DATA_CONST']['segflags']:#x}; `ld`'s are "
+                  f"{ref_segments['__DATA_CONST']['segflags']:#x}")
+
+
 TESTS = [
     ("every unordered pair of segments is visited exactly once",
      test_segment_pairs_are_covered_exactly_once),
@@ -2350,6 +2477,8 @@ TESTS = [
      test_the_library_admits_no_hole),
     ("a receiver write-back is not a returned frame",
      test_a_receiver_writeback_is_not_a_returned_frame),
+    ("the dylib's mach header flags and stub/GOT metadata match ld",
+     test_the_dylib_header_and_stub_metadata_match_ld),
 ]
 
 

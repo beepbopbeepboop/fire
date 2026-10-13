@@ -24,13 +24,14 @@ one row from green: `wdiff` refuses in the loop contract because the stack-floor
 guard's `getrlimit` (`bfeec991`, every arm64 prologue) was counted as a program
 call and became the theorem's halt boundary, and because the arm64 half of
 `38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
-by a merge. Both are fixed: the read moved to the startup stub
-(`arm64_codegen.py::_emit_stack_floor_init`) and `_emit_trap_flush` is restored,
-pinned by
+by a merge. Both were fixed on 2026-10-07: `806e72cb` moved the `RLIMIT_STACK`
+read into the startup stub (`arm64_codegen.py::_emit_stack_floor_init`, below
+`func_offset`, where no path tree walks it) and restored `_emit_trap_flush`,
+and `70b76755` finished the move; the read's new home is pinned by
 `test_formal_call_proof_gen.py::TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`.
-So "all twelve generate" below was true of the ten recursive examples and false
-of `wdiff` at the time of that measurement; `sum_range` refuses by design (the
-signed-loop contract, its `REFUSED` row).
+The class is green now. So "all twelve generate" below was true of the ten
+recursive examples and false of `wdiff` at the time of that measurement;
+`sum_range` refuses by design (the signed-loop contract, its `REFUSED` row).
 
 **Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
 not this doc's fix that regressed.** The census this doc pins — "all twelve
