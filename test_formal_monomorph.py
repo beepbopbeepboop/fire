@@ -292,11 +292,15 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
     Pair` then `Pair[Int]()`, one instantiation, two fields, and CPython's
     `PAIR_CPYTHON`/`PAIR_CPYTHON_MAIN` reference run at test time.
 
-    **The remedy is the NON-aliased spelling, and that is measured rather than
-    assumed**: `from pairlib import Pair as P` then `P[Int]()` is still refused
-    on this tree (the demand walk reads `P` where the template is `Pair`), so
-    the message names the module's own name and says so. This row is what
-    makes that claim worth making.
+    **The remedy is the NON-aliased spelling, and it is the remedy for the
+    DOTTED spelling's own reader.** The dotted refusal tells the reader to bind
+    the template by the module's own name rather than through the module alias
+    `L`, because a module alias is not resolvable on this path at all. The NAME
+    alias (`from pairlib import Pair as P`, then `P[Int]()`) is a different
+    construct and it now LOWERS — pinned by
+    `test_an_aliased_import_of_a_template_is_instantiated` below, which is the
+    fix §2's 2026-10-05 measurement asked for. This row is what makes the
+    dotted message's claim worth making.
     """
     bare = PAIR_PROG.replace("import pairlib", "from pairlib import Pair")
     for arch in ARCHES:
@@ -307,6 +311,38 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
               f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
               f"not the three answers this case is about — so the message is "
               f"recommending a spelling nothing checks")
+
+
+def test_an_aliased_import_of_a_template_is_instantiated(tmpdir):
+    """`from pairlib import Pair as P` then `P[Int]()` builds, on both arches.
+
+    §2's aliased half, and it was the SAME program as the row above spelled with
+    one `as`. The demand walk keyed each demand on the name AS SPELLED, so
+    `P[Int]()` asked for a template called `P` that no module declares: the
+    instantiation was never requested, the library published nothing under it,
+    and the call was refused by the bracketed-callee scan. The fix maps the
+    bracket's base through the import table (`formal/monomorph.py`'s
+    `_import_aliases`) in BOTH readers that have to agree about it — the demand
+    walk and the call-site rewrite — so the instantiation is asked for under
+    `Pair` and the call site is rewritten to the mangled name.
+
+    The program is the FULL differential, not a narrowed one: two `T`s, two
+    instantiations (`Int` and `Bool`), a field write, a field read and a method
+    call, all through the alias. That is deliberate — the failure this must not
+    have is the alias binding a DIFFERENT body than the module's own name
+    would, which only two instantiations can show.
+    """
+    aliased = (PAIR_PROG
+               .replace("from pairlib import Pair", "from pairlib import Pair as P")
+               .replace("Pair[", "P["))
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, aliased,
+                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
+        check(got == "7\n1\n3\n",
+              f"[{arch}] the aliased application printed {got!r}, not CPython's "
+              f"three answers — so `P[Int]()` bound something other than "
+              f"`Pair[Int]`")
 
 
 # ── behavioural: the boundary symbols ───────────────────────────────────────
@@ -2998,6 +3034,8 @@ TESTS = [
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
+    ("an aliased import of a template is instantiated",
+     test_an_aliased_import_of_a_template_is_instantiated),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library that applies another module's template instantiation",

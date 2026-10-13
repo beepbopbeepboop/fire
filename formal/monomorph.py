@@ -634,9 +634,47 @@ def _display_text(expr, values) -> str:
     return f"({body}{',' if len(items) == 1 else ''})"
 
 
+def _import_aliases(stmts) -> dict:
+    """`{local name: defining name}` for this file's `from m import X as Y`.
+
+    A bracketed callee is keyed on the name the source SPELLS, while the demand
+    it makes and the definition it binds are keyed on the name the DEFINING
+    module publishes.  For `from pairlib import Pair as P` those differ, so
+    `P[Int]()` was a demand for a template called `P` — which no module
+    declares — and the instantiation was silently never asked for.  The
+    mapping is `model.import_bindings`' third element, which
+    `formal/imports.py::imported_bindings` has reported since it was written;
+    this is the same fact read for the demand walk and the call-site rewrite.
+
+    Only a `from … import … as …`, and only when the two names differ.  A
+    module alias (`import m as n`) binds a MODULE, not a name a bracket can
+    instantiate, and a plain `from m import X` already spells `X`.
+    """
+    from formal import model as M                  # lazy — cycle
+    out: dict = {}
+    for st in stmts or ():
+        if type(st).__name__ != "FromImportStmt":
+            continue
+        for bound, _module, defining in M.import_bindings(st):
+            if defining and bound and defining != bound:
+                out[bound] = defining
+    return out
+
+
 def all_instantiation_calls(consumer_src: str) -> dict:
     """`{base name: sorted([(type arg, …), …])}` — every bracketed callee in
     `consumer_src` whose bracket spells concrete TYPE arguments.
+
+    **The base is the DEFINING name, not the spelling.**  An aliased import
+    (`from pairlib import Pair as P`, then `P[Int]()`) is a demand for
+    `pairlib`'s `Pair[Int]` and not for a template called `P`, which is what
+    the name as written asked before `_import_aliases` was folded in here.
+    Without the mapping the demand was silently dropped — the consumer's
+    bracketed call produced no instantiation, so the module published nothing
+    and the call was refused — while the very same program spelled with the
+    module's own name built and ran.  The mapping is a fact about ONE source
+    text, so it belongs in this per-source walk rather than at either call
+    site.
 
     Unfiltered: it does not know which module declares what, because that is a
     question about the import closure and this is a question about ONE source.
@@ -669,6 +707,7 @@ def all_instantiation_calls(consumer_src: str) -> dict:
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
         module_level = set(M.collect_module_symbols(stmts) or {})
+        aliases = _import_aliases(stmts)
         found: dict = {}
         for st in stmts:
             values = _names_bound_in(st) \
@@ -679,6 +718,7 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                 base = _callee_base(node)
                 if base is None:
                     continue
+                base = aliases.get(base, base)
                 args = _bracket_type_args(node.func, values)
                 if args:
                     found.setdefault(base, set()).add(tuple(args))
@@ -932,6 +972,7 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
+    aliases = _import_aliases(stmts)
     n = 0
     for st in stmts:
         if isinstance(st, F.FunctionDef):
@@ -944,7 +985,7 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
         for node in M.iter_nodes(st):
             if isinstance(node, F.MemberExpr) \
                     and isinstance(node.obj, F.IdentExpr):
-                mangled = uniq.get(node.obj.name)
+                mangled = uniq.get(aliases.get(node.obj.name, node.obj.name))
                 if mangled is None or node.obj.name in shadowed:
                     continue
                 node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
@@ -956,6 +997,7 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             base = _callee_base(node)
             if base is None:
                 continue
+            base = aliases.get(base, base)
             args = tuple(_bracket_type_args(node.func, values))
             mangled = demap.get((base, args))
             if mangled is None:

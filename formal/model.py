@@ -7064,16 +7064,17 @@ def dotted_specialization_refusal(name: str) -> str:
     `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
     the ABI decision it needs.
 
-    **The remedy is the one spelling measured to work, and nothing else is
-    claimed.** `from pairlib import Pair` — the module's OWN name — then
-    `Pair[Int]()`, which builds, runs and answers CPython on both architectures
-    (`test_formal_monomorph.py`'s two rows here). The ALIASED form is NOT
-    claimed: `from pairlib import Pair as P` then `P[Int]()` was measured on
-    this tree and is refused with `specialization_call_refusal`, because the
-    demand walk reads `P` where the template is `Pair` and a struct template's
-    instantiation is emitted under the mangled name. §2 of the doc says the
-    alias "maps back" for a FUNCTION template's demand; it is not true of this
-    one, so the message does not say it.
+    **The remedy is the one spelling measured to work, and the claim is now
+    narrower than it was.** `from pairlib import Pair` — the module's OWN name —
+    then `Pair[Int]()`, which builds, runs and answers CPython on both
+    architectures (`test_formal_monomorph.py`'s rows here). The NAME-aliased
+    form (`from pairlib import Pair as P`, then `P[Int]()`) ALSO lowers now,
+    because the demand walk maps the bracket's base through the import table
+    (`formal/monomorph.py::_import_aliases`) — that is a separate construct
+    from the MODULE alias this function is about, and the message's "ALIASED
+    form" clause is about the module alias (`import … as L`, then reaching
+    `Pair` through `L`), which is still refused because a module alias is not
+    resolvable on this path at all. §2 of the doc records both halves.
     """
     module, _, leaf = name.rpartition(".")
     return (
