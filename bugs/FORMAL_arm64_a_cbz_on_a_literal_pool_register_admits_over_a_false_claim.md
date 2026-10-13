@@ -21,6 +21,37 @@ through `st.mem` and not through `code`, and the word there is one the PROGRAM
 writes (the first caller stores `SP - BUDGET`), so relating it to the image
 would be false. §"What was measured, and where" is still right about the census.
 
+**Status, 2026-10-13 (re-measured on `master`): the residual STANDS and the
+INSTRUCTION and the OPERATOR it is stated in have moved.** `806e72cb`/`70b76755`
+moved the stack-floor guard's `RLIMIT_STACK` read into the startup stub
+(`_emit_stack_floor_init`, below `func_offset`), so the guard that a proof walk
+meets is no longer `… ; LDR X16, [X17] ; CBNZ X16, done`.  It is now
+
+    ADRP+ADD X17, &floor ; LDR X16, [X17] ; ADD X17, SP, #0 ; CMP X17, X16 ;
+    B.HS ok ; <trap …>
+
+— a `B.cond` and not a `CBNZ`, with the `CBNZ` cache test moved to the stub.
+The branch still admits, and its residual is an ORDER rather than a zero test:
+
+    ⊢ st.sp - 32 <
+        mem_read_u64
+          (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64
+              st.mem (st.sp - 16).toNat st.x29) (st.sp - 8).toNat st.x30)
+              (st.sp - 32).toNat st.x19) (st.sp - 24).toNat st.x20)
+          4299161608
+
+Measured generation-only on this tree (no Lean rebuild; `count`, arm64):
+`cfg_leaf_census` is **4** `runs-cbz-condition`, not the six the table below
+records — `walk-terminal` 4, `runs-ret-x0`/`-x30`/`-frame-ok-window` 2 each,
+`runs-bl-step` 1 — and exactly **two** of the four admit, at proof lines 4466
+and 4592 of the fallback-stripped file, each with the residual above.
+`count` still FAILS its proof on this tree, and `st.mem` is still unconstrained
+by the contract, so the obligation is still FALSE for an arbitrary `Arm64State`;
+the diagnosis the Status above reaches (a memory HYPOTHESIS, §"The next step")
+is unchanged, and this section corrects only the INSTRUCTION, the OPERATOR and
+the census count the doc names — the `CBNZ`-in-the-prologue subject is gone from
+the walked path.
+
 **What landed.** `emit_runs`' `cbz` arm now peels the frame stores off the
 tested register's load before the leaf
 (`mem_read_after_write_u64` / `mem_read_after_write_u64_ne`, `decide` as the
