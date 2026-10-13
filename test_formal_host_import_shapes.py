@@ -325,13 +325,21 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         register, frame slot or `__DATA` word for it".
 
         `importlib.util` is the same capability reached one step in:
-        `importlib.util.spec_from_file_location(path)` and
-        `module_from_spec(spec)` load a module BY PATH, so the row is a
-        `FIELD` read of a module-level name rather than a `DEAD` one. An
-        earlier version of this test asserted `DEAD` for both and was wrong,
+        `importlib.util.spec_from_file_location(path)`,
+        `module_from_spec(spec)` and `find_spec` name a module BY PATH, so the
+        row is a `FIELD` read of a module-level name rather than a `DEAD` one.
+        An earlier version of this test asserted `DEAD` for both and was wrong,
         because the reader it was checking had `import a.b` binding `a.b` — a
         false `DEAD` about a live file, which is the one answer this tool must
         never give.
+
+        The set is THREE names, not two: `find_spec` arrived when
+        `test_formal_imports.py` started asking CPython's own `find_spec` which
+        stdlib modules are unreachable (its
+        `test_the_find_spec_decided_names_are_unreachable`). It is the same
+        capability one step earlier — find the spec, then build the module from
+        it — so the row is blocked on the whole path-loading API, which is the
+        claim this case exists to make.
         """
         builtins = next((r for r in self.rows if r["name"] == "builtins"), None)
         if builtins is None:
@@ -347,12 +355,15 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         self.assertTrue(loader["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(loader["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is blocked on two names, and "
-                         "they are the two that load a module by PATH — an "
-                         "embedded CPython, which is why the row is tiered "
-                         "`unreachable` and not `modelled`")
+                         "the importlib.util row is blocked on three names, and "
+                         "they are the path-loading API of a module reached BY "
+                         "PATH (`find_spec`, `module_from_spec`, "
+                         "`spec_from_file_location`) — an embedded CPython, "
+                         "which is why the row is tiered `unreachable` and not "
+                         "`modelled`")
 
     def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
         """`--dead` is the set the ranking CANNOT see, so its ratchet is the
