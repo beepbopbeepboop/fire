@@ -594,9 +594,13 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
     shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    half a megabyte each.
+
+    The whole stdlib build's `mojostdlib_*` workdir is the third instance of the
+    same shape and is asserted below with ONE module: `build()` creates the
+    directory unconditionally at entry, so the leak is a property of the
+    function and not of how many modules it is handed — a one-module cold build
+    is enough to observe it and costs a fraction of the full 249-module build.
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
@@ -617,6 +621,33 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
               str(left))
+
+    # The stdlib build's own work directory, the third instance of the shape and
+    # the largest of the three. `build()` is per COLD cas and creates
+    # `mojostdlib_*` at entry regardless of module count, so one module shows
+    # it. A `finally` on the build's body is the fix; before it the directory
+    # held the reflection table's C and object, every module object and the
+    # staged dylib for the life of the machine (~324 kB for just this module,
+    # tens to hundreds of MB for the full build).
+    home = tempfile.mkdtemp(prefix='rtstage_home_')
+    tmp = tempfile.mkdtemp(prefix='rtstage_tmp_')
+    env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+    code = ('import os\n'
+            'from build_stdlib_dylib import build, stdlib_modules\n'
+            "m = min(stdlib_modules(), key=os.path.getsize)\n"
+            f"build([m], {os.path.join(tmp, 'out', 'x.dylib')!r},\n"
+            "      use_cache=False, link_runtime=False, jobs=1,\n"
+            "      track_local_deps=False, arch='arm64')\n")
+    proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                          capture_output=True, text=True)
+    check(proc.returncode == 0,
+          'a cold one-module stdlib build succeeds',
+          (proc.stderr or proc.stdout)[-400:])
+    left = sorted(os.path.basename(p)
+                  for p in glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+    check(not left,
+          'no `mojostdlib_*` work directory is left behind in $TMPDIR',
+          str(left))
 
 
 # ── 5. the audit still fires ────────────────────────────────────────────────
