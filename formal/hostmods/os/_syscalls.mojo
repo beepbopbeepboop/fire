@@ -1238,8 +1238,33 @@ def le16(b: Pointer[UInt8], i) -> int:
 
 
 def le32(b: Pointer[UInt8], i) -> int:
-    """The little-endian 32-bit field at byte `i` of `b`."""
+    """The little-endian 32-bit field at byte `i` of `b`.
+
+    UNSIGNED: `0xa8fb1a80` reads as `2835028608`. `le32s` below is the same
+    four bytes with the SIGN, for the fields whose high bit is part of the
+    value.
+    """
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
+
+
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` one extension wider, and the extension is the whole difference: the
+    same four bytes, sign-extended into the 64-bit word this path's `int` is.
+    `b = a8 fb 1a 80` is `-1459938688` here and `2835028608` there.
+
+    Its one caller is `fs_stat_field32s`, because `st_dev` is a `dev_t` -- a
+    signed 32-bit field whose high bit is part of the device number. The width
+    readers above it are the untrusted BYTES of a `stat` buffer, so this is the
+    one place either spelling can be tested without a filesystem whose `/dev`
+    happens to have the high bit set
+    (`test_formal_os_backing.py`'s `stat_field32_signed`).
+    """
+    var v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
 
 
 def le64(b: Pointer[UInt8], i) -> int:
@@ -1598,11 +1623,37 @@ def fs_stat_field32(p, follow, at) -> int:
     `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
     and reading it as 64 would take the four bytes of padding after it, so the
     width is the field's and not the alignment's.
+
+    UNSIGNED, which is right for the uid and gid it serves and NOT for `st_dev`
+    (see `fs_stat_field32s` below, the one reader that differs).
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `fs_stat_field32` one extension wider, and the extension is the whole
+    difference: `st_dev` is a `dev_t`, which is a SIGNED 32-bit field in this
+    layout, and its high bit is part of the device number. `/dev/null`'s is
+    `0xa8fb1a80`, so a zero-extending read reports `2835028608` where the field
+    says `-1459938688`; both have the same 32 bits and only the extension tells
+    them apart. `le32s` is the reader, so the extension has one home.
+
+    Measured against CPython, which reports the same 64-bit BITS for
+    `os.stat("/dev/null").st_dev` (`0xffffffffa8fb1a80`; it renders them
+    unsigned, `18446744072249612928`, where this returns the signed
+    `-1459938688`). Pinned by `test_formal_os_backing.py`'s `stat_null` and by
+    `stat_field32_signed`, which pins the reader on bytes rather than on a
+    filesystem whose `st_dev` happens to have its high bit set.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:

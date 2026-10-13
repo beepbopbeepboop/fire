@@ -271,6 +271,37 @@ def main(n):
     {"a": "5", "b": "6", "c": "0"},
 ))
 
+# `st_dev` is a signed `dev_t`, and a device number whose high bit is set is
+# NEGATIVE: CPython sign-extends it into the 64-bit word it returns, and the
+# module must read it the same way. This is the reader that does that, pinned on
+# BYTES rather than through a `/dev/null` whose `st_dev` happens to have its high
+# bit set -- the machine-INDEPENDENT half of the `stat_null` pin. `0xa8fb1a80` is
+# `-1459938688`; the second record is the high-bit-CLEAR control, so a reader
+# that simply negated everything would fail one half rather than pass on the
+# sign being right by accident.
+CASES.append(Case(
+    "stat_field32_signed",
+    '''\
+from os._syscalls import le32s
+
+
+def main(n):
+    var b: Pointer[UInt8] = malloc(8)
+    b[0] = 128
+    b[1] = 26
+    b[2] = 251
+    b[3] = 168
+    printf("neg=%d@@", le32s(b, 0))
+    b[0] = 14
+    b[1] = 0
+    b[2] = 0
+    b[3] = 1
+    printf("pos=%d@@", le32s(b, 0))
+    return 0
+''',
+    {"neg": "-1459938688", "pos": "16777230"},
+))
+
 # `p[i]` and `p.value()` are the same question, so they must give the same
 # answer. Measured before the route existed, they did not: `p[0]` on a
 # `Pointer[UInt8]` was -1879048144 and `p.value()` was 97.
@@ -768,6 +799,17 @@ def _stat_oracle(p):
     -1/`0` rather than raising, because this path has no exception to raise and
     a case that raised would be testing CPython's error handling rather than the
     module.
+
+    `st_dev` is the ONE field that is NORMALIZED rather than used as CPython
+    hands it over, and the normalization is the signedness of the field. It is a
+    `dev_t` — a signed 32-bit field whose high bit is part of the number — and
+    CPython reports the sign-extended 64-bit word read as unsigned, so
+    `/dev/null`'s reads `18446744072249612928` (`0xffffffffa8fb1a80`) where the
+    field says `-1459938688`. The target holds it as a signed `Int` and prints
+    it with `%d`, so the comparison has to be against the signed value of the
+    same bits, or the two disagree on exactly the machine whose `st_dev` has its
+    high bit set. `stat_dev` sign-extends the field for exactly this reason; a
+    zero-extending read was the defect this normalization pins.
     """
     out = {}
     out["pred"] = "isfile=%d isdir=%d islink=%d lexists=%d exists=%d" % (
@@ -786,11 +828,18 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def dev_field(st):
+        """`st_dev` as the signed 32-bit field the target holds, or -1."""
+        if st is None:
+            return -1
+        v = st.st_dev & 0xFFFFFFFF
+        return v - 2 ** 32 if v >= 2 ** 31 else v
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"), dev_field(s),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
