@@ -1547,6 +1547,33 @@ def _without_own_template_bodies(source_path: str, stmts: list) -> list:
     return MM.without_template_bodies(stmts, source)
 
 
+def _declared_struct_templates(source_path: str) -> set:
+    """The generic STRUCT templates `source_path` declares, by name.
+
+    Read from the SOURCE, because it is the only place these names survive: a
+    `struct Tagged[T, origin: Int]` is dropped from the statements the build
+    compiles (`_without_own_template_bodies` above), so by the time
+    `check_module_symbols` asks its multi-index question neither `callee_defs`
+    (a function table) nor the instantiated `structs` table names it.  The
+    consequence of not having them was a FALSE diagnosis: `Tagged[Int, 0]` was
+    refused as "a subscript whose index is a tuple", a container lookup that
+    never happens — the construct is a compile-time parameter list, and
+    `subscript_index_is_a_comptime_parameter_list` says so for every other name
+    this module declares.
+
+    A set, because the caller only ever asks membership.  `set()` on a file this
+    process cannot re-read, which is the same answer `_without_own_template_bodies`
+    gives and for the same reason.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    try:
+        with open(source_path) as f:
+            source = f.read()
+    except OSError:
+        return set()
+    return set(MM.template_struct_names(source))
+
+
 def _imported_structs(source_path: str, stmts: list, arch: str,
                       linked: list = None) -> list:
     """Struct declarations from the modules this file imports, or [].
@@ -2068,7 +2095,9 @@ def compile_formal(source_path: str, output: str = None,
                                 if d["install_name"] not in _have]
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if import_dylibs else None,
-                         _line)
+                         _line,
+                         declared_struct_templates=_declared_struct_templates(
+                             source_path))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -2824,7 +2853,9 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
         # imports, and `check_imported_frame_handoffs` is what decides that.
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if link_dylibs else None,
-                         link_manifests or [])
+                         link_manifests or [],
+                         declared_struct_templates=_declared_struct_templates(
+                             source_path))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
@@ -2860,7 +2891,8 @@ def _own_structs(structs) -> list:
 
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
-                     imported_module_names, link_line=None) -> None:
+                     imported_module_names, link_line=None,
+                     declared_struct_templates=None) -> None:
     """Publish this unit's module-level tables, then run every late check.
 
     ONE function for the two front ends, and the reason is a measured drift
@@ -3010,7 +3042,8 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_module_symbols(functions, by_name,
                          imported_module_names=imported_module_names,
                          link_line=link_line,
-                         import_aliases=_import_aliases(stmts))
+                         import_aliases=_import_aliases(stmts),
+                         declared_struct_templates=declared_struct_templates)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -14818,7 +14851,8 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
                                      rule=rule, declared=declared)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
-                         import_aliases: dict = None) -> None:
+                         import_aliases: dict = None,
+                         declared_struct_templates=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -14873,8 +14907,28 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     `dylib_extern_symbol`'s own device for a dotted call). Omitted it prints
     nothing rather than guessing, and the refusal is unchanged otherwise — so
     a caller that passes only the first three arguments keeps every verdict it
-    had."""
+    had.
+
+    `declared_struct_templates` is this module's OWN generic struct template
+    names, and it is consulted for exactly ONE question: whether a multi-element
+    bracket list is a compile-time parameter list rather than a tuple index.
+    Those names are absent from `structs_by_name` because a template is DROPPED
+    from the image before this runs (`formal/build.py::_declared_struct_templates`
+    has the measurement), so without them `Tagged[Int, 0]` was refused as "a
+    subscript whose index is a tuple" — false about the source. Omitted, the
+    classifier keeps today's answer."""
     struct_names = set(structs_by_name or {})
+    # The table `multi_index_refusal_for` classifies a bracket list against,
+    # WIDENED by this module's own generic struct templates. A value of `None`
+    # is enough: the reader only asks membership (`name in structs_by_name`), so
+    # the widened table says "this name is a TYPE this module declares" and
+    # nothing else. Deliberately a SEPARATE table from `struct_names` above: a
+    # declared template has no layout and must not reach a check that lays one
+    # out, and `classifier_structs` is used at the two multi-index call sites
+    # only.
+    classifier_structs = dict(structs_by_name or {})
+    for _declared in (declared_struct_templates or ()):
+        classifier_structs.setdefault(_declared, None)
     # A read-before-store hit per function, raised after the loop: see the
     # ordering note where they are raised.
     #
@@ -15486,7 +15540,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     and id(sub) not in type_positions:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
-                                                structs_by_name)
+                                                classifier_structs)
                 if why is None and M.is_external_call_template(sub) \
                         and id(sub) not in xc_callees:
                     # A well-formed template that is not a call's callee: a
@@ -15510,7 +15564,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         if why is None:
                             why = M.multi_index_refusal_for(
                                 outer, False, _callee_defs(functions),
-                                structs_by_name)
+                                classifier_structs)
                         break
             if why is None and isinstance(sub, F.SubscriptExpr) \
                     and id(root_ident) in bracket_callee_roots:

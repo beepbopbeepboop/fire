@@ -2236,6 +2236,137 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
               f"elements are 1, 7 and 4 over a base of 10")
 
 
+# ── a comptime VALUE argument on a STRUCT template ─────────────────────────
+#
+# `Tagged[Int, 7]` names a TYPE and a comptime VALUE.  The demand walk never read
+# the second element (a bare literal is not a type spelling, `type_arg_text`'s
+# answer by design), so the bracket was dropped, the call site kept it, and the
+# construct was refused as a compile-time explicit-parameter list — §2 row 4 of
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`.  The
+# substitution itself already worked (`monomorphize.monomorphize_source`
+# substitutes a value as readily as a type), so two things were missing: the
+# READ of the literal and the GATE that keeps it out of a TYPE parameter's
+# position (`Pair[2]` on `struct Pair[T]` substituted `2` into the type and
+# BUILT).  `origin` is READ in the body, so a value substituted into the wrong
+# position answers a different number rather than merely failing to build.
+
+TAGGED_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+    def get(self) -> Int:
+        return origin
+"""
+
+# The one-file twin: the template and its application in ONE file, which reaches
+# the instantiation through `_own_instantiations` rather than through a library.
+TAGGED_SELF_PROG = TAGGED_LIB + """
+def main():
+    var a = Tagged[Int, 7]()
+    var b = Tagged[Bool, 4]()
+    print(a.get())
+    print(b.get())
+"""
+
+# The IMPORTED twin: `Tagged` is declared in the library and applied here.  The
+# two halves need the same READ through different routes (`own_demands` for the
+# one-file case, `instantiation_demands` for the library's closure).
+TAGGED_PROG = """\
+from taggedlib import Tagged
+
+def main():
+    var a = Tagged[Int, 7]()
+    var b = Tagged[Bool, 4]()
+    print(a.get())
+    print(b.get())
+"""
+
+# Python has no comptime parameter, so the twin states the same program with the
+# value bound — the same computation, not a simulation of the lowering.
+TAGGED_CPYTHON = """\
+def main():
+    print(7)
+    print(4)
+"""
+
+
+def test_a_struct_templates_comptime_value_argument_instantiates(tmpdir):
+    """A struct template applied with a literal comptime value builds and RUNS.
+
+    Both routes, because they read the bracket in different places: the
+    one-file case goes through `own_demands`, the imported one through
+    `instantiation_demands`.  A fix that answered only one would leave the other
+    refused, which is why both are here rather than one plus an argument that
+    the other is the same.
+    """
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_self_val", None,
+                            TAGGED_SELF_PROG, TAGGED_CPYTHON)
+        check(got == "7\n4\n",
+              f"[{arch}] one file printed {got!r}; each value-parameter "
+              f"instantiation must read its own `origin`")
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_imp_val", TAGGED_LIB,
+                            TAGGED_PROG, TAGGED_CPYTHON,
+                            libname="taggedlib.mojo")
+        check(got == "7\n4\n",
+              f"[{arch}] imported printed {got!r}; a library's value-parameter "
+              f"instantiation must read its own `origin` too")
+
+
+def test_a_literal_in_a_type_parameters_position_is_not_a_demand(_tmpdir):
+    """The GATE, as a pure function of the source: `Pair[2]` on `struct Pair[T]`.
+
+    Without the gate this is not a refusal but a wrong-but-exit-0 image: the
+    literal substituted into the TYPE parameter left `var first: 2`, which this
+    backend accepts and runs (measured).  A literal on a type parameter is
+    therefore DROPPED — not a demand at all — so the call site keeps its
+    brackets and is refused with a sentence about the construct.
+    """
+    from formal import monomorph as MM
+    pair = ("struct Pair[T]:\n"
+            "    var first: T\n"
+            "\n"
+            "def main():\n"
+            "    var p = Pair[2]()\n"
+            "    return p.first\n")
+    made, failed = MM.instantiate_all(pair, MM.own_demands(pair))
+    check(not made and not failed,
+          f"a literal on a one-TYPE-parameter struct was instantiated "
+          f"({made!r}) or reported as a failed demand ({failed!r}); it is not a "
+          f"demand at all, and the call site must keep its brackets to be "
+          f"refused with the sentence about the construct")
+
+
+def test_a_literal_on_a_type_parameter_is_refused_as_the_construct(tmpdir):
+    """`Tagged[0, 5]` — a value in the TYPE slot — names the CONSTRUCT, not a tuple.
+
+    The multi-element bracket on a name this module declares as a generic struct
+    template is a compile-time parameter list.  A struct template is DROPPED
+    from the image before the placement check runs, so without the source-read
+    table the classifier could not see it and reported "a subscript whose index
+    is a tuple" — a container lookup that never happens, false about the source.
+    """
+    src = ("struct Tagged[T, origin: Int]:\n"
+           "    var v: T\n"
+           "\n"
+           "def main():\n"
+           "    var b = Tagged[0, 5]()\n"
+           "    print(b.v)\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_bad_lit", None, src, "",
+                             expect_ok=False)
+        check("compile-time explicit-parameter list" in text,
+              f"[{arch}] refused with {text.strip()[-400:]!r}, and a value in "
+              f"the TYPE slot must be refused as the compile-time parameter "
+              f"list it is")
+        check("whose index is a tuple" not in text,
+              f"[{arch}] still reports the false tuple-index sentence: "
+              f"{text.strip()[-400:]!r}")
+
+
 # ── the artifact's identity ─────────────────────────────────────────────────
 
 
@@ -3034,6 +3165,13 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a struct template's comptime value argument instantiates (own and "
+     "imported)",
+     test_a_struct_templates_comptime_value_argument_instantiates),
+    ("a literal in a type parameter's position is not a demand",
+     test_a_literal_in_a_type_parameters_position_is_not_a_demand),
+    ("a literal on a type parameter is refused as the construct",
+     test_a_literal_on_a_type_parameter_is_refused_as_the_construct),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",

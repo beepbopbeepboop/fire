@@ -2102,7 +2102,19 @@ def instantiation_demands(module_path: str, consumer_src: str,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     found = MM.all_instantiation_calls(consumer_src)
-    if not found:
+    # The literal half of the demand set, read ONCE for every module
+    # (`_DERIVED_FROM_SOURCE` memoises it on the source text, so this is a
+    # second walk of the same parse).  It is asked only about a STRUCT
+    # template's bracket (`template_struct_names`), and only for a name the
+    # consumer actually applies with a bracket — a bare literal on a FUNCTION
+    # template is the local specialisation machinery's (`tile[2, 3](…)`), and
+    # demanding a boundary symbol for it would publish a second body.  The
+    # legality of the literal against the declaration is `MM.instantiate_all`'s
+    # gate, not this reader's.  It is computed even when `found` is empty,
+    # because a struct applied with a comptime value may be the consumer's ONLY
+    # bracket (`Tagged[Int, 0]`), which the type-only walk cannot see.
+    found_lit = MM.all_instantiation_calls(consumer_src, literals=True)
+    if not found and not found_lit:
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2110,9 +2122,21 @@ def instantiation_demands(module_path: str, consumer_src: str,
         templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
     for p, names in templates.items():
-        got = MM.demands_from_calls(found, names, own=own_templates
-                                    if os.path.abspath(p) ==
-                                    os.path.abspath(module_path) else ())
+        own = (own_templates if os.path.abspath(p) ==
+               os.path.abspath(module_path) else ())
+        got = MM.demands_from_calls(found, names, own=own)
+        applied = [n for n in names if n in found_lit]
+        if applied:
+            src = module_source_text(p)
+            structs = set(MM.template_struct_names(src)) if src else set()
+            lit = MM.demands_from_calls(
+                found_lit, [n for n in applied if n in structs], own=own)
+            for n, args in lit.items():
+                seen = {tuple(a) for a in got.get(n, ())}
+                for a in args:
+                    if tuple(a) not in seen:
+                        got.setdefault(n, []).append(a)
+                        seen.add(tuple(a))
         if got:
             out[p] = got
     return out
