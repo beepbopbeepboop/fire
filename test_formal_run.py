@@ -1135,12 +1135,17 @@ CASES = [
      "    printf(\"len=%d %d\", b.length, c.length)\n"
      "    return 0\n", 0, "len=3 4"),
     # The comptime-over-a-variadic-parameter refusal this row once pinned is
-    # unreachable: constructing the variadic struct trips the TUPLE-INDEX
-    # refusal first (staged 2026-10-06: with any actual use of `Pair[Int, 7,
-    # 8, 9]` in main, both architectures refuse at the subscript, measured).
-    # With no use it builds and proves nothing either way. The row now pins
-    # the refusal that actually stands in front of the variadic comptime.
-    ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal",
+    # no longer even behind the tuple-index refusal: staged 2026-10-06, with
+    # any actual use of `Pair[Int, 7, 8, 9]` in main, both architectures
+    # refused at the subscript, and this row pinned that refusal as the one
+    # standing in front of the variadic comptime. The value-parameter work
+    # (`work/formal183-docs`, merged 2026-10-13: a bare literal is a spelling
+    # when the DECLARATION says the position is a value) lowered the variadic
+    # construction itself, so the row now pins what is behind it: the
+    # construction builds on both backends and `len(Self.values)` answers the
+    # TRUE count per instantiation (measured 2026-10-13: 1 value -> 1, 2 -> 2,
+    # 3 -> 3, CPython's answer in each case).
+    ("comptime_binding_reading_a_variadic_parameter_answers_the_true_count",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
      "\n"
@@ -1150,8 +1155,7 @@ CASES = [
      "def main(n):\n"
      "    var p = Pair[Int, 7, 8, 9]()\n"
      "    printf(\"len=%d\", p.size())\n"
-     "    return 0\n",
-     "refuse:a subscript whose index is a tuple", None),
+     "    return 0\n", 0, "len=3"),
     # …and the CONTROL. The bare `Box.length`-from-a-free-function spelling
     # this row used no longer builds — it is refused by the no-home family
     # (measured 2026-10-06 on both architectures), so the control now reads
@@ -25459,7 +25463,17 @@ def main():
                       # address 0 inside the dylib (the row is host-only and no
                       # gate ran it on x86).  It is checked on BOTH backends so
                       # the pin is on the machine the defect was measured on.
-                      | {"fd_write_on_an_open_result_writes"}) - {
+                      | {"fd_write_on_an_open_result_writes"}
+                      # `comptime_binding_reading_a_variadic_parameter_
+                      # answers_the_true_count` used to be a `refuse:` row (the
+                      # tuple-index refusal that stood in front of the
+                      # variadic comptime), and a `refuse:` row is checked on
+                      # both backends by construction. Its forward state — the
+                      # construction answers the true count — must keep the
+                      # same two-backend strength rather than quietly drop to
+                      # the host.
+                      | {"comptime_binding_reading_a_variadic_parameter_"
+                         "answers_the_true_count"}) - {
         c[0] for c in PRINT_KWARG_CASES
         if isinstance(c[2], str) and c[2].startswith('refuse:')}
     selected = [c for c in everything

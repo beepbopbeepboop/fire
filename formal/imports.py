@@ -3746,6 +3746,16 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
     for _tmpl, _args in MM.own_demands(module_source_text(source_path)).items():
         mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
+    # …and the type arguments this module writes in a NON-CALL position, which
+    # `own_demands` cannot see: `var a: Box[Int] = Box(…)` states the
+    # instantiation in the annotation and leaves the construction bare.  The same
+    # table the executable path merges (`_own_instantiations`), and it belongs in
+    # `mine` for the same reason the call-site demands do — it changes what the
+    # library publishes, so it is part of the artifact's identity.
+    for _tmpl, _args in MM.own_annotation_demands(
+            module_source_text(source_path),
+            module_statements(source_path)).items():
+        mine[_tmpl] = sorted(set(mine.get(_tmpl, [])) | set(_args))
     dkey = MM.demands_key(mine)
     key = (arch, here, dkey)
     if key in _BUILT:
@@ -4330,6 +4340,17 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     wanted = MM.own_demands(consumer_src)
+    # …and the type arguments this file writes in a NON-CALL position: a
+    # `var x: Base[Int] = Base(…)` states the instantiation in the annotation and
+    # leaves the construction bare, and `own_demands` walks CALL sites only.  The
+    # STRUCT templates are the ones a construction can name; a FUNCTION template
+    # is answered by the local-specialisation machinery and must not be
+    # instantiated here.
+    for base, args in MM.own_annotation_demands(consumer_src, stmts).items():
+        entries = wanted.setdefault(base, [])
+        for a in args:
+            if a not in entries:
+                entries.append(a)
     if not wanted:
         return {}
     made, _failed = MM.instantiate_all(consumer_src, wanted)

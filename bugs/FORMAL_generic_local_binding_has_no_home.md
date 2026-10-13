@@ -4,7 +4,11 @@
 `work/formal94-docs`.** PARTIALLY FIXED 2026-10-07 (`work/formal134-docs`): the
 measured construct — a type parameter that is PHANTOM — now builds on both
 architectures; a type parameter that the body USES still needs argument
-inference and is the residual below.
+inference and is the residual below. PARTIALLY FIXED again 2026-10-08
+(`work/formal168-docs`): the ANNOTATED spelling of a used parameter is read as
+a demand and rewrites the bare construction (executable and across the dylib);
+what remains is the INFERRED spelling of a used parameter, which the inferrable
+doc owns. See the two Status sections below.
 
 ## Status 2026-10-07: the reproducer and its variants are FIXED; the residual is a USED type parameter
 
@@ -64,6 +68,48 @@ filter and the predicate, with a USED-parameter control), and end to end by
 `origin_of_in_a_local_type_annotation_is_still_a_type` row, which was
 re-pointed at the refusal while this was open and is an answer row again.
 
+## Status 2026-10-08 (`work/formal168-docs`): the ANNOTATED half of a USED type
+## parameter is FIXED; the INFERRED half of it is not
+
+A type argument in a local `VarDecl` annotation (`var m: Marker[Int] =
+Marker(b.a)`) is now read as a DEMAND and the bare construction on the right is
+rewritten to the mangled instantiation, so the annotated spelling binds `m`
+exactly as `Marker[Int](b.a)` does. It works in an executable and across a dylib
+boundary, both architectures. What landed:
+
+* `formal/monomorph.py::annotated_construction_demands` — the reader. An
+  annotation is a STRING on `VarDecl.type_ann`, so `all_instantiation_calls`
+  (which walks CALL sites) cannot see the bracket in it; this reads
+  `Base[…]` out of the annotation, requires the right-hand side to be a bare
+  `Base(…)`, and refuses to speak for an argument it cannot name exactly (a
+  nested application, or a name the scope binds as a value), which keeps the
+  refusal of a USED parameter's `Marker[origin_of(b)]` unchanged.
+* `formal/monomorph.py::own_annotation_demands` — the own-struct-template table,
+  merged into BOTH demand sets: `formal/imports.py::_own_instantiations` (the
+  executable path) and `build_module_dylib`'s `mine` (the library path, whose
+  own demand set is also the artifact's identity).
+* the annotation arm of `rewrite_instantiation_calls`, which rewrites the bare
+  construction the annotation demanded.
+
+Pinned by `test_formal_monomorph.py`'s `a type argument in a local annotation is
+a demand` (one file, two instantiations, CPython differential, both arches) and
+`a library with an annotated construction publishes it` (the dylib boundary,
+with the manifest assertion that the instantiation was published), plus
+`a bare local construction with no annotation is still refused`, which pins the
+boundary.
+
+**The INFERRED half of a USED parameter is unchanged and is not this doc's to
+close.** `var m = Marker(b.a)` with a used parameter and no bracket anywhere
+states no type argument, so no demand is invented and the refusal stands — the
+inference a bare call needs is the feature
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+names, and doing it here would bind an instantiation nobody wrote. (For a
+PHANTOM parameter the same spelling is no longer a refusal at all: the
+2026-10-07 section above keeps the declaration, and the 10-07 residual is a
+used-parameter statement only.) Between the two fixes the title's halves stand
+as: "annotated" DONE for both phantom and used parameters; "inferred" DONE for
+a phantom parameter, still open for a used parameter.
+
 ## The residual, and it is a different feature
 
 A type parameter the body USES — `struct Marker[T: AnyType]: var v: T` — with an
@@ -84,10 +130,17 @@ one — infer the type arguments from the construction's arguments and add the
 demand, then rewrite the call site, the way `demands`/`instantiate_all` already
 do for a bracketed call — and it is the same "argument type inference" the
 interpreter performs and the compiled path reaches through
-`elaborate.infer_struct_type_args`. **Not attempted here; no test pins it.**
+`elaborate.infer_struct_type_args`. **Not attempted in the 2026-10-07
+session; no test pins it there either.** Updated 2026-10-08
+(`work/formal168-docs`): the ANNOTATED spelling of this same shape is no
+longer residual — `var m: Marker[Int] = Marker(b.a)` with a used parameter is
+the fix in the Status section above, executable and across the dylib. What is
+left is exactly the inferred spelling, which is the feature
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+owns, and `test_formal_monomorph.py`'s `a bare local construction with no
+annotation is still refused` is the row that has to change when it lands.
 
 ## Original report
-
 
 ## What was run
 
@@ -143,17 +196,29 @@ difference; it is inference-vs-explicit on the generic.
 `Marker(b.a)` with the generic's argument inferred from the field's type should
 bind `m` the same way `Marker[Int](b.a)` does.
 
-## Next step (updated 2026-10-07 to the residual)
+## Next step (updated 2026-10-07 to the residual; 2026-10-13 to the merged tree)
 
-The phantom-parameter case is fixed; what is left is a USED type parameter with
-an inferred construction (`Marker[T]: var v: T` + `Marker(b.a)`), and the next
-step is the original one restricted to it: infer the type arguments from the
-construction's arguments and add the demand, then rewrite the call site, the way
-`formal/monomorph.py::demands`/`instantiate_all`/`rewrite_instantiation_calls`
-already do for a bracketed call. The compiled path already has the inference
-(`elaborate.infer_struct_type_args`), and the interpreter performs it; the
-formal side needs the arguments' types, which is the part this backend does not
-currently compute for a call argument. No row pins this residual yet — the
-phantom case that used to stand in for it is now pinned as an answer, so a
-regression to the dropped-declaration behaviour fails
-`test_formal_monomorph.py`'s `a phantom struct template is kept`.
+Both fixes that landed since the 10-07 measurement are now in: the phantom case
+(keep the declaration — 2026-10-07, work/formal134-docs) and the ANNOTATED
+spelling for a phantom or used parameter — the type argument WRITTEN in the
+variable's annotation (work/formal168-docs, 2026-10-08: the annotation's demand
+is recorded by `formal/monomorph.py::annotated_construction_demands` /
+`own_annotation_demands`, and the construction is then monomorphized,
+instantiated, and rewritten the way a bracketed call already is). What remains
+is exactly the INFERRED spelling of a USED type parameter — `Marker[T]: var v:
+T` + `Marker(b.a)`, or the equivalent `var m = Marker(b.a)` with no bracket
+anywhere — and the next step is the original one restricted to it: infer the
+type arguments from the construction's arguments, add the demand, then rewrite
+the call site, the way `formal/monomorph.py::demands`/`instantiate_all`/
+`rewrite_instantiation_calls` already do for a bracketed call. The compiled path
+already has the inference (`elaborate.infer_struct_type_args`), and the
+interpreter performs it; the formal side needs the arguments' types, which is
+the part this backend does not currently compute for a call argument. The
+demand-recording half of that work is done, so the inference work only has to
+produce the bracket. The residual is owned by
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`;
+it is pinned by `test_formal_monomorph.py`'s `a bare local construction with no
+annotation is still refused` (the row that has to change when it lands), and a
+regression to the dropped-declaration or unrecorded-demand behaviour fails
+`a phantom struct template is kept`, `a type argument in a local annotation is a
+demand`, and `a library with an annotated construction publishes it`.
