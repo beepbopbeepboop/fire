@@ -960,20 +960,6 @@ _REFUSAL_FAMILIES = (
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("is refused on a string whose text is not ASCII",
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
-    # A CONTAINER at a NUMBER conversion (`formal/model.py::
-    # printf_container_conversion_refusal`), and the row that makes the printf
-    # conversion table a family rather than three unrelated sentences. Its
-    # siblings are all in this table already — a `%s` of a number is claimed
-    # above by "is a value this function bound to an integer" (a pre-existing
-    # mis-filing, kept rather than fixed here: that message's clause is about
-    # the OPERAND and this row's is about the CONVERSION) — and the FLOAT axis
-    # (`printf_kind_conversion_refusal`) still has no row, so it files as
-    # `other refusal`.
-    #
-    # The marker is the clause only this message carries, for the reason the
-    # four container-operand rows above give: first match wins, so a marker
-    # that any sibling also contains would empty one of the rows.
-    ("its one word is the address of its blob", "a printf conversion of a container"),
     # A CPython BUILTIN this target does not lower, refused BY NAME before any
     # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
     # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
@@ -1552,9 +1538,9 @@ own resolver spells it: `std.format._utils`, `std.math`, `..fstat`, `.path`.
 
 ONE reader, because two tools now want it and a second spelling rule would be a
 second thing to keep right: `tools/formal_sweep_causes.py` (whose `uses:`
-column read NOT MEASURED on 21 of 22 groups of the round-2 `std-os-io` scope
-until it existed) and `tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is
-this same pattern.
+column could not be measured for that row until it existed — see
+`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6.1) and
+`tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is this same pattern.
 """
 
 

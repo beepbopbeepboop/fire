@@ -5,8 +5,8 @@
 > and the doc the row cited (`FORMAL_sum_range_generation_refused_and_it_is_not_an_
 > expected_failure`) was itself deleted with commit `cbf00b9f`, which is what
 > closed the generation refusal.  What was left of that doc was a TYPECHECK
-> failure (a `B.cond` chain closing with no flag lemma, and the order that lets
-> the lemma fire — fixed in the flag-lemma/order work, `ad54fc2f6`) and
+> failure, which has its own doc
+> (`bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`) and
 > is a different subject from "does it generate".  §1 below is the whole of
 > what is still open here.
 

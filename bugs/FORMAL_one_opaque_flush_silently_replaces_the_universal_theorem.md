@@ -284,22 +284,3 @@ The three rows in `TestTheZeroDivisorGuardAgainstLean` stay RED and unmarked:
 they fail with messages that say what stopped happening, and item 2 does not
 change what they measure. `formal/arm64_proof_gen.py` is gate-owing; this is a
 comment string only, no emitted Lean changed.
-
-## Re-measured 2026-10-12 (`work/formal281-docs`): FIVE failures, and the class
-## is now BLIND rather than reporting a moved residual
-
-Built the library the sanctioned way (`formal.lean.ensure_library` via
-`tools/memslot.py`) and ran the class; `test_formal_call_proof_gen.py
-TestTheZeroDivisorGuardAgainstLean` is **`Ran 3 tests ... FAILED (failures=5)`**,
-not the three this document's title names. The count moved because a **fourth
-row was added under a different claim**:
-`test_the_measurement_class_can_still_see_what_it_measures` (from
-`bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`, which
-owns the class's blindness as a separate finding). All five fail for THIS doc's
-reason and say so in the guard's own words: the fixture generates **no
-`q_compiles_correctly_universal` carrying `all_goals (first | done | sorry)`**, so
-`tail.replace(_ADMIT, _TRACE)` is a no-op and no residual goal can be traced —
-i.e. the universal theorem is still replaced by the reachability statement, which
-is exactly what this document is about. Nothing about item 1/3 moves; what is
-corrected is the number, and the fact that the class now distinguishes "the
-residual moved" from "there is no residual here to move".

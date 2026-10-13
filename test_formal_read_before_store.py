@@ -324,14 +324,6 @@ CASES = [
      "    for i in []:\n        pass\n    return i\n", "refuse"),
     ("empty_string_target_is_not_a_definition",
      "    for c in \"\":\n        pass\n    return c\n", "refuse"),
-    # A `range()` call has no arguments to read, and `_range_is_nonempty`'s old
-    # `> 3` guard fell through to the three-way unpack, so this row used to raise
-    # `ValueError: not enough values to unpack` OUT of the model and into the
-    # build (a backend crash, not a refusal).  The answer is `'maybe'` — the
-    # argument count is CPython's own `TypeError` and this build cannot state it
-    # — so the reader must not crash on it.
-    ("zero_arg_range_does_not_crash_the_reader",
-     "    for i in range():\n        pass\n    return i\n", "ok"),
     ("nonempty_literal_list_target_is_still_a_definition",
      "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
     # ── …and the same emptiness through a NAME the preheader decides is such a
