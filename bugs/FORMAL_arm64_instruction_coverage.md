@@ -383,15 +383,19 @@ instruction:
    `work_step_*` theorems that negate every branch before their own, and
    `lib/ProofLib.lean` did not typecheck until all 18 had them.
 
-**What is NOT done, and it is one arm.** An `if` whose condition is a bit test
-**compiles, runs, and answers CPython**, and cannot be *proved*: the generator
-derives a branch's source-level proposition out of the cset that wrote the tested
-register, and TBZ/TBNZ write no register and set no flags. The generator refuses
-rather than emitting an `hcond` about the wrong thing, which is the correct
-failure. `“An `if` whose condition is a BIT TEST cannot be PROVED”` has the
-measurement, the site, and the next step — and it is why
-`formal/examples/bittest.mojo` is not committed with this: the example fails
-today and a failing example with no `EXPECTED_FAILURES` entry is the wrong shape.
+**The one arm that was NOT done is now done: a bit test is PROVED, and
+`formal/examples/bittest.mojo` is committed.** When the lowering landed it was
+the case that an `if` whose condition is a bit test **compiled, ran, and
+answered CPython**, and could not be *proved*: the generator derives a branch's
+source-level proposition out of the cset that wrote the tested register, and
+TBZ/TBNZ write no register and set no flags, so the generator refused rather
+than emitting an `hcond` about the wrong thing. `c18fe3a2` (2026-10-03, "an `if`
+on a bit test is PROVABLE") did the arm, committed
+`formal/examples/bittest.mojo`, and deleted
+`FORMAL_arm64_bit_test_branch_is_not_provable.md` — but this paragraph was not
+updated with it and has read "cannot be PROVED" ever since. Measured 2026-10-12
+(`work/formal306-docs`): `python3 test_formal.py -j 1 bittest` reports **PASS**,
+with 0 declarations admitted a `sorry`.
 
 **The six encoders of 2026-10-02 are still six.** The genuinely-uncovered list
 is still dominated by NEON, FP and the cryptographic extensions, none of which

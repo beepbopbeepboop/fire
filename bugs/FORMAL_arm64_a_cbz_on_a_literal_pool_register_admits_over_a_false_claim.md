@@ -3,6 +3,30 @@
 **Area:** FORMAL (the arm64 proof generator's CFG walk, `emit_runs`' `cbz`
 arm). Claim `project22:arm64-cfg-leaves`.
 
+**Re-measured 2026-10-12 (`work/formal306-docs`), after the stack-floor
+`getrlimit` moved to the startup stub and after the SP trackers were taught the
+frame's `sh` bit: the leaf that reads the floor word is STILL the one that
+admits, and it is a `B.cond` now rather than a `CBZ`.** The guard is
+`ADRP+ADD X17,&floor ; LDR X16,[X17] ; ADD X17,SP,#0 ; CMP X17,X16 ; B.HS ok`,
+so the conditional branch that reads the floor word is a `B.HS` (`hs`) and the
+residual is a `<` rather than the `= 0` quoted below:
+
+    ⊢ st.sp - 32 <
+        mem_read_u64
+          (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64 st.mem
+              (st.sp - 16).toNat st.x29) (st.sp - 8).toNat st.x30)
+              (st.sp - 32).toNat st.x19) (st.sp - 24).toNat st.x20)
+          4299161608
+
+`st.mem` is still unconstrained by the theorem, so the branch is still undecided
+and the obligation still cannot be closed: the fix is still the memory
+hypothesis §"The next step" describes. The decoder fix that made `fact`, `sum`,
+`sqsum` and `pow2` PASS (`formal/arm64_proof_gen.py::_addsub_imm_bytes`) removed
+the frame-tracking hard failures this leaf was mixed up with, but not this one —
+`count`, the one dec1 example still failing, is left with this leaf plus the
+return-frame read the `x30` doc owns, and its `runs-cbz-condition` census is
+**4**, not the 6 the table below records.
+
 **Status: OPEN, PARTIAL LANDED (2026-10-04, `work/formal23-2`), and the
 SUBJECT of this document is misidentified — which is the finding.** The
 register this leaf tests is **not** a literal-pool word and the `@require` guard

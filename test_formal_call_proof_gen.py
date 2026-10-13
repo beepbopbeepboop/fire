@@ -4073,7 +4073,20 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     X30_READ = "hx30fr_"
     ADRP = "arm64_set_reg 17"
 
+    #: The stems whose generated text this class measures.  Both still carry the
+    #: epilogue's `hx30fr_` read and the adrp-materialised register write, so
+    #: the shape this class is about is unchanged for both.
     STEMS = ("count", "pow2")
+
+    #: The stems whose `EXPECTED_FAILURES` marker this class pins — `count`
+    #: alone since 2026-10-12.  `pow2` WAS the second until then, when the SP
+    #: trackers learned the frame's `sh` bit
+    #: (`formal/arm64_proof_gen.py::_addsub_imm_bytes`): the mis-scaled frame
+    #: address was a HARD failure for it (the rewrite matched no store), the fix
+    #: makes its proof typecheck, and `test_formal.py` reports a passing marked
+    #: stem as a failure — so the entry had to go.  `count` is the one dec1
+    #: example still marked, and its proof still carries both facts above.
+    MARKED = ("count",)
 
     @classmethod
     def setUpClass(cls):
@@ -4102,9 +4115,9 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_both_are_marked_with_the_address_in_the_reason(self):
+    def test_the_marked_stem_carries_the_address_in_the_reason(self):
         import test_formal as T
-        for stem in self.STEMS:
+        for stem in self.MARKED:
             self.assertIn(stem, T.EXPECTED_FAILURES,
                           "%s is an UNMARKED failure of the `formal` suite job: "
                           "the next session reads the marker list, does not "
