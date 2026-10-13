@@ -368,6 +368,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # the runtime can say which. `_stringify_value` asks it
     # (`mojo_cstr_or_int_str`) instead of formatting the word as a decimal.
     gen._dyn_word_vals: set = set()
+    # The LOCALS such a word was bound to (`x = obj.attr`, or one slot of an
+    # unpack whose source carries no element type): same question, asked of
+    # the name, because a later read of the local is the local itself.
+    gen._dyn_word_locals: set = set()
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -806,6 +810,7 @@ class FuncState:
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
         self.fs_dyn_word_vals: set = set()
+        self.fs_dyn_word_locals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fsloop_stack: list = []
         self.fsexc_depth: int = 0
@@ -893,6 +898,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
     st.fs_dyn_word_vals = gen._dyn_word_vals
+    st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fsloop_stack = gen.loop_stack
     st.fsexc_depth = gen.exc_depth
@@ -988,6 +994,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
     gen._dyn_word_vals = st.fs_dyn_word_vals
+    gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen.loop_stack = st.fsloop_stack
     gen.exc_depth = st.fsexc_depth
@@ -4163,7 +4170,10 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # discriminator is right in both directions (a string comes back as
         # itself, an int as its decimal) and is what argument coercion to a
         # `str` parameter already uses for the same word.
-        if et == 'int64_t' and ev in gen._dyn_word_vals:
+        if et == 'int64_t' and (
+                ev in gen._dyn_word_vals
+                or (isinstance(enode, gimple_ctypes.IdentExpr)
+                    and enode.name in gen._dyn_word_locals)):
             return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])

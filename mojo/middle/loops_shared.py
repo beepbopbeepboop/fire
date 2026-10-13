@@ -119,7 +119,13 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         if suf == 'double':
             return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
         if elem in ('int64_t', 'int', '_Bool'):
-            return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            # `_elem_of`'s int64_t is also its "nothing recorded" default: a
+            # value with no element record at all is a word whose kind only
+            # the runtime knows (see `_dyn_word_vals`).
+            if v not in gen._elem_types and lp not in gen._elem_types:
+                gen._dyn_word_vals.add(_ev)
+            return 'int64_t', _ev
         # Pointer elem that isn't char* (e.g. a nested MojoList*): read the
         # opaque int64_t then cast, matching the old 'int'-suffix handling.
         # An UNKNOWN/empty element type (the tuple handle's elem type was
@@ -128,7 +134,9 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         # (`a = ()_t5;` — not even valid C; repro:
         # std/test/builtin/test_int.mojo's `a, b = divmod(...)`).
         if not elem or elem == 'unknown':
-            return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            gen._dyn_word_vals.add(_ev)
+            return 'int64_t', _ev
         raw = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         return elem, gen._new_val(elem, f"({elem}){raw}")
     # Non-container / untracked: despite this function's name, its real
@@ -145,7 +153,10 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
         return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
     if suf == 'double':
         return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
-    return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+    _ev = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+    if lp not in gen._elem_types:
+        gen._dyn_word_vals.add(_ev)
+    return 'int64_t', _ev
 
 def _try_const_fold_int(gen, expr) -> int | None:
     if isinstance(expr, gimple_ctypes.IntLiteral):

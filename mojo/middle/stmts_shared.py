@@ -283,6 +283,10 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, _decl_t)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
+        # A word of unknown kind landing in an int64_t local: the local is
+        # that word now (see `_dyn_word_locals`).
+        if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
+            gen._dyn_word_locals.add(tgt.name)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` (a var-type-inference join with
         # another branch's plain fn-pointer / lambda value collapsed it to
@@ -311,6 +315,13 @@ def _assign_target(gen, tgt, et, ev):
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'
             sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
+            # No element record for the unpacked value at all: each slot is a
+            # word whose kind only the runtime knows (`r, p, m = TABLE[k]`
+            # over a dict of tuples, `m` a str or None).
+            if (set_et == 'int64_t' and gen._elem_types.get(lp) is None
+                    and lp not in gen._tuple_slot_types
+                    and lp not in gen._nested_elem_types):
+                gen._dyn_word_vals.add(sev)
             gen._assign_target(sub, set_et, sev)
 
 def _is_except_as_member_target(gen, obj_node) -> bool:

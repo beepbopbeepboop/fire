@@ -4356,6 +4356,18 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                     _dm = gen._call_expr('char *', 'mojo_str_from_double',
                                          [('double', gen._coerce_to_type(
                                              default_ty, 'double', default_val))])
+                elif (isinstance(args[1], gimple_ctypes.NoneLiteral)
+                        or (isinstance(args[1], gimple_ctypes.IdentExpr)
+                            and args[1].name == 'None')):
+                    # `d.get(k, None)`: None in a `char *` slot is the NULL
+                    # word (the 'p' slot kind's own convention). Through
+                    # `mojo_cstr_or_int_str` it became the STRING "0", so
+                    # `d.get(k, None) is None` was False on every miss -- the
+                    # self-hosted compiler's own
+                    # `func_return_types.get(m, func_return_types.get(b, None))`
+                    # then typed every unknown method call's result `0`.
+                    _dm = gen._new_temp('char *')
+                    gen._emit(f"  {_dm} = (char *)0;")
                 else:
                     _dm = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                          [('int64_t', gen._to_int64(default_ty, default_val))])
