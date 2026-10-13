@@ -4193,7 +4193,13 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(expr, F.SetExpr):
             # Formal has no set runtime — lower as a list blob (membership
-            # / iteration are the only uses seen on this path).
+            # / iteration are the only uses seen on this path). A set's
+            # elements are DISTINCT in CPython, and the elements whose word is
+            # known at compile time are deduplicated here so the count word and
+            # the walk agree with it; see `model.set_literal_distinct_elements`.
+            kept, dropped = M.set_literal_distinct_elements(expr.elements)
+            if dropped:
+                expr = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
             self._emit_list(expr)
             return
 

@@ -7216,11 +7216,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_dict(expr)
             return
 
-        if isinstance(expr, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        if isinstance(expr, F.SetExpr):
+            # A set lowers as a list blob (see the arm below); its elements are
+            # DISTINCT in CPython, so the ones whose word is known at compile
+            # time are deduplicated before the list is emitted. A set literal
+            # with no compile-time duplicate is emitted unchanged, which keeps
+            # `{x, y}` — the elements the model cannot compare as words — the
+            # lowering it already had. `model.set_literal_distinct_elements`.
+            kept, dropped = M.set_literal_distinct_elements(expr.elements)
+            self._emit_list(
+                F.ListExpr(elements=kept, line=expr.line, col=expr.col)
+                if dropped else expr)
+            return
+
+        if isinstance(expr, (F.ListExpr, F.TupleExpr)):
             # TupleExpr and ListExpr have identical `elements` and one blob
             # layout, so they share an emitter rather than two parallel ones.
-            # A set lowers as a list blob: membership and iteration are the
-            # only uses formal sees, and the blob gives both.
             self._emit_list(expr)
             return
 
