@@ -1,5 +1,41 @@
 # FORMAL_listdir_no_run_time_sequence: a run-time-length blob is answerable; a run-time-length LIST is not
 
+## 2026-10-13 (`work/formal402-docs`): step 1's message was TRUNCATED at run time, on BOTH architectures, and it is fixed
+
+**`model.list_append_overflow_message` was written four bytes short, and so was
+every other run-time stop on this path, because the emitters told `write(2)` the
+CHARACTER count instead of the BYTE count.** The message is not ASCII — it spells
+an em dash and an ellipsis, so its 774 characters are 778 BYTES — while each
+backend's `_intern_string` interns `text.encode() + b"\x00"`. Both
+`_emit_stop_diagnostic`s passed `len(text)`, so both truncated: this message
+ended mid-word at "...the overflow follows the appe", cutting exactly the
+sentence step 1 exists to get right (that moving the appends into another
+function does NOT help). `model.diagnostic_byte_length` now reads the byte count
+in one place for both emitters, the way the message itself already lived in one
+place.
+
+**It survived every test because the truncation was IDENTICAL on both
+architectures.** The row that pins it compares the two machines' stderr to each
+other, which a shared four-byte shortfall passes, and every needle it carried
+(`list.append overflowed 'xs'`, `its capacity is 1`, `append SITES`) was early in
+the text. So the pin has a second half now: `test_formal_run.py`'s
+`list_append_overflow_is_loud` and `the_overflow_advice_names_spellings_that_work`
+carry the WHOLE message, read from `model.list_append_overflow_message` at import
+time, as a needle — a truncation is a FAILURE rather than a sentence nobody read
+to the end. Measured on both architectures, with the fix: the bytes written now
+equal `len(message.encode())` exactly (778), where they were 774.
+
+**Every other bounded stop on this path is the same defect** (`—` is in nearly
+every `_message`/`_refusal` the model spells, and the `_message` family is the
+one the emitters write at run time), and the one shared reader fixes all of
+them. The five STDERR_CASES rows that reach a message through
+`_emit_stop_diagnostic` (`list_append_overflow_is_loud`, the advice row,
+`dict_store_past_its_reservation_is_loud`,
+`blob_growth_concat_past_its_reservation_is_loud`,
+`subscript_out_of_range_is_loud`) are re-run green on both architectures.
+**What is left below is unchanged**: item 2's run-time-length blob and item 3's
+`malloc` are still the open work.
+
 **Status 2026-10-03 (`work/formal16-5`): item 1 was DONE AND HAD GONE RED ON
 `master` — a newer refusal could not see the callee's own declaration, so
 `names[0]` stopped building while the row that pins it was failing in the suite.

@@ -13914,6 +13914,33 @@ def list_repeat_operands_refusal(left: str, right: str) -> str:
         f"to concatenate, or `xs * n` with an integer count")
 
 
+def diagnostic_byte_length(text: str) -> int:
+    """The number of BYTES `_emit_stop_diagnostic` must hand to `write(2)`.
+
+    A stop diagnostic is interned as `text.encode() + b"\\x00"` (each backend's
+    `_intern_string`), so the length the syscall needs is the UTF-8 BYTE count.
+    It was `len(text)`, the CHARACTER count, which is the same number only for
+    an ASCII message — and `list_append_overflow_message` is not ASCII: it
+    spells an em dash and an ellipsis, so its 774 characters are 778 bytes, and
+    every run-time copy of it was written four bytes short, ending mid-word at
+    "...the overflow follows the appe".
+
+    That is a real defect rather than a cosmetic one. The sentence it cuts is
+    the one that says moving the appends into another function does NOT help,
+    which is the half `list_append_overflow_message`'s own docstring exists to
+    get right (its earlier advice sent a reader to a repair that re-fires the
+    same message). And it survived every test because the two architectures
+    truncated IDENTICALLY — the row compares them to each other — and every
+    needle it asserted was early in the text.
+
+    Both emitters ask THIS function, so the byte count is read in one place the
+    way the message itself is (`list_append_overflow_message`'s docstring's
+    reason for living here rather than in either emitter). The message and its
+    length cannot disagree about what "the text" means.
+    """
+    return len(text.encode("utf-8"))
+
+
 def list_append_overflow_message(name: str, capacity: int) -> str:
     """The ONE text an over-capacity `xs.append(v)` writes to fd 2 before it
     stops the program — for BOTH backends, because two architectures printing

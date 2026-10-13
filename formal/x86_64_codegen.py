@@ -5532,7 +5532,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
         self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
         self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
-        self._emit_mov_imm(Reg.RDX, len(text))         # length
+        # The interned blob is UTF-8 + NUL, so this is the BYTE count and not
+        # `len(text)`; see `model.diagnostic_byte_length` for the truncation the
+        # character count caused on a non-ASCII message.
+        self._emit_mov_imm(Reg.RDX, M.diagnostic_byte_length(text))
         self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
         self._emit_extern_call("write")
 
