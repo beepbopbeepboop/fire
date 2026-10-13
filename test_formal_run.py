@@ -15161,17 +15161,15 @@ STDERR_CASES = [
 1, ["`b[7]`", "is out of range for this bytearray",
          "IndexError: bytearray index out of range"]),
     # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
-    # limitation worth stating rather than a gap. `run_stderr_case` requires the
-    # program to build on BOTH architectures, and x86-64 refuses `a | b` by name
-    # (`model.set_union_refusal` — lowering it as a concatenation answers
-    # `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-    # comparison has nothing to compare. What is checkable for all three sites
-    # on both backends is the question this row's mechanism cannot ask — does
-    # the site have a guard at all — and that is
+    # limitation worth stating rather than a gap: a run-time stop is only
+    # observable on a program whose estimate is LOW, and for both of these the
+    # reservation is exact for a literal operand — the run-time total cannot
+    # exceed the estimate without a name in one of them — so there is no small
+    # program whose stop a stderr comparison could observe. What is checkable
+    # for every site on both backends is the question this row's mechanism
+    # cannot ask — does the site have a guard at all — and that is
     # `check_blob_growth_guards` / `_BLOB_GROWTH_PROBES`, which is where `*`
-    # and `|` are pinned. `*` builds on both, so the difference there is that
-    # its reservation is exact for a literal operand: the run-time total cannot
-    # exceed the estimate without a name in one of them.
+    # and `|` are pinned (both backends since x86-64 grew the union emitter).
     #
 ]
 
@@ -24356,14 +24354,12 @@ def check_stack_floor_decision(verbose=False):
 #
 # This is the structural half of `STDERR_CASES`'s blob-growth row, and it exists
 # because the row cannot cover the set. A run-time stop is only observable on a
-# program whose estimate is wrong, and for two of the three sites there is no
-# such program that builds on BOTH machines: x86-64 refuses `a | b` outright
-# (`model.set_union_refusal`, and it is right — lowering it as a concatenation
-# answers `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-# comparison has nothing to compare. What is left is the question the run cannot
-# ask: **does this site have a guard at all.** Before this, `*` had none on
-# either backend and `|` had none on either backend, and only `+` had one on
-# x86-64 — and that one was a bare `exit(1)`, which is why it is in
+# program whose estimate is wrong, and for several of these sites there is no
+# such program whose stop a two-architecture stderr comparison could observe —
+# the reservation is exact for a literal operand. What is left is the question
+# the run cannot ask: **does this site have a guard at all.** Before this, `*`
+# had none on either backend and `|` had none on either backend, and only `+`
+# had one on x86-64 — and that one was a bare `exit(1)`, which is why it is in
 # `STDERR_CASES` now.
 #
 # The check is BEHAVIOURAL and not a source grep: `_emit_blob_growth_guard` is
@@ -24397,13 +24393,15 @@ _BLOB_GROWTH_PROBES = [
     ("x86_64", "rep",
      "def main(n):\n    var t = [1, 2] * 3\n    return len(t)\n",
      {"a list repetition"}),
-    # `a | b`. arm64-only, and that is the POINT of the row: this is a site that
-    # existed on one architecture only, with no guard on it, and the check is
-    # what stops a fourth blob-producing site appearing on one backend alone.
+    # `a | b`. This was arm64-only, and that was the POINT of the row: a site
+    # that existed on one architecture only, with no guard on it, and the check
+    # is what stops a fourth blob-producing site appearing on one backend alone.
+    # x86-64 grew the same emitter (and the same guard), so BOTH backends are
+    # probed now — a site on one machine is no longer invisible to the other.
     #
     # The operands are SETS, and that is not a spelling choice. `|` is a union
     # only between two sets — Python raises `TypeError` for `[1, 2] | [3]` —
-    # and `model.container_union_refusal` now refuses every other pair, so a
+    # and `model.container_union_refusal` refuses every other pair, so a
     # list-valued probe does not compile at all.  That refusal is what makes
     # this row's operands load-bearing: it is the reason the guard below is
     # about `a | b` between two sets and not about lists, which is where the
@@ -24415,13 +24413,21 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var u = a | b\n    return len(u)\n",
      {"a set union"}),
-    # The three set operators arm64 grew beside the union, and each is a
-    # blob-producing site of its own: `&` and `-` reserve `nL` and `^` reserves
-    # `nL + nR`, so a guard missing on any of them is the same silent frame
-    # overrun the union's had. The operands are sets for the union's reason —
-    # `[1, 2] & [2]` is a TypeError and the shared gate refuses it — and all
-    # three are arm64-only, which is why each probe names that backend.
+    ("x86_64", "uni",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a | b\n    return len(u)\n",
+     {"a set union"}),
+    # The three set operators beside the union, and each is a blob-producing
+    # site of its own: `&` and `-` reserve `nL` and `^` reserves `nL + nR`, so a
+    # guard missing on any of them is the same silent frame overrun the union's
+    # had. The operands are sets for the union's reason — `[1, 2] & [2]` is a
+    # TypeError and the shared gate refuses it — and both backends lower all
+    # three now, so each is probed on both.
     ("arm64", "sin",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a & b\n    return len(c)\n",
+     {"a set intersection"}),
+    ("x86_64", "sin",
      "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
      "    var c = a & b\n    return len(c)\n",
      {"a set intersection"}),
@@ -24429,7 +24435,15 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
      "    var c = a - b\n    return len(c)\n",
      {"a set difference"}),
+    ("x86_64", "sdf",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a - b\n    return len(c)\n",
+     {"a set difference"}),
     ("arm64", "ssd",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var c = a ^ b\n    return len(c)\n",
+     {"a set symmetric difference"}),
+    ("x86_64", "ssd",
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
      {"a set symmetric difference"}),

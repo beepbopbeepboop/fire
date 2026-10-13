@@ -13045,37 +13045,6 @@ def container_union_refusal(left: str, right: str, left_is_set: bool,
         f"with an explicit membership test")
 
 
-def set_union_refusal(left: str, right: str) -> str:
-    """Why `{left} | {right}` is not lowered on the backend that asks.
-
-    The SECOND question, asked only once `container_union_refusal` above has
-    said the operator really is a set union between two sets: it is CPython's
-    union, and this backend has no emitter for it. The second one used to lower
-    the operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]`
-    with `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython
-    says 6. Measured on the pre-change tree: it built, it ran, it exited 0, and
-    it was wrong, which is the outcome this file exists to replace with a
-    refusal.
-
-    The message lives here, beside the other refusal texts, so the two backends
-    cannot word it differently on the day the second one grows the emitter —
-    and it says which backend does lower it, because "this is not supported" is
-    the answer that sends a reader looking for a spec when the answer is an
-    emitter. That sentence names arm64's `_emit_set_union` FOR SETS ONLY, and
-    the qualification is the point: the same emitter is what answered
-    `{"a": 1} | {"b": 2}` with 1 before `container_union_refusal` above started
-    refusing a pair blob, so a claim that arm64 "lowers this operator correctly"
-    without the qualification was a false statement about this tree.
-    """
-    return (
-        f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
-        f"containers as a concatenation: the result would keep every element "
-        f"of both sides, repeats included, which is not a set and answers a "
-        f"different program than the source writes. Use `+` if a "
-        f"concatenation is what you want, or build the union with an explicit "
-        f"membership test. arm64 lowers this operator correctly, for two SETS")
-
-
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 
@@ -14175,30 +14144,34 @@ def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
 
     The SECOND question for `&`/`-`/`^` on two blobs, asked only once
     `container_operator_refusal` has been reached and DEFERRED (it returns
-    None for `SET_ALGEBRA_OPS` on two blobs), the same way `set_union_refusal`
-    is the second question for `|`.  There are two answers and the caller's
+    None for `SET_ALGEBRA_OPS` on two blobs).  `|`'s second question is
+    `container_union_refusal`'s alone, because both backends lower a union
+    between two sets.  There are two answers and the caller's
     `backend_has_emitter` decides which one is true:
 
     * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
       sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
       refusal names that rather than pretending a lowering was missing.  This
-      is the arm64 answer when it cannot establish both operands are sets, and
-      the x86-64 answer for every two-blob shape.
+      is the answer BOTH backends give when they cannot establish that both
+      operands are sets.
     * **two sets, no emitter** — the operator really is the set operation the
       source writes, and the machine simply does not lower it.  The message
       says which machine does, so the reader is not sent looking for a spec.
+      **No current backend reaches this branch**: arm64 has lowered the three
+      since the set emitters landed and x86-64 grew `_emit_set_op` beside it,
+      so it is a fallback for a backend that has none rather than a state of
+      this tree.
 
-    The wording lives here, beside the other refusal texts and beside
-    `set_union_refusal`, so the two backends cannot word the same state
-    differently.
+    The wording lives here, beside the other refusal texts, so the two backends
+    cannot word the same state differently.
     """
     if left_is_set and right_is_set and not backend_has_emitter:
         return (
             f"{left} {op} {right} is a SET operation and this backend has no "
             f"emitter for it: both operands are sets, so Python's `{op}` is "
             f"{CONTAINER_OP_MEANING[_bare_operator(op)]}, and that needs a "
-            f"per-element scan this machine does not lower yet. arm64 lowers "
-            f"`&`, `-` and `^` for two sets; on this backend write the "
+            f"per-element scan this machine does not lower yet. Both backends "
+            f"lower `&`, `-` and `^` for two sets; on this backend write the "
             f"operation as a loop over `in` tests instead")
     which = ("the left operand" if not left_is_set else
              "the right operand" if not right_is_set else "an operand")
@@ -14220,7 +14193,7 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     `_emit_binop` knows about `x + y` has to be re-established here or the two
     spellings of one operator answer differently.
 
-    Measured on this tree, both backends, for `a = [1, 2]`:
+    Measured on the PRE-desugaring tree, both backends, for `a = [1, 2]`:
 
     | written | this path | CPython |
     |---|---|---|

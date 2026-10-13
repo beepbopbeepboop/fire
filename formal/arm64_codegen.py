@@ -13339,8 +13339,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         difference and difference, and they are lowered rather than passed to the
         shared `container_operator_refusal` gate that refuses them for every
         other blob. Only two SETS qualify, so `[1] - [2]` still reaches the gate
-        and is refused with CPython's TypeError reason, and x86-64 — which has no
-        set emitter at all — keeps refusing all three.
+        and is refused with CPython's TypeError reason. x86-64 lowers the same
+        three through its own `_emit_set_op`, over the same shared predicate, so
+        the two backends cannot disagree about which `&`/`^`/`-` is set algebra.
         `_expr_is_set_like` is the flow-sensitive reader `|` already uses, so the
         two set operators cannot disagree about which name is a set.
 
@@ -13443,9 +13444,9 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         Result is a fresh list blob in X0: the left's elements the right holds
         (`&`), the left's the right lacks (`-`), or the elements exactly one side
-        holds (`^`). arm64 is the backend that lowers these; x86-64 has no set
-        emitter at all and refuses them, which is `BACKEND_ONLY` in
-        `test_formal_container_methods.py` and the same split `|` already has.
+        holds (`^`). Both backends lower these — x86-64's `_emit_set_op` is this
+        method's twin over the same `_emit_set_filter_pass` body — so neither is
+        `BACKEND_ONLY` in `test_formal_container_methods.py` any more.
 
         **The capacity and the guard are the union's, with one difference.**
         An intersection or a difference can hold at most `nL` elements, so the

@@ -1,11 +1,32 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is now LANDED on BOTH backends
+(arm64 2026-10-06, x86-64 2026-10-12); items 1 (container `==`/`!=`), 2
+(ordering) and 4 (a length-changing slice store) are unchanged.**
+`test_formal_container_methods.py` measures the whole surface against CPython on
+both architectures and is green; this doc is about the rows in it that are green
+*as refusals*, which is a different thing from green as answers. All of item 3's
+rows are answers now, on both machines.
+
+**2026-10-12 (`formal312-docs`): the x86-64 half of item 3 is LANDED.** x86-64
+now has `_emit_set_union`, `_emit_set_op` and `_emit_set_filter_pass` — the
+twins of arm64's, over the same reservation arithmetic
+(`_blob_est`/`_blob_site_growth`), the same shared `_expr_is_set_like` reader and
+the same `model.SET_ALGEBRA_OPS` table — and `_maybe_emit_set_binop` intercepts
+the two-set shape in `_emit_binop` before the shared gate, exactly as arm64 does.
+A union between two sets was refused on x86-64; it lowers now. Measured,
+`test_formal_container_methods.py set operator`: **26 answers equal CPython and
+18 refusals named, over both backends** (the union and the three operators, plus
+their augmented forms, moved from `BACKEND_ONLY[...] = "x86_64"` to answers), and
+`test_formal_x86_64_parity.py` is unchanged at PASS=86 FAIL=1 (the pre-existing
+`printf_float_operand_read_from_an_xmm_register`). The 11 `BACKEND_ONLY` rows
+that named x86-64 for `s_union*`, `s_intersection_r`, `s_difference_r`,
+`s_symdiff_r`, `s_sub_r`, `s_andassign_r`, `o_xor` and `o_and` are deleted — a
+backend that grows the lowering has to delete its row. `model.set_union_refusal`
+is now unreferenced and was deleted with the fix, and the four `_BLOB_GROWTH_PROBES`
+set rows are duplicated for `x86_64` so each new site's capacity guard is pinned
+on the machine that grew it (all 12 probes pass). `l_slice_store_same` stays
+arm64-only, because item 4 is not this.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -24,18 +45,19 @@ augmented emitter — the augmented one used to reach the shared gate first, and
 **The gate did NOT narrow the way §"What to do, in order" item 1 prescribed, and
 the reason is a correction worth keeping.** Item 1 said to drop `&`/`^`/`-` from
 `model.CONTAINER_GATED_OPS` and move the rows to probes. That table is SHARED by
-both backends, so dropping an operator there would have made x86-64 — which has
-no set emitter at all — fall through to the integer ALU on two addresses, which
-is exactly the wrong answer the gate was widened for. Instead arm64 intercepts
-the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
+both backends, so dropping an operator there would have made a backend without
+the emitter fall through to the integer ALU on two addresses, which is exactly
+the wrong answer the gate was widened for. Instead each backend intercepts the
+two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
-`[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
-is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
-The five rows therefore carry `BACKEND_ONLY[...] = "x86_64"`, and the `operator`
-group's duplicate `o_xor`/`o_and` rows were re-pointed at probes the same way
-(`o_sub`, a LIST difference, stays a refusal on both backends). The structural
-half is pinned by four new `_BLOB_GROWTH_PROBES` rows, so each new site has to
-keep emitting its capacity guard.
+`[1] - [2]` (CPython's `TypeError`) on both, and every other pair, which is the
+same split `|` already had (`_emit_set_union` on two sets vs
+`container_union_refusal` on everything else). The five rows therefore carried
+`BACKEND_ONLY[...] = "x86_64"` until x86-64 grew the emitter (2026-10-12, above)
+and the `operator` group's duplicate `o_xor`/`o_and` rows were re-pointed at
+probes the same way (`o_sub`, a LIST difference, stays a refusal on both
+backends). The structural half is pinned by four new `_BLOB_GROWTH_PROBES` rows
+(now one per backend), so each new site has to keep emitting its capacity guard.
 
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
@@ -110,15 +132,14 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3) — **DONE on arm64
-   (2026-10-06).** The rows moved to probes and the augmented forms desugar onto
-   the binary lowering; x86-64 still refuses all three, so the rows carry
-   `BACKEND_ONLY`. What did NOT happen is the prescribed removal from
-   `CONTAINER_GATED_OPS`: that table is shared, and dropping an operator there
-   would send x86-64 into the ALU on two addresses. The backend intercepts
-   first, the way `|` already splits `_emit_set_union` from
-   `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
-   not started. See the Status at the top for the measurements and the emitters.
+1. **`&`, `^`, `-` between two sets** (item 3) — **DONE on BOTH backends
+   (arm64 2026-10-06, x86-64 2026-10-12).** The rows moved to probes and the
+   augmented forms desugar onto the binary lowering. What did NOT happen is the
+   prescribed removal from `CONTAINER_GATED_OPS`: that table is shared, and
+   dropping an operator there would send a backend without the emitter into the
+   ALU on two addresses. Each backend intercepts first, the way `|` already
+   splits `_emit_set_union` from `container_union_refusal`. See the Status at the
+   top for the measurements and the emitters.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
