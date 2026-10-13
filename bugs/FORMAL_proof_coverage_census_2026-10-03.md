@@ -1,5 +1,34 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**Status 2026-10-13 (`work/formal366-docs`): §0.8b's committed RATCHET baseline
+was one row stale on this tree, and it is re-banked — so `test_formal_proof_census
+.py` (61 tests) is green again.** `ffe27e1a` changed `formal/examples/fact.mojo`
+(its `@require` now takes the range its own `@refines` already claimed), so the
+committed `tools/formal_proof_census_baseline.json` row still carried the
+pre-change `source_sha256`, which `TestCommittedBaseline.test_each_row_is_tied_to_
+the_example_it_measured` refuses by design ("this is a different program"). It was
+the ONLY stale row — checked name-for-name over all 93 (`hashlib.sha256` against
+the on-disk corpus) — and it was re-banked the documented way (§0.8b.5):
+
+```sh
+python3 tools/memslot.py --gb 8 --label census-fact -- \
+  python3 tools/formal_proof_census.py --only fact --write-baseline
+  [1/1] fact: lean-rejected 0.6s          # REPLAYED from the verdict cache
+  wrote tools/formal_proof_census_baseline.json (1 measured, 93 already recorded)
+  no example regressed against formal_proof_census_baseline.json
+```
+
+The replayed write KEEPS the row's existing timing (§0.8b.5), which is what
+`fact`'s row needed: the proof is a `lean-rejected` verdict before and after and
+its Lean time is still the 2026-10-05 measurement. What moved is the row's
+`source_sha256` and its `reason` — `fact_proof.lean:2965:16` → `:4858:16` — which
+is the code generator's own drift since 2026-10-05 and not this example's
+contract change; the row is now against the program and the proof the tree has.
+`measured_this_write` is `["fact"]`, which is the tool's honest record of a
+`--only` write. **The rest of the document is unmoved**: §0.9c's two reds are a
+conditional-reachability defect in the arm64 proof path and the doc filed for it
+owns them, and no census figure here is a delta off this re-bank.
+
 **§0.9c is new (2026-10-07, `work/formal119-docs`): the INSTRUMENT's own test
 `test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` is
 RED on this tree, and it is a generator regression rather than a defect in the
