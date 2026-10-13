@@ -9,10 +9,16 @@ test expects to report `proof-emitted` under `--no-check`; it now reports
 carry one — the stack-floor guard's `getrlimit` (not recorded as a
 `compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
 same regression is why
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is red.
-Both root causes, with the reproduction and the fix, are
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`;
-the code is another claim's, so this census was not edited to absorb it.
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` was red.
+**Both root causes are since FIXED** — the conditional-halt-address walk now
+carries `(block, crossed)` per path, so a halt on a condition-free path is
+reached while one behind the source conditional is still refused, and the
+stack-floor guard's `getrlimit` no longer makes a one-`print` program a
+two-opaque-call program. Measured on this tree:
+`test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` and
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` are both
+green, and `TestTheReachedWalkIsPerPath` is the pin on the walk's own answer.
+The code was another claim's, so this census was not edited to absorb it.
 
 **§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
 of the TREE, and there is now a mode that says what it is in 1.7 seconds instead
