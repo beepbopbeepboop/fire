@@ -338,8 +338,12 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
                         sections: list) -> int:
     """Write the __TEXT segment command and its section headers at `o`.
 
-    One section is a (name, vmaddr, size, fileoff, flags, reserved1) tuple —
-    reserved1 is what carries a stub section's stub size. Returns the offset
+    One section is a (name, vmaddr, size, fileoff, flags, reserved2) tuple —
+    reserved2 is what carries a stub section's byte size, per `mach-o/loader.h`
+    on `S_SYMBOL_STUBS`: "byte size of stub in the reserved2 field".
+    `reserved1` is the indirect-symbol-table index, and these images have no
+    indirect symbol table, so it is 0 — which is what `ld` writes for the same
+    section (`otool -l` reads `reserved1 0 / reserved2 6`). Returns the offset
     just past the command.
     """
     def patch(off, fmt, *vals):
@@ -358,7 +362,7 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
     patch(o + 64, "<I", len(sections))
     patch(o + 68, "<I", 0)
     s = o + 72
-    for name, vmaddr, size, fileoff, flags, reserved1 in sections:
+    for name, vmaddr, size, fileoff, flags, reserved2 in sections:
         file[s : s + 16] = name.ljust(16, b"\0")
         file[s + 16 : s + 32] = b"__TEXT".ljust(16, b"\0")
         patch(s + 32, "<Q", vmaddr)
@@ -368,16 +372,30 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
         patch(s + 56, "<I", 0)      # reloff
         patch(s + 60, "<I", 0)      # nreloc
         patch(s + 64, "<I", flags)
-        patch(s + 68, "<I", reserved1)
-        patch(s + 72, "<I", 0)      # reserved2
+        patch(s + 68, "<I", 0)      # reserved1: no indirect symbol table
+        patch(s + 72, "<I", reserved2)
         s += 80
     return o + cmdsize
+
+# `mach-o/loader.h`'s `SG_READ_ONLY`: the dynamic linker makes this segment
+# read-only once it has applied the fixups. `ld` sets it on the GOT-carrying
+# `__DATA_CONST` for executables and libraries alike, where these images left
+# the field 0 — a hardening gap, and not the cause of anything that ran.
+SG_READ_ONLY = 0x10
 
 # MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE. The last two are not
 # cosmetic: a main executable without MH_DYLDLINK and MH_PIE is killed by
 # dyld before it reaches its entry point (verified by bisecting the load
 # commands of a hand-built image — the same image runs with these flags set).
 MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
+
+# MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS — what `ld`
+# emits for the same dylib (`otool -hv` reads `NOUNDEFS DYLDLINK TWOLEVEL
+# NO_REEXPORTED_DYLIBS`). It used to be `0x800005`, which set
+# MH_HAS_TLV_DESCRIPTORS (0x800000 — this library has no TLV descriptors) and
+# omitted MH_TWOLEVEL (0x80, the flag that says the image binds by (library,
+# name) rather than flatly). Values are `mach-o/loader.h`'s.
+MH_DYLIB_FLAGS = 0x1 | 0x4 | 0x80 | 0x100000
 
 
 def build_macho_executable(code: bytes, arch: str = "arm64",
@@ -948,7 +966,7 @@ def build_macho_executable_extern(
     patch(o + 56, "<I", 0x3)  # rw- : dyld writes the GOT slot at load time
     patch(o + 60, "<I", 0x3)
     patch(o + 64, "<I", 1)  # nsects: __got
-    patch(o + 68, "<I", 0)
+    patch(o + 68, "<I", SG_READ_ONLY)  # made read-only after dyld's fixups
     s = o + 72
     file[s : s + 16] = b"__got".ljust(16, b"\0")
     file[s + 16 : s + 32] = b"__DATA_CONST".ljust(16, b"\0")
@@ -1536,7 +1554,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(12, "<I", MH_DYLIB)
     patch(16, "<I", ncmds)
     patch(20, "<I", sizeofcmds)
-    patch(24, "<I", 0x800005)
+    patch(24, "<I", MH_DYLIB_FLAGS)
     o = 32
 
     text_sections = [(b"__text", base_addr, len(code), code_file, 0x80000400, 0)]
@@ -1564,7 +1582,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         patch(o + 56, "<I", 0x3)
         patch(o + 60, "<I", 0x3)
         patch(o + 64, "<I", 1)             # nsects: __got
-        patch(o + 68, "<I", 0)
+        patch(o + 68, "<I", SG_READ_ONLY)  # made read-only after dyld's fixups
         s2 = o + 72
         file[s2 : s2 + 16] = b"__got".ljust(16, b"\0")
         file[s2 + 16 : s2 + 32] = b"__DATA_CONST".ljust(16, b"\0")

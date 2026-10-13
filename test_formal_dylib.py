@@ -189,13 +189,17 @@ def parse_macho(data):
                 segname = data[sect + 16:sect + 32].rstrip(b"\0").decode("ascii")
                 addr, size = struct.unpack_from("<2Q", data, sect + 32)
                 offset, = struct.unpack_from("<I", data, sect + 48)
+                sflags, = struct.unpack_from("<I", data, sect + 64)
+                reserved1, reserved2 = struct.unpack_from("<2I", data, sect + 68)
                 sections.append({"sectname": sname, "segname": segname,
-                                 "addr": addr, "size": size, "offset": offset})
+                                 "addr": addr, "size": size, "offset": offset,
+                                 "flags": sflags, "reserved1": reserved1,
+                                 "reserved2": reserved2})
                 sect += 80
             info["segments"][name] = {
                 "vmaddr": vmaddr, "vmsize": vmsize, "fileoff": fileoff,
                 "filesize": filesize, "maxprot": maxprot, "initprot": initprot,
-                "sections": sections,
+                "segflags": segflags, "sections": sections,
             }
         elif cmd == LC_ID_DYLIB:
             name_offset, = struct.unpack_from("<I", data, pos + 8)
@@ -2254,6 +2258,63 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
+def test_the_header_flags_and_stub_metadata_match_ld(tmpdir, shared):
+    """Three latent Mach-O spec details, read out of the bytes.
+
+    Each is invisible to a loader that does not consult an indirect symbol
+    table, so nothing else in this tree could see a wrong one. The expected
+    values are what `ld` writes for the same shape (`otool -hv` / `-l` on a
+    `clang -dynamiclib` output): header flags `NOUNDEFS DYLDLINK TWOLEVEL
+    NO_REEXPORTED_DYLIBS` (0x100085), a `S_SYMBOL_STUBS` section whose stub SIZE
+    is in `reserved2` (its `reserved1` is the indirect-symbol-table index, 0
+    here), and a GOT-carrying `__DATA_CONST` marked `SG_READ_ONLY` (0x10) so
+    dyld remaps it read-only after the bind fixups.
+    """
+    lib = os.path.join(tmpdir, "specs.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("hi\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libspecs.dylib")
+    r = run_fire(["dylib", "--formal", "--no-prove", "-o", out, lib])
+    check(r.returncode == 0,
+          f"the extern-calling dylib failed to build: "
+          f"{(r.stderr or r.stdout or '').strip()[-300:]}")
+    with open(out, "rb") as f:
+        info = parse_macho(f.read())
+
+    MH_TWOLEVEL = 0x80
+    MH_HAS_TLV_DESCRIPTORS = 0x800000
+    MH_NO_REEXPORTED_DYLIBS = 0x100000
+    MH_DYLIB_FLAGS = 0x1 | 0x4 | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS
+    check(info["flags"] == MH_DYLIB_FLAGS,
+          f"dylib header flags {info['flags']:#x}, expected "
+          f"{MH_DYLIB_FLAGS:#x} (ld's NOUNDEFS|DYLDLINK|TWOLEVEL|"
+          f"NO_REEXPORTED_DYLIBS; the old literal 0x800005 omitted MH_TWOLEVEL "
+          f"and set MH_HAS_TLV_DESCRIPTORS on a library that has none)")
+    check(not (info["flags"] & MH_HAS_TLV_DESCRIPTORS),
+          "MH_HAS_TLV_DESCRIPTORS is set on a library with no thread-local "
+          "descriptors")
+
+    stubs = [s for s in info["segments"]["__TEXT"]["sections"]
+             if s["sectname"] == "__stubs"]
+    check(stubs, "the extern-calling dylib has no __TEXT,__stubs")
+    st = stubs[0]
+    check(st["reserved1"] == 0,
+          f"__stubs reserved1 is {st['reserved1']}, expected 0 (the "
+          f"indirect-symbol-table index; the stub SIZE goes in reserved2)")
+    check(st["reserved2"] == 12,
+          f"__stubs reserved2 is {st['reserved2']}, expected 12 (the arm64 stub "
+          f"size, the field <mach-o/loader.h> defines it in)")
+    for s in info["segments"]["__TEXT"]["sections"]:
+        if s["sectname"] == "__text":
+            check(s["reserved1"] == 0 and s["reserved2"] == 0,
+                  f"__text reserved fields are {s['reserved1']}/"
+                  f"{s['reserved2']}, expected 0/0")
+    check(info["segments"]["__DATA_CONST"]["segflags"] == 0x10,
+          f"__DATA_CONST segflags "
+          f"{info['segments']['__DATA_CONST']['segflags']:#x}, expected "
+          f"SG_READ_ONLY (0x10)")
+
+
 TESTS = [
     ("every unordered pair of segments is visited exactly once",
      test_segment_pairs_are_covered_exactly_once),
@@ -2297,6 +2358,8 @@ TESTS = [
      test_the_library_admits_no_hole),
     ("a receiver write-back is not a returned frame",
      test_a_receiver_writeback_is_not_a_returned_frame),
+    ("the header flags and stub metadata match ld",
+     test_the_header_flags_and_stub_metadata_match_ld),
 ]
 
 

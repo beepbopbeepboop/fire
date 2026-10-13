@@ -41,10 +41,17 @@ LC_UNIXTHREAD = 0x05
 ARM_THREAD_STATE64 = 4
 ARM_THREAD_STATE64_COUNT = 32
 
-MH_TWOLEVEL = 0x00800000
+# Mach header flags, from `mach-o/loader.h`. Three of these were aliased onto
+# their NEIGHBOURS' bits (`MH_TWOLEVEL` read `0x00800000`, which is really
+# `MH_HAS_TLV_DESCRIPTORS`; `MH_BIND_AT_LOAD` read `0x2`, which is
+# `MH_INCRLINK`; `MH_DEAD_STRIPPABLE_DYLIB` read `0x2000`, which is
+# `MH_NOFIXPREBINDING`). Nothing read them — `formal/macho_linker.py` builds its
+# masks from its own `MH_EXECUTE_FLAGS` / `MH_DYLIB_FLAGS` — but a wrong
+# constant is a wrong answer waiting for its first caller.
+MH_TWOLEVEL = 0x00000080
 MH_NOUNDEFS = 0x00000001
-MH_BIND_AT_LOAD = 0x00000002
-MH_DEAD_STRIPPABLE_DYLIB = 0x00002000
+MH_BIND_AT_LOAD = 0x00000008
+MH_DEAD_STRIPPABLE_DYLIB = 0x00400000
 
 
 def _build_segment_64(

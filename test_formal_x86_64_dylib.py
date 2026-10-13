@@ -662,6 +662,45 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
           f"{got.returncode}, expected 0")
 
 
+def test_getsize_through_an_imported_hostmod_dylib_answers(tmpdir, shared):
+    """The `os.path.getsize` hostmod chain ANSWERS on x86-64 instead of dying.
+
+    `os.path` is a module dylib linked against `os.path.__syscalls`, and
+    `getsize` reads the size through `fs_stat_field64`. On the tree before the
+    linker's `__LINKEDIT`/bind-stream fix, an x86-64 image importing it executed
+    at address 0 (exit -11) inside that chain while arm64 answered. This is the
+    doc's own reduction; the answer is the size of a file this test writes, so
+    the exit status measures the file rather than a constant.
+    """
+    target = os.path.join(tmpdir, "sized.bin")
+    with open(target, "wb") as f:
+        f.write(b"x" * 42)
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main():\n"
+                '    return getsize("%s")\n' % target)
+    runners = {"arm64": lambda p: subprocess.run(
+        [p], capture_output=True, text=True, timeout=60),
+        "x86_64": run_x86_64}
+    for arch in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, "getsize." + arch)
+        build = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "--backend=" + arch, "-o", out, prog],
+            capture_output=True, text=True, timeout=600)
+        check(build.returncode == 0,
+              f"the {arch} getsize hostmod program did not build: "
+              f"{(build.stderr or build.stdout).strip()[-400:]}")
+        got = runners[arch](out)
+        check(got.returncode == 42,
+              f"the {arch} getsize hostmod image exited {got.returncode}, "
+              f"expected 42 — the size of a 42-byte file read through the "
+              f"imported dylib; a negative status is the address-0 crash this "
+              f"pins")
+
+
 def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
     """The export trie carries the module's prefixed API and nothing else.
 
@@ -973,6 +1012,8 @@ TESTS = [
      test_program_importing_an_extern_module_matches_cpython),
     ("an x86-64 dylib with an extern call links and runs",
      test_module_dylib_with_an_extern_call_loads_into_a_program),
+    ("getsize through an imported hostmod dylib answers on both machines",
+     test_getsize_through_an_imported_hostmod_dylib_answers),
     ("the x86-64 dylib exports its module API",
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",
