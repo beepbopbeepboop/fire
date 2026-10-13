@@ -767,6 +767,26 @@ DECLARED = [
       "        raise ValueError('m')\n"
       "    print('after')\n"
       "    return 0\n", 3),
+     # …and the FALSY end of the value-SELECTING / BOOLEAN shapes: CPython's
+     # `1 < 0` is False, so nothing is suppressed and the exception propagates.
+     # The reader for these is `fold_module_select_expr` (the same folder the
+     # module-level constants use) reached only where `fold_literal_expr`
+     # answered None, and the truthy sibling (`1 < 2`) is a refusal below.
+     ("an_exit_returning_a_false_comparison_still_runs_the_protocol",
+      SUPPRESSING_EXIT.replace("return True", "return 1 < 0") +
+      "def main(n):\n"
+      "    with Suppressor() as v:\n"
+      "        print('body', v)\n"
+      "        raise ValueError('m')\n"
+      "    print('after')\n"
+      "    return 0\n",
+      SUPPRESSING_EXIT_PY.replace("return True", "return 1 < 0") +
+      "def main(n):\n"
+      "    with Suppressor() as v:\n"
+      "        print('body', v)\n"
+      "        raise ValueError('m')\n"
+      "    print('after')\n"
+      "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1086,6 +1106,20 @@ REFUSALS = [
     # exits 0.  The FALSY sibling (`len("")`) is an ANSWERED row above.
     ("an_exit_returning_len_of_a_nonempty_string_is_refused",
      SUPPRESSING_EXIT.replace("return True", 'return len("abc")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and a CONSTANT BOOLEAN shape, which `fold_literal_expr` does not hold and
+    # `fold_module_select_expr` does: `1 < 2` is foldably TRUE, and the image
+    # built, printed `enter / body 7 / exit` and exited 1 where CPython
+    # suppresses and prints `after`.  The FALSY sibling (`1 < 0`) is an ANSWERED
+    # row above.
+    ("an_exit_returning_a_true_comparison_is_refused",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"

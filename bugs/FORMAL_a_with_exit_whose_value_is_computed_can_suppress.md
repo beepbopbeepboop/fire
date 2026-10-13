@@ -10,21 +10,32 @@ fold, stated rather than hidden, because the alternative was refusing a host
 module the corpus depends on.
 
 **Update 2026-10-13 (`work/formal392-docs`): the FOLDABLE half was STILL
-incomplete one shape further out, and is now complete for a third kind.**
-`len(<string literal>)` — a foldable CALL rather than a literal, so
-`fold_literal_expr`'s `len` arm (which is over a DISPLAY, and is the WORD
-reader shared with the struct-field and class-constant readers) did not reach
-it — was let through: `return len("abc")` built, printed `enter / body 7 /
-exit` and exited 1 where CPython prints `after` and exits 0. `_literal_return_
-truthiness` now decides it from the literal's own text (a non-empty string is
-truthy under `len` exactly as it is under the string itself, and a non-empty
-source cannot decode to an empty string, so the raw value answers the
-truthiness), with `is_interpolated_literal` and `is_bytes` excluded because the
-first's value is its SOURCE TOKEN and the second is not a `str`. Falsy
-siblings `return len("")` and `return ""` still lower, as before. Pinned by
-`test_formal_with.py`'s
-`an_exit_returning_len_of_a_nonempty_string_is_refused` and
-`an_exit_returning_len_of_an_empty_string_still_runs_the_protocol`. **§2's
+incomplete two shapes further out, and is now complete for the kinds the build
+can fold.** Both are measured on both architectures and both produced the
+identical wrong answer as `return True` (built, printed `enter / body 7 /
+exit`, exited 1 where CPython prints `after` and exits 0):
+
+* **`len(<string literal>)`** — a foldable CALL rather than a literal, so
+  `fold_literal_expr`'s `len` arm (which is over a DISPLAY, and is the WORD
+  reader shared with the struct-field and class-constant readers) did not reach
+  it. It is now decided from the literal's own text (a non-empty string is
+  truthy under `len` exactly as under the string itself, and a non-empty source
+  cannot decode to an empty string, so the raw value answers the truthiness),
+  with `is_interpolated_literal` and `is_bytes` excluded because the first's
+  value is its SOURCE TOKEN and the second is not a `str`.
+* **the value-selecting and BOOLEAN shapes** — a comparison, `a if c else b`,
+  `and`/`or` and `not` over constants, which `fold_literal_expr` deliberately
+  does not hold and `fold_module_select_expr` does (`return 1 < 2`,
+  `return 9 if 1 else 0` and `return not 0` are all foldably true). The folder
+  is reached only where `fold_literal_expr` answered None, so this function's
+  float-truthiness rule is not weakened.
+
+Falsy siblings `return len("")`, `return ""`, `return 0.0` and `return 1 < 0`
+all still lower. Pinned by `test_formal_with.py`'s
+`an_exit_returning_len_of_a_nonempty_string_is_refused`,
+`an_exit_returning_len_of_an_empty_string_still_runs_the_protocol`,
+`an_exit_returning_a_true_comparison_is_refused` and
+`an_exit_returning_a_false_comparison_still_runs_the_protocol`. **§2's
 computed case is untouched and is still the whole of what is left.**
 
 **Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself

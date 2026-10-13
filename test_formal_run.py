@@ -1135,12 +1135,21 @@ CASES = [
      "    printf(\"len=%d %d\", b.length, c.length)\n"
      "    return 0\n", 0, "len=3 4"),
     # The comptime-over-a-variadic-parameter refusal this row once pinned is
-    # unreachable: constructing the variadic struct trips the TUPLE-INDEX
-    # refusal first (staged 2026-10-06: with any actual use of `Pair[Int, 7,
-    # 8, 9]` in main, both architectures refuse at the subscript, measured).
-    # With no use it builds and proves nothing either way. The row now pins
-    # the refusal that actually stands in front of the variadic comptime.
-    ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal",
+    # unreachable: constructing the variadic struct trips the COMPTIME-
+    # PARAMETER-LIST refusal first (staged 2026-10-06: with any actual use of
+    # `Pair[Int, 7, 8, 9]` in main, both architectures refuse at the subscript,
+    # measured).  With no use it builds and proves nothing either way.  The row
+    # pins the refusal that actually stands in front of the variadic comptime.
+    #
+    # The words it pins are the CONSTRUCT's and not the tuple-index sentence:
+    # `Pair` is a generic STRUCT template this module declares, so the
+    # multi-element bracket is a compile-time parameter list.  The tuple-index
+    # sentence was FALSE about this source and reached the row only because the
+    # template is dropped from the image before the placement check runs, so the
+    # classifier could not see the declaration — fixed 2026-10-13 with
+    # `formal/monomorph.py::template_struct_names` read into
+    # `check_module_symbols`.
+    ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_comptime_parameter_list_refusal",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
      "\n"
@@ -1151,7 +1160,7 @@ CASES = [
      "    var p = Pair[Int, 7, 8, 9]()\n"
      "    printf(\"len=%d\", p.size())\n"
      "    return 0\n",
-     "refuse:a subscript whose index is a tuple", None),
+     "refuse:is a compile-time explicit-parameter list", None),
     # …and the CONTROL. The bare `Box.length`-from-a-free-function spelling
     # this row used no longer builds — it is refused by the no-home family
     # (measured 2026-10-06 on both architectures), so the control now reads

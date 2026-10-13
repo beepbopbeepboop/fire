@@ -49122,9 +49122,11 @@ def _literal_return_truthiness(node):
     following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), a
     `len(<string literal>)` from its own text (the third foldable shape, and a
     CALL rather than a literal, so `fold_literal_expr`'s `len` arm — which is
-    over a display — does not reach it), and everything else is None — which
-    every caller reads as "not decided" and leaves the return where it was, the
-    one-sided direction this gate is deliberately in.
+    over a display — does not reach it), plus the value-selecting and BOOLEAN
+    shapes (`fold_module_select_expr`: a comparison, `a if c else b`, `and`/`or`,
+    `not` over constants), and everything else is None — which every caller
+    reads as "not decided" and leaves the return where it was, the one-sided
+    direction this gate is deliberately in.
     """
     if isinstance(node, F.FloatLiteral):
         try:
@@ -49157,6 +49159,17 @@ def _literal_return_truthiness(node):
                 and not is_interpolated_literal(arg):
             return bool(arg.value)
     value = fold_literal_expr(node)
+    if value is None:
+        # …and the VALUE-SELECTING and BOOLEAN shapes, which `fold_literal_expr`
+        # deliberately does not hold (it is also the struct-field and
+        # class-constant reader) and `fold_module_select_expr` does: a
+        # comparison, `a if c else b`, `and`/`or` and `not` over constants.
+        # `return 1 < 2`, `return 9 if 1 else 0` and `return not 0` are all
+        # foldably TRUE and were all let through — measured, both architectures,
+        # the same wrong answer as `return True`.  The float-truthiness rule of
+        # this function is not weakened by the fallback: it runs FIRST, and the
+        # select folder is only reached where `fold_literal_expr` answered None.
+        value = fold_module_select_expr(node)
     if value is None:
         return None
     return bool(value)
