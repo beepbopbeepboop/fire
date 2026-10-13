@@ -45,6 +45,31 @@ read-before-store stance this backend takes everywhere else. Already measured,
 with the same reasoning, in the `repo-c` round of `bugs/FORMAL_sweep_work_map.md`
 §4.4. **Not the sweep's next step, and not cheap either way.**
 
+**CORRECTED 2026-10-12 (`work/formal313-docs`): the refusal is unchanged and
+still CORRECT, but `formal/x86_64_decode.py` no longer exhibits it, so the
+`build:` line above cannot be reproduced from this section's file.** Commit
+`1613607b` ("`formal/x86_64_decode.py`: two declarations the formal backend
+cannot build") DELETED `Insn.extra: field(default_factory=dict)` because nothing
+in the repository read or wrote it, so this file's first refusal is now a
+different construct entirely — measured, both architectures:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build --formal \
+      --no-prove --backend=arm64 -o .tmp/x86dec formal/x86_64_decode.py
+build: an f-string literal on line 133 is refused on this path: its value is its
+INTERPOLATED text, and this path has no buffer to compose one in. …
+```
+
+which is `FORMAL_string_composition_has_no_buffer`'s row, not this one. **The
+construct is still refused** by `formal/dataclass_transform.py:472-474` and is
+still pinned — `test_refusal_taxonomy.py`'s
+"`` `field(default_factory=F)`: nowhere to keep a per-instance value ``" row and
+`tools/formal_sweep_causes.py`'s cause table both name it verbatim — so the row
+is a live "correct refusal" and only its EXAMPLE moved. A reader re-deriving
+§1 from the file this section names gets a message about f-strings; the next
+worker should reproduce it from the taxonomy row (or a fresh two-line dataclass)
+rather than from `formal/x86_64_decode.py`.
+
 ## 2. "one parameter, two kinds of value" — `module_loader.py` — FIXED 2026-10-03, so this section is retired
 
 **The row is FIXED**, by `fd396597` ("formal: a module-level struct value is a

@@ -17,6 +17,53 @@ question of which wall it is.  What it left behind is in
 `test_formal_method_param_field.py`'s "a struct-typed FIELD, initialised from a
 constructor ARGUMENT" case and in `formal/model.py::struct_field_names`.
 
+## Re-measured 2026-10-12 (`work/formal313-docs`): the FIRST arrow has moved a
+## FOURTH time, and it is now a bare-template-inference gap ABOVE every arrow below
+
+Both revisions below put the chain's first arrow at a frame-identity question
+(`StridedSlice___init__`/`Slice.write_to` self-assignment and returned-frame
+handoff). **That is no longer where the chain starts**, and the new arrow is two
+layers ABOVE the value-model question this doc owns. Measured, generation only,
+byte-identical text on both architectures:
+
+```console
+$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label t -- \
+      python3 fire.py build --formal --no-prove --backend=$a -o .tmp/bsl \
+      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: Slice.write_to: `FormatStruct` is called, and it is imported from
+`std.format._utils`, so the call has to bind a symbol `std.format._utils`
+exports. That module does not export it, and the reason is `doc/ABI.md`'s export
+rule applied to the DECLARATION: a generic template is not one symbol but one per
+instantiation … **If the call names no type argument at all, the SOURCE is right
+and this path is short**: Mojo infers a template call's type arguments, so
+`FormatStruct(…)` with no bracket is correct code … and this path does not infer
+them yet.
+```
+
+`std/utils/variant.mojo` reports the same arm, through its own import of
+`std.builtin.rebind` (`Allocation.write_to`), so the two subjects this doc
+tracks now meet at ONE wall that is neither a frame nor a value-model question.
+The chain reads:
+
+    a bare template call with inferrable type arguments (`FormatStruct(…)`)
+      ->  `std/builtin/builtin_slice.mojo` builds
+        ->  the 2026-10-03 arrow (self-assignment / returned-frame handoff)
+          ->  the 2026-10-01 arrow (`comptime` class attribute of a computed value)
+            ->  `Variant.get_discriminant`'s `__mlir_op`
+              ->  `Optional.or_else`
+                ->  the 13 files reach their own next refusal
+
+**So option 2 still cannot be started here, and the new first arrow belongs to
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**
+(123 measured files, per that doc's own header) — which is `formal/monomorph.py`'s
+demand pipeline, not this doc's value model. This is the fourth time the first
+arrow has moved, and the third time it has moved onto a construct this doc does
+not cover; the pattern is why the instruction at the end of the 2026-10-03
+section below ("measure the first refusal before starting any of it") still
+stands. **Nothing else in this doc changes:** `Optional`'s representation
+question, option 2's two halves, and the 13-file accounting are exactly as
+recorded, and no measurement here moves any of them.
+
 ## What the frame-holder doc measured, and what was behind it
 
 That doc's own text is accurate and its two messages are both real: the 13-file
