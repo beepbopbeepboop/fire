@@ -543,6 +543,20 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    # `FF /2` with `mod=11` — a call through a function VALUE. It jumps to a
+    # register's contents, and a random 64-bit value is outside the one
+    # `MAP_FIXED` region the harness maps, so every case would fault at the jump
+    # and no comparison would happen. The alternative (`call` to a fixed address
+    # inside the region) is a different instruction from the one the function
+    # value emits. The model side is not untested: `samples()` asks `x86_step`
+    # about it and `x86_step_call_r64` is a theorem about it. This was in
+    # `BACKLOG` until 2026-10-12 with the reason the fuzzer's own comment
+    # (`formal/x86_64_model_fuzz.py`, beside the pool) already gave, which is a
+    # harness property and not a gap anybody can close.
+    "encode_call_r64": "as `encode_blr_xn`: the target is a register's contents, "
+                       "which the harness cannot install, so a case would leave "
+                       "the generated stub; the model side is covered by "
+                       "`x86_step_call_r64`",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -588,35 +602,33 @@ BACKLOG = {
                             "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: the forms the harness cannot even NAME ───────────────────
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
-    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
-    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
-    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`. The previous pass recorded that and left it
-    # here on purpose because the tool was "another claim's write set"; the
-    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
-    # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
+    # **THE x86-64 BACKLOG IS EMPTY as of 2026-10-12.** Four kinds of entry left
+    # it, and each left for the reason the anti-rot half of
+    # `test_formal_isa_census.py` exists to enforce:
+    #
+    # * `encode_imul_r64_r64_imm` was removed on 2026-10-06
+    #   (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
+    #   ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
+    #   `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
+    #   a pool entry since `4a680153`;
+    # * `encode_and_r8_r8` / `encode_or_r8_r8` were removed on 2026-10-12: the
+    #   RBP-operand anomaly was this tree's own encoder omitting the REX prefix
+    #   for SPL/BPL/SIL/DIL, `_byte_rex_required` fixed it, and the two rows are
+    #   in `formal/x86_64_model_fuzz.py`'s pool, so the census reads
+    #   `yes/yes/yes` and the entries exempted nothing;
+    # * `encode_call_r64` was MOVED to `HARNESS_LIMITS` on 2026-10-12: the
+    #   fuzzer cannot run a call through a register (a random target is outside
+    #   its one `MAP_FIXED` region), which is a property of the harness, exactly
+    #   as the fuzzer's own comment beside the pool and arm64's `encode_br_xn`
+    #   say.
+    #
     # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
     # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
     # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
-    # ── x86-64: runnable, and the pool does not draw them ────────────────
+    # for every one.
+    #
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
     # engines' RIPs differ by the load slide" for the `lea` and "a call cannot

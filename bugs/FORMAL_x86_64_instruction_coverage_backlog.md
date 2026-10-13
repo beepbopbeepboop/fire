@@ -1,5 +1,41 @@
 # FORMAL_x86_64_instruction_coverage_backlog: the x86-64 half of the ISA census, form by form
 
+## Status 2026-10-12 (`work/formal314-docs`): THE x86-64 BACKLOG IS EMPTY
+
+`python3 tools/formal_isa_census.py --arch x86_64` now ends
+
+    -- 0 form(s) with no LEAN/FUZZ/AS and no exemption; 6 exempt (6 harness, 0 backlog)
+
+and the last three entries left `tools/formal_isa_census.py`'s `BACKLOG` in
+this pass, each for its own reason:
+
+* **`encode_and_r8_r8` / `encode_or_r8_r8` — a FIXED gap that kept its
+  exemption, and `test_formal_isa_census.py`'s anti-rot half had been RED on
+  both.** The RBP-operand anomaly this file documented was this tree's own
+  encoder omitting the REX prefix for SPL/BPL/SIL/DIL, `_byte_rex_required`
+  fixed it, the 512-case `rm`/`reg` census agrees with exact arithmetic and both
+  rows are in `formal/x86_64_model_fuzz.py`'s pool — so the census reads
+  `yes yes yes` and the two `BACKLOG` entries exempted nothing. They are gone.
+* **`encode_call_r64` — moved to `HARNESS_LIMITS`, not closed.** A call through a
+  register jumps to a random 64-bit value outside the harness's one `MAP_FIXED`
+  region, which is the property `formal/x86_64_model_fuzz.py`'s own comment
+  beside the pool states and the same one that keeps arm64's `encode_br_xn`
+  there. It is a harness limit, not a gap anybody can close, so `BACKLOG` (which
+  promises a fixable gap with a doc) was the wrong table.
+
+**What remains in this file is not the backlog, and both items are outside this
+claim's write set:**
+
+1. the CENSUS-INSTRUMENT defect in `--examples`' EX column (it matches a form by
+   DISASSEMBLY MNEMONIC, so two encodings of one instruction are
+   indistinguishable), which this file has always attributed to
+   `bug:FORMAL_arm64_instruction_coverage`; and
+2. the fuzz-attribution hole in `_impossible_on_hardware` — **which is now
+   FIXED**: that function is gone, replaced by `formal/x86_64_model_fuzz.py`'s
+   `_taint` dataflow pass, so an undefined flag propagated through a `setcc` is
+   attributed by value rather than by "the last flag-writing instruction was a
+   multiply".
+
 **Found 2026-10-05 by `tools/formal_isa_census.py`**, the instruction-coverage
 census, which prints the matrix for BOTH backends. arm64 is closed: every one
 of its 77 emitted forms has a model arm, a fuzz case and an `as` differential,
