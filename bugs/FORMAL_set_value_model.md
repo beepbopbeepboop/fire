@@ -1,5 +1,26 @@
 # A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython
 
+**Status 2026-10-13 (`work/formal395-docs`): the literal and the comprehension
+DEDUPLICATE now, and the "distinct words" this file's own first paragraph
+asserts was a claim the lowering did not keep.** A set lowers as a list, and the
+list a `{…}` literal — or a `{… for …}` comprehension — built held every element
+the SOURCE produced: measured on both architectures, `len({1, 1, 2, 2, 2, 3})`
+answered **6** where CPython says **3**, and `len({x % 3 for x in range(6)})`
+answered **6** where CPython says **3**, both from a build that exited 0. So
+`len` and the element MULTISET were wrong wherever the source produced a repeat,
+and the only divergence this file recorded — iteration ORDER — was not the only
+one. `formal/arm64_codegen.py::_emit_blob_uniquify` and x86-64's twin of the same
+name are the one in-place pass the literal and the comprehension now both ask: a
+word compare (an element is one 8-byte slot), the same compare `_emit_set_union`'s
+dedup already used, with the write index never passing the read index so the
+compaction cannot overwrite an element it has not read yet. **What is unchanged
+is the ORDER** — first occurrence here, hash order in CPython — so `set_order`
+and this file's argument for it stand exactly as written, and the fuzzer's `sets`
+corpus (whose elements are DISTINCT by construction) cannot see the fix either
+way. `test_formal_container_methods.py`'s set group is **23 answers (was 17)**,
+three new rows: the literal's count, the same seen through a walk, and the
+comprehension.
+
 **Status: NOT A BUG — this is the value model, and it is the document
 `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES['set_order']` row names.** The row
 was added by the fuzz-5 sweep in the same session that added `--mix sets`,

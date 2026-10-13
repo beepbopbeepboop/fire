@@ -3958,6 +3958,65 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
         self._emit_blob_base(offset, Reg.RAX)
 
+    def _emit_blob_uniquify(self, offset: int) -> None:
+        """Compact a SET's blob IN PLACE to its distinct elements.
+
+        The x86-64 twin of arm64's `_emit_blob_uniquify`, and the same pass a
+        set COMPREHENSION asks (`_emit_comprehension`). It exists because a set
+        lowers as a list and the list a literal or a comprehension builds holds
+        every element the source produced, so `len({1, 1, 2})` answered 3 where
+        CPython says 2. Distinctness is a WORD compare — an element is one
+        8-byte slot on both architectures — which is the compare the arm64 set
+        emitters already use.
+
+        Survivor order is first-occurrence, which is the divergence
+        `bugs/FORMAL_set_value_model.md` records and is unchanged. RAX exits
+        holding the blob address, as `_emit_list` leaves it."""
+        self._emit_blob_base(offset, Reg.R11)                    # R11 = base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))  # R10 = n
+        self._emit_mov_imm(Reg.R8, 0)                            # W = 0
+        self._emit_mov_imm(Reg.R9, 0)                            # R = 0
+        self._if_counter += 1
+        mid = self._if_counter
+        fn = self.func_name
+        loop = f"{fn}_uq{mid}"
+        done = f"{fn}_uqd{mid}"
+        found = f"{fn}_uqf{mid}"
+        nextr = f"{fn}_uqn{mid}"
+        scan = f"{fn}_uqs{mid}"
+        nf = f"{fn}_uqx{mid}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R10))
+        self._emit_setcc_bool(Reg.RSI, "setae")
+        self._emit_jcc_bool(Reg.RSI, COND_NE, done)       # R >= n -> done
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.RDI)    # RDI = &blob[R]
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))   # RAX = elem
+        self._emit_mov_imm(Reg.RSI, 0)                    # k = 0
+        self.asm.label(scan)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RSI, Reg.R8))
+        self._emit_setcc_bool(Reg.RDI, "setae")
+        self._emit_jcc_bool(Reg.RDI, COND_NE, nf)         # k >= W -> not found
+        self._emit_elem_addr(Reg.R11, Reg.RSI, Reg.RDI)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RDI, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_setcc_bool(Reg.RDI, "sete")
+        self._emit_jcc_bool(Reg.RDI, COND_NE, found)      # equal -> found
+        self.asm.emit(encode_add_r64_imm8(Reg.RSI, 1))
+        self._emit_jmp(scan)
+        self.asm.label(found)
+        self._emit_jmp(nextr)
+        self.asm.label(nf)                                # blob[W] = elem
+        self._emit_elem_addr(Reg.R11, Reg.R8, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))     # W++
+        self.asm.label(nextr)
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))     # R++
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self._emit_blob_base(offset, Reg.R11)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))    # count = W
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_list_star(self, expr) -> None:
         """List literal containing `*iterable` splats — reserve, then append.
 
@@ -7216,11 +7275,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_dict(expr)
             return
 
-        if isinstance(expr, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        if isinstance(expr, F.SetExpr):
+            # A set lowers as a list blob (membership and iteration are the
+            # only uses formal sees), and then it is DEDUPLICATED in place,
+            # because a set holds distinct elements and the list a literal
+            # builds holds every element the source wrote. arm64's
+            # `_emit_blob_uniquify` and `_emit_comprehension`'s set branch are
+            # the same pass; the argument and the measurement are there.
+            offset = self._list_cursor
+            self._emit_list(expr)
+            self._emit_blob_uniquify(offset)
+            return
+
+        if isinstance(expr, (F.ListExpr, F.TupleExpr)):
             # TupleExpr and ListExpr have identical `elements` and one blob
             # layout, so they share an emitter rather than two parallel ones.
-            # A set lowers as a list blob: membership and iteration are the
-            # only uses formal sees, and the blob gives both.
             self._emit_list(expr)
             return
 
@@ -9310,6 +9379,10 @@ preference.
         finally:
             self._container_ctx = saved_ctx
             self._compr_depth = d0
+        # A set comprehension appends every element its generators produce, so
+        # it needs the same in-place dedup a set LITERAL asks.
+        if getattr(expr, "kind", "list") == "set":
+            self._emit_blob_uniquify(offset)
         self._emit_blob_base(offset, Reg.RAX)
 
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int, res_offset: int,

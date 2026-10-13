@@ -4193,8 +4193,14 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(expr, F.SetExpr):
             # Formal has no set runtime — lower as a list blob (membership
-            # / iteration are the only uses seen on this path).
+            # / iteration are the only uses seen on this path) and then
+            # DEDUPLICATE it in place, because a set holds distinct elements
+            # and the list a literal builds holds every element the source
+            # wrote. `_emit_blob_uniquify` is the ONE pass for this, and a set
+            # COMPREHENSION asks the same one from `_emit_comprehension`.
+            offset = self._list_cursor
             self._emit_list(expr)
+            self._emit_blob_uniquify(offset)
             return
 
         if isinstance(expr, F.CallExpr):
@@ -11315,6 +11321,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._container_ctx = saved_ctx
             self._compr_depth = d0
 
+        # A set comprehension appends every element its generators produce, so
+        # it needs the same in-place dedup a set LITERAL asks — `{x % 3 for x
+        # in range(6)}` is three distinct elements in CPython and was six here.
+        if kind == "set":
+            self._emit_blob_uniquify(offset)
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
@@ -13330,6 +13341,74 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_b_to(ur)
         self.asm.label(urd)
         self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_blob_uniquify(self, offset: int) -> None:
+        """Compact a SET's blob IN PLACE to its distinct elements.
+
+        A set lowers as a list here, and the list an `_emit_list` or a
+        comprehension builds holds every element the source produced — so
+        `{1, 1, 2}` was a three-word blob and `len` answered 3 where CPython
+        says 2, and `for x in {1, 1, 2}` yielded the repeat. Nothing about
+        that is a hash question: the elements are WORDS on this path, so
+        "distinct" is a word compare, which is the same compare
+        `_emit_set_union`'s dedup and `_emit_set_filter_pass` already use.
+
+        The survivor order is FIRST-OCCURRENCE order, which is the divergence
+        `bugs/FORMAL_set_value_model.md` records (CPython walks hash order) and
+        is unchanged: this makes the COUNT and the multiset right, not the
+        order. The write index (X4) never passes the read index (X5), so
+        compacting in place cannot overwrite an element that has not been read.
+
+        X0 exits holding the blob address, as `_emit_list` leaves it."""
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 9, 0))     # X2 = n (count)
+        self.asm.emit(encode_movz_wd_imm(4, 0))          # W = 0
+        self.asm.emit(encode_movz_wd_imm(5, 0))          # R = 0
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        uq = f"{fn}_uq{wid}"
+        uqd = f"{fn}_uqd{wid}"
+        uqn = f"{fn}_uqn{wid}"
+        uqs = f"{fn}_uqs{wid}"
+        uqx = f"{fn}_uqx{wid}"
+        self.asm.label(uq)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(uqd, here_offset=-4)     # R >= n -> done
+        # elem = blob[R] -> X6
+        self.asm.emit(encode_add_xd_xn_imm(0, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))
+        # scan blob[0..W) for elem: k = X0
+        self.asm.emit(encode_movz_wd_imm(0, 0))
+        self.asm.label(uqs)
+        self.asm.emit(encode_cmp_xn_xm(0, 4))
+        self.asm.emit(encode_cset_xd_cond(10, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 10))
+        self.asm.emit_label_rel(uqx, here_offset=-4)     # k >= W -> not found
+        self.asm.emit(encode_add_xd_xn_imm(10, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(10, 10, 0))
+        self.asm.emit(encode_cmp_xn_xm(10, 6))
+        self.asm.emit(encode_cset_xd_cond(10, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 10))
+        self.asm.emit_label_rel(uqn, here_offset=-4)     # equal -> found
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(uqs)
+        self.asm.label(uqx)                              # not found: blob[W] = elem
+        self.asm.emit(encode_add_xd_xn_imm(10, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(10, 10, 4))
+        self.asm.emit(encode_str_xt_xn_imm(6, 10, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))     # W++
+        self.asm.label(uqn)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))     # R++
+        self._emit_b_to(uq)
+        self.asm.label(uqd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))     # count = W
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _maybe_emit_set_binop(self, left, right, op: str) -> bool:

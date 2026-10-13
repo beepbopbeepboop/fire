@@ -610,6 +610,19 @@ SET_CASES = [
      "a walk over a set's elements — the ORDER is insertion order here and "
      "hash order in CPython, so the walk is observed through a SUM, which is "
      "order-independent and therefore honest about what is being checked"),
+    ("s_literal_dedup", ["s = {1, 1, 2, 2, 2, 3}"], "len(s)",
+     "a set holds DISTINCT elements, and the list a set literal lowers to used "
+     "to keep every word the source wrote — so `len` answered 6 where CPython "
+     "says 3, on both backends. The dedup is `_emit_blob_uniquify`"),
+    ("s_literal_dedup_walk", ["s = {1, 2, 1, 3, 2}", "t = 0",
+                              "for x in s:", "    t = t + x"], "t",
+     "the same dedup through a WALK: the repeat used to be yielded, so the sum "
+     "was 9 where the distinct elements sum to 6. Observed through a sum "
+     "because the ORDER is still insertion order here and hash order in "
+     "CPython, which is `bugs/FORMAL_set_value_model.md`'s own divergence"),
+    ("s_comp_dedup", ["s = {x % 3 for x in range(6)}"], "len(s)",
+     "a set COMPREHENSION deduplicates too: six values are generated, three "
+     "are distinct, and CPython's count is 3 where the blob used to hold six"),
     ("s_union", ["s = {1, 2}", "t = s | {2, 3}"], "len(t)",
      "the ONE container operator arm64 lowers correctly: a union drops the "
      "repeats. x86-64 refuses it, so this case is arm64-only"),

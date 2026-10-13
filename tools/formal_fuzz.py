@@ -4912,7 +4912,12 @@ class Gen:
     #
     # The elements are DISTINCT small integers, so a `set` literal has no
     # duplicates to disagree about and `len` is the count of elements rather
-    # than the count of a literal CPython de-duplicated.
+    # than the count of a literal CPython de-duplicated. (A duplicate WOULD
+    # agree since 2026-10-13: `_emit_blob_uniquify` compacts a set literal and
+    # a set comprehension in place, so `len` is the distinct count on both
+    # engines — `bugs/FORMAL_set_value_model.md` carries the measurement. The
+    # corpus keeps its distinct elements so the `set_order` neutraliser, which
+    # rewrites the LITERAL to a list, stays an exact stand-in.)
     def set_stmt(self, indent, kind):
         if kind == "set_build" or not self.sets:
             name = self.fresh("S")
