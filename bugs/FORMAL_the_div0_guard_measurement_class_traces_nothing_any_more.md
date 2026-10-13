@@ -16,6 +16,23 @@ observable with an integrator's `prooflib` build** — `lib/ProofLib.olean` is
 absent on this worktree, so the class SKIPS there; the file parses and every
 Lean-free class in it is green.
 
+**Step 1 LANDED 2026-10-08 (`work/formal166-docs`).** `setUpClass` now records
+`cls.traced[label] = _ADMIT in tail` (and records a generation refusal the same
+way), `test_the_mechanism_that_prints_the_residual_fired` fails when it did not
+fire, and both existing rows check that flag FIRST so a fixture that stopped
+producing a residual can no longer report the misleading "fdiv64 may have been
+corrected" diagnosis.  **The mechanism check is also pinned Lean-free**, which
+the class itself cannot be: `TestTheZeroDivisorGuardIsAFalseGoal::
+test_the_symbolic_divisor_fixture_still_has_its_subject` asserts, without a
+built library, that the fixture either yields a tail carrying `_ADMIT` or
+refuses with the two-unfollowable-calls message — never a silently empty tail.
+That row is why a light worker can observe this half.  On this tree the class is
+red for the honest reason: `_symbolic_divisor_proof` REFUSES at generation
+because arm64 reads its own stack-guard `getrlimit` and div0-arm `fflush` as
+calls the PROGRAM makes, so no `q_compiles_correctly_universal` is emitted at
+all.  Step 2 (which of the two the class should measure) is the work that
+remains and is blocked on that emitter regression.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
@@ -185,7 +202,9 @@ Two independent drifts, and a fix needs both:
 1. ~~Add the mechanism check first~~ **DONE 2026-10-08**:
    `setUpClass` records whether `_ADMIT` occurred in the tail it built (and
    catches a generation refusal into the same flag), and
-   `test_the_mechanism_that_prints_the_residual_fired` fails when it did not.
+   `test_the_mechanism_that_prints_the_residual_fired` fails when it did not —
+   pinned Lean-free by
+   `TestTheZeroDivisorGuardIsAFalseGoal::test_the_symbolic_divisor_fixture_still_has_its_subject`.
 2. Then decide which of the two the class should measure:
    * **subtract `info["compiler_traps"]` in `_unfollowable_calls` too.** This is
      the same fix as

@@ -5515,6 +5515,38 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                              f"{backend}: the program printed after a zero "
                              f"divisor: {p.stdout!r}")
 
+    def test_the_symbolic_divisor_fixture_still_has_its_subject(self):
+        """Lean-free: the fixture yields the admission the class patches, or it
+        refuses — never a silently empty tail.
+
+        `TestTheZeroDivisorGuardAgainstLean` needs a built `lib/ProofLib.olean`,
+        so on a tree without one its mechanism check cannot run at all.  This
+        row is Lean-free and pins the same invariant one level down: the fixture
+        either produces a tail carrying `_ADMIT` (the class can trace a residual)
+        or it refuses outright (the class records why) — never a tail with no
+        admission, which is what turns the class's patch into a no-op and its
+        failure into a `fdiv64` diagnosis about a goal it never saw.  That is
+        `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+        and this is the observable half of its step 1.
+        """
+        from formal.build import FormalBuildError
+        try:
+            _head, tail = _symbolic_divisor_proof(self.tmp)
+        except FormalBuildError as e:
+            self.assertIn("this walk cannot follow", str(e),
+                          "the div0 fixture now refuses for a different reason "
+                          "than the two unfollowable calls this tree records; "
+                          "re-read bugs/FORMAL_the_div0_guard_measurement_"
+                          "class_traces_nothing_any_more.md before trusting "
+                          "either of its next steps")
+            return
+        self.assertIn(_ADMIT, tail,
+                      "the div0 fixture generated a proof whose tail carries "
+                      f"no {_ADMIT!r}, so the class's patch is a no-op and its "
+                      "rows would report a `fdiv64` diagnosis about a residual "
+                      "they never traced: whatever the div0 residual is today, "
+                      "the measurement class is not looking at it")
+
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
     """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
