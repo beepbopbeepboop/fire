@@ -320,8 +320,7 @@ def samples():
     # `formal/x86_64_codegen.py` emits all of these, and until now `samples()`
     # named NONE of them, so `x86_step` was never asked the one question this
     # list exists to ask — `tools/formal_isa_census.py`'s LEAN column for x86-64
-    # IS this list, and it read `no` for each.  See
-    # `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`, shape 1.
+    # IS this list, and it read `no` for each.
     #
     # A HIGH XMM index is not available (SysV AMD64 names only XMM0-XMM7, and
     # every encoder asserts it), so unlike the GPR rows there is no r8-r15 pair
