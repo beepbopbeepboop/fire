@@ -4103,7 +4103,10 @@ def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
     from formal import monomorph as MM            # lazy — pulls the middle tier
     from formal.build import parse_module         # lazy — cycle
     stmts = parse_module(module_source_text(source_path), filename=source_path)
-    MM.rewrite_instantiation_calls(stmts, demap)
+    MM.rewrite_instantiation_calls(
+        stmts, demap,
+        aliases={local: pair[1] for local, pair in
+                 imported_bindings(stmts).items()})
     return {source_path: stmts}
 
 
@@ -4154,7 +4157,10 @@ def imported_instantiations(source_path: str, stmts: list,
     out.update(_own_instantiations(module_source_text(source_path), source_path,
                                    demap, project_root or source_path, stmts))
     if demap:
-        MM.rewrite_instantiation_calls(stmts, demap)
+        MM.rewrite_instantiation_calls(
+            stmts, demap,
+            aliases={local: pair[1] for local, pair in
+                     imported_bindings(stmts).items()})
     return out
 
 

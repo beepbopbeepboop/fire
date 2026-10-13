@@ -256,10 +256,14 @@ def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
     wrong about correct code — and it is why the text is a whole function
     (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
 
-    Four needles, each for a different false claim above, and the last one is
-    the only part of the message a reader can act on: `from L import Pair` then
-    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
-    below, on this machine, in this tree.
+    The needles are for the false claims above, plus the two halves of the
+    repair: the non-aliased spelling `from L import Pair` then `Pair[Int]()`,
+    which is the SAME program and is lowered (the row below, on this machine),
+    and the distinction the message now draws — the NAME-aliased spelling works
+    too, and what is refused is the MODULE alias. Before 2026-10-13 the message
+    claimed the name alias was refused as well, and that is the half that went
+    stale when the alias was mapped (`test_an_aliased_import_of_a_generic_
+    template_is_instantiated`).
     """
     for arch in ARCHES:
         fresh_cas()
@@ -270,7 +274,7 @@ def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
                        "`L` is the module while `Pair` is the template",
                        "answers `None` for a dotted base BY DESIGN",
                        "from <the module> import Pair",
-                       "the ALIASED form"):
+                       "What is refused is the MODULE alias"):
             check(needle in text,
                   f"[{arch}] the dotted application did not say {needle!r}: "
                   f"{text.strip()[-400:]}")
@@ -293,10 +297,10 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
     `PAIR_CPYTHON`/`PAIR_CPYTHON_MAIN` reference run at test time.
 
     **The remedy is the NON-aliased spelling, and that is measured rather than
-    assumed**: `from pairlib import Pair as P` then `P[Int]()` is still refused
-    on this tree (the demand walk reads `P` where the template is `Pair`), so
-    the message names the module's own name and says so. This row is what
-    makes that claim worth making.
+    assumed**: `from pairlib import Pair` then `Pair[Int]()` is the spelling the
+    message names. The NAME-aliased form is a separate row now
+    (`test_an_aliased_import_of_a_generic_template_is_instantiated`), because it
+    was still refused when this message was written and is not any more.
     """
     bare = PAIR_PROG.replace("import pairlib", "from pairlib import Pair")
     for arch in ARCHES:
@@ -307,6 +311,66 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
               f"[{arch}] the remedy the new refusal recommends printed {got!r}, "
               f"not the three answers this case is about — so the message is "
               f"recommending a spelling nothing checks")
+
+
+def test_an_aliased_import_of_a_generic_template_is_instantiated(tmpdir):
+    """`from pairlib import Pair as P` then `P[Int]()` builds and agrees.
+
+    §2's ALIASED half. The demand walk keyed each demand on the name AS SPELLED
+    while `demands_from_calls` filters by the DEFINING name, so `P` and `Pair`
+    never met, the demand was silently dropped, and the call kept its brackets
+    and was refused — the message even recommended a spelling the program
+    already used. `formal/monomorph.py` now maps the base through
+    `model.import_bindings` at BOTH readers (the demand key and the rewrite
+    lookup), so the call is rewritten to the mangled `Pair_1_T_3_Int` and no
+    bracket survives to be refused. The mapping is the ONE reader of what an
+    import binds, so this is not a second recogniser — the failure mode §2 opens
+    with.
+
+    A CPython differential on both architectures. The unit half below pins the
+    KEY rather than the verdict, because a differential would pass even if the
+    demand were keyed on the spelling and the rewrite happened to match.
+    """
+    prog = ("from pairlib import Pair as P\n"
+            "\n"
+            "def main():\n"
+            "    var a = P[Int]()\n"
+            "    a.first = 7\n"
+            "    a.second = 3\n"
+            "    print(a.get_first())\n")
+    cpython_main = ("def main():\n"
+                    "    a = Pair()\n"
+                    "    a.first = 7\n"
+                    "    a.second = 3\n"
+                    "    print(a.get_first())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, prog,
+                            PAIR_CPYTHON + "\n" + cpython_main)
+        check(got == "7\n",
+              f"[{arch}] the aliased application printed {got!r}, not CPython's "
+              f"`7` — a demand keyed on the spelling is a demand no module "
+              f"declares, so nothing is instantiated and the call keeps its "
+              f"brackets")
+
+
+def test_an_aliased_demand_is_keyed_on_the_defining_name(_tmpdir):
+    """The demand walk attributes `P[Int]()` to `Pair`, not to `P`.
+
+    Asked of the source alone: the KEY is what `demands_from_calls` filters by
+    and what the library publishes its symbol under, and it is the half a
+    build-level differential cannot isolate.
+    """
+    from formal import monomorph as MM
+    src = ("from pairlib import Pair as P\n"
+           "\n"
+           "def main():\n"
+           "    var a = P[Int]()\n")
+    got = MM.all_instantiation_calls(src)
+    check(got == {"Pair": [("Int",)]},
+          f"the demand walk keyed the aliased call as {got!r}; the DEFINING "
+          f"name `Pair` is what the library publishes and what the rewrite "
+          f"looks up, so keying on the spelling drops the demand silently")
 
 
 # ── behavioural: the boundary symbols ───────────────────────────────────────
@@ -3092,6 +3156,10 @@ TESTS = [
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
+    ("an aliased import of a generic template is instantiated",
+     test_an_aliased_import_of_a_generic_template_is_instantiated),
+    ("an aliased demand is keyed on the defining name",
+     test_an_aliased_demand_is_keyed_on_the_defining_name),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library that applies another module's template instantiation",

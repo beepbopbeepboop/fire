@@ -731,6 +731,20 @@ def all_instantiation_calls(consumer_src: str) -> dict:
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
         module_level = set(M.collect_module_symbols(stmts) or {})
+        # An ALIASED import (`from pairlib import Pair as P`) binds `P` and the
+        # template is `Pair`, so a demand keyed on the spelling never meets the
+        # DEFINING name `demands_from_calls` filters by and is silently dropped
+        # — the demand is computed for a name no module declares. The mapping
+        # comes from `model.import_bindings`, the ONE reader of what an import
+        # binds (its third element is the defining name), so this is not a
+        # second spelling rule: it is the same one, read where the demand is
+        # keyed. A base that is not an alias is unchanged.
+        aliases: dict = {}
+        for st in stmts:
+            if isinstance(st, (F.ImportStmt, F.FromImportStmt)):
+                for local, _module, defining in M.import_bindings(st):
+                    if defining and defining != local:
+                        aliases.setdefault(local, defining)
         found: dict = {}
         for st in stmts:
             values = _names_bound_in(st) \
@@ -743,7 +757,8 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                     continue
                 args = _bracket_type_args(node.func, values)
                 if args:
-                    found.setdefault(base, set()).add(tuple(args))
+                    found.setdefault(aliases.get(base, base), set()).add(
+                        tuple(args))
         return {k: tuple(sorted(v)) for k, v in found.items()}
     return {k: list(v) for k, v in _derived_from_source(
         "all_instantiation_calls", consumer_src, derive).items()}
@@ -931,7 +946,7 @@ def instantiate_all(module_src: str, wanted: dict,
     return made, failed
 
 
-def rewrite_instantiation_calls(stmts, demap: dict) -> int:
+def rewrite_instantiation_calls(stmts, demap: dict, aliases: dict = None) -> int:
     """Rewrite `Base[Args](…)` call sites to the mangled `Base_Args`, in place.
 
     `demap` is `{(base, (arg, …)): mangled name}` — the same key
@@ -1017,6 +1032,10 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             if isinstance(node, F.MemberExpr) \
                     and isinstance(node.obj, F.IdentExpr):
                 mangled = uniq.get(node.obj.name)
+                if mangled is None and aliases:
+                    # An aliased import's base reads the DEFINING template's
+                    # instantiation, and `uniq` is keyed by the defining name.
+                    mangled = uniq.get(aliases.get(node.obj.name))
                 if mangled is None or node.obj.name in shadowed:
                     continue
                 node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
@@ -1030,6 +1049,15 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
                 continue
             args = tuple(_bracket_type_args(node.func, values))
             mangled = demap.get((base, args))
+            if mangled is None and aliases:
+                # `from pairlib import Pair as P` then `P[Int]()`: `demap` is
+                # keyed by the DEFINING template `Pair` (the demand walk maps
+                # the alias the same way), so the spelled base has to be mapped
+                # before the lookup. `model.import_bindings` is the one reader
+                # of that mapping, and the rewrite is the place that makes the
+                # two spellings meet — without it the call keeps its brackets
+                # and the scan refuses a program that is correct Mojo.
+                mangled = demap.get((aliases.get(base), args))
             if mangled is None:
                 continue
             node.func = F.IdentExpr(name=mangled,

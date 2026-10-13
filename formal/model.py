@@ -7067,13 +7067,15 @@ def dotted_specialization_refusal(name: str) -> str:
     **The remedy is the one spelling measured to work, and nothing else is
     claimed.** `from pairlib import Pair` — the module's OWN name — then
     `Pair[Int]()`, which builds, runs and answers CPython on both architectures
-    (`test_formal_monomorph.py`'s two rows here). The ALIASED form is NOT
-    claimed: `from pairlib import Pair as P` then `P[Int]()` was measured on
-    this tree and is refused with `specialization_call_refusal`, because the
-    demand walk reads `P` where the template is `Pair` and a struct template's
-    instantiation is emitted under the mangled name. §2 of the doc says the
-    alias "maps back" for a FUNCTION template's demand; it is not true of this
-    one, so the message does not say it.
+    (`test_formal_monomorph.py`'s two rows here). The NAME-aliased form is
+    claimed too as of 2026-10-13 (`work/formal343-docs`): `from pairlib import
+    Pair as P` then `P[Int]()` now builds and answers CPython on both
+    architectures, because `formal/monomorph.py` maps the alias through
+    `model.import_bindings` when it keys the demand and rewrites the call — see
+    §2 of the doc, whose "the aliased form was measured and does not work" is
+    the half that is now stale. What this message still refuses is the MODULE
+    alias (`import pairlib as L`, then `L.Pair[Int]()`), which is the dotted
+    application and is a recogniser gap rather than a name one.
     """
     module, _, leaf = name.rpartition(".")
     return (
@@ -7091,9 +7093,13 @@ def dotted_specialization_refusal(name: str) -> str:
         f"`from <the module> import {leaf}`, spelled with the MODULE'S OWN name "
         f"rather than the `{module}` alias — and call `{leaf}[…](…)`. That is "
         f"the same program, and it builds, runs and answers CPython on both "
-        f"architectures; the ALIASED form (`import … as {module}` then "
-        f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
-        f"measured on this tree and is still refused, so do not stop there. "
+        f"architectures. The NAME-aliased form is fine too — `from <the module> "
+        f"import {leaf} as <alias>` then `<alias>[…](…)` is instantiated exactly "
+        f"as the bare name is (`formal/monomorph.py` maps the alias through "
+        f"`model.import_bindings` when it keys the demand and rewrites the call). "
+        f"What is refused is the MODULE alias, `import <the module> as {module}` "
+        f"then `{module}.{leaf}[…](…)` — the dotted application below — so do not "
+        f"stop there. "
         f"The dotted application itself, and the ABI question a fix needs, are "
         f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
         f"emitted with the brackets dropped: that builds, runs, and returns a "

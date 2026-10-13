@@ -684,3 +684,39 @@ unchanged and remains the recogniser question §2 opens with. It is:
    necessary and sufficient for everything except that table;
 3. §2's dotted half (`L.Pair[Int]()`) is a SEPARATE piece and is untouched by all
    of the above — a dotted base's recogniser question, not an alias one.
+
+### 2026-10-13 (`work/formal343-docs`): the ALIASED half is FIXED, and place 3 was not needed
+
+**Status: DONE.** `from pairlib import Pair as P` then `P[Int]()` **builds, runs
+and answers CPython on both architectures** — measured, `P[Int]()` with
+`a.first = 7; a.second = 3; print(a.get_first())` prints `7` on arm64 and on
+x86-64, and `test_formal_monomorph.py`'s
+`an aliased import of a generic template is instantiated` is the differential.
+
+**Places 1 and 2 are as the 2026-10-05 measurement described, and place 3
+dissolves rather than being decided.** The demand walk (`all_instantiation_calls`)
+now maps the callee's base through `model.import_bindings` — the ONE reader of
+what an import binds — when it KEYS each demand, and `rewrite_instantiation_calls`
+maps the same way when it looks the call up in `demap`. The two changes are one
+fact read at two sites, not a second recogniser, and they are enough because the
+rewrite then emits the MANGLED name: `P[Int]()` becomes `Pair_1_T_3_Int()`, no
+bracket survives to be refused, and the symbol table never has to answer a
+question about the defining name. The 2026-10-05 plan rewrote the call's base to
+the DEFINING name and expected the bracketed scan to see `Pair[Int]()` — which is
+why it hit place 3 at all; producing the mangled name at the rewrite instead
+skips that intermediate spelling entirely.
+
+**So the decision place 3 named — should `collect_module_symbols` publish an
+import's DEFINING name — was not taken, and does not need to be.** The registry
+is not touched: a bare read or bare call of `Pair` in a unit that imported only
+`P` is still refused exactly as before, which is the wrong answer the 2026-10-05
+round declined to risk. The demand walk's own unit row
+(`an aliased demand is keyed on the defining name`) pins the key rather than the
+verdict, because a build-level differential would pass even if the rewrite
+matched a demand keyed on the spelling.
+
+**The dotted half (§2's `L.Pair[Int]()`) is untouched** and remains the
+recogniser question §2 opens with. The refusal's text no longer claims the NAME
+alias is refused — `formal/model.py::dotted_specialization_refusal` now says the
+name-aliased spelling works and only the MODULE alias is refused — which is the
+`refuse_without:` half that this fix made stale.
