@@ -19,30 +19,26 @@ refused ten of the twelve examples this doc's pin names as generating
 `if n == 0` test sits at the other end of the function). **Fixed**: the walk now
 carries `(block, crossed)` and answers True only for a block that CONTAINS the
 halt with no source conditional crossed, pinned in both directions by
-`test_formal_call_proof_gen.py::TestTheReachedWalkIsPerPath`. So the class is
-one row from green: `wdiff` refuses in the loop contract because the stack-floor
-guard's `getrlimit` (`bfeec991`, every arm64 prologue) is counted as a program
-call and becomes the theorem's halt boundary, and because the arm64 half of
-`38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
-by a merge. Both are filed as
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
-"all twelve generate" below is true of the ten recursive examples and false of
-`wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
-row).
+`test_formal_call_proof_gen.py::TestTheReachedWalkIsPerPath`. **Update
+2026-10-13: the class is GREEN.** The second half — the stack-floor guard's
+`getrlimit` (`bfeec991`, every arm64 prologue) being counted as a program call
+and becoming the theorem's halt boundary — was fixed by `70b76755`/`806e72cb`,
+which moved that read into the startup stub, before the entry function, so the
+walk no longer counts the compiler's own call. `wdiff` generates again, and the
+half of `38880520` that a merge dropped (`_emit_trap_flush` populating
+`compiler_traps`) is restored. So "all twelve generate" below is true once more;
+`sum_range` still refuses, but by design (the signed-loop contract, its
+`REFUSED` row). Measured here: `TestTheRecursionFamiliesStillGenerate` passes.
 
-**Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
-not this doc's fix that regressed.** The census this doc pins — "all twelve
-generate" — is measured green when written, and on this tree
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 12
-failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
-`both`, `either` and `wdiff` now REFUSE at
-`formal/arm64_proof_gen.py::_reached_without_a_condition` (the
-conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
-`sum_range` refuses there instead of at its owned loop-contract refusal. The
-cause is a logic bug in that check, not a reopened gap, and it is filed with
-the reproduction and the fix as
+**Status 2026-10-07 (`work/formal119-docs`): the PIN below went RED for a
+2026-10-07 interval and is GREEN again on this tree.** `caa3d1a7` changed
+`_reached_without_a_condition` to ask whether the HALT address's path crosses a
+source conditional rather than whether any reachable path meets one (the ten
+recursive examples generate again), and `70b76755`/`806e72cb` moved the
+stack-floor guard's `getrlimit` into the startup stub, so it is no longer
+counted as a program call. The getrlimit doc that filed the interval was retired
+with its fix; the walk half is recorded in
 `bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`.
-That doc is another claim's code, so nothing here was edited.
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
