@@ -1,5 +1,23 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.9d is new (2026-10-12, `work/formal299-docs`): the two reds §0.9c names are
+GREEN on this tree, and the bug it filed is fixed.** §0.9c ends with the
+instrument's own test `test_formal_proof_breadth.py::test_a_census_that_does_not_
+ask_lean_says_so` RED on `proof-refused` vs `proof-emitted`, and
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` RED on the
+recursion family, both from `_reached_without_a_condition` refusing a call before
+the condition. The fix landed as `caa3d1a7` — the walk now carries a per-path
+`crossed` flag (`(block, crossed)`) so a `pc` on the straight-line path before a
+source conditional is reachable, and a source conditional's own block is reached
+without following its successors — and the second half as the call-below-the-
+entry rule (`_program_extern_calls` subtracts an `extern_call` whose address is
+below `func_offset`, which is the startup stub's `getrlimit`, so a one-`print`
+program is one opaque call again). Measured here: `test_formal_proof_breadth.py`
+**Ran 26 tests … OK** and `TestTheRecursionFamiliesStillGenerate` **Ran 3 … OK**.
+The doc §0.9c cites is still in the tree; its removal is not this file's to take
+(one of its citations is in another claimed doc), so §0.9c stands as history with
+its verdict corrected here rather than deleted.
+
 **§0.9c is new (2026-10-07, `work/formal119-docs`): the INSTRUMENT's own test
 `test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` is
 RED on this tree, and it is a generator regression rather than a defect in the
