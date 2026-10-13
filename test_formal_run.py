@@ -25154,6 +25154,16 @@ def main():
     # two are answered.
     both_arch_names = ({c[0] for c in BOTH_ARCH_CASES}
                       | {c[0] for c in PRINT_KWARG_CASES}
+                      # `fd_write_on_an_open_result_writes` is the getsize row:
+                      # its `os.path.getsize` chain (`os_path -> fs_stat ->
+                      # fs_stat_field64`) SEGFAULTED on x86-64 — it jumped to
+                      # address 0 inside the imported hostmod dylib — while
+                      # arm64 answered 5 correctly. `run_case` builds the HOST
+                      # architecture, so on an arm64 host this row ran arm64-only
+                      # and was structurally blind to the x86-64 defect; running
+                      # both architectures is what pins the crash fixed (the fix
+                      # is `formal/macho_linker.py`'s `_linkedit_vm`).
+                      | {"fd_write_on_an_open_result_writes"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
                                              "deref_a_binary64_pointee"))}) - {
