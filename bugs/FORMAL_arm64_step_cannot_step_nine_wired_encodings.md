@@ -3,21 +3,22 @@
 ## Status
 
 **RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
-claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
+claim above is FALSIFIED. Arms this file prescribed as NOSTEP arms are WIRED and
 produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
-its own document now:**
+its own record now:**
 
 | defect | where it is now |
 |---|---|
 | the `CMN` arm took the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` wrote NO register | **FIXED** — the arm reads and writes `Rd`, pinned by the `adds x11, x1, x15` CPU-vs-model row in `TestUnsignedOffsetAccess`; its doc was deleted with the fix |
 | the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — `arm64_ext_imm12` decodes bits 21:10 and `sh`, pinned by the `lsl #12` rows in `TestUnsignedOffsetAccess`; the doc that sized it is `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the shifted-REGISTER arms read `Rn` and `Rm` and drop the `shift`/`amount` fields, so `add xD, xN, xM, lsl #3` models as `xN + xM` | **OPEN** — `lib/ProofLib.lean` (the build wall), measured on the CPU and filed 2026-10-13 as `FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md` |
 
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
-which is the generalisable half: this file's §5 is right that "the gap is the
-model is silent", and the two new defects are the OTHER failure — the model is
-*loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can
-see. Re-read §6 before using this file's tooling as a coverage claim.
+All three are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so
+they are written down rather than attempted. **None is in this file's `NOSTEP`
+table**, which is the generalisable half: this file's §5 is right that "the gap
+is the model is silent", and these are the OTHER failure — the model is *loud*
+and *wrong*, which is worse, and which no NOSTEP tally in this file can see.
+Re-read §6 before using this file's tooling as a coverage claim.
 
 **The CMN one is this file's own doing**, and that is worth stating rather than
 burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so
@@ -58,6 +59,15 @@ document and its own blocker
 (`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
 whose Status says the certificate is the expensive part and that the certificate
 belongs to another claim), so the reachable set this file names is now empty.
+
+**`WRONG 0` above is a row about the mixes as they were on 2026-10-05, and the
+`flagged` mix landed after it.** `gen_flagged_alu` draws the scaled register adds
+`encode_add_xd_xn_xm_lsl3/lsl4` emits, and re-measuring the same seed on this
+tree gives `--cases 200 --seed ledgerA --mix flagged` = `AGREE 133 WRONG 67`;
+the model's shifted-register `ADD` drops the shift. That is the third LOUD-WRONG
+defect, filed 2026-10-13 as
+`bugs/FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md`, and it is not
+a `NOSTEP` row in the table below for the reason this file's §5 gives.
 
 What landed, in the order §4 gives:
 
