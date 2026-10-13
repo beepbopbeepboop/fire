@@ -1,14 +1,5 @@
 # `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left
 
-**Status 2026-10-05 (`work/formal71-docs`): §2 and §3 are unchanged and both are
-projects, so this document is NOT closed — but the table of lowerings below had a
-row that published a construct this path refuses, and that is corrected and
-measured. `bool(x)` is not lowered (for ANY receiver, `Int` included — it is one
-of 38 names in `FRAME_VALUE_ONLY_CALLS`); what lowers is the conditional form,
-niche-aware. Everything else in the table measured today, on both architectures,
-and holds.** Read the correction before §2, whose "the two sound alternatives"
-does not depend on it.
-
 **Status 2026-10-05 (`formal25-4`): §4 is FIXED, and it was a WRONG ANSWER on
 both architectures rather than the limitation §4 called it — the gap was
 writable the moment the link line existed, and what it wrote was `Some(0)`
@@ -127,40 +118,8 @@ x or_else(d)       x == niche ? d : x
 x.value_or(d)      the same
 x.or(d)            the same
 x.unsafe_value()   x
-if x  /  1 if x else 0     x != niche     (Optional.__bool__ is "does it HAVE a value")
+bool(x)            x != niche          (Mojo's Optional.__bool__ is "does it HAVE a value")
 ```
-
-**The last row was `bool(x)` until 2026-10-05, and that spelling is REFUSED —
-the table published a lowering this path does not do.** Measured on this tree,
-both architectures, byte-identical:
-
-```console
-$ printf 'def main(n) -> Int:\n    var a: Optional[Bool] = None\n    printf("%d\n", bool(a))\n    return 0\n' > b.mojo
-$ python3 fire.py build --formal --no-prove --backend=arm64 -o b b.mojo
-build: `bool(...)` is not lowered on this path, and the reason is a property of
-the NAME rather than of the link line: `bool`: a compare against zero and a
-normalize — but the name is also in `FRAME_VALUE_ONLY_CALLS`, so the
-frame-address half of the answer is settled and the value half is not. …
-```
-
-and the refusal is **not an `Optional` question at all**: `bool(5)` on a plain
-`Int` is refused with the same words, and so are `abs`, `bin`, `chr`, `hex`,
-`int` and 31 others — `FRAME_VALUE_ONLY_CALLS` is 38 names and lowering any of
-them is a deliberate deferral about a CALL SPELLING, which is a different (and
-shared) piece of work from the niche table this document is about. **What lowers
-is the conditional form**, and it lowers NICHE-AWARE, which is the row's real
-content: `1 if a else 0` with `var a: Optional[Bool] = None` answers `0` on both
-architectures, and `test_formal_optional.py`'s `bool_truthiness_is_has_a_value`
-is the row that pins it (as a `FIXED_CASE`, because Mojo's `Optional.__bool__`
-disagrees with CPython's truthiness for `Some(False)` by design).
-
-The rest of the table measured today, both architectures, and every row holds:
-`Optional[String]` `is None` → `0 1`, `or_else("d")` → `d`, `value_or("d")` →
-`hi`, `unsafe_value()` → `hi`; `Optional[Int8]` `or_else(9)` → `9` and
-`unsafe_value()` → `5`; `Optional[List[Int]]` `is None` → `1`; and the refused
-list is refused AT THE USE rather than at the annotation — a bare
-`f(z: Optional[Float64])` with no comparison builds, while `if z is None:` in the
-same program is refused naming `OPTIONAL_TWO_WORD`.
 
 **Where the code is**: `formal/model.py` for the table and the readers,
 `formal/build.py::apply_optional_none_representation` for the ONE site that puts
@@ -242,15 +201,11 @@ picking it up should check rather than take on trust:
    read through a word that is not a receiver.** Every frame read this path has
    lowers from a RECEIVER (`self.f`) or from a name whose candidate struct is in
    `fn._frame_candidates`; a name declared `Optional[…]` has no candidate struct
-   because `Optional` is not in this module's table. The shape is the one the
-   deleted `…_a_subscript_on_a_frame_slot_is_a_pointer_dereference_…` doc was
-   about: reading a field through a word the source has not proven is a frame
-   address. That case is now REFUSED by name rather than dereferenced
-   (`ba63213c`/`f0df70b2`, "a subscript on a base the source proves is a scalar
-   is refused"), so what this item needs is not a lowering but the stdlib-struct
-   entry that makes the word a frame holder in the first place. Note that this
-   pass already needed `_frame_receivers`' census for the same reason
-   (`h.<field>`), so the mechanism exists and the missing piece is that entry.
+   because `Optional` is not in this module's table. See
+   `FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_two_
+   backends_disagree.md` for the shape, and note that this pass already needed
+   `_frame_receivers`' census for the same reason (`h.<field>`), so the
+   mechanism exists and the missing piece is a stdlib-struct entry.
 3. **`x = None` becomes a store of a FRAME into a slot**, which is
    `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
    refusal is `formal13-5`'s claim to answer. `Slice.__init__` is exactly this
@@ -262,27 +217,6 @@ The niche table is what makes this row decidable rather than open-ended: it says
 list and not a project.
 
 ### 3. An UNSTATED payload type still folds to `== 0`, and that is a residual
-
-**Status 2026-10-13 (`work/formal361-docs`): the residue is a wrong ANSWER and
-not merely an unavailable one, and it is now pinned with that output.**
-Measured on this tree, both architectures:
-
-    def f(x) -> Int:
-        if x is None:
-            return 1
-        return 2
-
-    def main(n):
-        printf("%d\n%d\n", f(None), f(0))
-
-CPython prints `1` then `2`; the image prints `1` then `1`, because `f(0)`'s `0`
-IS the folded `None` word. `test_formal_optional.py`'s
-`unstated_payload_comparison_folds_0_as_none` pins `1\n1\n` and says in its own
-comment that CPython's second line is `2`, so the row goes red the day the
-inference below lands. This sharpens the paragraph below without changing its
-conclusion: the fold is deliberate, and the sentence "both are pinned in
-`test_formal_optional.py`" was true of the UNWRAP only — the comparison had no
-row of its own until now, which is how a wrong answer stayed invisible.
 
 `var z = None; if z is None:` still compares against 0, because the pass's
 obligation is discharged only where the SOURCE stated an `Optional[T]`.
@@ -428,9 +362,8 @@ be launched from a test.
   two-word row's cost was arrived at, and because a reader who wants the
   two-word form needs the history of why the niche was chosen first. **Its
   "NOT FIXED" headline is wrong as of this commit.**
-* the `builtin_slice` frame-holder doc — **deleted** (`32cfde0c`, "Three
-  resolved documents deleted"): it asked whether an
-  `Optional`-typed *field* is a frame holder, which this representation does not
-  touch, and it is resolved rather than open.
+* `FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` — unchanged and
+  still accurate; it is the `struct`-typed-field question, which this
+  representation does not touch.
 * the `b10` round of `bugs/FORMAL_sweep_work_map.md` §2.4 — the row it names is not
   blocked on this any more, and was not (§1 above).
