@@ -746,6 +746,94 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # ── the BOOLEAN/COMPARISON falsy boundary, and it is a real hole closed ──
+    # `_literal_return_truthiness` decided a float literal, a `+`/`-` over one,
+    # and whatever the WORD folder folds — so a `not`, a comparison, an
+    # `and`/`or` and a ternary were all `None`, i.e. "not decided", and a TRUTHY
+    # one of each SUPPRESSED in CPython while this path ran the cleanup and
+    # exited 1.  The three ANSWERED rows here and the four REFUSED rows below
+    # are ONE pair per shape, and the falsy end is what a gate that refused the
+    # whole shape (rather than its truthiness) would break.
+    ("an_exit_returning_a_false_comparison_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 2 < 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 2 < 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_a_falsy_not_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return not 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return not 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_a_falsy_and_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 0 and 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 0 and 1") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the falsy ends of the EQUALITY and `len` arms.  `"a" != "a"` is
+    # FALSE, and `len("")` is 0 — `0` from a call rather than from a literal, so
+    # a gate keyed on "the value is a literal" would have to refuse the call
+    # outright; the emptiness answer lets it lower, which is what a `__exit__`
+    # returning `len(buf)` wants when the buffer is empty.
+    ("an_exit_returning_a_falsy_string_inequality_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return "a" != "a"') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return "a" != "a"') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_len_of_an_empty_string_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return len("")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return len("")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1050,6 +1138,81 @@ REFUSALS = [
     # same value behind a `UnaryOp` and is covered by the same reader.
     ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", "return 0.5") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # ── the BOOLEAN/COMPARISON truthy end, refused for the same reason ───────
+    # `not 0`, `1 < 2`, `1 and 2` and `1 if 1 else 0` are each a compile-time
+    # CONSTANT that CPython reads as true, so each suppresses the exception in
+    # flight — and each built, ran the cleanup and exited 1 with `after` never
+    # printed, the identical wrong answer as `return True`.  Decided by
+    # `_literal_return_truthiness`'s `not` and `fold_module_select_expr` arms
+    # (see its docstring); the FALSY sibling of each is an ANSWERED row above,
+    # so the pair is what keeps the gate about TRUTHINESS and not about shape.
+    ("an_exit_returning_not_zero_is_refused_as_a_suppression",
+     SUPPRESSING_EXIT.replace("return True", "return not 0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_true_comparison_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_truthy_logic_and_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 and 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_truthy_ternary_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 if 1 else 0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and the truthy end of the EQUALITY and `len` arms, each decided by this
+    # reader rather than by a folder because `fold_module_select_expr` refuses a
+    # string comparison operand and has no `len`-of-a-string arm.  `return
+    # len("ab")` is the one of these a reader might write on purpose.
+    ("an_exit_returning_a_true_string_equality_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", 'return "a" == "a"') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_none_equality_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return None == None") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_len_of_a_string_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", 'return len("ab")') +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"

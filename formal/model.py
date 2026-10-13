@@ -49105,6 +49105,51 @@ def struct_is_context_manager(struct_def) -> bool:
     return not context_exit_returns_truthy(exit_)
 
 
+def _literal_equality_operand(node):
+    """`(kind, value)` for a literal `==`/`!=` operand, else None.
+
+    `kind` is `"none"`, `"num"` or `"str"` — the three Python kinds an equality
+    over source literals can meet, with `bool` folded into `"num"` because
+    CPython reads `True == 1` as true.  This is deliberately NOT `fold_literal_expr`,
+    which answers a WORD: a string there is the source-escape text and a float is
+    not folded at all, and equality is a question about the VALUE.
+    """
+    if is_none_expr(node):
+        return ("none", None)
+    if isinstance(node, F.BoolLiteral):
+        return ("num", 1 if node.value else 0)
+    if isinstance(node, F.IntLiteral):
+        try:
+            return ("num", int(node.value))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return ("num", float(node.value))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(node, F.StringLiteral) \
+            and not getattr(node, "is_bytes", False) \
+            and not getattr(node, "is_interpolated", False) \
+            and isinstance(node.value, str):
+        try:
+            return ("str", F.decoded_literal(node))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _literal_values_equal(left, right) -> bool:
+    """CPython's `==` for two `_literal_equality_operand` pairs."""
+    kind_l, val_l = left
+    kind_r, val_r = right
+    if kind_l == "none" or kind_r == "none":
+        return kind_l == kind_r
+    if kind_l != kind_r:
+        return False
+    return val_l == val_r
+
+
 def _literal_return_truthiness(node):
     """CPython's truthiness of a `return`'s value when it is a literal, else None.
 
@@ -49123,6 +49168,34 @@ def _literal_return_truthiness(node):
     everything else is None — which every caller reads as "not decided" and
     leaves the return where it was, the one-sided direction this gate is
     deliberately in.
+
+    **The BOOLEAN, COMPARISON and EQUALITY forms are decided here too, and
+    landing only the float and string arms left a measured hole.**  A
+    `return not 0`, a `return 1 < 2`, a `return 1 == 1`, a `return 1 and 2`, a
+    `return 0 or 3`, a `return 1 if 1 else 0`, a `return "a" == "a"`, a
+    `return None == None` and a `return len("ab")` are all compile-time
+    CONSTANTS and all SUPPRESS in CPython; each built, ran the cleanup and
+    exited 1 where CPython prints `after` and exits 0 — the same wrong answer as
+    `return True`, reached through a shape the earlier arms did not look at.
+    Three arms close them:
+
+      * a `not` is decided from its OPERAND's truthiness rather than its word,
+        because `1` is truthy and `not 1` is FALSE — `fold_module_select_expr`
+        has a `not` arm, but it can only fold `not <int>` and `not ""` is a hole
+        there;
+      * `a if c else b`, `and`, `or` and the six comparisons go through
+        `fold_module_select_expr`, whose every arm is exact over the folded
+        words.  It is safe to delegate to it here because it CANNOT return a
+        truncated float — the module folders' only float arm is
+        `fold_module_value`'s top-level `FloatLiteral`, and this function has
+        already decided that shape from its own value before reaching here;
+      * `==`/`!=` over two literals and `len(<a string literal>)` are decided by
+        this function itself (`_literal_equality_operand` / the emptiness of the
+        decoded text), because `fold_module_select_expr` refuses a STRING
+        comparison operand and has no `len`-of-a-string arm.  Equality is total
+        over the literal kinds, so no `TypeError` can reach it, and the `len`
+        answer is emptiness rather than a count, which is the one question
+        character- and byte-length agree on.
     """
     if isinstance(node, F.FloatLiteral):
         try:
@@ -49131,6 +49204,53 @@ def _literal_return_truthiness(node):
             return None
     if isinstance(node, F.UnaryOp) and node.op in ("+", "-"):
         return _literal_return_truthiness(node.operand)
+    # `not <decided>`: the answer is the operand's truthiness NEGATED, which is
+    # why it cannot come from the operand's word — `not 1` is 0 (falsy) and
+    # `not 0` is 1, and a word reader that answered `bool(1)` would refuse a
+    # return that CPython does NOT suppress.
+    if isinstance(node, F.UnaryOp) and node.op == "not":
+        inner = _literal_return_truthiness(node.operand)
+        return None if inner is None else (not inner)
+    # `==` / `!=` over two LITERALS, which `fold_module_select_expr` declines for
+    # a string operand and this reader must not: CPython's `==` never raises, so
+    # a literal pair is always decidable, and `return "a" == "a"`,
+    # `return "a" != "b"` and `return None == None` each SUPPRESS (they are
+    # true) while this path ran the cleanup and exited 1.  Equality is total over
+    # the literal kinds (`None == None` is true, `None == 0` and `"a" == 0` are
+    # false, `True == 1` is true), so no `TypeError` arm is needed here.
+    if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
+        left = _literal_equality_operand(node.left)
+        right = _literal_equality_operand(node.right)
+        if left is not None and right is not None:
+            equal = _literal_values_equal(left, right)
+            return equal if node.op == "==" else (not equal)
+    # `len(<a string literal>)`, decided by whether the decoded text is EMPTY:
+    # the count itself is not asked, and emptiness is the same question whether
+    # the pointer's length is read as characters or as bytes — the one place the
+    # two can disagree (`len("é")` is 1 in CPython and 2 through `strlen`) does
+    # not move a zero count off zero.
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr) \
+            and node.func.name == "len" and not (node.kwargs or []) \
+            and len(node.args or []) == 1:
+        arg = node.args[0]
+        if isinstance(arg, F.StringLiteral) \
+                and not getattr(arg, "is_bytes", False) \
+                and not getattr(arg, "is_interpolated", False):
+            try:
+                return F.decoded_literal(arg) != ""
+            except (TypeError, ValueError):
+                return None
+    # The CONDITIONAL and COMPARISON shapes `fold_module_select_expr` decides.
+    # `and`/`or` and the comparisons are `_FOLD_SELECT_OPS` / `_FOLD_COMPARE`;
+    # the ternary is the third.  All of them fold to a WORD (or a folded
+    # string), so the truthiness is the value's own.
+    if isinstance(node, F.TernaryExpr) or (
+            isinstance(node, F.BinaryOp)
+            and (node.op in _FOLD_SELECT_OPS or node.op in _FOLD_COMPARE)):
+        value = fold_module_select_expr(node)
+        if value is None:
+            return None
+        return bool(value)
     value = fold_literal_expr(node)
     if value is None:
         return None
