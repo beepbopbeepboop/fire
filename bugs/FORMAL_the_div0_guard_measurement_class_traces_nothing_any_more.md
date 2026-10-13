@@ -1,5 +1,58 @@
 # FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more
 
+**Status 2026-10-12 (`work/formal298-docs`): the SYMPTOM below has moved a THIRD
+time — the fixture no longer raises, it GENERATES AGAIN, and the class is blind
+for `one_opaque_flush`'s reason rather than for a build refusal.** Measured on
+this tree, arm64, `prove=True, check=False`:
+
+```
+def q(a, b): return a // b   ->  553 theorems, 0 `sorry`, and NO
+  `q_compiles_correctly_universal`; the universal theorem emitted is
+  `q_reaches_call_at_0x100000504`, whose proposition is a valueless `match` on
+  `arm64_exec_go_exit`.
+info["compiler_traps"] == [0x100000504]   # the div0 arm's `_emit_trap_flush`
+info["extern_calls"]   == [getrlimit@0x100000460, fflush@0x100000504]
+```
+
+So the two calls the 2026-10-07 status above reported (`getrlimit` + `fflush`)
+are now one: the stack-floor guard's `getrlimit` moved into the startup stub,
+below `func_offset`, and the compiler's own `fflush` is recorded. `setUpClass`
+therefore records `blind` for both spellings instead of raising —
+
+    as_emitted: the fixture generates no `q_compiles_correctly_universal`
+    carrying `all_goals (first | done | sorry)`, so `tail.replace(_ADMIT, _TRACE)`
+    is a no-op and no goal can be traced: whatever the div0 residual is today,
+    this class is not looking at it
+
+— which is exactly the shape `bugs/FORMAL_one_opaque_flush_silently_replaces_the_
+universal_theorem.md` records: ONE opaque call does not raise, it substitutes a
+reachability theorem (its item 1, still open). Two consequences, and neither is
+this document's to change:
+
+* **Step 1 is doing its job.** `test_the_measurement_class_can_still_see_what_it_
+  measures` now fails BY NAME with "there is no residual here to move" rather
+  than letting a bare `assertIn("⊢ 1 =")` report "the residual moved"; the two
+  `⊢ 1 =` rows are gated behind the same `assertIsNone`. So the class is honest
+  about going blind, which was the whole of step 1.
+* **The remaining work is item 1 of `one_opaque_flush`** — what ONE opaque call
+  should say, its option 2 ("stop claiming a value on a block that cannot
+  return") argued first — plus the walk's conditional-call terminal,
+  `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`.
+  Nothing in either is this branch's to change, and the class stays red until
+  they land, deliberately and by name.
+
+**That substitution is pinned, Lean-free and green**, by
+`test_formal_call_proof_gen.py::TestTheOneOpaqueCallIsAnnounced`, whose
+`PROGRAM` is this same `def q(a, b): return a // b` and whose four rows read the
+emitted TEXT (`check=False`): the value theorem is absent, the note says so,
+there is no `x0` claim, and a program with no out-of-image call is unaffected.
+So this document's state is measured rather than asserted, and only the
+`⊢ 1 =` residual is unmeasurable.
+
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` cites this doc
+for these four rows; that citation is still correct, with "raises" replaced by
+"generates a valueless reachability theorem".
+
 **Area:** FORMAL, the arm64 proof generator's own doc-truth test.
 `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean`
 (`test_the_false_goal_survives_the_documented_next_step`,
