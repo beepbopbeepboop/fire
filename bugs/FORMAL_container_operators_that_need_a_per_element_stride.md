@@ -8,6 +8,26 @@ in it that are green *as refusals*, which is a different thing from green as
 answers. The set-algebra rows are answers on arm64 now (six of them — five
 moved, one added); x86-64 still refuses each by name.
 
+**2026-10-08 (`formal162-docs`), merged 2026-10-12: the x86-64 half of item 3
+was BUILT on the branch, and the merge kept the arm64-only mechanism.** The
+branch lowered `|`, `&`, `-` and `^` between two sets on x86-64 too — a fresh
+x86-64 `_emit_set_union` (the `|` branch had lowered a concatenation and then
+been refused by `model.set_union_refusal`, which the branch deleted with the
+emitter) and `_emit_set_intersection` / `_emit_set_difference` /
+`_emit_set_symmetric_difference`, all dispatched from a syntax-level predicate
+`_try_emit_set_algebra` asked BEFORE the shared gate (a KIND cannot tell a set
+from a list, so set-ness has to be read from the source), with the blob-growth
+guard at every set site and the five `set` rows and the two `operator` rows
+moved to answers on both backends. On the merge into `work/merge-qwen1` the
+master-side arm64 lowering was kept as the canonical mechanism and the branch's
+x86-64 emitters were folded away, so on the merged tree the split is exactly
+the 2026-10-06 paragraph's: **re-measured 2026-10-12 on this tree, arm64
+answers all four** (`{1,2} | {2,3}` → 6, `s & {2}` → 2, `s - {2}` → 1,
+`s ^ {2,3}` → 4, each CPython-agreeing) **and x86-64 refuses all four by name**
+(`set_union_refusal` for `|`; `set_algebra_refusal` for `&`, `-` and `^`). The
+branch's x86-64 emitter is recorded here as a parallel implementation of the
+same fix; the x86-64 half of item 3 is not started on the canonical tree.
+
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
 `s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
@@ -124,7 +144,10 @@ the second reason this is a project rather than a rewrite.
    would send x86-64 into the ALU on two addresses. The backend intercepts
    first, the way `|` already splits `_emit_set_union` from
    `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
-   not started. See the Status at the top for the measurements and the emitters.
+   not started (the `formal162-docs` branch built it in 2026-10-08 and the
+   2026-10-12 merge recorded it in the Status above; its emitter is the
+   blueprint for that half). See the Status at the top for the measurements
+   and the emitters.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and

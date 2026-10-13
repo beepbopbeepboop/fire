@@ -446,6 +446,19 @@ def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
     runner = CT.SourceRunner(fn)
     check("a_floordiv_body_runs_at_its_own_word_semantics",
           runner(7, 2) == 3, repr(runner(7, 2)))
+    # The truncation wraps at the word boundary rather than in the signed
+    # region: `2^64 - 7` is one from the top of the unsigned reading, and the
+    # division must land where CPython's word reading lands, masked.
+    check("a_floordiv_body_wraps_at_the_word_boundary",
+          runner((1 << 64) - 7, 2)
+          == (((1 << 64) - 7) // 2) & ((1 << 64) - 1),
+          repr(runner((1 << 64) - 7, 2)))
+    # And the evaluator answers the clause at a fixed input, truncating,
+    # rather than skipping the operator: `result` is the third operand the
+    # machine compares against, `7 // 2 == 3`.
+    check("a_floordiv_clause_evaluates_truncating",
+          CT._eval_of(ir, {"a": 7, "b": 2, "result": 3}, [1000]) is True,
+          repr(ir))
     try:
         runner(7, 0)
         check("a_floordiv_by_zero_is_still_a_skip", False, "returned a number")
