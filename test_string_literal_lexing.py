@@ -1042,7 +1042,8 @@ def check_escape_decoding(verbose):
     where CPython makes one, and a person transcribing the expected strings gets
     a digit wrong. `\\uXXXX`, `\\UXXXXXXXX`, `\\N{…}` and a multi-digit octal
     run are the four that were missing; `\\xHH`, the C simple escapes, an
-    unknown escape and a SHORT `\\x`/`\\u` run are the controls.
+    unknown escape, a SHORT `\\x`/`\\u` run, a lone SURROGATE, an out-of-range
+    `\\U`, and an empty or unclosed `\\N{}` are the permissive controls.
     """
     # (name, the literal BODY handed to the decoder, a CPython source literal
     # whose eval() is the expected value). The body is spelled RAW so the test
@@ -1058,6 +1059,12 @@ def check_escape_decoding(verbose):
         ("octal_three",    r'\777',     r'"\777"'),
         ("mixed",          r'a\u00e9b\101', r'"a\u00e9b\101"'),
         ("hex_two",        r'\x41',     r'"\x41"'),
+        # Multi-byte hex/escape and the short octal runs: the same four
+        # missing escapes, spelled to exercise the byte width of the answer.
+        ("hex_two_multibyte", r'\xe9',  r'"\xe9"'),
+        ("u_snowman",         r'\u2603', r'"\u2603"'),
+        ("octal_two",         r'\12',   r'"\12"'),
+        ("octal_one",         r'\7',    r'"\7"'),
         ("unknown_stays",  r'\q',       r'"\q"'),
         ("simple_n",       r'\n',       r'"\n"'),
         ("simple_t",       r'\t',       r'"\t"'),
@@ -1070,6 +1077,23 @@ def check_escape_decoding(verbose):
     permissive = [
         ("hex_short_stays", r'\x4'),
         ("u_short_stays",   r'\u12'),
+        ("u_short_3",       r'\u123'),
+        ("U_short_7",       r'\U0001F60'),
+        ("dollar_stays",    r'\$'),
+        # An empty or an UNCLOSED brace is the permissive arm: there is no
+        # name to look up, so there is no error to report.
+        ("N_empty_braces",  r'\N{}'),
+        ("N_unclosed",      r'\N{unclosed'),
+        # A lone SURROGATE and an out-of-range `\U` fall to the same arm, for a
+        # reason CPython does not have: one character of a surrogate has no
+        # UTF-8 encoding, and every consumer here writes the decoded text as
+        # UTF-8, so decoding it turns a doc comment (`formal/hostmods/json.mojo`
+        # spells `\ud800` while explaining why it refuses exactly that code
+        # point) into a UnicodeEncodeError from the intern. The path cannot
+        # represent it, so keeping the backslash is the answer.
+        ("u_lone_surrogate", r'\ud800'),
+        ("U_lone_surrogate", r'\U0000D800'),
+        ("U_out_of_range",   r'\U00110000'),
     ]
     failures = []
     for name, body, cpy_lit in rows:
@@ -1089,17 +1113,18 @@ def check_escape_decoding(verbose):
         got = F.decode_c_escapes(body)
         if got != body:
             failures.append(
-                f"escape {name}: decode_c_escapes({body!r}) == {got!r}, but a "
-                f"short run must be left verbatim")
+                f"escape {name}: decode_c_escapes({body!r}) == {got!r}, but "
+                f"this spelling must be left verbatim")
         elif verbose:
             print(f"  escape       {name:22s} {got!r}  (left verbatim)")
-    # A name CPython does not know must NOT be invented: `unicodedata.lookup`
-    # raises, and a decoder that returned something plausible would be the same
-    # wrong-answer class this table exists to catch.
+    # A name CPython does not know must NOT be invented: CPython refuses the
+    # source, and the decoder raises a `SyntaxError` naming the name; a decoder
+    # that returned something plausible would be the same wrong-answer class
+    # this table exists to catch.
     try:
         F.decode_c_escapes(r'\N{NOT A REAL UNICODE NAME}')
         failures.append("escape N_unknown: an unknown name did not raise")
-    except KeyError:
+    except SyntaxError:
         pass
     if failures:
         return False, "; ".join(failures)

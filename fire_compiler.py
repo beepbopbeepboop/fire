@@ -1877,6 +1877,16 @@ def decode_c_escapes(s: str) -> str:
     rule (CPython's `"\x41"` is `A`, `"\x4"` is a literal backslash-x-4); the
     named escapes likewise only fire on a complete, all-hex run.
 
+    A lone SURROGATE (`\ud800`, `\U0000D800`) and a `\U` above U+10FFFF fall to
+    the permissive arm instead of being decoded: CPython makes one character of
+    a surrogate, but that character has no UTF-8 encoding and every consumer
+    here writes the decoded text as UTF-8, so decoding it turns a doc comment
+    (`formal/hostmods/json.mojo` spells `\ud800` while explaining why it refuses
+    exactly that code point) into a `UnicodeEncodeError` from the intern. The
+    path cannot represent it, so keeping the backslash is the answer. An
+    unknown `\N{NAME}` is a `SyntaxError`, CPython's own refusal; an empty or
+    unclosed brace is the permissive arm.
+
     Not in scope, and worth saying so: RAW strings. `_scan_string_end` records
     that no engine here preserves `r"..."`, so a literal's body arriving here has
     already lost the distinction and decoding will not make it worse. Deciding
@@ -1913,14 +1923,24 @@ def decode_c_escapes(s: str) -> str:
             if nxt == 'u':
                 h = _hex_run(s, i + 2, 4)
                 if h is not None:
-                    out.append(chr(int(h, 16))); i += 6; continue
+                    code = int(h, 16)
+                    # A lone surrogate has no UTF-8 encoding (see the
+                    # docstring): the permissive arm, not a decoded character.
+                    if not (0xD800 <= code <= 0xDFFF):
+                        out.append(chr(code)); i += 6; continue
             if nxt == 'U':
                 h = _hex_run(s, i + 2, 8)
                 if h is not None:
-                    out.append(chr(int(h, 16))); i += 10; continue
+                    code = int(h, 16)
+                    # In range AND not a surrogate, for the same two reasons
+                    # the `\u` arm gives; out of range has no `chr` at all.
+                    if code <= 0x10FFFF and not (0xD800 <= code <= 0xDFFF):
+                        out.append(chr(code)); i += 10; continue
             if nxt == 'N' and i + 2 < n and s[i + 2] == '{':
                 close = s.find('}', i + 3)
-                if close != -1:
+                # `close > i + 3` is a NON-EMPTY name: `\N{}` and an unclosed
+                # brace (`close == -1`) fall to the permissive arm below.
+                if close > i + 3:
                     # `unicodedata` through `_python_import`, not a top-level
                     # `import`: a static import would add the module to the
                     # self-host compile closure, while the dynamic one keeps it
@@ -1928,7 +1948,13 @@ def decode_c_escapes(s: str) -> str:
                     # CPython's `unicodedata.lookup` does — a decoder that
                     # invented a character would be a second wrong answer.
                     _ud = _python_import('unicodedata')
-                    out.append(_ud.lookup(s[i + 3:close])); i = close + 1; continue
+                    try:
+                        ch = _ud.lookup(s[i + 3:close])
+                    except KeyError:
+                        raise SyntaxError(
+                            f"unknown Unicode character name in \\N{{...}}: "
+                            f"{s[i + 3:close]!r}") from None
+                    out.append(ch); i = close + 1; continue
             # Unknown escape — leave the backslash as-is (CPython's own
             # behaviour for e.g. "\d"), matching gimple_codegen._c_escape's
             # `\\` passthrough.

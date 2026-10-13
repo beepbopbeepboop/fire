@@ -233,3 +233,19 @@ contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
 already named; this update is the measurement that makes the boundary concrete.
 `version.py` remains exactly as closed — refused at `r.returncode` — and no
 caller-side substitution was made for the same reason the doc originally gave.
+
+**merged 2026-10-13 (merging `work/formal186-docs`): the branch carried a
+parallel 2026-10-08 section for the same landed fix** (its one-word map read the
+callee's declared return type through `M.call_result_type_name` instead of this
+tree's `_call_returns_one_word_struct`, pinned by its own two rows); deduped
+into the 2026-10-08 Status above. Its unique measurements, re-measured on the
+merged tree: the same-image fix is NOT sufficient for `subprocess.run` because
+`run` is MODULE-QUALIFIED, and both cross-module shapes are still refused at
+the BINDING — `var r = libcp.make(7)` and `var r = make(7)` under
+`from libcp import make`, each with a one-field `CP` whose `make` returns `CP`,
+each refusing on `'r.returncode' is a field access through 'r', and this path
+has no way to say what 'r' holds`. On the branch tree the import-from shape was
+refused at the DYLIB stage instead (`libcp.mojo: make returns a frame address,
+so it cannot be compiled into a dylib`); the merged tree stops earlier, at the
+binding, so the dylib-stage sentence is a branch-tree fact and the binding
+refusal is the merged-tree one.

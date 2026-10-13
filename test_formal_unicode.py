@@ -134,12 +134,12 @@ ORACLE_CASES = [
     # A character OUTSIDE the BMP: FOUR bytes, one code point, and the widest
     # gap in the table between "count the bytes" and "count the characters".
     #
-    # Spelled as the CHARACTER and not as `\\U0001F600`, which is the whole of
-    # a separate front-end defect: `fire_compiler.decode_c_escapes` handles the
-    # C simple escapes and `\\xHH` and leaves `\\u`/`\\U`/`\\N{}` alone, so an
-    # escape spelling would measure THAT (see the header and the bug doc) rather
-    # than what this row is for.  With a real character the fold answers 3, where
-    # the byte count was 6.
+    # Spelled as the CHARACTER and not as `\\U0001F600`.  The escape spelling
+    # now decodes to the same character (`fire_compiler.decode_c_escapes` handles
+    # `\\u`/`\\U`/`\\N{}` and octal), so either would measure this row; the
+    # character is kept because it is the spelling the encoding block is about
+    # and because it does not depend on the front end.  With a real character
+    # the fold answers 3, where the byte count was 6.
     ("len_astral_literal_folds",
      'def main(n):\n'
      '    printf("len=%d\\n", len("a😀b"))\n'
@@ -231,6 +231,46 @@ ORACLE_CASES = [
      '    return 0\n',
      'def main():\n'
      '    print("len=%d" % len("\\x7f"), end="\\n")\n'),
+
+    # ── `\\u`, `\\U`, `\\N{…}` and the octal run ──────────────────────────
+    #
+    # These four were NOT decoded by `fire_compiler.decode_c_escapes` before
+    # 2026-10-07: every engine made a SIX-character string out of `"\\u00e9"`
+    # where CPython makes one, a TEN-character one out of `"\\U0001F600"`, and
+    # `"\\101"` was a NUL followed by `101` rather than `A`. That was a
+    # front-end defect shared by every engine (fixed 2026-10-07; its doc went
+    # with the fix); the formal half is free here because the fold reads the
+    # DECODED text.
+    ("len_of_a_u_escaped_literal_folds",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\u00e9"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\u00e9"), end="\\n")\n'),
+
+    ("len_of_an_astral_escape_folds",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\U0001F600"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\U0001F600"), end="\\n")\n'),
+
+    ("len_of_an_octal_escape_is_the_character",
+     'def main(n):\n'
+     '    printf("len=%d\\n", len("\\101"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("len=%d" % len("\\101"), end="\\n")\n'),
+
+    # …and the same escaped text through `ord`, which is the other construct
+    # that reads the DECODED literal: `ord("\\u00e9")` is 233 where the escaped
+    # spelling's first byte is a backslash (92).
+    ("ord_of_a_u_escaped_character_folds",
+     'def main(n):\n'
+     '    printf("%d\\n", ord("\\u00e9"))\n'
+     '    return 0\n',
+     'def main():\n'
+     '    print("%d" % ord("\\u00e9"), end="\\n")\n'),
 
     # ── `len`: an ASCII IMAGE is untouched ────────────────────────────────
     #

@@ -1069,7 +1069,7 @@ divergence, recorded there and not fixed here. For a non-ASCII string it gave a
 byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
 is refused by name.
 
-## The next step, which is not in this document's subject
+## The front-end escape fix, which was not in this document's subject
 
 **`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes WERE not decoded by any
 engine in this repository** (`len("\u00e9")` was 6 where CPython makes 1); that
