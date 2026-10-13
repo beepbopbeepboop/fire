@@ -87,7 +87,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | **unclaimed** | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
 | `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | **unclaimed** | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
-| `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow.md` | **unclaimed** | the div0 residual goal the zero-divisor class pins is no longer REACHED, so three `test_formal_call_proof_gen.py` rows are red on any tree with a built library |
 | `FORMAL_three_examples_fail_their_proofs_on_master.md` | **unclaimed** | `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES` |

@@ -621,8 +621,9 @@ class TestGeneratorSource(unittest.TestCase):
         one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
         reading a branch condition out of a COMMENT above the TBZ case, which put
         `test_formal.py` in a state where it raised before generating a single
-        proof for every example it has — see
-        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+        proof for every example it has. The fix was de-duplication — one reader
+        of a branch condition, not a reworded comment — and the audit is now
+        pinned by this row rather than by a doc.
 
         The regression this pins is the one whose fix was to REMOVE a row:
         `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
@@ -4690,8 +4691,9 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
-    `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
-    recorded twelve red examples on 2026-10-03 and measured them one family at a
+    A 2026-10-03 audit of the arm64 step table (a branch condition read out of a
+    COMMENT, fixed by making the two auditors share one reader) recorded twelve
+    red examples and measured them one family at a
     time, which is the right discipline and produced a list that has since gone
     stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
     `sorry`, and `sum_range` was the last one refusing at generation — its

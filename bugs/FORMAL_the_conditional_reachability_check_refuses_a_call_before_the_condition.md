@@ -2,8 +2,8 @@
 
 **Status: NOT FIXED — filed 2026-10-07 by `work/formal119-docs`, found while
 running the narrow suites for `FORMAL_proof_coverage_census_2026-10-03.md` and
-`FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`. Both of
-those docs' pins are RED on this tree and this is why. The code is another
+the arm64 step-table audit's census pin. Both of
+those pins are RED on this tree and this is why. The code is another
 claim's (`_reached_without_a_condition` was added by `2b7e5ec8`, the subject of
 `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` and
 `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`), so it
