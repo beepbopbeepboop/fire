@@ -428,8 +428,18 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 272,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
+    # Read the figure out of §6 rather than spelling it here: this row is
+    # `runtime_abi()`'s own count and needs no dylib, so it is the one row a
+    # cheap caller can verify — and a hardcoded copy is a second census that
+    # rots the moment the header grows, which is how the row went stale for
+    # ten entry points while nothing watched it.
+    m_word = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+                       text)
+    check(m_word is not None,
+          'FORMAL.md §6 phase 2 still publishes the word-shaped row')
+    check(m_word and len(word) == int(m_word.group(1)),
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes '
+          f'{m_word and m_word.group(1)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
