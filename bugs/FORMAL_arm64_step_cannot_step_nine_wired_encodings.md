@@ -7,10 +7,10 @@ claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED a
 produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
 its own document now:**
 
-| defect | document |
+| defect | where it is now |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `CMN` arm took the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` wrote NO register | **FIXED** — the arm reads and writes `Rd`, pinned by the `adds x11, x1, x15` CPU-vs-model row in `TestUnsignedOffsetAccess`; its doc was deleted with the fix |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — `arm64_ext_imm12` decodes bits 21:10 and `sh`, pinned by the `lsl #12` rows in `TestUnsignedOffsetAccess`; the doc that sized it is `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
 
 Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
 written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
