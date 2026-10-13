@@ -162,8 +162,10 @@ duplicate-implementation shape this project has been bitten by. So:
 
 ## 5. Provenance
 
-Found in the same sweep as
-`bugs/FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md`, while
+Found in the same sweep as the `CMN`/`ADDS` model arm that wrote no
+destination register (`0xab000000` with `Rd ≠ 31`, fixed and pinned by
+`test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`'s `adds x11, x1,
+x15` row), while
 re-measuring `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md`. That
 doc's §1 counterexample list is a list of instructions the model cannot STEP
 (`NOSTEP`); this is one it steps WRONGLY, which is a different bucket and is why
