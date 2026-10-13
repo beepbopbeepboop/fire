@@ -14,7 +14,13 @@ check exists for, is unchanged. `test_formal_run.py`'s `SPREAD_CONSTRUCTION_CASE
 gains `a_dict_literal_spread_of_a_repeated_key_takes_the_last_value` and
 `SPREAD_REFUSALS` gains
 `a_dict_literal_spread_that_drops_a_side_effecting_value_is_refused`. **The
-variadic-ABI blocker below is unchanged and still the only remaining step.**
+variadic-ABI blocker below is unchanged and still the only remaining step.** One
+nested shape is still refused and is recorded rather than built, for §0b's own
+reason (no witness): a literal with its OWN unpacking, `S(**{'a': 1, **{'b':
+2}})`, parses as a pair whose key is `UnaryOp('**')` and is not un-spread, so it
+gets the generic "keys are not knowable" refusal though CPython runs it — the
+nested spelling of the same capability, and `dict`-display unpacking itself
+lowers.
 
 **Status: PARTIAL — the false half is fixed and the real blocker is now
 measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
