@@ -8855,6 +8855,18 @@ BOTH_ARCH_CASES = [
      "    s = s + a + b + c\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n", 0, "49"),
+    # ── a container ELEMENT at `%d` still prints ───────────────────────────
+    # The control for the `printf("%d", <container>)` refusal rows: the refusal is a
+    # claim about the CONTAINER the conversion reads, and a subscript's result
+    # is an element rather than a blob, so `xs[0]` must keep lowering. A rule
+    # that read the name's kind instead of the operand's would refuse this row
+    # (the bug doc's second "thing to decide"), and one that refused every
+    # `%d` whose operand mentions a list would too.
+    ("both_arch_a_container_element_at_an_integer_conversion_prints",
+     "def main() -> Int32:\n"
+     "    xs = [7, 8]\n"
+     "    printf(\"e=%d\", xs[0])\n"
+     "    return 0\n", 0, "e=7"),
     # …and the SAME target shape with a starred leaf, which is the other half of
     # the shared shape reader: arm64 validated the target through
     # `_lbn_target_names`, which STRIPS the star (`[a, b]` for `(a, *b)`), so

@@ -7,6 +7,17 @@ against a 93-file corpus: `07cc3260` fixed that (the baseline now holds all 93),
 and what is left is one stale row that keeps the registered gate job
 `formal-proof-census-tool` red on master.
 
+**merged 2026-10-13 (merging `work/formal251-docs`): the branch re-measured this
+same residual (the `66e21e6a… != b2bbaf51…` mismatch on `fact`, the same
+`test_library_state_agrees_with_the_question_it_asks` environment failure in a
+fresh worktree) and its doc — the deleted
+`FORMAL_proof_census_baseline_covers_52_of_93_examples.md` — is gone with the
+coverage subject, so this file carries the half of that doc this one does not:
+the x86-64 half of the ratchet has never run. `tools/formal_proof_census_
+baseline_x86_64.json` does not exist, so on an x86-64 machine the census has
+no baseline to ratchet against; the arm64 re-seed above is the one step that
+needs Lean, and the x86-64 baseline is the first full run that machine gets.**
+
 ## What I ran
 
 ```console
