@@ -621,8 +621,9 @@ class TestGeneratorSource(unittest.TestCase):
         one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
         reading a branch condition out of a COMMENT above the TBZ case, which put
         `test_formal.py` in a state where it raised before generating a single
-        proof for every example it has — see
-        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+        proof for every example it has — the regression
+        `test_the_step_table_audit_does_not_read_a_condition_out_of_a_comment`
+        below reproduces on a fixture of its own.
 
         The regression this pins is the one whose fix was to REMOVE a row:
         `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
@@ -631,6 +632,52 @@ class TestGeneratorSource(unittest.TestCase):
         import formal.arm64_proof_gen as G
         G.check_step_conds(os.path.join(HERE, "lib", "ProofLib.lean"))
         notes = G.audit_step_table(os.path.join(HERE, "lib", "ProofLib.lean"))
+        self.assertIsInstance(notes, list)
+        for note in notes:
+            self.assertIn("shadows entry", note)
+
+    def test_the_step_table_audit_does_not_read_a_condition_out_of_a_comment(self):
+        """A branch condition QUOTED IN A COMMENT is prose, not a branch.
+
+        This is the whole of the 2026-10-03 regression, reproduced on a source
+        of our own rather than relied on to be present in `ProofLib.lean`'s
+        text: `audit_step_table` read `arm64_step`'s conditions with an
+        UNANCHORED regex, so it matched the comment above the TBZ arm — which
+        quotes `(insn &&& 0xff000000) = 0x36000000` while reasoning about it —
+        as though it were a second branch. The model list then came out one
+        entry longer than `_STEP_CONDS` while the two lists' symmetric
+        difference stayed empty in both directions, and `audit_step_table`
+        raised on every run. `test_formal.py` calls it BEFORE it generates, so
+        the whole arm64 proof suite had not run since that comment landed.
+
+        The fixture is `_STEP_CONDS` written out as `arm64_step`'s if-chain, in
+        TABLE order (so the order invariant is satisfied) with a comment above
+        the first arm quoting a condition that is in NO table. A reader that
+        still matched the comment would see one more branch than `_STEP_CONDS`
+        and raise; the de-duplicated reader (`_decoder_branch_conds`, anchored
+        to a line that is a whole `if … then`) ignores it. So this fails on the
+        old shape and passes on the fix, which is the property the deletion of
+        the doc this pins leaves behind.
+        """
+        import formal.arm64_proof_gen as G
+
+        lines = ["def arm64_step (s : Arm64State) (insn : UInt32) : "
+                 "Option Arm64State :=",
+                 "  -- the test-bit space, because "
+                 "(insn &&& 0xdeadbeef) = 0x12345678 is specific (and in no "
+                 "table)",]
+        for i, (mask, base) in enumerate(G._STEP_CONDS):
+            cond = (f"insn = {base:#x}" if mask is None
+                    else f"(insn &&& {mask:#x}) = {base:#x}")
+            lines.append(f"  {'if' if i == 0 else 'else if'} {cond} then")
+            lines.append("    some s")
+        lines += ["  else", "    none", "", "def other : Nat := 0", ""]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mini.lean")
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+            notes = G.audit_step_table(path)
         self.assertIsInstance(notes, list)
         for note in notes:
             self.assertIn("shadows entry", note)
@@ -4690,8 +4737,10 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
-    `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
-    recorded twelve red examples on 2026-10-03 and measured them one family at a
+    The 2026-10-03 census behind the arm64 step-table audit — taken only after
+    the audit stopped reading a branch condition out of the COMMENT above the
+    TBZ arm and taking `test_formal.py` down before it generated a proof —
+    recorded twelve red examples and measured them one family at a
     time, which is the right discipline and produced a list that has since gone
     stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
     `sorry`, and `sum_range` was the last one refusing at generation — its
