@@ -543,6 +543,12 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "the target is a REGISTER's contents, so a case would "
+                       "leave the harness's one `MAP_FIXED` region to an "
+                       "address the model cannot be told about — the same "
+                       "reason as arm64's `encode_blr_xn`. The decoder, the "
+                       "model arm and the `as` check all cover it; only the "
+                       "fuzzer cannot draw it",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -586,36 +592,20 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: the BACKLOG is EMPTY, and here is where each entry went ────
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
-    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
-    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
-    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`. The previous pass recorded that and left it
-    # here on purpose because the tool was "another claim's write set"; the
-    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
-    # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
+    # **Every x86-64 `BACKLOG` entry has been removed.** `encode_imul_r64_r64_imm`
+    # came off on 2026-10-06 (`work/x86-coverage-endtoend`) and the last three —
+    # `encode_call_r64`, `encode_and_r8_r8`, `encode_or_r8_r8` — on 2026-10-12.
+    # `and`/`or` are `yes/yes/yes` now (a decoder arm, a model arm, a `samples()`
+    # row and a pool entry each), so their entry was a fixed gap still holding
+    # its exemption, which the anti-rot half of `test_formal_isa_census.py`
+    # reported. `encode_call_r64`'s remaining gap is its FUZZ column and the
+    # reason is a property of the HARNESS (a call through a register has no
+    # target the harness can install), so it moved to `HARNESS_LIMITS` — where
+    # its arm64 twin `encode_blr_xn` already lives — rather than staying a
+    # `BACKLOG` entry whose recorded reason ("the decoder maps `FF` only to
+    # `FF 15`/`FF 25`") had been false since the decoder arm landed.
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
