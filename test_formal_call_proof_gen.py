@@ -2141,6 +2141,87 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                     if G._step_branch_index(w) is not None]
         self.assertEqual(expected, self.step_ok)
 
+    def test_the_alternative_generators_cover_the_executable_region_only(self):
+        """A DYLIB proof's step lemmas skip its string tail too.
+
+        `_step_result_plan` walks every 4-byte word of the `code` it is handed,
+        and a dylib carries its interned strings in `__TEXT` after the bodies.
+        A string word that decodes as an instruction would be planned a lemma
+        for a word no execution reaches, whose step-OK discriminator is FALSE —
+        the failure `_executable_code_end` filters, which the main generator and
+        (now) `generate_dylib_proof` share.
+
+        The decodable word is INJECTED at the first string address rather than
+        found in the corpus, so the row is a fact about the filter and not about
+        which bytes this compiler happens to intern: `909189220` is the stack-
+        trap message's `TBZ`, and it is checked to be decodable before it is
+        placed, and to be planned over the UNFILTERED code so the absence below
+        cannot be a vacuous plan.
+        """
+        import formal.arm64_proof_gen as G
+        from formal.build import compile_formal_dylib
+        d = tempfile.mkdtemp(prefix="a2-dylib-step-")
+        try:
+            src = os.path.join(d, "show.mojo")
+            with open(src, "w") as fh:
+                fh.write('def show(n) -> Int:\n    print("hello world")\n'
+                         '    return n\n')
+            built = compile_formal_dylib(
+                [src], output=os.path.join(d, "show.dylib"), prove=False)
+            code, info = built["code"], built["info"]
+            base = info["base_addr"]
+            code_end = G._executable_code_end(code, base, info)
+            self.assertLess(code_end, len(code),
+                            "the fixture has no string tail, so this row is not "
+                            "measuring the filter")
+            self.assertEqual(code_end % 4, 0,
+                             "the string tail does not start on a word, so the "
+                             "injected word would not be the region's first")
+            word = 909189220                       # the trap message's TBZ
+            self.assertIsNotNone(G._step_branch_index(word))
+            mutated = bytearray(code)
+            mutated[code_end:code_end + 4] = word.to_bytes(4, "little")
+            mutated = bytes(mutated)
+            idx = code_end // 4
+            self.assertIn(
+                idx, G._step_result_plan(mutated),
+                "the injected word is not one the plan would otherwise cover, "
+                "so the absence asserted next would prove nothing")
+            text = G.generate_dylib_proof(mutated, info, built["exports"], {})
+            self.assertNotIn(f"theorem dylib_step_ok_{idx}", text,
+                             "a step-OK lemma was emitted for a word in the "
+                             "DYLIB's string tail")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_executable_region_stops_at_the_first_string(self):
+        """`_executable_code_end` is the one answer to "where does code stop".
+
+        `__TEXT` is the bodies and THEN the interned strings, so the first
+        string address is the end of the executable region; with no strings the
+        whole `code` is code.  The result is clamped to `len(code)` and to 0, so
+        a string table that pointed outside the section cannot plan a lemma for
+        a byte that is not there.
+        """
+        import formal.arm64_proof_gen as G
+        base = 0x1000
+        code = bytes(range(64))
+        self.assertEqual(G._executable_code_end(code, base, {}), 64)
+        self.assertEqual(G._executable_code_end(code, base, {"str_addrs": {}}), 64)
+        self.assertEqual(
+            G._executable_code_end(code, base, {"str_addrs": {"a": base + 40}}),
+            40)
+        self.assertEqual(
+            G._executable_code_end(
+                code, base, {"str_addrs": {"a": base + 40, "b": base + 24}}),
+            24, "the FIRST string wins, not the last")
+        self.assertEqual(
+            G._executable_code_end(code, base, {"str_addrs": {"a": base - 8}}),
+            0)
+        self.assertEqual(
+            G._executable_code_end(code, base, {"str_addrs": {"a": base + 999}}),
+            64)
+
     def test_the_derivation_is_total_over_the_step_table(self):
         """Every word the step decoder accepts has a right-hand side.
 
