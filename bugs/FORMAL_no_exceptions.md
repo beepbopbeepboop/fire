@@ -19,12 +19,18 @@ document `formal/hostmods/json.mojo` cited a file that did not exist. Found
 2026-09-30 while auditing the cross-references of the second host-module wave;
 the measurement below is new, the behaviour is old.
 
-**Status 2026-10-07 (`formal112-docs`): the RULE is unchanged, next step 3 is
+**Status 2026-10-07 (`formal112-docs`; `work/formal160-docs` recorded the same
+state independently): the RULE is unchanged, next step 3 is
 DONE, and case (a) below is STALE.** The uncaught half of the contract now has
 its own suite — `test_formal_exceptions.py`, **285 checks, green**, both
-architectures — so "there is no test in the tree that raises on this path" (next
-step 3) is no longer true and the `arm64` flush divergence it says sat unnoticed
-has its own document and its own rows. And case (a)'s shape is no longer a
+architectures — it runs each program under `python3` and the image and
+compares stdout AND exit status, which is the observable the exit-0-only
+`test_formal_run.py` runner could not express — so "there is no test in the tree
+that raises on this path" (next step 3) is no longer true and the `arm64` flush
+divergence it says sat unnoticed has its own rows
+(`test_formal_link_accounting.py::test_raise_flushes_stdout` and the parity
+file's `printed_output_survives_a_raise`; the divergence's own document was
+deleted with the fix). And case (a)'s shape is no longer a
 build-and-die: `try: raise …` with an `except:` arm that has a BODY is now
 REFUSED by name ("… is a handler arm with a body this path cannot put in the
 image"), which is the honest form of the same fact — the arm could never run, so
@@ -33,8 +39,8 @@ states is exactly what makes that refusal correct, and the measured table in
 "what a `raise` actually lowers to" still holds for a `raise` the image DOES
 build: evaluate the expression, run the enclosing `finally`, terminate. Next
 steps 1 (one convention for the host modules) and 2 (an EH runtime, or not) are
-untouched.
-
+untouched and open — item 2 is the reason this stays a limit-of-the-target
+document.
 **Why a document rather than a line in a module docstring.** Four modules now
 answer the same question differently because of this, and each had to invent its
 own wording: `os.makedirs` is CPython's `makedirs(path, exist_ok=True)` with no
@@ -254,4 +260,6 @@ Ordered by what unblocks the most:
    both keep their stdout and exit 1 on both backends — the gate-resident file
    that already owns "does the thing this claim names exist" — and the class
    `test_formal_x86_64_parity.py`'s `FAILING_CASES` (`printed_output_survives_a_raise`)
-   carries the same shape for the file that is in no bucket.
+   carries the same shape for the file that is in no bucket. The suite itself,
+   `test_formal_exceptions.py`, is also not in a `tools/suite.py` bucket;
+   registering it is a separate decision this document does not make.

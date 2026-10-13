@@ -534,8 +534,7 @@ puts those 9 files on `std/function.mojo`'s MLIR-attribute template at round 7 a
 `hasher.mojo`. Both of those are the modules the walk had just stubbed, so the
 honest reading is "with the walls in front of them stubbed, these 9 land on the
 MLIR attribute template in `std/reflect.mojo`" — a new link, not a fix, and it
-belongs to `FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`
-(`formal19-4`).
+belongs to the MLIR dialect construct's area (`formal19-4`).
 
 Verified: `test_formal_imports.py` **PASS=72 FAIL=3** (the three are pre-existing
 and measured identical with the fix disabled — `_KIND_HOPS = 0`, which is the
