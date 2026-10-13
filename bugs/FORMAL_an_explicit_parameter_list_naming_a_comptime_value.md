@@ -2,9 +2,46 @@
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
-MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`); the comptime-value
-wall itself (§1, §4.1) is still OPEN. Filed 2026-10-05 on `work/formal27-5` at
-`7ac78995`, with every claim below measured on that tree.
+MESSAGES ARE BOTH FIXED (2026-10-07, `work/formal106-docs`);
+**§4.1's SCALAR-LITERAL half LANDED (2026-10-12, `work/formal322-docs`) — a
+struct template's scalar value parameter now takes a bare literal when the
+template is declared in the same module that applies it**; the IMPORTED bare-name
+half and the named `comptime` ALIAS (`ImmStaticOrigin`, §1) are still OPEN. Filed
+2026-10-05 on `work/formal27-5` at `7ac78995`, with every claim below measured on
+that tree.
+
+**What landed 2026-10-12, and what it is bounded by.** `Tagged[T, origin: Int]`
+applied as `Tagged[Int, 0]()` IN THE MODULE THAT DECLARES IT used to be refused.
+The demand walk reads bracket arguments through `type_arg_text`, which answers
+`""` for every bare literal by design — a bare literal is the `Pair[2]` /
+`tile[2, 3]` comptime-specialization shape and is never a boundary symbol — so no
+instantiation was demanded, the template was dropped from the image
+(`monomorph.without_template_bodies`), and the call was refused with a sentence
+about a **tuple index** that is false about the source. The fix is a
+per-POSITION kind table: `elaborate.bracket_param_kinds` reads the DECLARATION's
+own annotations and answers the scalar kind a bare literal may spell
+(`int`/`bool`/`float`/`str`) or `None` for every type parameter (`T`,
+`T: AnyType`, `T: Copyable`) and every non-scalar value parameter
+(`keys: List[T]`, `target: CompilationTarget`). `struct_literal_param_kinds`
+builds that table for a source's own struct templates, `all_instantiation_calls`
+passes the per-base entry into `_bracket_type_args`, and the literal's own
+spelling — the text `instantiate` substitutes into the body — fills the position.
+The whitelist is the safety property: a number can only be substituted for a
+parameter the declaration says IS that scalar, so `Pair[2]` (a literal at a TYPE
+position) stays a non-demand and no fabricated instantiation is published. Pinned
+by `test_formal_monomorph.py::a_scalar_value_parameter_takes_a_bare_literal`
+(the table, the demand set, and a both-architectures build-and-RUN differential
+whose two instantiations print their own values, `5` and `-3`).
+
+**What is deliberately still refused.** (a) The IMPORTED bare name
+(`from tagged import Tagged` then `Tagged[Int, 0]()`) — classified by the module
+that DECLARES the template, whose annotations the call-site walk does not hold
+(`all_instantiation_calls`'s memo is a function of the consumer's source alone);
+it keeps §1's honest explicit-parameter-list sentence, measured unchanged after
+this commit. (b) the named `comptime` alias of §1
+(`Span[StaticString, ImmStaticOrigin]`), refused by `type_arg_text`'s own
+value-binding check because the name is bound in the reading scope. Both remain
+the open part of §4.1; neither is a regression.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
@@ -161,6 +198,13 @@ written down.
    substitution, and the mangler needs the argument's **text** — which is why
    `type_arg_text` returning `""` for a non-type is right and insufficient
    rather than a bug to widen.
+   **The SCALAR-LITERAL half is DONE (2026-10-12, `work/formal322-docs`): a bare
+   literal at a position the DECLARATION annotates with a scalar is now a
+   demand, the literal's own text is the substitution, and `Pair[2]` /
+   `tile[2, 3]` are untouched. What is left of this step is the IMPORTED
+   bare-name half (the defining module's annotations are not in the call-site
+   walk) and the named `comptime` ALIAS (`ImmStaticOrigin`). See the Status at
+   the top.**
 2. ~~**The two messages**, which are independent of (1) and can be landed
    first.~~ **DONE.** Row 5's dotted sentence landed on `94b29b12`
    (`dotted_specialization_refusal`); row 3's advice landed 2026-10-07 in
