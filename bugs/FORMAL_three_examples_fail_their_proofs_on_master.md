@@ -8,6 +8,36 @@ cases are still red, and the fix is in a write set another worker holds. Found
 2026-10-04 on `work/formal21-4` while landing the floor correction for `//` and
 `%`, and it is PRE-EXISTING: it reproduces on the base commit.**
 
+## Status 2026-10-08 (`work/formal170-docs`): the failure has MOVED — the frame-address `rfl` site is gone, and the true blocker is the emitter's base branch
+
+**The `count_proof.lean:5330` `rfl` failure this file diagnoses below no longer
+appears.** Re-measured on master
+(`python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py -j 1 count
+pow2`, 7.0 GB peak, both rows `KNOWN-GAP`, `PASS=0 KNOWN-GAP=2`), the generated
+`count_proof.lean` now dies at three OTHER sites:
+
+    count_proof.lean:5939:19: error(lean.unknownIdentifier): Unknown identifier `ih`
+    count_proof.lean:6435:8: error: (kernel) excessive memory consumption detected
+    have type FrameBound 131152 st arg in the application
+      frameBound_descend_le 131152 32 st arg (arg - 1) ?m.1144 ?m.1145 hargrel hPge hbnd
+
+The 5939 site is the "second error site" this file already waved at as *not
+this doc's*. It is not a proof gap: the emitted `count_contract` refines
+`contract_sound … ?_ ?_`, opens the **base** branch at
+`count_proof.lean:5824` (`· intro fuel st hb …`, whose binder list has no `ih`,
+per `lib/Refine.lean:746`), and then emits `hsub_2 := ih ({…}) (fuel - 83) …` at
+5939 with `ih` unbound (the only `ih`-introducing branch opens 250 lines later,
+at 6178). That is an emitter defect in `formal/arm64_proof_gen.py`, not a missing
+`ProofLib` lemma. The 6435 kernel OOM is new here.
+
+count and pow2 stay declared (`EXPECTED_FAILURES`) and pinned, so the *bug this
+file was filed for* — an undeclared red — is still closed. What changed is the
+root cause: the frame-address canonicalisation this file's body is about is no
+longer what stops these two. **The fix is in `formal/arm64_proof_gen.py`, which
+live formal workers hold (`formal178-docs`'s arm64 proof-gap rows,
+`formal166-docs`'s arm64 proof-time row), so it is reported and not edited
+here.**
+
 ## Status 2026-10-04 (`work/formal25-6`): declared, pinned, and the cause is not the dead `if`
 
 **The failure is unchanged and reproduces byte for byte** (`python3
