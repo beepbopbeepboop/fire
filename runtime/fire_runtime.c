@@ -1617,6 +1617,16 @@ void mojo_list_init(MojoList *l)
     l->len  = 0;
     l->cap  = MOJO_LIST_INLINE;
     _pr_add(&_reg_list, (uint64_t)(uintptr_t)l);
+    /* A NEW list starts describing nothing. The per-address side tables (the
+     * tuple marker, the slot kinds and the element repr) are dropped by
+     * `mojo_list_destroy`, but a block that left by any other route -- a bare
+     * `free()` of an owned local, a stack frame that died -- leaves its row
+     * behind, and the next list malloc hands that address inherited the dead
+     * list's element repr. Measured in the self-hosted compiler: a fresh
+     * `(filename, line)` tuple came back with a `ClosureInfo` repr shim, and
+     * hashing it as a set key ran `_mojo_repr_ClosureInfo` over a string. */
+    _pr_del(&_reg_tuple, (uint64_t)(uintptr_t)l);
+    _kinds_forget((uint64_t)(uintptr_t)l);
 }
 
 void mojo_list_destroy(MojoList *l)
@@ -5919,9 +5929,47 @@ void mojo_set_clear(MojoSet *s)
 
 static void _set_grow(MojoSet *s);
 
+static char *_container_key_str(int64_t v);
+
+/* An int-domain set element that is a registered LIST word is a TUPLE (a
+ * Python list is unhashable, so a set never legitimately holds one), and a
+ * tuple is equal to every other tuple of the same contents. Hashing and
+ * comparing it by ADDRESS made every freshly built tuple a new element:
+ * `s.add(('x', 1)); ('x', 1) in s` was False, and the self-hosted compiler's
+ * own `(filename, line)` dedup set and `(struct, method)` membership tests
+ * never matched. So such a word is hashed and compared by its content key --
+ * the same text a tuple DICT key already uses (`_container_key_str`), which
+ * keeps "equal for a set" and "equal for a dict" one rule. Every other word
+ * (ints, identity registries keyed by heap pointer) keeps the address
+ * semantics it always had; the registry probe is the whole cost for them. */
+static uint64_t _set_int_hash(int64_t v)
+{
+    if (mojo_is_registered_list(v)) {
+        char *k = _container_key_str(v);
+        uint64_t hk = _str_hash(k);
+        free(k);
+        return hk;
+    }
+    uint64_t h = (uint64_t)v * 2654435761ULL;
+    h ^= h >> 32;
+    return h;
+}
+
+static int _set_int_eq(int64_t a, int64_t b)
+{
+    if (a == b) return 1;
+    if (!mojo_is_registered_list(a) || !mojo_is_registered_list(b)) return 0;
+    char *ka = _container_key_str(a);
+    char *kb = _container_key_str(b);
+    int eq = strcmp(ka, kb) == 0;
+    free(ka);
+    free(kb);
+    return eq;
+}
+
 static int64_t _set_slot_int(MojoSet *s, int64_t v)
 {
-    uint64_t h = (uint64_t)v * 2654435761ULL;
+    uint64_t h = _set_int_hash(v);
     /* `% s->cap` (always a power of two) keeps only h's LOW bits - the
      * weakest bits of a plain multiplicative hash. Values from
      * mojo_set_add_int(registry, (int64_t)(intptr_t)ptr) (this runtime's
@@ -5936,12 +5984,11 @@ static int64_t _set_slot_int(MojoSet *s, int64_t v)
      * exposed it. Fold the high bits down before the modulo (matches the
      * mixing step in xxhash/murmur's finalizers) so pointer alignment
      * doesn't determine which slots ever get used as probe starts. */
-    h ^= h >> 32;
     for (int64_t i = 0; i < s->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)s->cap);
         _SetSlot *sl = &s->slots[idx];
         if (sl->tag == -1) return idx;
-        if (sl->tag == 0 && sl->val_i == v) return idx;
+        if (sl->tag == 0 && _set_int_eq(sl->val_i, v)) return idx;
     }
     return -1;
 }
@@ -6127,11 +6174,8 @@ MojoBytes *mojo_set_val_bytes(MojoSet *s, int64_t idx)
 static int64_t _set_home_slot(MojoSet *s, int64_t idx)
 {
     _SetSlot *sl = &s->slots[idx];
-    if (sl->tag == 0) {
-        uint64_t h = (uint64_t)sl->val_i * 2654435761ULL;
-        h ^= h >> 32;
-        return (int64_t)(h % (uint64_t)s->cap);
-    }
+    if (sl->tag == 0)
+        return (int64_t)(_set_int_hash(sl->val_i) % (uint64_t)s->cap);
     return (int64_t)(_str_hash(sl->val_s ? sl->val_s : "") % (uint64_t)s->cap);
 }
 
