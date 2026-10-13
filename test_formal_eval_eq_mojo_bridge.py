@@ -756,20 +756,27 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_a_spill_is_not_attributed_to_the_conditional_expression(self):
-        """The other unmodelled word is a spill, and it says so.
+    def test_a_spill_no_longer_reaches_the_unmodelled_negative_offset_form(self):
+        """`STUR`/`LDUR` are unmodelled, but a spill no longer reaches them.
 
         `STUR`/`LDUR` is the 9-bit-displacement form a frame access at a
         NEGATIVE offset needs, and the step table has arms for the scaled
-        `STR`/`LDR` and not for these — so a function with enough spilled
-        locals to reach below the entry `sp` gets no arm64 proof either, and has
-        nothing to do with a conditional expression. This row is why the refusal
-        names the instruction off its encoding instead of assuming the one
-        construct this file is about: a message that blamed the ternary for a
-        spill would send a reader to fix the wrong thing.
+        `STR`/`LDR` and not for these.  It used to be that twelve spilled
+        locals reached below the entry `sp`, so the function got no arm64 proof
+        — for a construct that has nothing to do with a conditional expression,
+        which is why the refusal named the instruction off its encoding rather
+        than assuming the one construct this file is about.
 
-        Measured: twelve spilled locals is enough, and the words are
-        `stur x0, [x29, #-0x58]` (`0xf81a83a0`) and `ldur` of the same shape.
+        Re-measured 2026-10-12: it does not any more.  The prologue reserves the
+        container budget (`_emit_sub_imm(sp, _SCRATCH)` — 131072 bytes, one
+        scaled `sub sp, sp, #32, lsl #12`), so twelve locals live at POSITIVE
+        offsets and the emitter emits the scaled `STR`/`LDR` the model does
+        step.  The function generates a proof, and the proof names no
+        `STUR`/`LDUR` — which is the re-measurement this row's own message
+        asked for, and it is asserted both ways below.  The two instruction
+        pins are unchanged: the words are still what `_unmodelled_instruction`
+        names, so a program that DOES reach one is still refused with the
+        instruction rather than the ternary.
         """
         locals_12 = "\n".join(f"    v{i} = {i} + n" for i in range(12))
         spill = ("def main(n):\n" + locals_12 + "\n    return "
@@ -787,18 +794,19 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="spill-arm64-")
         try:
             path, err = _generate(tmp, spill, "spill_arm64", arch="arm64")
-            self.assertIsNone(path, "a spilling function now generates an arm64 "
-                                    "proof, so `bugs/FORMAL_arm64_instruction_"
-                                    "coverage.md`'s LDUR/STUR row is stale and "
-                                    "this row should be re-measured")
-            self.assertNotIn("_ternary_go", err,
-                             f"a spill is being blamed on the conditional "
-                             f"expression:\n{err}")
-            self.assertIn("STUR", err,
-                          f"the refusal does not name the spill:\n{err}")
-            self.assertIn("NEGATIVE offset", err,
-                          f"the refusal does not say why the emitter reached "
-                          f"for the unscaled form:\n{err}")
+            self.assertIsNone(err, f"the twelve-local function refused: {err}")
+            self.assertIsNotNone(
+                path, "a twelve-local function reserves the container scratch "
+                      "and needs no STUR/LDUR, so it generates a proof; a None "
+                      "here means the spill reached the negative-offset form "
+                      "again")
+            text = _read(path)
+            for instr in ("STUR", "LDUR"):
+                self.assertNotIn(
+                    instr, text,
+                    f"the proof names {instr}: the spill reached the unmodelled "
+                    f"negative-offset form again, and the doc row for it needs "
+                    f"re-measuring rather than this assertion")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
