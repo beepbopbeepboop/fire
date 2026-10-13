@@ -304,9 +304,8 @@ MLIR_ATTR_ROOT = "__mlir_attr"
 # "this path has no MLIR … an MLIR attribute, type or operation has no
 # representation in [a 64-bit word]" — and that sentence asserts a property of
 # the TARGET where the property belongs to the OPERATION. Measured over the
-# stdlib (`../new-modular`, `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`):
-# 259 `__mlir_op` sites over 104 distinct operations in 49 files. Sorted by what
-# each one DENOTES, not by what it is called:
+# stdlib (`../new-modular`): 259 `__mlir_op` sites over 104 distinct operations
+# in 49 files. Sorted by what each one DENOTES, not by what it is called:
 #
 #   * 14 operations / 76 sites denote NO VALUE at all — an effect. A store, a
 #     trap, an ownership marker, a free, a coroutine step. "Has no
@@ -571,9 +570,8 @@ MLIR_UNGUARDED_OPS = {
 
 # ── The OPERAND's DECLARED type, which is the fact every arithmetic arm needs ──
 #
-# `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
-# Correction measured the thing this section exists for: counted by OPERATION
-# NAME, the corpus's arithmetic sites look scalar (38 sites over 27 operations,
+# The stdlib MLIR census measured the thing this section exists for: counted by
+# OPERATION NAME, the corpus's arithmetic sites look scalar (38 sites over 27 operations,
 # the names read `add`/`sub`/`mul`/`cmp`), and a table keyed on the name that
 # emitted `a + b` for `pop.add` would be RIGHT for 9 of them and WRONG for 26.
 # The 26 are `std/simd.mojo`, whose own source documents the operation it
@@ -1369,10 +1367,9 @@ def mlir_dialect_op_refusal(op: str, operand: str = None,
     # A NAME-keyed "this operation denotes one 64-bit word, so write the
     # ordinary spelling" table is DELIBERATELY not here, and this is the place
     # that says so, because a version of this function did carry one and it was
-    # wrong: `MLIR_EFFECT_OPS` above and the census in
-    # `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
-    # Correction both exist because the answer to "is this operation's result a
-    # word?" is a fact about its OPERANDS, not its name — 26 of the 38
+    # wrong: `MLIR_EFFECT_OPS` above and the stdlib MLIR census both exist
+    # because the answer to "is this operation's result a word?" is a fact about
+    # its OPERANDS, not its name — 26 of the 38
     # arithmetic sites are elementwise over an N-lane vector, and a name-keyed
     # table would have lowered those to a scalar add of two vector-typed words.
     # That branch was UNREACHABLE (a `return` above ended the function), so it
