@@ -1996,24 +1996,43 @@ class TestNestedConditionFactSharing(unittest.TestCase):
     def test_the_fact_count_grows_with_the_paths_and_not_with_the_branches(self):
         tmp = tempfile.mkdtemp(prefix="hprior_growth_")
         try:
-            counts = {}
+            counts, scopes = {}, {}
             for k in (2, 3, 4):
                 proof = self._proof(tmp, k)
-                counts[k] = proof.count("have hprior_")
+                facts = self._hprior_scopes(proof)
+                counts[k] = len(facts)
+                scopes[k] = len({sc for sc, _st in facts})
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
-            # x2 per condition, which is the path count. The pre-memo growth was
-            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
-            # bound of 2.2 is below the old one and above the new one — and it
-            # is a bound rather than a count because the exact number moves with
-            # the block layout, while the growth rate is the thing that was wrong.
-            for k in (3, 4):
-                ratio = counts[k] / counts[k - 1]
+            # The memo pins each prior block ONCE per path, so a scope proves
+            # only the facts for the blocks its own path has not already pinned:
+            # the number of NEW facts per scope is a property of ONE branch (a
+            # block or two) and not of the depth. The path count is still the
+            # growth: `scopes` doubles per condition (2, 6, 14, 30 here for
+            # k = 1..4), so "at most 2 per scope" IS "grows with the paths".
+            #
+            # The bound is on the RATIO OF FACTS TO SCOPES and not on the ratio
+            # of the TOTALS. The totals carry a constant offset from the entry
+            # level — the emission is exactly 3*2**k - 3 here, 9 / 21 / 45 — so
+            # the ratio of two totals is 2.33 at k = 2 and 2.14 at k = 3: a
+            # bound on it must sit above 2.33 to accept a correct memo, which
+            # leaves it just under the ×2.88 the pre-memo emission reached one
+            # step later. That is a property of a geometric series with a first
+            # term, not of re-derivation, and it is why the load-bearing
+            # quantity is the per-scope count.
+            #
+            # Per scope, the measured emission is 15/6, 51/14 and 147/30 facts
+            # BEFORE the memo (2.5, 3.6, 4.9, growing with the depth) and
+            # exactly 1.5 after it at every k. Two is therefore below the old
+            # ratio and above the new one, and the old emission fails it at k=2.
+            for k in (2, 3, 4):
+                ratio = counts[k] / scopes[k]
                 self.assertLessEqual(
-                    ratio, 2.2,
-                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
-                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
-                    f"this x2 (the number of paths) and anything above 2.2 is "
-                    f"the exponential back")
+                    ratio, 2.0,
+                    f"{k} conditions: {counts[k]} `hprior_*` facts over "
+                    f"{scopes[k]} scopes is x{ratio:.2f} per scope, above the "
+                    f"x2 the per-path memo bounds it to; the pre-memo emission "
+                    f"proved every prior block in every scope and grows with "
+                    f"the depth (x2.5 at two conditions)")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
