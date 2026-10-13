@@ -509,6 +509,23 @@ LIST_CASES = [
      "x86-64 does not have. arm64-only, declared in BACKEND_ONLY below rather "
      "than discovered: the group image is one build, so the case is EXCLUDED "
      "from it on x86-64 rather than failing the build"),
+    ("l_slice_store_grow", ["a = [3, 1, 2]", "a[0:1] = [9, 9, 9]"],
+     ("%d %d %d %d %d\\n", ["a[0]", "a[1]", "a[2]", "a[3]", "a[4]"]),
+     "a length-CHANGING slice store that GROWS: CPython inserts the extra "
+     "elements and shifts the tail, so [3, 1, 2] answers [9, 9, 9, 1, 2] with "
+     "len 5. arm64 resizes the blob in place now (the tail memmoved by "
+     "len(value) - range and the count bumped, room reserved by "
+     "`_scan_list_caps`); x86-64 still refuses every slice store, so the case "
+     "is arm64-only. All FIVE elements are printed, so a shift that stopped "
+     "one short is a visible wrong number rather than a length that happens "
+     "to agree"),
+    ("l_slice_store_shrink", ["a = [3, 1, 2]", "a[0:1] = []"],
+     ("%d %d\\n", ["a[0]", "len(a)"]),
+     "the SHRINK half: `a[0:1] = []` deletes the range and moves the tail "
+     "DOWN, so [3, 1, 2] answers [1, 2] with len 2. Measured on arm64 before "
+     "the lowering: exit 1 with nothing on either stream. arm64-only like the "
+     "grow, and both directions are here because a resize that moved the tail "
+     "the wrong way would pass a length-only reading"),
 ]
 
 DICT_CASES = [
@@ -892,6 +909,11 @@ BACKEND_ONLY = {
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",
+    # The length-changing resize is arm64's too, for the same reason: a slice
+    # on x86-64 is a materialized copy, so the store has no source to write back
+    # into and the backend refuses it outright (`slice_store_refusal`).
+    "l_slice_store_grow": "x86_64",
+    "l_slice_store_shrink": "x86_64",
 }
 
 

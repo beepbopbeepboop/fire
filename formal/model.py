@@ -12733,6 +12733,50 @@ def slice_store_refusal() -> str:
         "through one would have to write back into its source blob")
 
 
+def _literal_element_count(node) -> int | None:
+    """`len(node)` for a container LITERAL the build can read, else None.
+
+    The ONE reader of a literal's element count for the slice-store
+    question, shared by `slice_store_static_length_refusal` (which asks
+    whether the store keeps the length) and `slice_store_growth_slots` (which
+    asks how much room an in-place resize could need). A `*` splat has no
+    compile-time length, so it answers None the way every other capacity
+    reader on this path treats it.
+    """
+    import fire_compiler as F
+    if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return None
+    if any(isinstance(el, F.UnaryOp) and el.op == "*"
+           for el in getattr(node, "elements", []) or []):
+        return None
+    return len(getattr(node, "elements", []) or [])
+
+
+def slice_store_growth_slots(value) -> int:
+    """An upper bound on the slots `xs[a:b] = value` can ADD to `xs`, 0 if not
+    build-time known.
+
+    The capacity half of the slice-store question, and the reader
+    `formal/arm64_codegen.py::_scan_list_caps` uses to reserve room for an
+    in-place RESIZE: the range `[a, b)` is never negative, so the growth
+    `len(value) - (b - a)` cannot exceed `len(value)`, and that is the bound
+    this returns. It is deliberately loose — `xs[0:2] = [9]` reserves one slot
+    it will not use — for the same reason `_scan_list_caps` counts append
+    SITES: the alternative computes `b - a`, which needs the receiver's own
+    run-time count whenever a bound is omitted or negative, and a capacity that
+    depends on a run-time number is not a reservation.
+
+    A value whose length is not a literal answers 0, which is "this build
+    cannot tell" rather than "no growth is possible": the emitter then keeps
+    the run-time capacity guard, and a store that does grow past the
+    reservation says so and stops rather than writing over the frame. A store
+    that only SHRINKS needs no room at all, so answering 0 there is exact
+    rather than a shrug — `xs[0:1] = []` is a shrink and reserves nothing.
+    """
+    vlen = _literal_element_count(value)
+    return vlen if vlen is not None else 0
+
+
 def slice_store_static_length_refusal(target, value) -> str | None:
     """Why `xs[a:b] = v` cannot keep the blob's length, or None when it can.
 
@@ -12768,13 +12812,7 @@ def slice_store_static_length_refusal(target, value) -> str | None:
     """
     def literal_len(node):
         """`len(node)` when the build can read it, else None."""
-        import fire_compiler as F
-        if not isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return None
-        if any(isinstance(el, F.UnaryOp) and el.op == "*"
-               for el in getattr(node, "elements", []) or []):
-            return None
-        return len(getattr(node, "elements", []) or [])
+        return _literal_element_count(node)
 
     def bound(node, default, count):
         if node is None:

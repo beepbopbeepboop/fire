@@ -1,11 +1,12 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. Three of those rows are answers now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64, and so is
+item 4 (a length-changing slice store) for a name bound to a list literal, in
+both directions; items 1 (container `==`/`!=`) and 2 (ordering) are unchanged,
+and so is item 4's x86-64 half.** `test_formal_container_methods.py` measures
+the whole surface against CPython on both architectures and is green; this doc
+is about the rows in it that are green *as refusals*, which is a different thing
+from green as answers. More of those rows are answers now.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -37,6 +38,36 @@ group's duplicate `o_xor`/`o_and` rows were re-pointed at probes the same way
 half is pinned by four new `_BLOB_GROWTH_PROBES` rows, so each new site has to
 keep emitting its capacity guard.
 
+**2026-10-13 (`formal342-docs`): item 4, a LENGTH-CHANGING slice store, is
+lowered on arm64 for a name bound to a list literal.** Measured, both
+directions, `test_formal_container_methods.py list`: `a = [3, 1, 2]` then
+`a[0:1] = [9, 9, 9]` answers `9 9 9 1 2` and `a[0:1] = []` answers `1 2`, where
+before both **exited 1 with nothing on stdout and nothing on stderr** — the
+silent-stop class this file exists to record, and the last row of the "What was
+wrong" table below that is still a stop. The lowering is
+`formal/arm64_codegen.py::_emit_slice_store`'s RESIZE arm: `delta = len(value) -
+(stop - start)`; a positive delta memmoves the tail `[stop, count)` UP, walking
+`i` from the count down so each source is read before the higher slot it moves
+into is written, a negative delta moves it DOWN from `stop`, and the count is
+bumped by `delta`. Both directions are pinned as separate rows because a resize
+that moved the tail the wrong way passes a length-only reading — the group
+prints all five elements of the grow and the two of the shrink.
+
+**The room a growth needs is a reservation, not a heap, and it comes from the
+append machinery rather than a second one.** `model.slice_store_growth_slots`
+returns `len(value)` (an upper bound on `len(value) - range`, since the range is
+never negative) and `_scan_list_caps` counts the store beside the appends that
+grow the same literal, so `_emit_list` reserves the room and the store's
+capacity guard (`model.blob_growth_overflow_message`, the same sentence a `+`
+and an `|` write) stops a grow past it. A store whose value length is not
+build-time known reserves nothing and keeps the run-time guard; a store on a
+receiver that is not a name bound to a literal — a parameter, a member, a
+bound name that is not a literal — keeps the SAME-LENGTH replace and its
+diagnostic, which is the same split `list.append` already makes. The x86-64
+half is untouched: a slice there is a materialised copy, so
+`slice_store_refusal` refuses the store outright and the rows carry
+`BACKEND_ONLY["x86_64"]`.
+
 Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
 number below is measured on that branch, on both `arm64` and `x86-64`, and each
 has a named row in `test_formal_container_methods.py`.
@@ -62,7 +93,7 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 | `[1, 2] \| [3]` | `3` | `TypeError` | answering a program CPython rejects |
 | `[1] in [[1], [2]]` | `1` on arm64, `0` on x86-64 | `1` | the two architectures disagreeing |
 | `b = [1]; b in [[1], [2]]` | `0` on both | `1` | wrong number |
-| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop |
+| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop — **FIXED on arm64 2026-10-13** (item 4) |
 | `t = (1,2,3); t[0] = 9` | `t0=9 len=3` | `TypeError` | wrong *mutation* |
 | `for k in d: del d[k]` | `1` | `RuntimeError` | wrong number |
 | `for k in d: d["z"] = 5` | `2` | `RuntimeError` | wrong number |
@@ -95,11 +126,12 @@ with the element's own width known only at run time
    two nested loops with a different keep/drop predicate. This is the cheapest
    of the four by a wide margin and it is the one to do next.
 4. **A length-changing slice store** — `xs[a:b] = v` where `len(v) != b - a`:
-   a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
-   primitives are both already here: `_emit_del_list_range` memmoves a tail and
-   shrinks the count, and `_emit_list_append` grows it past the count into
-   reserved capacity. arm64's `_emit_slice_store` is a same-length copy loop and
-   x86-64 has no slice store at all.
+   a memmove of the tail by `len(v) - (b - a)` elements and a count bump.
+   **LANDED on arm64 2026-10-13** (see the Status note): `_emit_slice_store` now
+   emits the memmove (up for a grow, down for a shrink) and the count bump, and
+   `_scan_list_caps` reserves the room the way `_emit_list_append`'s growth
+   already did. x86-64 has no slice store at all and still refuses the whole
+   construct.
 
 The stride is the whole of it, and it is not free: `model.blob_elem_stride`
 already answers it for `list:int`, `list:str` and a dict's `list:<value-elem>`
@@ -128,9 +160,13 @@ the second reason this is a project rather than a rewrite.
 3. **Ordering** (item 2). Both backends. Strictly after item 1, and it reuses
    item 1's compare — a three-way element compare is the same inner loop with a
    different exit.
-4. **A length-changing slice store** (item 4). arm64 first (it is the backend
-   that has the store), and only then x86-64, which needs a slice to stop being
-   a materialized copy before the store can mean anything.
+4. **A length-changing slice store** (item 4). **DONE on arm64 for a name
+   bound to a list literal (2026-10-13)**; see the Status note above for the
+   emitter and the reservation. What is left is x86-64, which needs a slice to
+   stop being a materialized copy before the store can mean anything, and the
+   arm64 readers that cannot be resized in place — a name that is not bound to a
+   literal, a member, a parameter — which keep the same-length replace and its
+   diagnostic, the same split `list.append` makes.
 
 ## The rows that must not be "fixed" by deleting the case
 

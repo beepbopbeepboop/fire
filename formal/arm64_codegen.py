@@ -5004,6 +5004,29 @@ ctor_field_value=self._ctor_field_value_for(name),
             # why an unbounded loop is not made into a build failure.
             trips = trips_by_id.get(id(node), 1) or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
+        # A slice STORE that can grow the list needs the same room for the same
+        # reason, and it is counted in the same pass so `_emit_slice_store` and
+        # `_emit_list` cannot disagree about the capacity. The growth is
+        # `model.slice_store_growth_slots(node.value)`, which is `len(value)`
+        # for a literal and 0 for anything else — a bound on how many slots the
+        # `[start:stop] = value` can add, since the range is never negative and
+        # a store that only shrinks adds none. A site whose growth is 0 still
+        # creates the NAME -> (base, extra) entry, because the entry is what
+        # makes the resize path reachable at all: a shrink needs no capacity,
+        # and a dynamic grow is what the run-time guard answers for.
+        for node in _walk_ast(getattr(fn, "body", None) or []):
+            if not (isinstance(node, F.AssignStmt)
+                    and isinstance(node.target, F.SliceExpr)):
+                continue
+            recv = node.target.obj
+            if not isinstance(recv, F.IdentExpr):
+                continue
+            growth = M.slice_store_growth_slots(node.value)
+            if growth:
+                trips = trips_by_id.get(id(node), 1) or 1
+                appends[recv.name] = appends.get(recv.name, 0) + growth * trips
+            else:
+                appends.setdefault(recv.name, 0)
         by_node: dict = {}
         by_name: dict = {}
         for name, count in appends.items():
@@ -12384,35 +12407,70 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    def _slice_shift_step(self, base: int, i: int, delta: int) -> None:
+        """One step of the in-place slice resize's tail move.
+
+        `obj[1 + i + delta] = obj[1 + i]`, where `obj`'s base is in `X<base>`,
+        the index in `X<i>` and the (signed) shift in `X<delta>`. Factored out
+        because the grow half and the shrink half emit the SAME move and differ
+        only in the DIRECTION of the loop around it, which is what keeps
+        overlap safe: a grow walks `i` down from the count so each source is
+        read before the higher slot it moves into is written, and a shrink
+        walks `i` up from the stop so each destination is a slot already read.
+        `X14` holds the blob's element base, `X12`/`X13` the two addresses and
+        `X0` the word, so the caller's live registers (`X9` base, `X10` delta,
+        `X11` index) survive the step."""
+        self.asm.emit(encode_add_xd_xn_imm(14, base, 8))
+        self.asm.emit(encode_add_xd_xn_xm(12, i, delta))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 14, 12))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(13, 14, i))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 13, 0))
+        self.asm.emit(encode_str_xt_xn_imm(0, 12, 0))
+
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
-        """`obj[a:b] = value` — same-length replace of the slice range.
+        """`obj[a:b] = value` — replace the slice range, resizing the blob.
 
-        A formal list blob cannot change length without a compaction pass, so
-        this is a SAME-LENGTH replace and `len(value) != slice_len` stops the
-        program — with a DIAGNOSTIC, which is the second half of what used to
-        be wrong here. step must be 1 (or None).
+        A name bound to a list LITERAL gets an IN-PLACE RESIZE: the tail
+        `[stop, count)` is moved by `len(value) - (stop - start)` elements and
+        the count is updated, so `a = [3, 1, 2]; a[0:1] = [9, 9, 9]` answers
+        `[9, 9, 9, 1, 2]` the way CPython does. The room a growth needs comes
+        from `_scan_list_caps`, which counts the store beside the appends that
+        grow the same literal (`model.slice_store_growth_slots`), and a growth
+        past that reservation stops the program with
+        `model.blob_growth_overflow_message` rather than writing over the frame.
+        step must be 1 (or None).
 
-        **The exit was silent, and a silent exit is the worst outcome this path
-        has.** Measured on this tree before the gate: `a = [3, 1, 2]` then
-        `a[0:1] = [9, 9, 9]` built, ran and **exited 1 with nothing on stdout
-        and nothing on stderr** — a program that looks like it ran and did not,
-        where CPython's answer is `[9, 9, 9, 1, 2]`. The same source's
+        Everything else — a receiver that is not a name bound to a literal, or
+        a value whose length is not build-time known — keeps the SAME-LENGTH
+        replace this method has always had, and a store that changes the length
+        there stops with a DIAGNOSTIC.
+
+        **The exit used to be silent, and a silent exit is the worst outcome
+        this path has.** Measured on this tree before the gate: `a = [3, 1, 2]`
+        then `a[0:1] = [9, 9, 9]` built, ran and **exited 1 with nothing on
+        stdout and nothing on stderr** — a program that looks like it ran and
+        did not, where CPython's answer is `[9, 9, 9, 1, 2]`. The same source's
         `a[0:1] = [9]` (equal lengths) answered 9 correctly, so the defect only
         showed on the half of the construct this lowering does not implement.
         x86-64 refuses the construct outright; that is a refusal at a wider
         scope than this one, and it names the same reason, so the two are one
         answer at two depths rather than two answers.
 
-        Two things now, and the second is what covers what the first cannot see:
+        Three things now, and the third is what covers the cases the first two
+        cannot reach:
 
         * `model.slice_store_static_length_refusal` refuses AT BUILD TIME when
-          the receiver, the bounds and the value are all literal — the shape a
-          corpus writes, and the shape above;
-        * the run-time arm this method still needs, because the receiver's count
-          is a word read at run time and a store into a name-bound list cannot
-          be decided while emitting, now says WHICH bound it was before it
-          stops, through the same `write(2)` every other bounded stop on this
-          path uses (`_emit_blob_growth_guard`'s half).
+          the receiver, the bounds and the value are all literal — a store into
+          a literal target, which has no name for `_scan_list_caps` to reserve
+          room under;
+        * the named-literal RESIZE above, whose guard is the reservation the
+          scan made, so the case the static refusal cannot see (a name) is
+          answered rather than stopped;
+        * the run-time arm for every other receiver, because the receiver's
+          count is a word read at run time and a store into such a name cannot
+          be decided while emitting; it says WHICH bound it was before it stops,
+          through the same `write(2)` every other bounded stop on this path uses
+          (`_emit_blob_growth_guard`'s half).
         """
         if target.step is not None:
             st = target.step
@@ -12424,6 +12482,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
         obj = target.obj
+        # `_scan_list_caps` reserved room for an in-place resize of a name bound
+        # to a list literal, and its `(base, extra)` pair IS the capacity such a
+        # store may grow into. A receiver with no entry — a name that is not
+        # bound to a literal, a member, a parameter — has no reservation, so it
+        # keeps the same-length replace whose run-time arm is below.
+        name = obj.name if isinstance(obj, F.IdentExpr) else None
+        room = self._list_caps_by_name.get(name) if name is not None else None
+        cap = None if room is None else room[0] + room[1]
         self._if_counter += 1
         sid = self._if_counter
         fn = self.func_name
@@ -12483,43 +12549,129 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_cset_xd_cond(0, "cs"))
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
+        # X6 = stop - start, the length of the range being replaced.
         self.asm.emit(encode_sub_xd_xn_xm(6, 5, 4))
-        self.asm.emit(encode_cmp_xn_xm(3, 6))
-        self.asm.emit(encode_cset_xd_cond(0, "eq"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        self.asm.emit_label_rel(fail_label, here_offset=-4)
-        self.asm.emit(encode_movz_wd_imm(7, 0))
-        loop = f"{fn}_ssl{sid}"
-        self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(7, 6))
-        self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 0))           # i >= len → done
-        self.asm.emit_label_rel(done_label, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_xm(10, 4, 7))
-        self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 10))
-        self.asm.emit(encode_add_xd_xn_imm(12, 8, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 7))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 12, 0))
-        self.asm.emit(encode_str_xt_xn_imm(0, 11, 0))
-        self.asm.emit(encode_add_xd_xn_imm(7, 7, 1))
-        self._emit_b_to(loop)
-        self.asm.emit(encode_b(0))
-        self.asm.emit_label_rel(done_label, here_offset=-4)
-        self.asm.label(fail_label)
-        # SAY WHY before stopping.  A bare `exit(1)` here is what made
-        # `a[0:1] = [9, 9, 9]` look like a program that ran and did not, so the
-        # run-time arm gets the same `write(2)` every other bounded stop on this
-        # path uses.  The message names the CONSTRUCT and not the two counts,
-        # because turning X3 and X6 into decimal text is a division loop this
-        # emitter does not otherwise have, and a wrong-but-plausible pair of
-        # numbers in a diagnostic would be worse than none.
-        self._emit_stop_diagnostic(
-            "slice assignment: this path replaces the range IN PLACE, so the "
-            "replacement has to have exactly as many elements as the range; "
-            "this one does not.  Python resizes instead - xs[0:1] = [9, 9, 9] "
-            "on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
-        self._emit_exit(1)
+
+        if cap is None:
+            # ── the same-length replace ─────────────────────────────────────
+            self.asm.emit(encode_cmp_xn_xm(3, 6))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            self.asm.emit_label_rel(fail_label, here_offset=-4)
+            self.asm.emit(encode_movz_wd_imm(7, 0))
+            loop = f"{fn}_ssl{sid}"
+            self.asm.label(loop)
+            self.asm.emit(encode_cmp_xn_xm(7, 6))
+            self.asm.emit(encode_cset_xd_cond(0, "ge"))
+            self.asm.emit(encode_cbnz_xn(0, 0))         # i >= len → done
+            self.asm.emit_label_rel(done_label, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(10, 4, 7))
+            self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(11, 11, 10))
+            self.asm.emit(encode_add_xd_xn_imm(12, 8, 8))
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 12, 7))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 12, 0))
+            self.asm.emit(encode_str_xt_xn_imm(0, 11, 0))
+            self.asm.emit(encode_add_xd_xn_imm(7, 7, 1))
+            self._emit_b_to(loop)
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(done_label, here_offset=-4)
+            self.asm.label(fail_label)
+            # SAY WHY before stopping.  A bare `exit(1)` here is what made
+            # `a[0:1] = [9, 9, 9]` look like a program that ran and did not, so
+            # the run-time arm gets the same `write(2)` every other bounded stop
+            # on this path uses.  The message names the CONSTRUCT and not the
+            # two counts, because turning X3 and X6 into decimal text is a
+            # division loop this emitter does not otherwise have, and a
+            # wrong-but-plausible pair of numbers in a diagnostic would be worse
+            # than none.
+            self._emit_stop_diagnostic(
+                "slice assignment: this path replaces the range IN PLACE, so "
+                "the replacement has to have exactly as many elements as the "
+                "range; this one does not.  Python resizes instead - "
+                "xs[0:1] = [9, 9, 9] on [3, 1, 2] gives [9, 9, 9, 1, 2].\n")
+            self._emit_exit(1)
+        else:
+            # ── the in-place RESIZE ─────────────────────────────────────────
+            # X10 = delta = len(value) - range; signed, and negative for a
+            # shrink. The reservation is the bound on a grow, and the check is
+            # the same shape `_emit_list_append` makes against the same number.
+            self.asm.emit(encode_sub_xd_xn_xm(10, 3, 6))
+            self.asm.emit(encode_add_xd_xn_xm(11, 2, 10))   # newcount
+            self._emit_mov_imm("X14", cap)
+            self.asm.emit(encode_cmp_xn_xm(11, 14))
+            self.asm.emit(encode_cset_xd_cond(0, "hi"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(fail_label, here_offset=-4)
+            copy_label = f"{fn}_sscopy{sid}"
+            # delta == 0: nothing to shift, straight to the value copy.
+            self.asm.emit(encode_cmp_xn_imm(10, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "eq"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(copy_label, here_offset=-4)
+            # delta > 0 grows, delta < 0 shrinks.
+            self.asm.emit(encode_cmp_xn_imm(10, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "gt"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            grow_label = f"{fn}_ssgrow{sid}"
+            self.asm.emit_label_rel(grow_label, here_offset=-4)
+            # shrink: i = stop; while i < count: obj[i+delta] = obj[i]; i++.
+            self.asm.emit(encode_mov_zr_xn(11, 5))
+            shrink_loop = f"{fn}_sssl{sid}"
+            after_shrink = f"{fn}_ssasl{sid}"
+            self.asm.label(shrink_loop)
+            self.asm.emit(encode_cmp_xn_xm(11, 2))
+            self.asm.emit(encode_cset_xd_cond(0, "ge"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(after_shrink, here_offset=-4)
+            self._slice_shift_step(9, 11, 10)
+            self.asm.emit(encode_add_xd_xn_imm(11, 11, 1))
+            self._emit_b_to(shrink_loop)
+            self.asm.label(after_shrink)
+            self._emit_b_to(copy_label)
+            # grow: i = count; while i > stop: i--; obj[i+delta] = obj[i].
+            # Backwards, so each source slot is read before the higher slot it
+            # moves into is written.
+            self.asm.label(grow_label)
+            self.asm.emit(encode_mov_zr_xn(11, 2))
+            grow_loop = f"{fn}_ssgl{sid}"
+            after_grow = f"{fn}_ssagl{sid}"
+            self.asm.label(grow_loop)
+            self.asm.emit(encode_cmp_xn_xm(11, 5))
+            self.asm.emit(encode_cset_xd_cond(0, "le"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(after_grow, here_offset=-4)
+            self.asm.emit(encode_sub_xd_xn_imm(11, 11, 1))
+            self._slice_shift_step(9, 11, 10)
+            self._emit_b_to(grow_loop)
+            self.asm.label(after_grow)
+            # ── the value copy, shared with delta == 0 ──────────────────────
+            self.asm.label(copy_label)
+            self.asm.emit(encode_movz_wd_imm(11, 0))
+            copy_loop = f"{fn}_sscl{sid}"
+            after_copy = f"{fn}_ssacl{sid}"
+            self.asm.label(copy_loop)
+            self.asm.emit(encode_cmp_xn_xm(11, 3))
+            self.asm.emit(encode_cset_xd_cond(0, "ge"))
+            self.asm.emit(encode_cbnz_xn(0, 0))
+            self.asm.emit_label_rel(after_copy, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(12, 4, 11))       # start + i
+            self.asm.emit(encode_add_xd_xn_imm(14, 9, 8))       # blob elems
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 14, 12))  # dst
+            self.asm.emit(encode_add_xd_xn_imm(13, 8, 8))       # value elems
+            self.asm.emit(encode_add_xd_xn_xm_lsl3(13, 13, 11))  # src
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 13, 0))
+            self.asm.emit(encode_str_xt_xn_imm(0, 12, 0))
+            self.asm.emit(encode_add_xd_xn_imm(11, 11, 1))
+            self._emit_b_to(copy_loop)
+            self.asm.label(after_copy)
+            self.asm.emit(encode_add_xd_xn_xm(2, 2, 10))        # count += delta
+            self.asm.emit(encode_str_xt_xn_imm(2, 9, 0))
+            self._emit_b_to(done_label)
+            self.asm.label(fail_label)
+            self._emit_stop_diagnostic(
+                M.blob_growth_overflow_message("a slice store", cap))
+            self._emit_exit(1)
         self.asm.label(done_label)
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
