@@ -634,6 +634,41 @@ def _display_text(expr, values) -> str:
     return f"({body}{',' if len(items) == 1 else ''})"
 
 
+def bracketed_callees(consumer_src: str) -> list:
+    """`[(base, bracket_subscript, values), …]` for every bracketed callee.
+
+    The ONE walk of a consumer's call sites, shared by the strict demand walk
+    (`all_instantiation_calls`), the value-demand walk (`value_arg_demands`) and
+    any later reader that asks a different question of the same bracket.  Two
+    walks would be two answers to "which call sites have a bracket", and the
+    value half and the type half of a demand have to be read off the SAME sites
+    or a call can be rewritten to a symbol the other half never asked for.
+
+    `values` is the scope the call is written in, which is what keeps `Pair[t]()`
+    with a local `var t = Float64` out of the demand set.  Derived once per
+    source text (`_derived_from_source`), for the reason the callers' docstrings
+    give: the answer is a function of the text alone.
+    """
+    def derive():
+        from formal import model as M                  # lazy — cycle
+        from formal.build import _names_bound_in       # lazy — cycle
+        stmts = _consumer_statements(consumer_src)
+        module_level = set(M.collect_module_symbols(stmts) or {})
+        out: list = []
+        for st in stmts:
+            values = _names_bound_in(st) \
+                if isinstance(st, F.FunctionDef) else module_level
+            for node in M.iter_nodes(st):
+                if not isinstance(node, F.CallExpr):
+                    continue
+                base = _callee_base(node)
+                if base is None:
+                    continue
+                out.append((base, node.func, values))
+        return tuple(out)
+    return list(_derived_from_source("bracketed_callees", consumer_src, derive))
+
+
 def all_instantiation_calls(consumer_src: str) -> dict:
     """`{base name: sorted([(type arg, …), …])}` — every bracketed callee in
     `consumer_src` whose bracket spells concrete TYPE arguments.
@@ -665,23 +700,11 @@ def all_instantiation_calls(consumer_src: str) -> dict:
     fresh lists on every call.
     """
     def derive():
-        from formal import model as M                  # lazy — cycle
-        from formal.build import _names_bound_in       # lazy — cycle
-        stmts = _consumer_statements(consumer_src)
-        module_level = set(M.collect_module_symbols(stmts) or {})
         found: dict = {}
-        for st in stmts:
-            values = _names_bound_in(st) \
-                if isinstance(st, F.FunctionDef) else module_level
-            for node in M.iter_nodes(st):
-                if not isinstance(node, F.CallExpr):
-                    continue
-                base = _callee_base(node)
-                if base is None:
-                    continue
-                args = _bracket_type_args(node.func, values)
-                if args:
-                    found.setdefault(base, set()).add(tuple(args))
+        for base, sub, values in bracketed_callees(consumer_src):
+            args = _bracket_type_args(sub, values)
+            if args:
+                found.setdefault(base, set()).add(tuple(args))
         return {k: tuple(sorted(v)) for k, v in found.items()}
     return {k: list(v) for k, v in _derived_from_source(
         "all_instantiation_calls", consumer_src, derive).items()}
@@ -728,6 +751,72 @@ def demands(consumer_src: str, templates, own=()) -> dict:
                               templates, own)
 
 
+def value_arg_demands(consumer_src: str, module_src: str, templates,
+                      own=()) -> dict:
+    """`{template: [(arg, …), …]}` for brackets a comptime VALUE literal fills.
+
+    `all_instantiation_calls` reads a bracket as TYPE arguments and drops — not
+    refuses — the ones `type_arg_text` cannot spell, so `Tagged[Int, 0]` is not a
+    demand there and the call site keeps its brackets and is refused with the
+    explicit-parameter-list sentence.  This is the second half of that reader,
+    and it exists only for the one value shape that can be read WITHOUT a value
+    model: **a SCALAR LITERAL at a declared SCALAR value parameter of a STRUCT
+    template.**
+
+    Three restrictions, each of which is a fact and not a taste:
+
+    * **A struct, not a function.**  A FUNCTION template with a bracket is
+      already answered by the local-specialization machinery
+      (`mojo/middle/comptime.specialization_args`, both backends), so demanding a
+      boundary symbol for `tile[2, 3]` would publish a second copy of a body the
+      build already emits.  A STRUCT has no local-specialization path — its
+      instantiation IS the boundary symbol — which is why the struct half is the
+      one that can be added without a second symbol for one instantiation.
+    * **A scalar value type, from the DECLARATION.**  The parameter's own
+      annotation has to name a type this path holds as one word
+      (`_SCALAR_VALUE_ANNOTATIONS`), so a literal at a TYPE parameter (`Pair[2]`)
+      or at a CONTAINER parameter (`keys: List[T]`) is still dropped.  The
+      declaration is read rather than guessed, because a literal at a position
+      the source did not ask for a scalar at would substitute a number into a
+      type or a container position — a wrong answer, which is the outcome every
+      reader in this module exists to refuse.
+    * **A literal, not a name or an expression.**  A named value
+      (`ImmStaticOrigin`, `origin_of(self)`) is a resolution this reader does not
+      have and a wider value model is the project
+      (`bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §4.1).
+
+    What this does NOT cover, stated so the doc's wall is not read as closed: a
+    value that is not a literal, a value at a function template's parameter, a
+    value whose declared type is not a scalar this path represents, and the
+    `**kw`-style spread the same doc's standing instance also reaches.  It is the
+    subset whose substitution is a literal the mangler can already carry.
+    """
+    wanted = sorted({n for n in (templates or ()) if n}
+                    - {n for n in (own or ()) if n})
+    positions = {}
+    for name in wanted:
+        try:
+            if template_kind(module_src, name) != KIND_STRUCT:
+                continue
+            tsrc = _template_source(module_src, name, KIND_STRUCT)
+        except MonomorphError:
+            continue
+        vp = _bracket_value_positions(tsrc)
+        if vp:
+            positions[name] = vp
+    if not positions:
+        return {}
+    found: dict = {}
+    for base, sub, values in bracketed_callees(consumer_src):
+        vp = positions.get(base)
+        if vp is None:
+            continue
+        args = _bracket_type_args(sub, values, value_positions=vp)
+        if args:
+            found.setdefault(base, set()).add(tuple(args))
+    return {k: tuple(sorted(v)) for k, v in found.items()}
+
+
 def own_demands(module_src: str) -> dict:
     """`{template: [(type arg, …), …]}` — what `module_src` asks of the
     templates `module_src` ITSELF declares.
@@ -763,7 +852,15 @@ def own_demands(module_src: str) -> dict:
     rewrite of this module's own call sites — which is why it is a function and
     not a line in one of them.
     """
-    return demands(module_src, template_names(module_src), own=())
+    names = template_names(module_src)
+    out = demands(module_src, names, own=())
+    for name, args in value_arg_demands(module_src, module_src, names,
+                                        own=()).items():
+        have = out.setdefault(name, [])
+        for a in args:
+            if a not in have:
+                have.append(a)
+    return out
 
 
 def demap_from(made) -> dict:
@@ -956,7 +1053,8 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             base = _callee_base(node)
             if base is None:
                 continue
-            args = tuple(_bracket_type_args(node.func, values))
+            args = tuple(_bracket_type_args(node.func, values,
+                                            value_positions="any"))
             mangled = demap.get((base, args))
             if mangled is None:
                 continue
@@ -1029,7 +1127,94 @@ def _callee_base(call):
     return comptime_eval.specialization_name(getattr(call, "func", None))
 
 
-def _bracket_type_args(sub, values=()) -> list:
+#: The value types a bracket parameter can be a SCALAR LITERAL argument of.
+#:
+#: A comptime parameter annotated with one of these holds one WORD, so a literal
+#: at its position in the bracket is the value the declaration asked for and
+#: `monomorphize_source` substitutes it as written.  The list is POSITIVE and
+#: deliberately not "anything that is not a type": a parameter annotated with a
+#: CONTAINER (`keys: List[T]`) also names a value, but the value it takes is a
+#: DISPLAY (`[1, 2, 3]`, read by `_display_text`), and a bare literal there is a
+#: shape whose substitution into a `List` position would be a wrong answer rather
+#: than a missing feature — so it is refused rather than widened.  A parameter
+#: annotated with a comptime type this path has no word for (`origin:
+#: ImmStaticOrigin`, `target: CompilationTarget`) is the same refusal for the same
+#: reason, and a wider set is the value-model project
+#: (`bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §4.1).
+_SCALAR_VALUE_ANNOTATIONS = frozenset({
+    "int", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64", "bool", "index"})
+
+
+def _value_arg_text(expr) -> str:
+    """The ABI spelling of a comptime VALUE bracket ARGUMENT, or "".
+
+    Only the LITERAL shapes, and the narrowness is the point rather than a
+    shortcut: the mangled name IS the substituted text, so the spelling has to be
+    the same program, and a literal is the one value whose spelling is closed (and
+    injective under `safe_suffix`, which is what keeps two instantiations
+    differing only in the value argument two symbols).  A bare NAME is
+    deliberately not read here — `type_arg_text` already reads one as a TYPE when
+    nothing in the reading scope binds it, and this reader has no scope to ask the
+    other half of that question.
+    """
+    if isinstance(expr, F.BoolLiteral):
+        return "True" if expr.value else "False"
+    if isinstance(expr, F.IntLiteral):
+        return str(expr.value)
+    return ""
+
+
+def _is_scalar_value_annotation(ann: str) -> bool:
+    """Whether a bracket parameter's ANNOTATION names a scalar value type.
+
+    The annotation's own text, reduced to its tail identifier so a namespaced
+    spelling (`std.sys.Int`) is read the same way, and only the FIRST name of a
+    bracketed annotation is asked (`Origin[mut=mut]`'s `Origin`) — which is why
+    that shape is refused rather than read as a scalar.  `origin: Int` is a value
+    parameter, `T` and `T: AnyType` are not, and `keys: List[T]` is a value
+    parameter whose argument is a DISPLAY rather than the scalar this caller
+    accepts.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return False
+    ann = ann.split("=")[0].strip()
+    tail = ann.rsplit("[", 1)[0].rsplit(".", 1)[-1].strip().lower()
+    return tail in _SCALAR_VALUE_ANNOTATIONS
+
+
+def _bracket_value_positions(template_src: str) -> frozenset:
+    """The indices of the SCALAR-VALUE parameters in `template_src`'s bracket.
+
+    Read from the DECLARATION's own header, because position `i` is a value
+    position only when the declaration says the parameter there is one — and that
+    is the fact a literal in the bracket has to be checked against.  `Pair[2]` (a
+    TYPE parameter) and `total[Int, 0]` with a `keys: List[T]` parameter are both
+    a literal at a position the declaration did not ask for a scalar at, and
+    neither may become a demand: the first would substitute `2` into a type
+    position and the second a number into a `List`.
+
+    The position is the FILTERED one (`type_param_names`'s enumeration, which
+    skips the `/`/`*` markers), so it lines up with the bracket's items and with
+    `instantiate`'s own positional binding of them.
+    """
+    from monomorphize import head_match             # lazy — module docstring
+    m = head_match(template_src)
+    if not m:
+        return frozenset()
+    out, idx = [], 0
+    for piece in F.split_top_level_commas(m.params):
+        piece = piece.strip()
+        if not piece or piece in ("/", "*", "**", "//"):
+            continue
+        _name, _sep, ann = piece.partition(":")
+        if _is_scalar_value_annotation(ann):
+            out.append(idx)
+        idx += 1
+    return frozenset(out)
+
+
+def _bracket_type_args(sub, values=(), value_positions=None) -> list:
     """The bracket's items as concrete type-argument spellings, or [].
 
     A COMMA LIST is several arguments and not one: `Pair[Int, Bool]` is `Pair`
@@ -1049,7 +1234,14 @@ def _bracket_type_args(sub, values=()) -> list:
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
     """
-    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    spelled = []
+    for i, item in enumerate(bracket_items(sub)):
+        text = type_arg_text(item, values)
+        if not text and (value_positions == "any"
+                         or (value_positions is not None
+                             and i in value_positions)):
+            text = _value_arg_text(item)
+        spelled.append(text)
     return spelled if spelled and all(spelled) else []
 
 

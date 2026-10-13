@@ -2236,6 +2236,129 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
               f"elements are 1, 7 and 4 over a base of 10")
 
 
+# The SCALAR half of the same construct, and the shape
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §4.1's
+# wall is about: a comptime parameter whose annotation is a SCALAR value type
+# (`origin: Int`) rather than a container. A bare literal at such a parameter is
+# a demand the type reader cannot spell — `type_arg_text` refuses a top-level
+# literal for `tile[2, 3]`'s reason — so it is read by the SECOND half of the
+# demand walk, `monomorph.value_arg_demands`, which reads the DECLARATION to find
+# which positions are scalar value parameters. `origin_of` reads the value in the
+# body, so the substitution is observable rather than merely a distinct symbol:
+# `Tagged[Int, 0]` and `Tagged[Int, 5]` print 0 and 5.
+SCALAR_VALUE_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+    def origin_of(self) -> Int:
+        return origin
+"""
+
+SCALAR_VALUE_PROG = """\
+from scalarval import Tagged
+
+def main():
+    var a = Tagged[Int, 0]()
+    a.v = 1
+    var b = Tagged[Int, 5]()
+    b.v = 2
+    print(a.origin_of())
+    print(b.origin_of())
+"""
+
+SCALAR_VALUE_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.origin = origin
+        self.v = 0
+    def origin_of(self):
+        return self.origin
+
+def main():
+    a = Tagged(0)
+    a.v = 1
+    b = Tagged(5)
+    b.v = 2
+    print(a.origin_of())
+    print(b.origin_of())
+"""
+
+
+# The SAME construct in ONE FILE, where the module DECLARES and APPLIES the
+# template — `own_demands` is the demand set that has to see it, and it is a
+# different caller from `instantiation_demands`.
+SCALAR_VALUE_ONE_FILE = SCALAR_VALUE_LIB + """
+def main():
+    var a = Tagged[Int, 0]()
+    a.v = 1
+    var b = Tagged[Int, 5]()
+    b.v = 2
+    print(a.origin_of())
+    print(b.origin_of())
+"""
+
+
+def test_a_scalar_value_literal_is_a_demand_at_a_declared_value_parameter(
+        tmpdir):
+    """`Tagged[Int, 0]()` is a demand when `Tagged[T, origin: Int]` says so.
+
+    The end-to-end half: two instantiations differing only in the value argument
+    bind two symbols and print their own values (0 and 5), which is the property
+    a mangling that collapsed the two onto one symbol would fail — it would
+    print one program's answer twice.
+
+    The second half is the boundary the fix must NOT cross, and it is asked of
+    the demand walk directly: a literal is a demand only at a parameter the
+    DECLARATION wrote as a scalar value. `Pair[Int, 0]` (a literal at a TYPE
+    parameter `U`) and `Buf[Int, 0]` (a literal at a CONTAINER parameter
+    `keys: List[T]`) must stay non-demands — the first would substitute `0` into
+    a type position and the second a number into a `List` — and `tile[2, 3]`
+    stays a comptime SPECIALIZATION, not a boundary symbol.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_scalarval", SCALAR_VALUE_LIB,
+                            SCALAR_VALUE_PROG, SCALAR_VALUE_CPYTHON,
+                            libname="scalarval.mojo")
+        check(got == "0\n5\n",
+              f"[{arch}] printed {got!r} for two instantiations whose value "
+              f"arguments are 0 and 5")
+
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_scalarval_one", None,
+                            SCALAR_VALUE_ONE_FILE, SCALAR_VALUE_CPYTHON)
+        check(got == "0\n5\n",
+              f"[{arch}] the ONE-FILE shape printed {got!r}; the module applies "
+              f"its own value-parameter template and `own_demands` has to see it")
+
+    from formal import monomorph as MM
+    lib = ("struct Pair[T, U]:\n"
+           "    var a: T\n"
+           "    var b: U\n"
+           "\n"
+           "struct Buf[T: AnyType, keys: List[T]]:\n"
+           "    var tag: Int\n"
+           "\n"
+           "def tile[N: Int](x: Int) -> Int:\n"
+           "    return x\n")
+    prog = ("from scalarval import Pair, Buf, tile\n"
+            "def main():\n"
+            "    var a = Pair[Int, 0]()\n"
+            "    var b = Buf[Int, 0]()\n"
+            "    var c = tile[2, 3](7)\n")
+    check(MM.value_arg_demands(prog, lib, ["Pair", "Buf"]) == {},
+          "a literal at a TYPE parameter (`Pair[Int, 0]`) or at a CONTAINER "
+          "parameter (`Buf[Int, 0]`) must not become a demand")
+    check(MM._bracket_value_positions(
+              "struct Buf[T: AnyType, keys: List[T]]:\n    var tag: Int\n")
+          == frozenset(),
+          "a CONTAINER parameter (`keys: List[T]`) is not a scalar value "
+          "position")
+    check(MM._bracket_value_positions(SCALAR_VALUE_LIB) == frozenset({1}),
+          "`origin: Int` is a scalar value position, and it is position 1")
+    check(MM.all_instantiation_calls(prog).get("tile") is None,
+          "`tile[2, 3]` is a comptime SPECIALIZATION, not a boundary demand")
+
+
 # ── the artifact's identity ─────────────────────────────────────────────────
 
 
@@ -3034,6 +3157,8 @@ TESTS = [
      test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
     ("a value bracket argument reaches the boundary symbol",
      test_a_value_bracket_argument_reaches_the_boundary_symbol),
+    ("a scalar value literal is a demand at a declared value parameter",
+     test_a_scalar_value_literal_is_a_demand_at_a_declared_value_parameter),
     ("a struct template's body is not the body that runs",
      test_a_struct_templates_body_is_not_the_body_that_runs),
     ("a class-attribute read names the instantiation",

@@ -2102,7 +2102,7 @@ def instantiation_demands(module_path: str, consumer_src: str,
     """
     from formal import monomorph as MM            # lazy — pulls the middle tier
     found = MM.all_instantiation_calls(consumer_src)
-    if not found:
+    if not MM.bracketed_callees(consumer_src):
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2110,9 +2110,16 @@ def instantiation_demands(module_path: str, consumer_src: str,
         templates = _closure_template_slice(closure[0], closure[1], module_path)
     out = {}
     for p, names in templates.items():
-        got = MM.demands_from_calls(found, names, own=own_templates
-                                    if os.path.abspath(p) ==
-                                    os.path.abspath(module_path) else ())
+        own = own_templates if os.path.abspath(p) == os.path.abspath(
+            module_path) else ()
+        got = MM.demands_from_calls(found, names, own=own)
+        for name, args in MM.value_arg_demands(consumer_src,
+                                               module_source_text(p), names,
+                                               own=own).items():
+            have = got.setdefault(name, [])
+            for a in args:
+                if a not in have:
+                    have.append(a)
         if got:
             out[p] = got
     return out
