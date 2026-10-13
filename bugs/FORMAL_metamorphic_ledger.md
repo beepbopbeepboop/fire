@@ -47,6 +47,21 @@ in §2 re-ran, and the tool's tally was never the thing that was wrong.
 
 **What this does NOT close:** §6's four items are unchanged — the `struct` decision (now named as the 3 stems above), the stdlib sweep, the two rare transforms, and the `int_only` lower bound. Nothing here is a new SWEEP; it is the suite going from red to green with the two real defects fixed.
 
+## 0z. Status 2026-10-13 (`work/formal324-docs`): §6 item 1 is DONE — the struct DECISION is made, and the `fn` rule it reached had been silently inert
+
+**§6 item 1 asked for a DECISION about `struct`, not another rule, and it is made: a struct whose every field is declared an INTEGER type is translated to a Python `class` whose fields read the `0` this path's construction already gives them, and any other struct stays unmeasured naming the construct.** `tools/formal_metamorph.py::_translate_structs` is the rule and `_STRUCT_ZERO_TYPE_RE` (`U?Int(?:8|16|32|64)?`) is the closed table it decides on; it declines a struct with a non-integer field or an explicit `__init__` (whose body IS the construction here). The decision is forced rather than guessed — `Point()` reads `0` from every field before any store is emitted, measured on both architectures — and it is CHECKED per file, because `_normalisation` builds the struct file AS WRITTEN and compares it against the twin, so the translation cannot hide a manufactured disagreement.
+
+**Measured:** the examples corpus is **93 programs / 910 pairs, all 93 driven, 0 findings, 0 `transform-invalid`, 0 `transform-crash`**, and the three former coverage holes (`wide_recv`, `struct_point`, `struct_method`) are driven:
+
+    $ python3 tools/memslot.py --gb 8 --label mm -- \
+        python3 tools/formal_metamorph.py -n 0 --examples formal/examples -j 6
+    programs=93 pairs=910 … transform-invalid 0 transform-crash 0
+    struct translation x1 x3 … struct_method, struct_point, wide_recv
+
+**The `fn` rule §6 item 1 reached had been LYING, and the inertness is the finding.** `FN_DECL_RE` replaced `fn` with NOTHING, so `fn f(x):` became `f(x):` — a call statement with a colon, which does not parse — while the note still fired, so the rule read as working. The only `fn` example was unmeasured for the struct reason anyway, which is why nothing saw it. It now rewrites to `def`, which is what its own coverage fixture always claimed. Both halves are pinned by `test_formal_metamorph.py`'s `RULES` row for `struct` (which asserts `class Point:`, `def __init__(self):`, `self.x = 0`), the declined-struct row (a `String` field and an explicit `__init__`), and the coverage row, which now asserts that **NOTHING** is unmeasured rather than "nothing but the struct". `test_formal_metamorph.py` is **62/62**.
+
+**What this does NOT close:** §6 items 2 (the stdlib sweep), 3 (the two rare transforms) and 4 (`Analysis.int_only`'s lower bound) are unchanged.
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
@@ -322,25 +337,23 @@ Every row in §2 is reproducible from the seed and the index range:
     python3 tools/memslot.py --gb 8 --label mm -- python3 tools/formal_metamorph.py \
         -n 20 --mix core --stmts 8 20 -j 6
 
-`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus of 14 programs (one per documented rule), every generator mix, and every drivable example — and the two argument-taking examples (`twoparams`, `subscript_var`) are driven rather than silently unanswered. **The examples count in this sentence was 51 of 51 and the corpus has grown since (93 files, 90 drivable as of 2026-10-07); the current figure is a fact about `example_corpus()` rather than about a run, and §0/§5a/§6 hold what landed.**
+`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus of 14 programs (one per documented rule), every generator mix, and every drivable example — and the two argument-taking examples (`twoparams`, `subscript_var`) are driven rather than silently unanswered. **The examples count in this sentence was 51 of 51 and the corpus has grown since (93 files, and as of 2026-10-13 all 93 drivable — §0z); the current figure is a fact about `example_corpus()` rather than about a run, and §0/§0z/§5a/§6 hold what landed.**
 
 **What is NOT measured here**, and is the next thing a session should do. The
 first three items of the previous session's list are now DONE and are recorded in
 §2a; these are the four that remain:
 
-1. **Three `formal/examples` files are unmeasured, all for a `struct` body:
-   `wide_recv.mojo`, `struct_point.mojo` and `struct_method.mojo`** (§2b records
-   the count moving 14 → 3 when `@refines` joined the proof-decorator rule). The
-   rules remove `@spec`/`@require`/`@ensure`/`@refines`, `var` and `fn` and
-   nothing else, deliberately: a Python `class` body of bare annotations has no
-   attributes, so `p.get_y()` reads a name that was never assigned while the
-   struct's field reads `0` — a real disagreement with CPython manufactured by the
-   translation rather than found by it. Giving each field an initialiser is a
-   judgement about what a struct's fields are worth, not a removal of syntax. So
-   the next step is a DECISION about `struct`, not another rule. (It was one file
-   when this item was written; `struct_point` and `struct_method` joined the
-   corpus since, which is exactly why the coverage check asks WHY a file is
-   unmeasured rather than counting — §0 and §5a.)
+1. ~~**Three `formal/examples` files are unmeasured, all for a `struct` body:
+   `wide_recv.mojo`, `struct_point.mojo` and `struct_method.mojo`** ... the
+   next step is a DECISION about `struct`, not another rule.~~ **DONE
+   2026-10-13 (`work/formal324-docs`) — the DECISION is made, in §0z.** A struct
+   whose every field is declared an INTEGER type is translated to a Python
+   `class` whose fields read the `0` this path's construction gives them
+   (`tools/formal_metamorph.py::_translate_structs`), and every other struct
+   stays unmeasured naming the construct. All three files are driven: the
+   examples corpus is 93/93 measured, 0 findings. §0z also records the `fn` rule
+   this reached, which had been replacing `fn` with nothing and so firing its
+   note while leaving the file unparseable.
 2. **No metamorphic sweep of the stdlib.** `formal/hostmods/*.mojo` is the largest
    body of real source this backend must keep working, and a metamorphic pair over
    it needs the import machinery the fuzzer does not have. This is the largest
