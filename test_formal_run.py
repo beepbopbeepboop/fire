@@ -6388,6 +6388,48 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A starred for-target, which used to build and then exit(1) with nothing
+    # printed on BOTH backends (the bug
+    # `FORMAL_a_starred_for_target_is_broken_on_both_backends`, fixed here).
+    # arm64 had two instruction-level defects in
+    # `_emit_for_unpack_star_rest`: the rest-loop's exit test was `cset ge` +
+    # `cbz`, which branches to `done` on the CLEAR flag — exactly when the loop
+    # should run — and `rest_count` was `count - 6` rather than `count -
+    # n_fixed`, because `encode_sub_xd_xn_imm` (an IMMEDIATE encoder) was
+    # handed the register NUMBER.  x86-64 had no star arm at all.  The expected
+    # 731 is `(1 + 2*100 + 2*10) + (10 + 3*100 + 20*10)`: the rest's LENGTH and
+    # its first element both feed the sum, so a backend that built a rest blob
+    # of the wrong count or copied the wrong tail answers a different number
+    # rather than merely failing to build.  CPython agrees.
+    ("both_arch_a_starred_for_target_binds_the_rest_tail",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2, 3), (10, 20, 30, 40)]:\n"
+     "        s = s + a + len(rest) * 100 + rest[0] * 10\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=731"),
+    # …and the EMPTY rest, which is the case the inverted exit test ran AWAY on
+    # (it entered the copy loop and walked off the blob): `count == n_fixed`, so
+    # `len(rest)` is 0 and the answer is `7 * 100`.  A rest that is not zeroed
+    # or whose count is `count - 6` answers something else.
+    ("both_arch_a_starred_for_target_with_an_empty_rest",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(7,)]:\n"
+     "        s = s + a * 100 + len(rest)\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=700"),
+    # …and a star INSIDE a nested group, so the rest arm is reached through the
+    # recursive unpack rather than only at the top level.  414 is
+    # `(1 + 2 + 2*100 + 3*10) + (5 + 6 + 1*100 + 7*10)`.
+    ("both_arch_a_starred_for_target_inside_a_nested_group",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, *c) in [(1, (2, 3, 4)), (5, (6, 7))]:\n"
+     "        s = s + a + b + len(c) * 100 + c[0] * 10\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=414"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.

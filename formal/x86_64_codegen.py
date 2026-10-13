@@ -44,7 +44,7 @@ import mojo.middle.comptime as comptime_eval
 from formal import model as M
 from formal import monomorph
 from formal.model import CodegenError, IDENTITY_TYPE_CTORS
-from mojo.middle.boundnames import bound_names_in_order
+from mojo.middle.boundnames import bound_names_in_order, _lbn_target_names
 
 # Bytes of stack the frame always reserves BELOW the spill slots: expression
 # temporaries live in 16-byte slots (see _push_slot), and a function that used
@@ -244,23 +244,6 @@ def _range_args(iterable):
             and iterable.func.name == "range"):
         return list(iterable.args)
     return None
-
-
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
 
 
 def _collect_var_names(f: F.FunctionDef) -> list:
@@ -593,25 +576,8 @@ def _binds_name(target, name: str) -> bool:
     if isinstance(target, (F.TupleExpr, F.ListExpr)):
         return any(_binds_name(el, name) for el in target.elements)
     if isinstance(target, str):
-        from mojo.middle.boundnames import _lbn_target_names
         return name in _lbn_target_names(target)
     return False
-
-
-def _for_tree_leaves(tree) -> list:
-    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
-
-    A star leaf keeps its `*`, so the caller's identifier check refuses it —
-    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
-    the reason the for-loop's target validation is a leaf walk rather than
-    `_lbn_target_names` (which strips the star and would pass a `*rest`
-    through to a store under a name nothing allocated)."""
-    if isinstance(tree, list):
-        out = []
-        for child in tree:
-            out.extend(_for_tree_leaves(child))
-        return out
-    return [tree]
 
 
 def _dotted(func) -> str:
@@ -4004,7 +3970,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_blob_base(offset, Reg.RAX)
 
     def _emit_star_splice(self, res_offset: int, cap: int,
-                          is_dict: bool = False) -> None:
+                          is_dict: bool = False, start: int = 0) -> None:
         """RAX = source blob; append every element into the result.
 
         `is_dict` is `M.walk_stride`'s question about the SOURCE and it decides
@@ -4015,6 +3981,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         CPython builds `[10, 20, 30]`, exit 0. The default is `False` so a caller
         with no opinion gets the list stride, which is what every non-dict
         source wants.
+
+        `start` skips the first `start` elements instead of beginning at 0, so a
+        `for a, *rest` tail can reuse this loop rather than carry a second copy
+        of it: it appends `src[start : count]`. The default is 0, which is what
+        `[*xs]` wants.
 
         The x86-64 twin of arm64's `_emit_star_splice`, and the register
         choice is the whole difficulty. The loop has to carry a source base,
@@ -4045,7 +4016,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 0))
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # its count
         self._push_slot(Reg.R10)               # count
-        self._emit_mov_imm(Reg.R10, 0)        # i = 0
+        self._emit_mov_imm(Reg.R10, start)     # i = start
         self._push_slot(Reg.R10)               # index
 
         self._while_counter += 1
@@ -6674,42 +6645,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # 3))]` compared an element count of 2 against a target count of 3
             # and exited(1) with nothing printed, where arm64 and CPython both
             # answer. arm64 reads the same tree through the same `M` reader.
+            #
+            # A `*rest` leaf KEEPS its star here — `_emit_for_unpack` binds it
+            # as a rest blob, exactly as arm64's does (the two share
+            # `M.for_target_tree` and now the star arm too). The identifier
+            # check is over the BOUND names (star stripped), which is the shared
+            # `_lbn_target_names` walk the allocation uses — a leaf that is not
+            # a plain name is still refused.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
-            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+            leaves = _lbn_target_names(stmt.target) \
+                if isinstance(stmt.target, str) else []
             if not leaves or any(not n.isidentifier() for n in leaves):
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The target as a TREE, not the flattened leaf list: a nested
-            # group is a second unpack against the element at that position,
-            # and comparing the outer blob's count against the number of
-            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
-            # and exit 1 with nothing printed, where arm64 and CPython answer
-            # 21. `M.for_target_tree` is the one builder both backends ask.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
-            # The TARGET AS A TREE, not the flattened name list: a nested group
-            # `a, (b, c)` must stay a nested group so the arity check counts 2
-            # against the element's blob and recurses, exactly as arm64's
-            # `_emit_for_unpack` does.  Flattening it (the old
-            # `_emit_for_unpack(tnames, …)` here) compared the blob's count of
-            # 2 against a target count of 3 and exited 1 with nothing printed,
-            # where arm64 and CPython both answer.  `M.for_target_tree` is the
-            # one parser both backends now use, so the two cannot disagree
-            # about what a target's shape is.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -7044,21 +6995,56 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         is exactly why it is worth not emitting.  The nested-group arm had the
         same exposure with no way to reach it; both are the same fix for the same
         reason.
+
+        A FOURTH kind of entry is a `*name` STAR leaf, legal only as the last
+        entry: it binds the blob's TAIL `[n_fixed : count]` as a rest blob
+        (`_emit_for_star_rest`) rather than one element, so the arity test is
+        `count >= n_fixed` instead of `count == len(targets)`. This is the
+        `for a, *rest in …` target, read from the same `M.for_target_tree` shape
+        arm64 reads, and it is why `_emit_for_unpack` gets the SHAPE and not the
+        flattened names.
         """
         fn = self.func_name
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
+        # A trailing `*name` (star) leaf binds the TAIL of the blob as a rest
+        # blob rather than one element, so the arity test is `count >= n_fixed`
+        # rather than `count == len(targets)`. arm64's `_emit_for_unpack` reads
+        # the same tree with the same rule; a star anywhere but last is refused
+        # by name rather than silently mis-bound.
+        star_i = -1
+        for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                if i != len(targets) - 1:
+                    raise CodegenError(
+                        f"starred for-target {target!r} must be last")
+                star_i = i
+        n_fixed = len(targets) - (1 if star_i >= 0 else 0)
         self._if_counter += 1
         uid = self._if_counter
         ok_label = f"{fn}_fu{uid}_ok"
         bad_label = f"{fn}_fu{uid}_bad"
-        self._emit_jcc(COND_NE, bad_label)
+        if star_i >= 0:
+            # count < n_fixed → exit(1). `setb` is unsigned below, which is the
+            # right reading for a count; `setl` would call a huge count
+            # negative. Same signal `a, b = rhs` gives on an arity mismatch.
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, n_fixed))
+            self._emit_setcc_bool(Reg.R8, "setb")
+            self._emit_jcc_bool(Reg.R8, COND_NE, bad_label)
+        else:
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
+            self._emit_jcc(COND_NE, bad_label)
         self._emit_jmp(ok_label)     # arity matches: skip the exit
         self.asm.label(bad_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
         for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                # R10 is still the blob base here: every fixed child above
+                # restores it after its own push/pop, and this is the LAST
+                # child (the star-must-be-last check above guarantees it).
+                self._emit_for_star_rest(target[1:].strip(), Reg.R10, n_fixed)
+                continue
             # `stride` is 0 for a `[count][e0...]` blob and `M.PAIR_STRIDE` for
             # a dict's `[npairs][k0][v0]...`: a tuple unpack over a dict binds
             # the KEYS, and an element-stride read binds the key and the value.
@@ -7080,6 +7066,34 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._pop_slot(Reg.R10)
             else:
                 self._store_var(target, Reg.RAX)
+
+    def _emit_for_star_rest(self, name: str, src_reg: Reg, n_fixed: int) -> None:
+        """Bind `name` to a NEW rest blob holding `src[n_fixed : count]`.
+
+        `src_reg` holds the source blob `[count][e0…]`; the result is a blob of
+        the same layout, so `len(rest)` and `rest[i]` read it exactly as they
+        read any list. The tail is copied by `_emit_star_splice`, which the
+        `[*xs]` list literal already uses — the same append loop, started at
+        `n_fixed` instead of 0, so the two cannot disagree about what a rest is.
+        A tail longer than `M.STAR_REST_CAP` exits(1) inside the append, exactly
+        as arm64's reserved buffer does.
+
+        R10 (the source base) is NOT guaranteed across `_compr_append_elem` —
+        it is the append's own count register — so the source is moved into RAX
+        (what `_emit_star_splice` takes it in) BEFORE the result blob is
+        initialised, and the result base is re-derived from `res_offset`
+        afterwards.
+        """
+        cap = M.STAR_REST_CAP
+        offset = self._reserve_blob(8 * (1 + cap),
+                                    "a for-star unpacking buffer")
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, src_reg))
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self._emit_star_splice(offset, cap, start=n_fixed)
+        self._emit_blob_base(offset, Reg.RAX)
+        self._store_var(name, Reg.RAX)
 
     # ── expressions (result in RAX) ──────────────────────────────────
 
@@ -9401,17 +9415,21 @@ preference.
 
             # The SHAPE, not the flattened names, for the same reason the
             # for-loop asks for it — arm64's `_emit_compr_gen` reads the same
-            # `M.for_target_tree`.
+            # `M.for_target_tree`, and a `*rest` leaf reaches the same star arm
+            # `_emit_for_unpack` now carries. The identifier check is over the
+            # BOUND names (star stripped), the shared `_lbn_target_names` walk.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
-            if not leaves or any(not n.isidentifier() for n in leaves):
+            leaves = _lbn_target_names(gen.target) \
+                if isinstance(gen.target, str) else []
+            if ttree is None or not leaves or any(
+                    not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
                     f"plain names (got {gen.target!r})")
             if isinstance(ttree, str):
-                self._store_var(ttree, Reg.RAX)
+                self._store_var(ttree[1:].strip()
+                                if ttree.startswith("*") else ttree, Reg.RAX)
             else:
                 self._emit_for_unpack(ttree, Reg.RAX, f"{fn}_cgu{wid}")
 

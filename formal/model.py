@@ -74,6 +74,15 @@ BYTE_ELEM_STRIDE = 1       # a BYTE blob's element stride (see `blob_elem_stride
 PAIR_STRIDE = 16           # key+value pair stride (also the key-address step)
 VALUE_OFFSET = 8           # key -> value within a pair
 
+# The fixed capacity of the blob a `for a, *rest in …` builds for the rest.
+# Both backends reserve this many slots up front and exit(1) rather than
+# overflow it, so a target that binds MORE fixed names than the element has —
+# or a rest longer than this — is a compile-time reservation and a run-time
+# trap on the same number on both architectures. Shared because the two
+# backends' `_emit_for_unpack_star_rest`/`_emit_star_splice` call sites must
+# agree about it, the same way they agree about `ELEM_STRIDE`.
+STAR_REST_CAP = 64
+
 
 def blob_elem_stride(kind) -> int:
     """Byte step between a blob's own elements, for a blob of value `kind`.

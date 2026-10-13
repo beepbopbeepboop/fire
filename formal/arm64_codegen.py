@@ -3835,9 +3835,18 @@ dylib_exports: list = None, globals_base: int = None,
         """Build rest blob under `name` from [src_base, n_fixed] on stack.
 
         Stack layout on entry (stp_pre X6=n_fixed, X9=src): [SP+0]=n_fixed,
-        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap 64;
-        overflow → exit(1). Pops both slots."""
-        rest_cap = 64
+        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap
+        `M.STAR_REST_CAP`; overflow → exit(1). Pops both slots.
+
+        The `done` test is `cset ge` + `cbnz`, NOT `cbz`: `cset X0, ge` sets the
+        flag when the index has REACHED `rest_count`, so branching on a CLEAR
+        flag is exactly the case where the loop should RUN. The `cbz` this used
+        branched to `done` on the clear flag, so the body never ran for a short
+        rest and ran away for an empty one — the same inversion the sibling
+        `_emit_star_splice` fixed (see its docstring), and the reason
+        `for a, *rest in [(1,)]` exited 1 with nothing printed.
+        """
+        rest_cap = M.STAR_REST_CAP
         nbytes = 8 + 8 * rest_cap
         if self._list_cursor + nbytes > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
@@ -3849,7 +3858,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))     # rest_count = count - n_fixed
         self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
@@ -3860,7 +3869,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(4, 3))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))
