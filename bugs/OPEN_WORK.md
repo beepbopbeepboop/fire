@@ -253,7 +253,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | `formal261-docs-r2-r2` | `.returncode` is a field access on an integer |
-| `FORMAL_a_starred_for_target_is_broken_on_both_backends.md` | **unclaimed** | `for a, *rest in …` builds and then exits 1 with nothing printed |
 | `FORMAL_the_stdlib_build_leaves_its_workdir.md` | **unclaimed** | `build()`'s `mojostdlib_*` work directory is never removed |
 
 ---

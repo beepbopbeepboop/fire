@@ -3849,7 +3849,13 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        # rest_count = count - n_fixed, a REGISTER subtraction: X6 holds
+        # n_fixed, so this is `SUB Xd, Xn, Xm`, not the immediate form that
+        # `encode_sub_xd_xn_imm(3, 3, 6)` spelled (`SUB X3, X3, #6`). The
+        # immediate form made rest_count `count - 6`, so every tuple shorter
+        # than seven elements wrote a huge count into the rest blob (measured:
+        # `for a, *rest in [(1, 2, 3)]` bound `rest` a count of 2**64-3).
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))     # rest_count
         self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
@@ -3859,8 +3865,12 @@ dylib_exports: list = None, globals_base: int = None,
         oob_end = f"{tag}_sx{self._while_counter}"
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(4, 3))
+        # X0 = (i >= rest_count): branch to `done` when the loop has finished.
+        # The branch was `CBZ`, which sent every iteration to `done` and copied
+        # nothing — and, with the `SUB` immediate above, made the rest blob's
+        # count wrong as well.
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))

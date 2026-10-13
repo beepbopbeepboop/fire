@@ -6388,6 +6388,39 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A `*rest` for-target, which is a REST binding and not a name with a star
+    # in it.  On this group because both backends were wrong about it and in
+    # DIFFERENT ways: arm64 BUILT the program and then exited(1) with nothing
+    # printed (a `SUB Xd, Xn, #6` where the register `X6` was meant, and a
+    # `CBZ` where the loop-exit wanted `CBNZ`), and x86-64 had no star arm at
+    # all, so the star reached `_store_var` and refused with "'*rest' has no
+    # home".  The answer is CPython's: (1,2,3) gives 1 + 2 + (2+3) = 8 and
+    # (4,) gives 4 + 0 = 4, so 12 — and both a non-empty and an EMPTY rest are
+    # in the one row, because an empty iterable never ran the broken guard.
+    ("both_arch_a_starred_for_target_binds_the_rest_blob",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2, 3), (4,)]:\n"
+     "        s = s + a + len(rest)\n"
+     "        for r in rest:\n"
+     "            s = s + r\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=12"),
+    # …and the same star over a COMPREHENSION generator target, which is the
+    # other place `_emit_for_unpack` is reached (`_emit_compr_gen`).  A fix
+    # that only touched the for-loop arm would leave x86-64 silently binding
+    # `rest` to the element at the star's position (an int) where arm64 binds
+    # the tail blob, so the nested `for r in rest` discriminates rather than
+    # merely failing to build.  CPython's answer: [1+2, 1+3, 4+5] sums to 16.
+    ("both_arch_a_starred_comprehension_target_binds_the_rest_blob",
+     "def main():\n"
+     "    var xs = [a + r for a, *rest in [(1, 2, 3), (4, 5)] for r in rest]\n"
+     "    var s = 0\n"
+     "    for x in xs:\n"
+     "        s = s + x\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=16"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.
