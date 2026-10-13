@@ -631,9 +631,9 @@ MLIR_SELF_TYPE_NAMES = frozenset(("self", "this", "Self"))
 # The elementwise operations this path REWRITES when the operand's declared type
 # is one word, and the ordinary operator each denotes. Rewriting to the
 # ordinary spelling rather than adding an instruction selection is the whole of
-# the design, and it is the reason `bugs/FORMAL_mlir_dialect_refusal_is_false_
-# of_the_word_valued_ops.md`'s "each arm must select instructions from the
-# decisions the two backends already SHARE" is satisfied by construction: `+`,
+# the design, and it is the reason the design note's "each arm must select
+# instructions from the decisions the two backends already SHARE" is satisfied
+# by construction: `+`,
 # `-`, `*`, `/`, `%`, `&`, `>>` already go through `common_type`, `cmp_signed`
 # and `shift_signedness` in both emitters, so an arm here that would re-decide
 # any of them would be a second copy of an answer that exists.

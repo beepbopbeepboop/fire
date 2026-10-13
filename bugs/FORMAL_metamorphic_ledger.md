@@ -77,6 +77,19 @@ mocked `cpython_answer` with a bare `(exit, stdout)` tuple, which
 `struct` files now (`wide_recv`, `struct_point`, `struct_method`), which is
 the documented non-goal rather than the `@refines` hole.
 
+**Status 2026-10-13 (merging `work/formal192-docs`): the branch carried a
+parallel record of the SAME six defects, so its Status section is deduped
+into the entries above rather than kept as a second copy. Its one addition
+to the merged tree is the read-hazard hunk itself: the merged code still
+asked only about WRITES (`a.writes & reach`) when the branch was merged, and
+the check is now `(a.reads | a.writes) & reach` in both directions — what the
+2026-10-07 entry above describes and measured in advance (`globals:3`,
+32 → 33). The branch's alias mechanism (`Analysis.alias_closure` and
+`_reference_aliases`) is the parallel form of `_alias_classes`, and its
+hand-written pin is covered by `ReorderAliasing`. Measured on the merged
+tree: `test_formal_metamorph.py` is 62/62 (the file has grown since the 160
+entry's 55), peak 0.2 GB; `test_formal_mlir_precedence.py` is 40/0.**
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
