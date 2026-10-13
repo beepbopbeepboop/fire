@@ -87,6 +87,24 @@ checks the generated x86-64 file — `ok`, and exactly the two designed trust
 boundaries as holes (the AST/model conformance theorem and the end-to-end one).
 Without `lib/ProofLib.olean` it skips loudly, like its siblings.
 
+### 0b. 2026-10-13: the same file's ARM64 `TestBridgeTypechecks` was red, and it was the `hcond` SPILL READ's `sh` bit
+
+Independent of the model: `TestBridgeTypechecks` typechecks the generated ARM64
+file for `ifonly` / `condassign` / `elif3`, and all three were red on master with
+`Tactic 'rewrite' failed: Did not find an occurrence of the pattern … (s_0.sp -
+32 - 16)` against a target holding `s_0.sp - 131072 - 16`. The `sp` expression
+the spill rewrite is handed was built without the ADD/SUB immediate's shift
+selector (`32 << 12` is the 128 KiB frame scratch), so it named an address the
+composed state cannot contain. **FIXED** in this branch — `_addsub_imm` in
+`formal/arm64_proof_gen.py` is now the one reader of that immediate and all four
+byte-level `sp` trackers use it; the three fixtures typecheck and
+`TestTheAddSubImmediateShiftBit` pins the decode without Lean. The whole of it is
+`bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` §0b,
+because the `hcond` obligation is that doc's subject. What §0 above landed is
+unaffected: the CSEL/`_ternary_go` model half is still the residue this doc is
+about, and the machine half is still
+`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`.
+
 ## What was run
 
 ```sh

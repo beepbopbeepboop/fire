@@ -47,6 +47,40 @@ not test while still elaborating). **Verified to fail on the pre-fix tree**
 Arm64State.init] …'`) and to pass after, with no Lean run involved — which is
 the point of putting it in this file rather than in `test_formal.py`.
 
+## §0b 2026-10-13: the `hcond` SPILL READ built the wrong address, and that is the `sp` tracker's `sh` bit
+
+This is a second, independent defect in the same `hcond` chain, found by running
+channels §"The next step" only points at: **the `sp` expression the spill
+rewrite is given did not occur in the goal, so Lean rejected the `rewrite`.**
+Measured on the three nearest arm64 fixtures,
+`test_formal_eval_eq_mojo_bridge.py::TestBridgeTypechecks`'s `ifonly`,
+`condassign` and `elif3` — each failed with
+
+    Tactic `rewrite` failed: Did not find an occurrence of the pattern
+      mem_read_u64 (mem_write_u64 (mem_write_u64 ?m _ ?m) _ ?m) (s_0.sp - 32 - 16)
+    in the target expression
+
+while the target held the SAME read at `s_0.sp - 131072 - 16`. `32` is the
+`imm12` of `sub sp, sp, #131072`: the frame scratch is `32 << 12`, i.e. `sh = 1`,
+and `_hcond_mem_rws`/`_frame_read_addrs`/`_frame_ldp_addrs`/`_sp_stores` read
+bits 21:10 alone and never applied the shift selector (bit 22). `arm64_step`
+does apply it (`_expr_go`'s ADD/SUB arm; `arm64_ext_imm12` in `lib/ProofLib.lean`
+is the model's reader), so the generator built an address the composed state
+cannot contain — the same class as §0's empty flag set, and it is the `sp`
+half of "the operand is read through a slot".
+
+**FIXED.** `_addsub_imm` is now the one reader of an ADD/SUB immediate's byte
+value (`imm12 << (12 * sh)`), and all four byte-level `sp` trackers use it.
+Pinned without Lean by
+`test_formal_call_proof_gen.py::TestTheAddSubImmediateShiftBit`, which checks the
+decode on the encoder's own `sh = 0` / `sh = 1` words and checks
+`_frame_read_addrs` builds the shifted address. Measured against the old code:
+the three bridge fixtures now typecheck, and
+`test_formal_call_proof_gen.py`'s proof-lane reds go 8 -> 7
+(`TestANarrowTypedParameterGetsItsRange`'s three examples now prove). §"The next
+step" below is unchanged and still the remaining order/spill-resolution work;
+this is the address-decode half, not the spill-in-a-prior-block half.
+
 ## §1 The reported failure no longer reproduces, and what replaced it
 
 `sum_range.mojo`'s generated proof, through `formal/lean.py::run_lean`
