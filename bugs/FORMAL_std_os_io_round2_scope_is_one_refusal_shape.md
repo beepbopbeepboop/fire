@@ -57,9 +57,9 @@ features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
 §2's, and the only thing this document asked for was an instrument that can
 answer the question. §0.1 is what changed.
 
-Round 1 of this scope is `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`
-(`sweep14:std-os-io`, **not edited here** — it is that claim's document). It
-measured `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` = 46 files, 3 pass,
+Round 1 of this scope is the round-1 `std-os-io` scope audit (`sweep14:std-os-io`,
+**not edited here** — it is that claim's document, now deleted as a settled
+history). It measured `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` = 46 files, 3 pass,
 and read the chain behind all 43 as `std/collections/binary_heap.mojo`, then
 `std/algorithm/backend/tile.mojo`, then `std/builtin/builtin_slice.mojo`.
 
