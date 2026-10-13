@@ -600,13 +600,13 @@ BACKLOG = {
         "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
         "`FF /2` with mod=11, the call through a function VALUE; the decoder "
         "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
+    # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-13. The
+    # byte-wise `and`/`or` the floating compare needs (`cf0d8869` wired them into
+    # `formal/x86_64_codegen.py`) gained their decoder arm, model arm, `samples()`
+    # rows and fuzz-pool row, so the census reads `yes yes yes` for both and the
+    # two entries exempted nothing. `test_formal_isa_census.py`'s anti-rot half is
+    # what reported it, and an exemption kept past its gap is an exemption for the
+    # next gap that lands on the same encoder.
     # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
     # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,

@@ -8,6 +8,16 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-13 (`work/formal348-docs`): the two byte-wise ALU entries are gone, and they were the last stale x86-64 `BACKLOG` rows
+
+`encode_and_r8_r8` / `encode_or_r8_r8` — the byte-wise `and`/`or` the floating
+compare needs — are `yes yes yes` in the census now, so their two `BACKLOG`
+entries exempted nothing and `test_formal_isa_census.py`'s anti-rot half
+reported them as a fixed gap that kept its exemption. The entries are removed
+and `tools/formal_isa_census.BACKLOG`'s x86-64 half is `encode_call_r64` alone
+(the register-target call, a `HARNESS_LIMITS`-shaped reason with a doc). The
+rows below that say "FUZZ cannot yet" are corrected.
+
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
 This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed
@@ -58,11 +68,6 @@ all steppable**, all five checks green; `test_x86_64_decode.py` green;
 
 * `encode_call_r64` — the target is a register's contents, outside the harness's
   one `MAP_FIXED` region; a permanent `HARNESS_LIMITS` reason, not work.
-* `encode_and_r8_r8` / `encode_or_r8_r8` — the RBP-operand anomaly, which turned
-  out to be this tree's own encoder omitting the REX prefix for SPL/BPL/SIL/DIL
-  rather than a hardware one, and which `x86-hw-fuzz` fixed with
-  `_byte_rex_required` (see "The byte-wise ALU class" below). Their LEAN and AS
-  columns are `yes`.
 * Two CENSUS-INSTRUMENT defects, reported rather than edited (the tool is
   another claim's write set): the EX column matches a form by DISASSEMBLY
   MNEMONIC, so two encodings of one instruction are indistinguishable; and the
@@ -90,7 +95,7 @@ result 0.
 |---|---|---|
 | `encode_imul_r64_r64_imm` | **yes / yes / yes** | `6B /r ib` (not `69 /r id`, which the BACKLOG note says — see below), `x86_step`'s new arm, `x86_step_imul_r64_imm`, two `samples()` rows with both immediate signs, a pool row. The census's LEAN, FUZZ and AS columns are all `yes`. |
 | `encode_call_r64` | **yes / NO / yes** | `FF /2` with `mod=11`, a model arm in front of the old `0xff` arm (which fed the same two bytes to `x86_mem_addr`, refused it, and left `x86_step` returning `none`), `x86_step_call_r64`, two `samples()` rows. FUZZ cannot: the instruction jumps to a register's contents and a random 64-bit value is outside the harness's one `MAP_FIXED` region, the same reason arm64's `encode_br_xn` is in `HARNESS_LIMITS`. |
-| `encode_and_r8_r8`, `encode_or_r8_r8` | **yes / NO / yes** | `20 /r` and `08 /r`, one shared `x86_step_alu_r8` for BOTH decoders (the encoder emits a REX byte when either register is r8-r15, so an arm in one of them left the rest unsteppable — measured, `and R11, R10` = `45 20 d3` was a `NORUN`), two step lemmas, four `samples()` rows. FUZZ cannot yet, and the reason is a measurement rather than a policy: see §"The class the byte-wise ALU found" below. |
+| `encode_and_r8_r8`, `encode_or_r8_r8` | **yes / yes / yes** | `20 /r` and `08 /r`, one shared `x86_step_alu_r8` for BOTH decoders (the encoder emits a REX byte when either register is r8-r15, so an arm in one of them left the rest unsteppable — measured, `and R11, R10` = `45 20 d3` was a `NORUN`), two step lemmas, four `samples()` rows, and a fuzz-pool row, so the FUZZ column is `yes` now (it read `NO` when this table was written; see §"The class the byte-wise ALU found" below for what the pool had to learn first). |
 
 Two things this pass found that the doc did not predict, both worth the next
 reader's time:
@@ -255,7 +260,7 @@ hardware on every ordered pair and disagree on `NaN`.
 |---|---|---|
 | `encode_imul_r64_r64_imm` | `69 /r id`, the `x * 10` shape | the decoder's `imul` arm is `0x0F 0xAF` only |
 | `encode_call_r64` | `FF /2` with `mod=11`, the call through a function VALUE | the decoder maps `FF` only to `FF 15` / `FF 25` (the RIP-relative forms) |
-| `encode_and_r8_r8` / `encode_or_r8_r8` | the byte-wise `and`/`or` the floating compare needs | no REX.W, and the decoder's ALU arm is `w and …` |
+| `encode_and_r8_r8` / `encode_or_r8_r8` | the byte-wise `and`/`or` the floating compare needs | no REX.W, and the decoder's ALU arm is `w and …` — **CLOSED 2026-10-06: `x86_step_alu_r8` is the shared arm and the census reads `yes yes yes`** |
 
 Each of these is byte-checked against clang today (`test_x86_64_encoders.py`'s
 new rows: `imulq $7, %rbx, %rax`, `andb %cl, %al`, `orb %cl, %al`), which is

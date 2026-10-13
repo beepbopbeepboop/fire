@@ -189,8 +189,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    ok = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                       exit=False).result.wasSuccessful()
+    # `ok and 0 or 1` was here and is ALWAYS 1: `True and 0` is `0`, so the `or`
+    # takes the 1 — the file reported `OK` and exited non-zero on every run,
+    # which is why nothing chained on it noticed. `0 if ok else 1` is the
+    # answer the shape was reaching for.
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
