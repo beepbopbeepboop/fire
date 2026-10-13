@@ -1,7 +1,8 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
 **Status 2026-10-08 (`work/formal181-docs`; the same redirect was recorded
-independently by `work/formal175-docs` on 2026-10-07): the REPRESENTATION this
+independently by `work/formal175-docs` on 2026-10-07 and
+`work/formal191-docs` on 2026-10-08): the REPRESENTATION this
 document asks for LANDED 2026-10-05, so its "NOT FIXED" headline is no longer
 true — read `bugs/FORMAL_optional_needs_a_niche.md`, which is the live document.
 `None` is a NICHE word per payload type (`formal/model.py::optional_none_word`),
@@ -10,7 +11,9 @@ and `x is None`, `x == None`, `or_else`, `value_or`, `or`, `unsafe_value` and
 both backends. What remains is the TWO-WORD form for a payload with no niche —
 `Optional[Int]`, which is exactly `builtin_slice.mojo`'s field — and an
 unstated payload; both are §2 and §3 of that doc, and neither is this row's
-work. **The chain analysis below is kept as the HISTORY that priced the
+work — the row's terminal cause is now the bare `FormatStruct` call,
+`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`'s row.
+**The chain analysis below is kept as the HISTORY that priced the
 two-word form**: it is why the niche was chosen first and what the tagged form
 still costs. A reader who wants the current state should read the niche doc, not
 this one.**
