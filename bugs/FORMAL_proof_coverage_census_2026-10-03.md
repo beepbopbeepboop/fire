@@ -10,9 +10,11 @@ carry one — the stack-floor guard's `getrlimit` (not recorded as a
 `compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
 same regression is why
 `test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is red.
-Both root causes, with the reproduction and the fix, are
-`bugs/FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md`;
-the code is another claim's, so this census was not edited to absorb it.
+Both root causes — the per-path `crossed` state in
+`_reached_without_a_condition` (commit `14af4cbe`) and the stack-floor guard's
+`getrlimit` moved below the entry into the startup stub — are fixed on this tree,
+and both pinning tests are green again; the code was another claim's, so this
+census was not edited to absorb them.
 
 **§0.9 is new (2026-10-05, `work/formal27-5`): the ratchet's COST is a property
 of the TREE, and there is now a mode that says what it is in 1.7 seconds instead
