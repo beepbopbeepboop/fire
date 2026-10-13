@@ -8236,8 +8236,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _fls = [f for f in _fls if f is not None]
                 _fl = _COND_LEMMA.get(_cnd)
                 # **A `B.cond` BLOCK HAS NO CSET, so `_fls` came out EMPTY for it
-                # while `_fl` did not — and that asymmetry is the whole of
-                # `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.**
+                # while `_fl` did not — and that asymmetry was a real defect:
+                # every conditional branch's chain closed with no flag lemma
+                # (found 2026-10-04 and fixed in §0 of the order work, whose
+                # order half landed `ad54fc2f6`).**
                 # `_cset_cond` reads the raw hardware condition field off the
                 # block's terminator when it finds no CSET (its own docstring says
                 # so, and it is what `_fl` above is derived from), while
@@ -8403,8 +8405,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         b)` can never match again — so a closer whose `simp` set
                         names that lemma still hands `bv_decide` an opaque
                         `arm64_reg`/`arm64_matches_condition` term, which is the
-                        "potentially spurious counterexample" of
-                        `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.
+                        "potentially spurious counterexample" the `B.cond`-with-
+                        no-`CSET` defect produced on a conditional branch.
                         The lemma has to fire FIRST, which is the order
                         `_cond_flag_lines` already uses for a loop's exit test,
                         and this is the same recipe for a branch.
