@@ -162,8 +162,9 @@ duplicate-implementation shape this project has been bitten by. So:
 
 ## 5. Provenance
 
-Found in the same sweep as
-`bugs/FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md`, while
+Found in the same sweep as the `CMN`-arm-takes-the-whole-`0xab000000`-class
+defect (the two landed together in `0ad2ef33`, which made `arm64_step` read and
+write `Rd` for the class and honour the `imm12` `lsl #12` here), while
 re-measuring `bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md`. That
 doc's §1 counterexample list is a list of instructions the model cannot STEP
 (`NOSTEP`); this is one it steps WRONGLY, which is a different bucket and is why
