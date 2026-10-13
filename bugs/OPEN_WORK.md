@@ -48,12 +48,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | `formal261-docs-r2-r2` | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` | **unclaimed** | The `CMN` model arm claims the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register |
 
-### `formal/arm64_codegen` — 15 documents, 2 claimed
+### `formal/arm64_codegen` — 14 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | `formal260-docs-r2-r2` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
-| `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md` | `formal260-docs-r2-r2` | The arm64 stack-floor guard's `getrlimit` is now the ONE opaque call in every function, so the arm64 proof corpus has no value theorem left |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |

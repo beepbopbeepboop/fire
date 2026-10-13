@@ -6882,6 +6882,88 @@ def _generate_dir(tmp, src_path, name, out):
                              prove=True, check=False)
 
 
+class TestTheStackFloorGuardIsNotACallOnAnyWalkedPath(unittest.TestCase):
+    """The arm64 stack-floor guard's `getrlimit` must not be a call any proof
+    walk can meet.
+
+    The guard used to read `RLIMIT_STACK` with a `BL getrlimit` inside EVERY
+    guarded prologue, behind a `CBNZ` cache test.  That made one opaque call --
+    a call `arm64_step` cannot follow, because its target is outside `code` --
+    the first thing on the path of every function, so NO arm64 program with a
+    guard could be given a value theorem: the walk halted at the call and
+    emitted a reachability theorem in place of
+    `<fn>_compiles_correctly_universal` (measured 2026-10-07: 29 of 93 examples
+    generated a reach theorem, 35 more were refused, and 0 had a value
+    theorem).
+
+    The read now lives in the STARTUP STUB
+    (`formal/arm64_codegen.py::_emit_stack_floor_init`), below `func_offset`,
+    where no run test starts and no path tree walks -- exactly where the x86-64
+    backend already placed it.  `_program_extern_calls` subtracts it by address
+    for the same reason; `TestExternCallTheRunDoesNotReach` pins that
+    subtraction for a one-function probe.
+
+    This pins the claim at its own width, which a one-function probe cannot:
+    **one** `getrlimit` per IMAGE rather than one per guarded function, below
+    the entry, with the walked functions still carrying a value theorem.  The
+    program therefore has TWO functions, so "moved to the stub" is
+    distinguishable from "still in the one prologue there happens to be".
+    """
+
+    PROGRAM = ("def leaf(a: Int) -> Int:\n"
+               "    return a + 1\n"
+               "\n"
+               "def main(n: Int) -> Int:\n"
+               "    if n > 0:\n"
+               "        return leaf(n)\n"
+               "    return 0\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-guard-call-")
+        src = os.path.join(cls.tmp, "two.mojo")
+        with open(src, "w") as f:
+            f.write(cls.PROGRAM)
+        cls.r = _compile(src, os.path.join(cls.tmp, "two.aout"), "arm64")
+        with open(cls.r["proof_path"], encoding="utf-8") as f:
+            cls.text = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_image_carries_one_getrlimit_and_it_is_below_the_entry(self):
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self.r["info"]
+        entry = info.get("func_offset")
+        self.assertIsNotNone(entry, "the image has no entry, so 'below the "
+                                    "entry' cannot be asked of it")
+        calls = info["extern_calls"]
+        getrlim = [c for c in calls if c["sym"] == "getrlimit"]
+        self.assertEqual(
+            len(getrlim), 1,
+            "the guard's getrlimit must be read ONCE per image, not once per "
+            f"guarded function; the image's extern calls are "
+            f"{[c['sym'] for c in calls]}")
+        self.assertLess(
+            getrlim[0]["addr"], entry,
+            "the stub's getrlimit is at or above the entry, so it is a call on "
+            "a path a run test starts in and the walk can meet it")
+        self.assertNotIn(
+            "getrlimit", [c["sym"] for c in _program_extern_calls(info)],
+            "the stub's getrlimit is being counted as a call the PROGRAM makes, "
+            "so the universal theorem would halt there")
+
+    def test_the_walked_functions_get_a_value_theorem(self):
+        self.assertRegex(
+            self.text, r"(?m)^theorem main_compiles_correctly_universal\b",
+            "no value theorem: the guard's call is back on the walked path, so "
+            "the walk halts at it and only a reachability theorem can be "
+            "stated")
+        self.assertNotIn(
+            "reaches_call_at_", self.text,
+            "a reachability theorem is emitted in place of the value one -- "
+            "the substitution this class exists to prevent")
 
 
 class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
