@@ -543,6 +543,13 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "`FF /2` with mod=11 calls the contents of a register, so "
+                       "the target is a random 64-bit value outside the "
+                       "harness's one `MAP_FIXED` region and a case would leave "
+                       "the generated stub — the same reason as arm64's "
+                       "`encode_blr_xn`. LEAN, AS and the decoder arm are all "
+                       "covered (`x86_step_call_r64`); only the fuzzer cannot "
+                       "run it",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -586,51 +593,36 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: THERE IS NO BACKLOG ROW ──────────────────────────────────
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
-    # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
-    # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
-    # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`. The previous pass recorded that and left it
-    # here on purpose because the tool was "another claim's write set"; the
-    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
-    # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
-    # ── x86-64: runnable, and the pool does not draw them ────────────────
-    # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
-    # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
-    # engines' RIPs differ by the load slide" for the `lea` and "a call cannot
-    # run in the harness's straight-line stub without leaving it" for the
-    # `call`.  Both reasons are FALSE of this harness and were worth measuring
-    # rather than repeating: the emulated region is ONE `MAP_FIXED` mapping and
-    # the model is handed the same base, so a pc-relative result is the same
-    # number in both halves; and a branch to the NEXT instruction stays inside
-    # whatever the program has already put there.  All four are in the pool now
-    # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
-    # reason is the one that fits IT: this project does not map the arm64
-    # harness's code at a fixed address, so a pc-relative RESULT cannot be
-    # compared and only pc DELTAS are.
+    # The x86-64 backend has no un-exempted gap at all, and every entry that
+    # used to stand here is accounted for:
+    #
+    # * `encode_imul_r64_r64_imm` was removed 2026-10-06
+    #   (`work/x86-coverage-endtoend`): `6B /r ib` had a decoder arm, a model
+    #   arm, a `samples()` row and a pool entry since `4a680153`, and its note
+    #   ("`69 /r id`: no decoder arm …") was false twice over.
+    # * `encode_and_r8_r8` / `encode_or_r8_r8` were FIXED at the same time —
+    #   the byte-wise ALU class closed by `_byte_rex_required`, and both now
+    #   read `yes/yes/yes` — but the entries were left behind, so they were a
+    #   fixed gap keeping its exemption. That is exactly what the anti-rot
+    #   half of `test_formal_isa_census.py` reports, and `encode_call_r64`
+    #   (below) is the one that kept its reason.
+    # * `encode_call_r64` moved to `HARNESS_LIMITS`: its fuzz column is `NO`
+    #   for a permanent reason (a call through a register's contents has no
+    #   target the harness can install), the same reason arm64's
+    #   `encode_blr_xn` carries.
+    # * all nine of shape 1's SSE2 rows — `addsd`, `subsd`, `mulsd`, `divsd`,
+    #   `ucomisd`, `xorpd`, `movq_r64_xmm`, `cvtsi2sd` and `cvttsd2si` — came
+    #   out on 2026-10-06 (`work/x86-coverage-endtoend`): each gained a decoder
+    #   arm, a model arm, a `samples()` row and a fuzz-pool entry.
+    # * `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
+    #   `encode_call_rel32` came out on 2026-10-05: the two recorded reasons
+    #   ("the two engines' RIPs differ by the load slide" for the `lea`, "a
+    #   call cannot run in the harness's straight-line stub" for the `call`)
+    #   are false of this harness — the emulated region is ONE `MAP_FIXED`
+    #   mapping and a branch to the NEXT instruction stays inside it — so all
+    #   four are in the pool and measured AGREE at four initial states each.
 }
 
 
@@ -886,6 +878,16 @@ def _forms_in_image(arch, image_path, workdir, table):
     answer is "this form occurs in this image" — which is what (d) asks — and
     not "some word of this image has these bits", which a pool-load or a string
     would also satisfy.
+
+    LIMITATION, measured 2026-10-05 and still true: the match is on the
+    DISASSEMBLY MNEMONIC, so two encodings of one instruction are
+    indistinguishable here. `encode_imul_r64_r64_imm` (`6B /r ib`) and
+    `encode_imul_r64_r64` (`0F AF /r`) both disassemble to `imulq`, so a row can
+    claim a corpus that contains the other spelling — which is exactly how that
+    row's "8 examples are blocked" note came to be false. The fix is to key this
+    on (mnemonic, operand shape) and report `ambiguous` where that does not
+    separate them; it needs the `--examples` cache re-measured on both
+    architectures, which is cheap (104 compiles, ~5 s) and is not done here.
     """
     have = _image_mnemonics(image_path)
     return [(mn, name) for name, mn in sorted(table.items()) if mn in have]

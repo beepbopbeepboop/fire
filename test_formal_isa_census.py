@@ -184,13 +184,37 @@ class TestExemptions(unittest.TestCase):
         self.assertEqual(
             [], [r.encoder for r in rows if r.missing() and not r.excluded])
 
+    def test_the_x86_64_backend_has_no_unexplained_gap_at_all(self):
+        """x86-64 carries the same ratchet, and it now has no backlog.
+
+        It used to be the backend with a `BACKLOG` attached, and the whole of
+        the x86-64 coverage backlog (18 of 85 emitted forms with no fuzz case,
+        no model sample or no decoder arm, found 2026-10-05) was that backlog.
+        Every row is now either covered outright or holds a permanent
+        `HARNESS_LIMITS` reason, so the file this test pins is gone and this
+        assertion is what keeps it gone: a new x86-64 form that lands without a
+        model, a fuzz case or an `as` check fails here, and an exemption cannot
+        sneak back in as a "backlog" row nobody re-reads.
+        """
+        rows = _ROWS["x86_64"]
+        self.assertGreater(len(rows), 50,
+                           "the x86-64 census has collapsed to %d rows, so it "
+                           "is no longer measuring the emitter" % len(rows))
+        self.assertEqual(
+            [], [r.encoder for r in rows if r.missing() and not r.excluded])
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    # `ok and 0 or 1` is always 1: `ok and 0` is `0` when `ok`, which is falsy,
+    # so the `or 1` wins and a GREEN run exited 1. A test harness whose exit
+    # code cannot say PASS is a harness nothing can gate on, so the ternary is
+    # not a style choice here.
+    ok = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                       exit=False).result.wasSuccessful()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

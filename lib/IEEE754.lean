@@ -92,7 +92,7 @@ operand was `±inf`, so `x < +inf` was false for every finite `x` and the flags
 above already stated the right predicate — an infinity IS ordered — and the
 `key` function below handles infinities correctly; only the guard was wrong.
 Found by `formal/x86_64_model_fuzz.py --census` once the SSE compare had a model
-arm and a pool entry (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+arm and a pool entry (the 2026-10-06 SSE2 coverage pass gave it both). -/
 def comparable (b : Bits) : Bool := !isNaN b
 
 /-- The order-preserving key: an unsigned integer that sorts the same way the
