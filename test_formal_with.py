@@ -191,6 +191,41 @@ SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
     "    def __exit__(self):",
     "    def __exit__(self, exc_type, exc_val, tb):")
 
+# The SECOND shape of the same suppression, and the one the declaration-level
+# gate cannot see: `__exit__` returns a FIELD, so whether CPython suppresses
+# depends on the argument the CONSTRUCTION passed — the doc's own `Suppressor`,
+# and `contextlib.nullcontext`'s `self.exit_result` one struct over.  No
+# `__init__`: an implicit field-init `Quiet(1)` puts 1 in slot 0, which is the
+# mapping `model.context_exit_suppression_at_site` reads, and a struct WITH an
+# `__init__` binds its fields in a body that reader deliberately does not follow.
+COMPUTED_EXIT = """class Quiet:
+    var quiet: Int
+    var tag: Int = 7
+    var log: Int = 0
+
+    def __enter__(self) -> Int:
+        return self.tag
+
+    def __exit__(self) -> Int:
+        return self.quiet
+"""
+
+# …and CPython's half.  Python has no implicit field-init constructor, so the
+# same program is written with an `__init__` that stores the field, which is the
+# twin `test_formal_with.py`'s other fixtures already use.
+COMPUTED_EXIT_PY = """class Quiet:
+    def __init__(self, quiet):
+        self.quiet = quiet
+        self.tag = 7
+        self.log = 0
+
+    def __enter__(self):
+        return self.tag
+
+    def __exit__(self, exc_type, exc_val, tb):
+        return self.quiet
+"""
+
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
@@ -746,6 +781,40 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # …and the COMPUTED boundary the site-level gate has to keep, one argument
+    # over from the refusal below: `Quiet(0)` makes the field `__exit__` returns
+    # FALSY, so CPython does NOT suppress and the exception still propagates.
+    # Both engines print `body 7` and exit 1, and the refusal for `Quiet(1)`
+    # would be over-refusal if this program did not still lower.
+    ("a_computed_exit_the_site_makes_falsy_still_runs_the_protocol",
+     COMPUTED_EXIT + "def main(n):\n"
+     "    with Quiet(0) as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     COMPUTED_EXIT_PY + "def main(n):\n"
+     "    with Quiet(0) as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the OTHER half of the pair: `Quiet(1)` makes the field truthy, but a
+    # body that cannot RAISE never consults the return value — CPython discards it
+    # on the fall-through path too — so this program is already faithful and
+    # stays lowered.  Without it, a gate that refused every `Quiet(1)` would pass
+    # the refusal while breaking a program CPython runs.
+    ("a_computed_truthy_exit_still_lowers_when_the_body_cannot_raise",
+     COMPUTED_EXIT + "def main(n):\n"
+     "    with Quiet(1) as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n",
+     COMPUTED_EXIT_PY + "def main(n):\n"
+     "    with Quiet(1) as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1057,6 +1126,39 @@ REFUSALS = [
      "    print('after')\n"
      "    return 0\n",
      "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # ── `__exit__` returning a FIELD this site makes true ──────────────────
+    # The COMPUTED half of the suppression above, and the reason it is a second
+    # refusal rather than a widening of the first: the declaration alone cannot
+    # answer it.  `Quiet.__exit__` returns `self.quiet`, and whether CPython
+    # suppresses depends on the argument `Quiet(1)` passes — the same cross-field
+    # flow `context_exit_returns_truthy` records as its remaining limit and that
+    # `nullcontext`'s `self.exit_result` is the corpus spelling of.  Measured on
+    # both architectures before the site-level gate: this program BUILT, printed
+    # `body 7`, never printed `after` and exited 1 where CPython exits 0 — the
+    # cleanup ran, so every visible line matched.  The needle is the site
+    # sentence, and the `forbid` clause keeps a future fix from absorbing it back
+    # into the declaration-level wording ("SUPPRESSING the exception in flight"),
+    # which is false about a struct whose `__exit__` returns a field.
+    ("a_computed_exit_the_site_makes_truthy_is_refused_by_name",
+     COMPUTED_EXIT + "def main(n):\n"
+     "    with Quiet(1) as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "the value this call gives `quiet` is TRUE",
+     "it declares no __enter__"),
+    # …and the keyword spelling of the same argument, because a construction may
+    # name the field either way and the reader takes the keyword first.
+    ("a_computed_exit_made_truthy_by_a_keyword_is_refused_the_same_way",
+     COMPUTED_EXIT + "def main(n):\n"
+     "    with Quiet(quiet=1) as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "the value this call gives `quiet` is TRUE",
+     "it declares no __enter__"),
     # ── a context this build cannot type ───────────────────────────────────
     # A name bound from a CALL to another function.  This is the limit the
     # ANSWERED table's NAME rows stop at, and it is a return-type table this

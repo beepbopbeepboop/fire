@@ -19826,6 +19826,27 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
             F.CallExpr(func=F.IdentExpr(resource_exit),
                        args=[F.IdentExpr(tmp)], kwargs=[]),
             fn)
+    # A `__exit__` whose value THIS SITE makes truthy is a suppression the path
+    # cannot perform, and it is a WRONG ANSWER rather than a clean refusal:
+    # `struct_is_context_manager`'s declaration-level gate folds a literal
+    # return, but a return of a FIELD is decided by the argument this
+    # construction passes (`context_exit_suppression_at_site`), and a body that
+    # raises then leaves the process where CPython continues.  The body has to
+    # be able to RAISE for the return value to be consulted at all — on the
+    # fall-through path CPython discards it too — so the two conditions are
+    # asked together and a non-raising body keeps its lowering.
+    #
+    # `_raises_somewhere` with an empty raiser set is the direct-`raise` reader:
+    # a call into another function of this image is `_refuse_try_handlers`'
+    # question and its limit is a limit of the evidence, so it is not guessed at
+    # here.  `nested_ok=False` because a `raise` inside a nested `def` runs on
+    # another frame and cannot reach this `with`.
+    _suppressing = M.context_exit_suppression_at_site(struct, item.expr)
+    if _suppressing is not None and _raises_somewhere(body, set(),
+                                                      nested_ok=False):
+        raise CodegenError(
+            M.suppressing_exit_at_site_refusal(fn, struct, item.expr,
+                                               _suppressing))
     tmp = fresh_name()
     # `__exit__` takes the receiver alone, or CPython's own three exception
     # words.  The four-word shape is accepted only when the method never reads

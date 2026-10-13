@@ -49207,6 +49207,107 @@ def context_exit_returns_truthy(method) -> bool:
     return False
 
 
+def context_exit_suppression_at_site(struct_def, expr):
+    """The FIELD `__exit__` returns that THIS construction site makes truthy, or None.
+
+    `context_exit_returns_truthy` decides the case where `__exit__`'s return
+    VALUE is a literal, at the DECLARATION.  This is the other half of the same
+    wrong answer, and it is the case that gate cannot see: `__exit__` returns a
+    FIELD, so whether CPython would suppress depends on the value the field was
+    given at the site that CONSTRUCTED the manager — `nullcontext` returns its
+    own `exit_result`, and the doc's `Suppressor` returns `self.quiet`.  The
+    declaration alone cannot answer it; the construction site can, when the
+    argument is a foldable value.
+
+    **What is read, and why that is the whole of it.**  The manager is built by
+    an expression this build already recognises as a CONSTRUCTION — `S(...)` or
+    `mod.S(...)`, the same spelling `with_expr_struct` resolves through — and the
+    argument the field takes is the positional argument at the field's
+    declaration slot, or the keyword naming it.  Only the IMPLICIT field-init
+    constructor is read: a struct that declares `__init__` binds its parameters
+    to fields in a body this reader does not follow, and following it would be
+    the cross-FIELD flow `context_exit_returns_truthy`'s docstring names as the
+    remaining limit.  A struct without `__init__` has no such gap — position `i`
+    of the argument list IS field `i`.
+
+    **A `None` means "not decided" and is read as "leave it alone"**, exactly as
+    `_literal_return_truthiness`'s is: a non-construction expression, a computed
+    argument, a field with no argument at this site (its default stands), and a
+    truthiness none of the folded kinds answers all return None and the program
+    is built as before.  The direction is the ONE-SIDED one the gate above is
+    deliberately in: only a provably-true value is reported.
+
+    The caller pairs this with "the body can actually RAISE", because a truthy
+    `__exit__` is only consulted when the body leaves by an exception; on the
+    fall-through path CPython discards the return value too, so refusing a
+    non-raising body would refuse a program that is already correct.
+    """
+    if struct_def is None or expr is None:
+        return None
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    exit_ = methods.get(CONTEXT_EXIT)
+    if exit_ is None or "__init__" in methods:
+        return None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    # The construction has to NAME the struct.  `with make_suppressor() as v:`
+    # is a call to a function whose declared return type happens to be this
+    # struct, and its arguments are the function's, not the fields' — reading
+    # them by position would invent a field value the source never wrote.
+    spelled = getattr(callee, "name", None) or getattr(callee, "member", None)
+    if not isinstance(spelled, str) or spelled != getattr(struct_def, "name", None):
+        return None
+    fields = struct_field_names(struct_def)
+    args = list(getattr(expr, "args", None) or [])
+    kwargs = list(getattr(expr, "kwargs", None) or [])
+    exit_params = _param_names(getattr(exit_, "params", None))
+    self_name = exit_params[0] if exit_params else None
+    if self_name is None:
+        return None
+    for node in iter_nodes(getattr(exit_, "body", None) or ()):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        value = getattr(node, "value", None)
+        if not (isinstance(value, F.MemberExpr)
+                and isinstance(value.obj, F.IdentExpr)
+                and value.obj.name == self_name):
+            continue
+        name = value.member
+        if name not in fields:
+            continue
+        argument = _constructor_argument_for(fields, name, args, kwargs)
+        # `_literal_return_truthiness` is the ONE reader of "what would CPython
+        # read this as", float arm included, so the site-level and the
+        # declaration-level gates cannot disagree about what "true" means.
+        if argument is not None and _literal_return_truthiness(argument):
+            return name
+    return None
+
+
+def _constructor_argument_for(fields, name, args, kwargs):
+    """The argument this construction gives field `name`, or None.
+
+    Keyword first — a construction may spell the field either way, and the
+    keyword is the one spelling that cannot be confused with a different field —
+    then the positional argument at the field's declaration slot.  An argument
+    list shorter than the slot is a field taking its DEFAULT, which this reader
+    does not fold and reports as not-decided.
+    """
+    for entry in kwargs:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            continue
+        if entry[0] == name:
+            return entry[1]
+    try:
+        index = fields.index(name)
+    except ValueError:
+        return None
+    if index < len(args):
+        return args[index]
+    return None
+
+
 def _dunder_receiver_params(method) -> int:
     """How many parameters a method declares, receiver included; -1 if unknown.
 
@@ -49578,6 +49679,38 @@ def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
         f"image already has a value for (`open`), and the `with` has to "
         f"construct one of those rather than name something untyped; a `with` "
         f"whose context is a plain value cannot be made faithful here."
+    )
+
+
+def suppressing_exit_at_site_refusal(fn, struct_def, expr, field) -> str:
+    """Why this `with`'s `__exit__` is a SUPPRESSION this site makes decisive.
+
+    A separate sentence from `refuse_unlowerable_with`, and the reason is that
+    the struct here is a perfectly good context manager: both dunders are
+    present, the receiver is framed, and on the fall-through path the protocol
+    is honoured exactly.  What this site changes is the RETURN VALUE — it
+    constructs the manager so that the field `__exit__` returns is TRUE — and a
+    truthy return is CPython's suppression.  The fix is not in the struct (that
+    would be a different method being written for a different manager) and not
+    in the alias; it is in the ARGUMENT this construction passes, so the message
+    names the construction and the field rather than either of the other two.
+
+    The wrong answer it replaces is the one `context_exit_returns_truthy`
+    documents from the other side: the cleanup runs, every visible line matches,
+    and the statements after the block silently do not — a program that prints
+    the right numbers and exits 1 where CPython exits 0.
+    """
+    spelled = expr_spelling(expr)
+    return (
+        f"{fn.name}: `with {spelled} as …` constructs {struct_def.name} so that "
+        f"`__exit__` returns `{field}`, and the value this call gives `{field}` "
+        f"is TRUE. CPython reads a truthy `__exit__` as SUPPRESSING the "
+        f"exception the `with` body raises, and then continues after the block; "
+        f"this path has no unwinder, so the `raise` leaves the process with "
+        f"status 1 once the cleanup has run — every visible line would match and "
+        f"the statements after the block would silently not run. Refused rather "
+        f"than built. Construct the manager so `{field}` is false, take the "
+        f"`raise` out of the block, or let the exit leave the process."
     )
 
 

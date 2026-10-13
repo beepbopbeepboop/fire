@@ -29,10 +29,47 @@ wrong way. `return ""`, `return 0.0`, `return 0`, `return False` and `return
 None` all still lower. Pinned by `test_formal_with.py`'s truthy-string and
 truthy-float REFUSAL rows and their falsy siblings
 (`an_exit_returning_an_empty_string_still_runs_the_protocol`,
-`an_exit_returning_zero_point_zero_still_runs_the_protocol`). **§2's computed
-case is untouched and is still the whole of what is left.**
+`an_exit_returning_zero_point_zero_still_runs_the_protocol`).
 
+**Update 2026-10-13 (`work/formal378-docs`): the FOLDABLE half is now joined by
+the decisive COMPUTED one, and §2's own shape is refused rather than built
+wrong.** The declaration-level gate (`context_exit_returns_truthy`) cannot see
+`return self.quiet`, because the value that decides the truthiness is an
+argument of the CONSTRUCTION rather than a literal in the method — but that
+argument is AT THE SITE, so a site-level reader decides it:
+`model.context_exit_suppression_at_site(struct, expr)` reads the field `__exit__`
+returns and the argument this construction gives it (the field's positional
+slot, or the keyword naming it), folds the value with the ONE truthiness reader
+(`_literal_return_truthiness`, float arm included, so the site gate and the
+declaration gate cannot disagree about what "true" means), and reports the FIELD
+when it is provably TRUE. `formal/build.py::_one_with_item` refuses that site
+when the body can actually RAISE — a truthy `__exit__` is consulted only on an
+exception exit, so a non-raising body is already faithful and keeps its
+lowering.
 
+Measured, both architectures, on §2's own program with `Suppressor(1)`: it used
+to BUILD, print `body 7`, never print `after` and exit 1 where CPython exits 0.
+It is now refused, naming the field and the construction. Pinned by
+`test_formal_with.py`:
+`a_computed_exit_the_site_makes_truthy_is_refused_by_name`,
+`a_computed_exit_made_truthy_by_a_keyword_is_refused_the_same_way`, and the two
+ANSWERED boundaries the refusal must not cross —
+`a_computed_exit_the_site_makes_falsy_still_runs_the_protocol` (`Quiet(0)`, so
+CPython does not suppress and the exception still propagates) and
+`a_computed_truthy_exit_still_lowers_when_the_body_cannot_raise`.
+
+**What is STILL open, and it is the true root cause rather than a wider fold.**
+The reader only decides a field whose slot THIS construction fills with a
+FOLDABLE value, and it reads the construction INLINE (`with Quiet(1) as v:`): a
+manager whose `__exit__` returns a field bound from a CALL, from a parameter,
+from a default, from another field, or from a `q = Quiet(1)` binding the `with`
+only names still builds and still suppresses silently, and a struct that
+declares `__init__` is not read at all —
+binding a parameter to a field in a body the reader does not follow is how a
+plausible constant gets invented, which is the fabrication this tree refuses
+everywhere. Honouring the suppression rather than refusing the decidable case is
+still §4's status word plus resume edge, and it is still the last step. §2's
+computed case is therefore decided one increment further out and is not closed.
 
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of
 the gate: `model.context_exit_returns_truthy` asks "does some `return` in
@@ -137,8 +174,12 @@ this one is the smaller of the two and is the one to build first.
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py \
         an_exit_returning_true_is_refused_as_a_suppression_it_cannot_perform \
         an_exit_returning_one_is_refused_for_the_same_reason \
-        an_exit_returning_false_still_runs_the_protocol
+        an_exit_returning_false_still_runs_the_protocol \
+        a_computed_exit_the_site_makes_truthy_is_refused_by_name \
+        a_computed_exit_the_site_makes_falsy_still_runs_the_protocol \
+        a_computed_truthy_exit_still_lowers_when_the_body_cannot_raise
 
-§1's two refusals and §3's falsy boundary. The `nullcontext` consumer that §3 is
+§1's two refusals, §3's falsy boundary, and the site-level computed gate added
+2026-10-13 (the truthy site refusal and the two boundaries it must not cross). The `nullcontext` consumer that §3 is
 about is `python3 tools/memslot.py --gb 8 --label t -- python3
 test_formal_core_hostmods.py ctx` (three CPython pairs, both backends).
