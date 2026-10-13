@@ -7,6 +7,27 @@ This is the wave note for three modules written (`formal/hostmods/{traceback,
 signal,operator}.mojo`) and it is the queue for everything the wave could not
 write, which is most of what is left.
 
+**Status 2026-10-12 (`work/formal329-docs`): the sibling ranking this doc
+pointed at is DELETED, folded in here.** That ranking
+(`FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`)
+was the `glob`-wave ranking, and every item in its queue has closed: `glob`
+landed (42 of 50 files changed class, 0
+reached `pass`, 35 of the 42 landing on `cas.py:164`'s handler-arm refusal,
+`FORMAL_except_arm_is_never_emitted`); `shlex.quote` landed
+(`formal/hostmods/shlex.mojo`, `test_formal_shlex.py`, `quote` only — `split`
+/`join` answer a list or a generator); and `random` landed
+(`formal/hostmods/random.mojo`, `test_formal_random.py` — `seed` and
+`randrange` over a 624-word module-level state, 8 of 8 files changed class, 0
+passes), over the module-state premise that a module's OWN `global` has storage
+and survives across calls in one process. Its `types` "uses" tool defect was
+fixed in `6a7c36bb` (`_host_declared_names` was scanning `ast.parse(...).body`
+and stopping there, so a `SimpleNamespace` bound inside a module-level `try:`
+read as pure closure). Its remaining rows — `zlib` (a DEFLATE project),
+`collections` (claimed) and the type factories (`types`/`copy`/`datetime`/
+`resource`, each with its own doc) — are the six capabilities §3 below already
+names per row, so nothing was lost by folding it in: this document is the wall
+tool's reference and the ranking was its narrower first half.
+
 **Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
 §3 has been re-measured on this tree by it. The queue itself is unchanged: 20
 names, six capabilities, and every one of them still a project rather than a
