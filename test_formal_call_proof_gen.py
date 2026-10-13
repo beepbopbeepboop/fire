@@ -2611,6 +2611,37 @@ class TestCallProofs(unittest.TestCase):
                "`RET`: the return address map is built and never read, so the "
                "callee's `ret` ends the path instead of returning")
 
+    def test_the_block_start_sequence_side_condition_is_proved_not_rfl(self):
+        """`runs_cons_seq`'s side condition for a block's FIRST step is not a
+        bare `rfl`.
+
+        That condition is `(qT0 st).pc = st.pc` (`qS0 st` is `st` by the
+        generated def), which a `rfl` proves in principle -- but on
+        `Arm64State` (36 fields) Lean's defeq walk of that projection can
+        exhaust `maxRecDepth` (100000) when the step's record update is on `sp`
+        with a large `UInt64.ofNat` immediate.  That is the measured
+        `same_image_leaf` block b3 and `mod_by_var` block 6 red (`add sp, sp,
+        #32, lsl #12`) the fix is for: the condition is discharged by
+        `first | (simp only [qT0, qS0] <;> done) | rfl`, which reduces the
+        projection without the deep walk and still closes every case the bare
+        `rfl` closed.
+
+        Read as TEXT rather than through Lean, because the Lean half is
+        `TestSameImageCallLean`/`TestExternCallTheRunDoesNotReach` and both
+        skip without a built `lib/ProofLib.olean`; this row holds on every run,
+        so a revert to the bare `rfl` cannot land unnoticed.
+        """
+        with open(self.proofs["same_image_leaf"]) as f:
+            text = f.read()
+        self.assertIn(
+            "(by first | (simp only [", text,
+            "the block-start `runs_cons_seq` side condition is a bare `rfl` "
+            "again, which is the shape that exhausted `maxRecDepth` on a block "
+            "whose first step updates `sp` by a large immediate")
+        self.assertNotIn(
+            "0 hs0 rfl", text,
+            "a block-start `runs_cons_seq` is discharged by a bare `rfl` again")
+
     def test_a_second_call_site_into_the_same_image_is_still_refused(self):
         """The boundary of the fix, and it is a boundary of the MAP.
 
