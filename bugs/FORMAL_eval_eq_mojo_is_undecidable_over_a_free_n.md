@@ -1,5 +1,39 @@
 # An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable
 
+**Status 2026-10-12 (`work/formal299-docs`): three of this file's own bridge
+PROGRAMS were RED, and the cause was NOT the `eval_eq_mojo` tactic — it was the
+value-flow proof's memory ADDRESSES.** `test_formal_eval_eq_mojo_bridge.py` was
+4-failures on this tree. Three were `ifonly`, `condassign` and `elif3` — the
+"`if` on a comparison and nothing else" family this document's PROGRAMS were
+built from — and Lean's verdict was not `` `simp` failed `` at all: it was
+
+```
+Tactic `rewrite` failed: Did not find an occurrence of the pattern
+  mem_read_u64 (mem_write_u64 (mem_write_u64 ?m (s_0.sp - 32 - 16) …) …)
+in the target expression
+  … (s_0.sp - 131072 - 16) …
+```
+
+The prologue reserves the container budget as `sub sp, sp, #131072`, which
+`_emit_imm_shift12` emits as the SCALED form `sub sp, sp, #32, lsl #12`. The
+step model reads `sh` (`ProofLib.arm64_ext_imm12`), but the four Python address
+trackers that build those `mem_read_*` terms (`_frame_ldp_addrs`,
+`_frame_read_addrs`, `_hcond_mem_rws`, `_sp_stores`) read `imm12` alone, so the
+rewrite named `sp - 32` for an image whose `sp` is `sp - 131072`. One decoder,
+`_ext_imm12`, mirrors the Lean helper and the four trackers call it. Measured:
+the three rows go green, and `test_formal_call_proof_gen.py` 9 → 8 (the
+narrow-typed-parameter `sgt8` example's rewrite finds its pattern again).
+The fourth failure was a stale spill row and is re-measured separately — it is
+about the container scratch, not this document.
+
+**This is a different theorem from the one this document is about**, and the
+distinction matters: `eval_eq_mojo` is the AST bridge, and what failed here is
+the `hcond`/`hsid` value-flow proof's addresses. It is recorded because this
+file's PROGRAMS are the family it broke, not because the `eval_eq_mojo` class
+below moved. **It did not move**: the deep-program `simp` exhaustion is exactly
+where §"Status 2026-10-05 (`work/formal27-3`)" left it, items 1 and 2 are still
+the options, and the chain of per-statement `have`s is still unmeasured.
+
 **Status 2026-10-05 (`work/formal19-3-r2`): the Status section's central
 conclusion is WRONG, and it was measured wrong because of a defect in the
 harness this doc's own reproduce command runs through — now fixed. Read
