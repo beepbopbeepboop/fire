@@ -92,7 +92,7 @@ from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
-    _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
+    _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime, _gmi_tuple_target_globals,
     _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_imported_global_homes, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
@@ -11295,6 +11295,23 @@ def gen_module_impl(self, stmts):
                 if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
                 _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
+        elif isinstance(_scan_stmt, AssignStmt):
+            # An unpacking target (`A, B = ...`): one global per bound name,
+            # typed from its own element when the RHS is a same-shaped
+            # literal and as the int64_t box otherwise. See
+            # `_gmi_tuple_target_globals`.
+            for _ttg in _gmi_tuple_target_globals(_scan_stmt):
+                _gname = _as_str(_ttg[0])
+                _ttv = _ttg[1]
+                if _gname in _pre_declared_globals:
+                    continue
+                _pre_declared_globals.add(_gname)
+                if _gname not in self._global_to_module and _scan_own:
+                    self._global_to_module[_gname] = _phase17_mod
+                if _ttv is not None:
+                    _phase17_infer_global_type(_gname, _ttv, _scan_own)
+                else:
+                    _phase17_set_gtype(_gname, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
             _pre_declared_globals.add(_scan_stmt.name)
             if _scan_stmt.name not in self._global_to_module:
@@ -13112,6 +13129,23 @@ def gen_module_impl(self, stmts):
                 _declared_globals[gname] = True
                 _gscan_declare_global(gname, stmt.value)
                 _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
+        elif isinstance(stmt, AssignStmt):
+            # The unpacking twin of the IdentExpr branch above; the Phase 1.7
+            # scan's identical branch is the other half (both read
+            # `_gmi_tuple_target_globals`, so they agree on the names).
+            for _ttg in _gmi_tuple_target_globals(stmt):
+                gname = _as_str(_ttg[0])
+                _ttv = _ttg[1]
+                if gname in _declared_globals:
+                    continue
+                _declared_globals[gname] = True
+                if _ttv is not None:
+                    _gscan_declare_global(gname, _ttv)
+                    _declared_global_inits[gname] = _gmi_global_init_code(_ttv)
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
         elif isinstance(stmt, VarDecl) and _as_str(stmt.name) not in _declared_globals:
             _vd_gname = _as_str(stmt.name)
             _declared_globals[_vd_gname] = True

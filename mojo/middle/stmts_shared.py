@@ -260,6 +260,15 @@ def _assign_target(gen, tgt, et, ev):
     plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
     nested tuples by indexing the inner iterable."""
     if isinstance(tgt, gimple_ctypes.IdentExpr):
+        if (gen._in_toplevel_gen and tgt.name not in gen.var_types
+                and tgt.name in gen._global_var_types):
+            # A module-level unpacking (`A, B = ...` at the top level) binds
+            # module GLOBALS: `_write_dest` routes the store to the globals
+            # struct, and a `_toplevel` local of the same name would only
+            # shadow nothing. The value is coerced to the field's own C type.
+            _gdt = gen._global_c_decl_types.get(tgt.name) or gen._global_var_types[tgt.name]
+            gen._safe_coerce_emit(et, _gdt, ev, gen._write_dest(tgt.name))
+            return
         if tgt.name not in gen.var_types:
             hint = gen._inferred_var_types.get(gen.current_func_name, {}).get(tgt.name) \
                 if hasattr(gen, '_inferred_var_types') else None

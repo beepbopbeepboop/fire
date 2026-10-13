@@ -1487,6 +1487,46 @@ def _cpp_method_receiver_name(m) -> str:
     return _method_receiver_kind(m)
 
 
+def _gmi_tuple_target_globals(stmt) -> list:
+    """`[(name, element value or None)]` for a module-level UNPACKING
+    assignment (`A, B = 1, 2` / `OP_X, OP_Y = range(2)` / `[a, b] = f()`),
+    one row per bound name, flattened through nested target groups; `[]` for
+    any other statement.
+
+    The element value is the matching element of a same-shaped tuple/list
+    LITERAL right-hand side, and None when the RHS is anything else (its
+    elements are only known at run time). Both global scans ask this one
+    function, so they agree on which names an unpacking binds -- which is
+    the reason it exists: neither scan saw an unpacking at all, so its names
+    got no module-global field, and the top-level code bound them as LOCALS
+    of `_toplevel`. Every function reading one then read an undeclared name
+    as 0; the regex compiler's `OP_CHAR, ..., OP_REPEAT = range(7)` made
+    every compiled regex program a table of opcode 0."""
+    out = []
+    if not isinstance(stmt, AssignStmt):
+        return out
+    tgt = stmt.target
+    if not (isinstance(tgt, TupleExpr) or isinstance(tgt, ListExpr)):
+        return out
+    _gmi_tuple_target_rows(tgt, stmt.value, out)
+    return out
+
+
+def _gmi_tuple_target_rows(tgt, value, out: list) -> None:
+    elems = tgt.elements
+    vals = None
+    if ((isinstance(value, TupleExpr) or isinstance(value, ListExpr))
+            and len(value.elements) == len(elems)):
+        vals = value.elements
+    for i in range(len(elems)):
+        e = elems[i]
+        v = vals[i] if vals is not None else None
+        if isinstance(e, IdentExpr):
+            out.append((_as_str(e.name), v))
+        elif isinstance(e, TupleExpr) or isinstance(e, ListExpr):
+            _gmi_tuple_target_rows(e, v, out)
+
+
 def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
