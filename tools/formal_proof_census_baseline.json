@@ -640,26 +640,26 @@
   },
   "fact": {
    "arch": "arm64",
-   "cached": true,
+   "cached": false,
    "decide_sites": {
     "bv_decide": 6,
     "native_decide": 835
    },
    "decide_total": 841,
-   "lean_cpu_s": 227.7,
-   "lean_peak_gb": 2.91,
-   "lean_wall_s": 222.3,
+   "lean_cpu_s": 133.3,
+   "lean_peak_gb": 3.27,
+   "lean_wall_s": 77.2,
    "n_admitted": 0,
    "n_sorries": 0,
-   "peak_gb": 0.06,
+   "peak_gb": 3.27,
    "phase": "check",
    "proof_lines": 5574,
    "reason": "fact_proof.lean:4858:16: error: Tactic `rfl` failed: The left-hand side",
    "source_sha256": "b2bbaf519f24c780c4ff33d73400b42a72b024c512007f65c7f0e69a38360606",
    "status": "lean-rejected",
    "stem": "fact",
-   "timed_on": "2026-10-05",
-   "wall_s": 0.5
+   "timed_on": "2026-10-13",
+   "wall_s": 155.0
   },
   "fib": {
    "arch": "arm64",
@@ -2083,5 +2083,5 @@
  "tag": "formal-proof-census-v2",
  "time_factor": 2.0,
  "timed_rows": 64,
- "written": "2026-10-13T10:00:33Z"
+ "written": "2026-10-13T10:12:25Z"
 }
