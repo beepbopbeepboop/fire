@@ -30753,12 +30753,38 @@ def comprehension_element_is_flat_container(element) -> bool:
     distinct outer lists over the same elements. Only a container the element
     position itself BUILDS is the defect.
 
-    The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
+    **A nested comprehension is one of those flat containers, and the copy
+    works for it for a structural reason rather than by luck.** A nested
+    comprehension's RESULT blob is reserved BEFORE its generators are walked —
+    both emitters reserve it first and then evaluate each iterable — so the
+    result sits at the START of the element's own footprint, exactly where a
+    literal's single blob sits. The caller's `memcpy` copies from that start,
+    so the destination slot holds a copy of the nested result, and the pointer
+    `_compr_append_elem` appends is that copy. That is why the relocation the
+    refusal used to ask for (turning the nested result's `res_offset` into a
+    run-time register) is NOT needed for this shape: the nested result is
+    emitted at its own scratch offset and then COPIED, the same way a literal
+    is.
+
+    What the nesting changes is the recursion, not the copy. A nested result
+    is a flat blob of WORDS only when the nested comprehension's own payload
+    builds no container — a word-valued payload lands raw words, while a
+    payload that opens a container (a literal, a deeper comprehension, a call)
+    lands the ADDRESS of a blob whose storage the NEXT outer iteration reuses,
+    the same aliasing one level down. So the payload is checked with the same
+    `_expr_builds_a_container` the literal's children are checked with.
+
+    The shapes that still return False keep `comprehension_element_blob_refusal`:
+    a list of lists, a slice, a constructor call, and every non-literal,
+    non-comprehension expression. Those are the cases whose per-iteration
     materialisation needs the runtime blob base the refusal's own document
     describes.
     """
+    if isinstance(element, F.Comprehension):
+        payload = [element.element]
+        if element.kind == "dict":
+            payload.append(element.value)
+        return not any(_expr_builds_a_container(p) for p in payload)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False

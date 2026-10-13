@@ -3652,7 +3652,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         (`M.comprehension_element_is_flat_container`) and the same message, so
         the two architectures cannot materialise — or refuse — an element
         differently. RAX on entry holds the element's blob and on exit the
-        per-iteration copy `_compr_append_elem` appends.
+        per-iteration copy `_compr_append_elem` appends. The element may be a
+        flat container literal or a nested comprehension whose own payload is
+        word-valued: `_emit_comprehension` reserves the nested result BEFORE
+        walking a generator, so it is at this element footprint's start, where
+        RAX points.
 
         `i` is the result blob's count word (elements appended so far), the
         destination is `array_base + i * bytes_`, and the copy is `memcpy`,

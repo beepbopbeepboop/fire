@@ -17413,11 +17413,19 @@ COMPREHENSION_ELEMENT_CASES = [
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
-    # The rows after them are the shapes whose per-iteration materialisation
-    # needs a runtime blob base and is still refused (see
-    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
-    # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
-    # anything else fails the case.
+    # A NESTED comprehension is a flat container too, and the same copy
+    # materialises it: both emitters reserve the nested result blob BEFORE they
+    # walk a generator, so it sits at the START of the element's footprint —
+    # exactly where a literal's blob sits — and the copy lands a per-iteration
+    # copy of the nested result in slot `i`. The nested payload has to be
+    # word-valued (a nested literal or a deeper comprehension inside it is the
+    # unsound shape and stays refused), which is the recursion `_expr_builds_a_container`
+    # already answers. See
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`.
+    # The rows after it are the shapes still refused: a list of lists, a dict
+    # whose VALUE allocates, and a nested comprehension whose own payload opens a
+    # container. The refusal needle is the CONSTRUCT and not the remedy, so a
+    # refusal about anything else fails the case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -17445,16 +17453,28 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which is the reproducer and was the case the refusal
+    # named as exiting 1 rather than merely answering wrongly. It is
+    # materialised by the same copy now, because the nested result blob is at
+    # the element footprint's start: `v[i]` reads `r[i]`, so a copy that put all
+    # three iterations' results in slot 0 would answer `11 11 11`.
+    ("a_nested_comprehension_as_the_element_is_per_iteration",
      "def main() -> Int:\n"
-     "    var s = 0\n"
-     "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
-     "        s = s + v[0]\n"
-     "    printf(\"%d\", s)\n"
+     "    var r = [[x + y for x in [1, 2]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][1], r[2][1])\n"
      "    return 0\n",
-     "refuse:the element `[…] for …` opens a container", None),
+     0, "12 22 32"),
+    # …and the boundary the nested acceptance does NOT cross: a nested
+    # comprehension whose OWN element opens a container writes the ADDRESS of
+    # that inner blob into the nested result, and the inner blob is rebuilt at
+    # the same scratch offset on the next outer iteration — so a shallow copy of
+    # the nested result would share it. The recursion refuses it by name.
+    ("a_nested_comprehension_whose_element_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[x] for x in [1, 2]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:opens a container", None),
     # The DICT half: the VALUE opens the container, and it is the shape the
     # `nested_comprehension_in_a_generator_iterable` row used to carry as its
     # fourth case — so this row is that coverage, strengthened from "builds and

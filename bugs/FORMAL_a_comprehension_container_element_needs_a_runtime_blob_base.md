@@ -5,21 +5,34 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
-element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
+**Status: the FLAT-container half of the relocation has LANDED (2026-10-06) and
+now covers the NESTED comprehension too (2026-10-13), on BOTH backends; the
+runtime-blob-base half has not and is NOT needed for that shape.** A
+comprehension whose element is a list / tuple / set / dict LITERAL with no
+nested container-building sub-expression is materialised per iteration: the
+element's blob is copied into a slot of a `cap`-sized array indexed by the
+result count, so the aliasing is gone AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
 the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
 is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+copy (see "What landed 2026-10-06" below).
+
+**The NESTED comprehension — this document's own reproducer — is a flat
+container too, and the same copy materialises it (2026-10-13, "What landed
+2026-10-13" below).** Both emitters reserve the nested result blob BEFORE they
+walk a generator, so it sits at the START of the element's footprint, exactly
+where a literal's blob sits; the caller's `memcpy` then copies it into slot `i`
+just as it does for a literal, and `_compr_append_elem` appends the copy. So the
+relocation the rest of this document describes — turning the nested result's
+`res_offset` into a runtime register — is NOT needed for this shape. What the
+nesting adds is the RECURSION, not the copy: the nested payload has to be
+word-valued (`_expr_builds_a_container` decides it), because a payload that opens
+its own container writes that blob's ADDRESS into the nested result and the blob
+is rebuilt at the same scratch offset next outer iteration. What is STILL refused
+is a list of lists, a slice, a constructor call, and a nested comprehension whose
+own payload opens a container. Read "What landed" first; the paragraphs under it
+price the shapes that remain refused, and the "what the obvious fix actually is"
+relocation is now needed only for THOSE.
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
@@ -63,6 +76,50 @@ comprehension's element site reserves through the ONE sequential frame ledger
 (`_reserve_blob` against `_list_cursor`), and it runs once at COMPILE time while
 running N times at RUN time — so any reservation it makes is one allocation for
 N iterations. Measured on both architectures.
+
+## What landed 2026-10-13: the NESTED comprehension is per-iteration, and the runtime base is not needed for it
+
+**The reproducer in the table above now answers CPython's answer on both
+backends, with no relocation.** The insight is structural and was already true of
+the emitters: `_emit_comprehension` reserves the result blob BEFORE it emits any
+generator (`formal/arm64_codegen.py`'s `_emit_comprehension` reserves `offset`
+and only then calls `_emit_compr_gen`, which is where an iterable is evaluated;
+`formal/x86_64_codegen.py`'s does the same). So a nested comprehension's result
+is at the START of the element's own ledger footprint — the exact position a
+literal's single blob occupies — and the `_materialize_compr_element` copy that
+already exists lands a per-iteration copy of the nested result in slot `i`
+without ever recomputing a base. `comprehension_element_is_flat_container`
+(`formal/model.py`) gained the nested arm; neither emitter changed.
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | **`63`** |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, `r[i][1]` | `12 22 32` | refused | **`12 22 32`** |
+| `[[[x] for x in [1, 2]] for y in [10, 20, 30]]` (payload opens a container) | — | refused | refused (unchanged) |
+| `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused (unchanged) |
+| `{k: [v for v in [1, 2, 3]] for k in [1, 2]}` (a dict VALUE that allocates) | — | refused | refused (unchanged) |
+
+**What the nesting adds is the RECURSION, not the copy.** The nested result is a
+flat blob of WORDS exactly when its own payload builds no container: a
+word-valued payload (`x + y`, a bare name) lands raw words, while a payload that
+opens a container (`[[x] for x in …]`, a literal, a call) lands the ADDRESS of a
+blob whose scratch storage the next outer iteration reuses. So the nested payload
+is checked with the same `_expr_builds_a_container` the literal's children are
+checked with, and the third row above is the boundary that keeps the recursion
+honest.
+
+**The relocation in "What the obvious fix actually is" is now owed only by the
+shapes that remain refused** — a list of lists, a slice, a constructor call, and
+a nested comprehension whose payload builds a container. Those carry an inner
+blob's ADDRESS and so a byte copy cannot make them independent; the nested
+comprehension did not, which is why the copy reached it and they are still
+refused.
+
+**Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`):
+`a_nested_comprehension_as_the_element_is_per_iteration` reads `r[i][1]` on both
+architectures (the content, so an aliasing defect cannot hide behind a count),
+and `a_nested_comprehension_whose_element_opens_a_container_is_refused` is the
+negative that a predicate which accepted every `Comprehension` would fail.
 
 ## What landed (2026-10-05): the refusal, and the ledger measurement that asks it
 
@@ -173,8 +230,13 @@ store. So relocating it means `res_offset` stops being a compile-time constant
 and becomes a **register holding a run-time address**, and every one of those
 recomputes has to read that register instead of calling `_emit_list_base`.
 
-**That is the whole of what is left, and it is not a patch.** Concretely, on
-each backend:
+**"What landed 2026-10-13" supersedes the third row of that table.** The nested
+comprehension did NOT need the relocation: its result is at the element
+footprint's start, so the copy reaches it. Steps 1-3 below are owed by the
+shapes whose element carries an inner blob's ADDRESS and so cannot be made
+independent by a byte copy — a list of lists, a slice, a constructor call, and a
+nested comprehension whose payload builds a container. **That is what is left,
+and it is not a patch.** Concretely, on each backend:
 
 1. `_emit_comprehension` must be able to say "my result lives at a slot of my
    parent's array" and then keep that address in a register for the whole walk,
@@ -197,7 +259,11 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
   disagree about a comprehension's result address;
 * the two rows it did fix are covered by the OTHER doc's table as cases a fix
   must not break, and they only pass *because* the nested row is broken in the
-  same build — so there is no partial landing that is a partial fix;
+  same build — so there is no partial landing that is a partial fix. **That
+  argument is superseded (2026-10-13): the nested row did not need this
+  relocation at all, and the per-iteration COPY already reaches it, so the
+  partial landing this bullet says is impossible has landed** (see "What landed
+  2026-10-13");
 * one real defect in it is worth recording: `_blob_est` counts **elements**, and
   every blob is `[count][element…]`, so a slot sized `8 * _blob_est(...)` is one
   word too small and the third iteration's count header overwrote the second
@@ -206,9 +272,12 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
 
 ## The exact next step
 
-Steps 1-3 above, on **both** backends, with the whole of the other doc's table
-as the acceptance set — and in particular its three rows that a fix must NOT
-break, which are the reason a partial landing is not one:
+**The nested comprehension is DONE (2026-10-13), so what is left is the
+address-carrying shapes only** — a list of lists, a slice, a constructor call,
+and a nested comprehension whose payload builds a container. For THOSE, steps
+1-3 above, on **both** backends, with the whole of the other doc's table as the
+acceptance set — and in particular its three rows that a fix must NOT break,
+which are the reason a partial landing is not one:
 
 * one outer iteration (`for y in [10]` → 11),
 * an element that does not depend on the loop variable (→ 3, correct today only
