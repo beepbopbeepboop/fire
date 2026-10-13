@@ -13,6 +13,30 @@ below (one discoverable convention; an EH runtime or not) are unchanged design
 projects, and item 1's cost is three host modules' worth of churn, which is not
 this document's to spend.
 
+**Status 2026-10-08 (`work/formal193-docs`): the 10-07 records above are
+re-verified, and the 2026-09-30 measurements under "What I ran" are corrected
+where they have gone stale.** Read the rest of this file as the record of
+2026-09-30, with the corrections below.
+
+- **(c) the same `try`/`except` with a body is refused whether or not anything
+  is raised**, so the program that measured "`try` is lowered and works" under
+  "What I ran" no longer runs; the positive half survives in
+  `test_formal_exceptions.py` as `an_except_pass_arm_still_builds` and
+  `else_runs_when_the_body_completed`.
+- **(d) the arm64 flush divergence is GONE** — a `raise 7` after a `printf` now
+  prints `before@@` and exits 1 on arm64 as it always did on x86-64, measured
+  that session on both backends; the 10-07 sections above already record the
+  fix and the deletion of the divergence's own document.
+- The handler-arm refusal the 10-07 sections record is confirmed by name on
+  both backends; the three refusal rows it stands on are
+  `an_except_arm_with_a_print_is_refused_by_name`,
+  `an_except_as_binding_is_refused_by_name` and
+  `a_bare_except_with_a_body_is_refused_by_name`.
+
+Next step 3 remains DONE exactly as the 10-07 sections and the "The next
+step" item below record it; steps 1 and 2 (one discoverable convention; an
+EH runtime) are unchanged design projects and are not this update's.
+
 **Status:** open, and it is a LIMIT OF THE TARGET rather than a defect — but it
 is load-bearing for every module under `formal/hostmods/`, and until it had a
 document `formal/hostmods/json.mojo` cited a file that did not exist. Found

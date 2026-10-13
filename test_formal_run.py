@@ -6392,6 +6392,17 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # The CONTROL for the `printf("%d", <container>)` refusals in `REFUSAL_CASES`:
+    # reading a NUMBER out of a container is a program this path answers, and the
+    # new row must not turn the whole construct into a refusal. `len(xs)` is an
+    # integer and `xs[0]` is an element; both are what the refusal message tells a
+    # reader to print instead, so a rule that fired on the presence of a list
+    # rather than on the operand's own kind would fail this row.
+    ("printf_d_of_a_list_length_and_element_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [11, 22, 33]\n"
+     "    printf(\"%d %d\", len(xs), xs[1])\n"
+     "    return 0\n", 0, "3 22"),
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.
@@ -22345,6 +22356,33 @@ REFUSAL_CASES = [
      "def main(n: Int) -> Int:\n"
      "    return f(n)\n",
      "refuse:does not fold to a compile-time constant", None),
+
+    # ── A NUMBER CONVERSION OF A CONTAINER ─────────────────────────────────────
+    #
+    # `printf("%d", xs)` for a list built GREEN, linked, ran, and printed the
+    # blob's heap ADDRESS — measured `v=1809329920` on arm64 and `v=1870638832`
+    # on x86-64 from the same source on two machines — exit 0 and nothing on
+    # stderr, where CPython raises `TypeError`. It is the mirror of the `%s`-of-
+    # an-integer rows in `PRINTF_TEXT_CASES`: that one is the conversion that
+    # DEREFERENCES, this one is the operand whose VALUE is a pointer. The rule
+    # and the words are `model.printf_container_conversion_refusal`, asked by
+    # both emitters through `model.printf_format_refusal`, so a `refuse:` row
+    # asserts the two architectures produce the SAME sentence. The LOCAL
+    # spelling of this construct is pinned by `CONTAINER_REFUSALS` (list, dict,
+    # bytearray); the row that the merged tree took from this group is the
+    # PARAMETER shape, which that group does not cover:
+    # The same construct where the container arrives through a PARAMETER, so a
+    # rule that only looked at a constructor binding would pass the local rows
+    # and fail this one. `show([1, 2, 3])` keeps the call site's kind through
+    # `param_kind`, which `ValueKinds` already reads for `len`/`if`, and the
+    # refusal does not care how the name got its kind.
+    ("printf_d_of_a_list_parameter_is_refused",
+     "def show(xs):\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n"
+     "def main() -> Int:\n"
+     "    return show([1, 2, 3])\n",
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
 ]
 
 
