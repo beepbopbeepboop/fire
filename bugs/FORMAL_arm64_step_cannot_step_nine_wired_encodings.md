@@ -2,18 +2,18 @@
 
 ## Status
 
-**RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
-claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
-produce a state the machine never reached — `WRONG`, not `NOSTEP` — and each has
-its own document now:**
+**RE-MEASURED 2026-10-05 (`work/formal52-docs`), and the two `WRONG` arms it
+found there are now FIXED (2026-10-07), so the two documents that used to sit in
+this table are deleted with their fix. Both were `lib/ProofLib.lean` changes the
+sweep measured as past a bounded worker's 8 GB ceiling; the sweep's own summary
+stands:**
 
-| defect | document |
+| defect | status |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | `FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | `FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **fixed 2026-10-07** (`5361903f`); pinned by `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess`'s `adds x11, x1, x15` row |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **fixed 2026-10-07** (`5361903f`); pinned by `TestUnsignedOffsetAccess`'s `lsl #12` and unshifted rows |
 
-Both are `lib/ProofLib.lean` and past a bounded worker's 8 GB ceiling, so they are
-written down rather than attempted. **Neither is in this file's `NOSTEP` table**,
+**Neither is in this file's `NOSTEP` table**,
 which is the generalisable half: this file's §5 is right that "the gap is the
 model is silent", and the two new defects are the OTHER failure — the model is
 *loud* and *wrong*, which is worse, and which no NOSTEP tally in this file can

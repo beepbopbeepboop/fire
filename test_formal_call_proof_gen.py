@@ -136,12 +136,17 @@ REFUSED = {
     "two_args": ("fn add2(a, b):\n    return a + b\n"
                  "fn main():\n    return add2(3, 4)\n",
                  "a two-argument callee: every argument must be modelled"),
-    "callee_chain": ("fn c(n):\n    return n\n"
-                     "fn b(n):\n    return c(n) + 1\n"
-                     "fn main():\n    return b(1)\n",
-                     "two call sites into the same image: `x30` at the callee's "
-                     "`RET` is then a property of the CALL PATH, and one return "
-                     "address does not serve two of them"),
+    # TWO calls to the SAME function, which is the boundary the return-address
+    # map has and a CHAIN (`main → b → c`, in `SAME_IMAGE_CALL`) does not: each
+    # callee here is entered once, but `helper` is entered from two sites, so
+    # `x30` at its `RET` is a property of the CALL PATH rather than a constant.
+    # A chain is two ENTRY points and one site each.
+    "two_sites": ("fn helper(n):\n    return n * 2\n"
+                  "fn main(x):\n    if x > 0:\n        return helper(x)\n"
+                  "    return helper(x + 1)\n",
+                  "two call sites into the same image: `x30` at the callee's "
+                  "`RET` is then a property of the CALL PATH, and one return "
+                  "address does not serve two of them"),
 }
 
 
@@ -215,6 +220,18 @@ SAME_IMAGE_CALL = {
         "    return helper(x)\n",
         "the same call with a conditional callee: generation is what is pinned "
         "here, and the cost boundary is the walk's path count, not the call"),
+    # A CHAIN: `main` calls `b`, and `b` calls `c`.  Every function is entered
+    # from exactly ONE site, so `x30` at each `RET` is still the constant
+    # `call_pc + 4` — the return-address map is a map, not one entry, and the
+    # walk nests a callee's return into its own caller's continuation.  What
+    # this does NOT cover is two sites to the SAME callee, which is `REFUSED`
+    # above and stays refused.
+    "same_image_chain": (
+        "fn c(n):\n    return n\n"
+        "fn b(n):\n    return c(n) + 1\n"
+        "fn main():\n    return b(1)\n",
+        "a chain of same-image calls: two call sites, one per callee, each "
+        "return address a constant of its own call"),
 }
 
 
@@ -390,7 +407,7 @@ class TestGeneratorSource(unittest.TestCase):
                       "`mojo` to every caller")
 
     def test_callee_models_are_defined_before_use(self):
-        defs = _models(REFUSED["callee_chain"][0], "main")
+        defs = _models(SAME_IMAGE_CALL["same_image_chain"][0], "main")
         for name in ("c_go", "b_go", "main_go"):
             self.assertIn(f"def {name}", defs,
                           f"{name} is called but never defined; Lean reports "
@@ -2353,25 +2370,27 @@ class TestCallProofs(unittest.TestCase):
                "`RET`: the return address map is built and never read, so the "
                "callee's `ret` ends the path instead of returning")
 
-    def test_a_second_call_site_into_the_same_image_is_still_refused(self):
+    def test_a_second_call_site_to_the_same_callee_is_still_refused(self):
         """The boundary of the fix, and it is a boundary of the MAP.
 
-        Two call sites means `x30` at the callee's `RET` is a property of the
-        CALL PATH rather than a constant, which is the whole of what the fix
-        buys; the refusal has to say so, and it has to say it instead of the
-        recursion arm's error about a program with no recursion in it.
+        TWO sites to one callee means `x30` at that callee's `RET` is a property
+        of the CALL PATH rather than a constant, which is the whole of what the
+        fix buys; a CHAIN (`main → b → c`, covered by `SAME_IMAGE_CALL`) is not
+        this shape — every function there is entered once.  The refusal has to
+        say so, and it has to say it instead of the recursion arm's error about
+        a program with no recursion in it.
         """
-        err = self.errors["callee_chain"]
-        self.assertIsNotNone(err, "callee_chain: expected a refusal, got a proof")
+        err = self.errors["two_sites"]
+        self.assertIsNotNone(err, "two_sites: expected a refusal, got a proof")
         self.assertNotIn("recursion argument bound", err,
-                         "callee_chain: the old recursion-only error "
+                         "two_sites: the old recursion-only error "
                          "misdescribes a program with no recursion in it")
-        self.assertIn("2 calls into the same image", err,
-                      f"callee_chain: the refusal must name the shape, so a "
+        self.assertIn("called from 2 sites", err,
+                      f"two_sites: the refusal must name the shape, so a "
                       f"reader can tell it from the one-call case that now "
                       f"proves: {err}")
         self.assertIn("return address", err,
-                      f"callee_chain: and it must say what is missing — a "
+                      f"two_sites: and it must say what is missing — a "
                       f"return address per call path: {err}")
 
     def test_a_two_argument_callee_is_refused_by_the_bridge(self):
@@ -2431,8 +2450,22 @@ class TestCallProofs(unittest.TestCase):
                          "the return address of a `BL` is the instruction after "
                          "it, and that constant is the whole mechanism")
 
-        got, why = plan(REFUSED["callee_chain"][0])
-        self.assertIsNone(got, "two call sites is not a constant")
+        # A CHAIN is followed: `main` calls `b`, `b` calls `c`, and each is
+        # entered from exactly one site, so each return address is its own
+        # constant and the map has two entries.
+        got, why = plan(SAME_IMAGE_CALL["same_image_chain"][0])
+        self.assertEqual(len(got or {}), 2,
+                         f"a chain of two same-image calls is two entries, not "
+                         f"a refusal: {why}")
+        for call_pc, ret_pc in (got or {}).items():
+            self.assertEqual(ret_pc, call_pc + 4,
+                             "every followed `BL` returns to the instruction "
+                             "after it, and that constant is the mechanism")
+
+        # TWO sites to the SAME callee is still refused: its `RET` would then
+        # have a return address that is a property of the CALL PATH.
+        got, why = plan(REFUSED["two_sites"][0])
+        self.assertIsNone(got, "two call sites to one callee is not a constant")
         self.assertIn("ONE return address does not serve them", why)
 
         # A callee that calls BACK INTO THE ENTRY is recursion the plan cannot

@@ -1,5 +1,47 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**Status 2026-10-13 (`work/formal336-docs`): STEP 2's CHAIN is LANDED — the walk
+follows a call FOREST, so `main → b → c` proves — and only TWO SITES TO THE SAME
+CALLEE, recursion, and the census remain.** What changed, and every piece is
+`formal/arm64_proof_gen.py` (no `lib/ProofLib.lean`, so it is landable by a
+bounded worker):
+
+* `_same_image_call_plan` now returns `{call_pc: call_pc + 4}` for EVERY call
+  whose callee is entered from exactly ONE site, whose call graph is acyclic,
+  whose target is a block start of the walk, and whose body contains no call
+  OUT of the image. A chain (`main → b → c`) is two such calls and is a MAP with
+  two entries, not the refusal `len(intra) > 1` used to be. What stays refused,
+  by name: a callee reached from two sites (its `RET` is then a property of the
+  call path), recursion including a callee that calls back into the entry, and
+  an out-of-image call inside a callee (the halt address is the entry's).
+* the return address is now a STACK (`ctx["ret_to"] = [None, ret_b, ret_c, …]`),
+  not a single value plus the caller's own. A callee's `RET` POPS it, so each
+  function returns to its OWN caller's continuation instead of to the entry's;
+  the old single value was right one level deep and made `b`'s `RET` in a chain
+  jump to `main` and `main`'s `RET` jump back to its own call site.
+* `generate_arm64_proof`'s "one halt address cannot discharge them" count now
+  counts calls OUT of the image, so a chain of three is not mis-refused.
+
+**Verified.** `test_formal_call_proof_gen.py`: `SAME_IMAGE_CALL`'s new
+`same_image_chain` is followed end to end (the FULL theorem, no call-boundary
+note — `TestCallProofs`), the plan test asks the chain for two entries and the
+two-sites shape for its refusal, and the whole non-Lean set is green (131 tests,
+only `TestNestedConditionFactSharing`'s pre-existing `hprior` red remains). The
+chain's GENERATED proof TYPECHECKS with 0 sorries — measured, `rc=0`, 5.3 GB —
+**but only with the generated file's `maxRecDepth 100000` raised**, because a
+PRE-EXISTING red
+(`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`) makes every
+proof that steps the ADD-immediate stack restore fail at the default limit,
+including the one-call `same_image_leaf`; that red is the blocker on the
+Lean-checked rows and NOT this change. `same_image_leaf`'s proof is byte-identical
+to `HEAD`'s, so the forest is behaviour-preserving for the shape that already
+worked.
+
+**What is left is step 3 (recursion, unchanged), the two-sites shape, and the
+census** (`tools/formal_proof_breadth.py --no-check`, a `formal_sweep`-class run
+this worker may not take). Everything below this paragraph is the record of how
+the question got here.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1
