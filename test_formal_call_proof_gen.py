@@ -2132,6 +2132,137 @@ class TestNestedConditionFactSharing(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestACompareWithTheImmediateOnTheLeft(unittest.TestCase):
+    """`if 0 == n:` must behave exactly like `if n == 0:` — on both layers.
+
+    Two independent defects made the immediate-on-the-left spelling unprovable
+    while the immediate-on-the-right one was fine, and each has its own
+    assertion here (`bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_
+    the_left_does_not_elaborate.md`):
+
+    1. **The CFG walk.** `_taken_dead`'s statically-dead-taken-arm shortcut
+       scans a branch's prefix for the register it tests holding a known
+       non-zero constant and closes the taken arm by `exact absurd hc_N hne_N`.
+       That is a `CBZ` statement: `r = w & 0x1f` is a register only for the
+       register-test branches, and `arm64_reg r ≠ 0` is the negation of a CBZ's
+       own `_condtxt` and of nothing else. On a `B.cond` the tested thing is the
+       FLAGS, `r` is the condition code, and the emitted `hne_N` is not the
+       negation of `hc_N : arm64_matches_condition … = true`, so Lean rejects
+       the proof with "Application type mismatch". The local `n = 3` pair below
+       is the one that leaves the tested register holding a constant.
+
+    2. **The `eval_eq_mojo` bridge.** A comparison is rendered twice — by
+       `_cmp_term_t` for the model and the `by_cases` split, and by `_expr_ast`
+       for the AST the bridge evaluates — and `0 = n` must come out spelled
+       `n = 0` in both: `simp` turns a hypothesis `0 = n` into the rewrite
+       `0 → n` and will not rewrite a variable to a numeral, so the bridge
+       cannot close. The parameter pair below is the one that reaches the
+       bridge; the assertion is that the emitted `ast` and `by_cases` are
+       normalised and that the two spellings reach the SAME verdict (this tree
+       has pre-existing failures on both, so parity and not `ok` is the claim).
+    """
+
+    FLAG_PAIR = {
+        "lit_right": ("def main() -> Int:\n"
+                      "    n = 3\n"
+                      "    if n == 0:\n"
+                      "        return 10\n"
+                      "    else:\n"
+                      "        return 20\n"),
+        "lit_left": ("def main() -> Int:\n"
+                     "    n = 3\n"
+                     "    if 0 == n:\n"
+                     "        return 10\n"
+                     "    else:\n"
+                     "        return 20\n"),
+    }
+
+    BRIDGE_PAIR = {
+        "param_right": ("def main(n: Int) -> Int:\n"
+                        "    if n == 0:\n"
+                        "        return 10\n"
+                        "    else:\n"
+                        "        return 20\n"),
+        "param_left": ("def main(n: Int) -> Int:\n"
+                       "    if 0 == n:\n"
+                       "        return 10\n"
+                       "    else:\n"
+                       "        return 20\n"),
+    }
+
+    @staticmethod
+    def _flags_branch_register_facts(proof):
+        """`[(bi, hc_statement, hne_line)]` for a register `hne` closing a
+        FLAGS branch — the shape whose two hypotheses do not have matching
+        types."""
+        conds = {}
+        for m in re.finditer(r"by_cases hc_(\w+) : (.*)$", proof, re.M):
+            conds[m.group(1)] = m.group(2).strip()
+        bad = []
+        for line in proof.split("\n"):
+            m = re.search(r"have hne_(\w+) : arm64_reg (\d+) \S+ ≠ 0", line)
+            if not m:
+                continue
+            stmt = conds.get(m.group(1))
+            if stmt is not None and "arm64_matches_condition" in stmt:
+                bad.append((m.group(1), stmt, line.strip()))
+        return bad
+
+    def test_a_flags_branch_is_never_closed_by_a_register_hne(self):
+        tmp = tempfile.mkdtemp(prefix="lit_flags_")
+        try:
+            for name, source in self.FLAG_PAIR.items():
+                path, err = _generate(tmp, source, name)
+                self.assertIsNone(
+                    err, f"{name}: the generator refused the program: {err}")
+                with open(path) as fh:
+                    proof = fh.read()
+                self.assertIn(
+                    "arm64_matches_condition", proof,
+                    f"{name}: the program lowered without a flags branch, so "
+                    f"this test would not be pinning what it says")
+                bad = self._flags_branch_register_facts(proof)
+                self.assertEqual(
+                    bad, [],
+                    f"{name}: a flags branch was closed by a register `hne` "
+                    f"(the two never type-match): {bad[:2]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_bridge_normalises_and_the_spellings_agree(self):
+        tmp = tempfile.mkdtemp(prefix="lit_bridge_")
+        try:
+            verdicts = {}
+            for name, source in self.BRIDGE_PAIR.items():
+                path, err = _generate(tmp, source, name)
+                self.assertIsNone(
+                    err, f"{name}: the generator refused the program: {err}")
+                with open(path) as fh:
+                    proof = fh.read()
+                # The AST and the bridge's split must both put the literal on
+                # the right, or the `if` in `evalFunc` and the `by_cases`
+                # hypothesis are two different terms.
+                self.assertIn(
+                    '(MojoExpr.binop "=" (MojoExpr.var "n") '
+                    '(MojoExpr.int (UInt64.ofNat 0)))', proof,
+                    f"{name}: the emitted AST did not normalise the literal to "
+                    f"the right of `=`")
+                self.assertIn(
+                    "by_cases h0 : (n = 0)", proof,
+                    f"{name}: the bridge split is not `(n = 0)`, so `simp` "
+                    f"cannot rewrite `n` in the `0 = n` spelling")
+                verdicts[name] = _check_proof(path)
+            left, right = verdicts["param_left"], verdicts["param_right"]
+            if left is not None and right is not None:
+                self.assertEqual(
+                    left[0], right[0],
+                    f"the two spellings reach different verdicts: left="
+                    f"{(left[1] or '').splitlines()[:1]}, right="
+                    f"{(right[1] or '').splitlines()[:1]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestStepOkDerivesFromStepResult(unittest.TestCase):
     """`*_step_ok_i` is the step-RESULT lemma of the same index, read as a
     corollary -- not a second reduction of `arm64_step`.

@@ -1414,10 +1414,38 @@ def _cmp_term_t(l: str, r: str, t, op: str) -> str:
     `ast` evaluator and the `CSET`-eq step all state, so the `by_cases`
     hypothesis would no longer be the test the model branch is on and the
     bridge goal would not close.  Signedness changes an ORDER, never identity.
+
+    **An EQUALITY is normalised so a literal is on the RIGHT.**  Equality is
+    symmetric, so `0 = n` and `n = 0` are the same proposition — but `simp`
+    turns a hypothesis `0 = n` into the rewrite `0 → n` (it will not rewrite a
+    variable to a numeral), so a `by_cases h : 0 = n` leaves `n` unreduced and
+    the bridge cannot close; with `n = 0` the same `h` rewrites `n → 0` and it
+    does.  This is the operand-order half of
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
+    elaborate.md`, normalised HERE rather than at each consumer so `_src`, the
+    `by_cases` list and the emitted `ast` cannot disagree about the spelling.
+    Only a bare literal (`0`, or the `UInt64.ofNat 0` this runs on before
+    `_norm_uint`) moves, so `a = b` for two variables — and every signed order,
+    which is NOT symmetric — is untouched.
     """
-    if op in ("=", "≠") or not cmp_signed(t):
+    if op in ("=", "≠"):
+        l, r = _literal_last(l, r)
+        return f"({l} {op} {r})"
+    if not cmp_signed(t):
         return f"({l} {op} {r})"
     return f"(({l} ^^^ {_SIGN64}) {op} ({r} ^^^ {_SIGN64}))"
+
+
+_LITERAL_RE = re.compile(r"^\(?(?:UInt64\.ofNat )?\d+\)?$")
+
+
+def _literal_last(l: str, r: str) -> tuple:
+    """`(l, r)` with a bare-numeral operand moved to the right, if exactly one
+    side is one.  `_LITERAL_RE` accepts both the spelling this is handed
+    (`UInt64.ofNat 0`) and the one `_norm_uint` leaves (`0`)."""
+    if _LITERAL_RE.match(l) and not _LITERAL_RE.match(r):
+        return r, l
+    return l, r
 
 
 _CMP_OPS = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
@@ -2671,8 +2699,19 @@ def _expr_ast(e, scope=None) -> str:
                 f"(`\"not\"`) is how `+` came to be evaluated as a negation")
         return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand, scope)}))'
     if isinstance(e, BinOp):
+        # An EQUALITY is normalised so a literal is on the RIGHT, matching
+        # `_cmp_term_t`'s spelling of the same comparison: `evalExpr` in
+        # `lib/ProofLib.lean` evaluates `binop "=" l r` as `l = r`, so if the
+        # `ast` kept the literal on the left while `by_cases` normalised it to
+        # the right (or vice versa) the bridge's `if` test and its hypothesis
+        # would be two different terms. Both generators share this builder, so
+        # the normalisation is one edit rather than one per backend.
+        left, right = e.left, e.right
+        if (_lean_op(e.op) in ("=", "!=")
+                and isinstance(left, Int) and not isinstance(right, Int)):
+            left, right = right, left
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
-                f'({_expr_ast(e.left, scope)}) ({_expr_ast(e.right, scope)}))')
+                f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
     if isinstance(e, Call):
         return (f'(MojoExpr.call "{_call_name(e)}" '
                 f'({_expr_ast(e.args[0], scope)}))')
