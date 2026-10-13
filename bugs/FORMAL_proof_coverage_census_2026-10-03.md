@@ -1,5 +1,31 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**§0.9d is new (2026-10-12, `work/formal315-docs`): §0.9c's regression is
+FIXED on this tree, and this census's own ratchet baseline is re-banked.** Both
+of §0.9c's reds are green here: `test_formal_proof_breadth.py` is 26 tests OK
+(including `test_a_census_that_does_not_ask_lean_says_so`) and
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 3
+tests OK. The reachability half is `formal/arm64_proof_gen.py`'s
+`_reached_without_a_condition`, which now carries `crossed` PER PATH instead of
+returning `False` on the first source conditional it meets anywhere in the CFG —
+so `formal/examples/count.mojo`'s halt is reached on the entry path the way the
+theorem's premise says. **§0.9c's text is kept below as the record of what was
+live when this census's numbers were taken; a reader who runs the suite today
+will not reproduce it.**
+
+**And the §0.8b ratchet's committed baseline had one stale row, which is now
+re-banked through the tool's own launcher.** `tools/formal_proof_census_baseline.json`'s
+`fact` row still recorded the pre-`ffe27e1a` program (`source_sha256 66e21e6…`,
+`proof_lines` 4284) against a tree whose `formal/examples/fact.mojo` hashes
+`b2bbaf…`, so the registered job `formal-proof-census-tool` was RED on `master`
+(`test_formal_proof_census.py::TestCommittedBaseline::test_each_row_is_tied_to_the_example_it_measured`).
+Measured and re-banked on this tree with one bounded Lean run through the
+census tool (`--only fact --remeasure --write-baseline`: 160.9 s wall, 3.24 GB
+peak, `lean-rejected` at `fact_proof.lean:4858:16`), so the row now describes
+the program the tree has and `test_formal_proof_census.py` is 61 tests OK (no
+regression). The two duplicate docs that filed this row — both titled after the
+same stale `fact` row — are deleted with the fix.
+
 **§0.9c is new (2026-10-07, `work/formal119-docs`): the INSTRUMENT's own test
 `test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` is
 RED on this tree, and it is a generator regression rather than a defect in the
