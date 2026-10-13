@@ -4355,6 +4355,20 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     # zero divisor and the guard's `_emit_exit` flushes — and `formal/examples/
     # mod_by_var.mojo` is the committed copy of this program.
     DIVISOR = "def mod_by_var(n):\n    d = 4\n    return n % d\n"
+    # The doc's anti-rot, and the reason it is a SOURCE CONDITIONAL rather than
+    # a straight line: `bfeec991` moved the stack guard's `RLIMIT_STACK` read
+    # into the PROLOGUE as a `BL getrlimit`, and `arm64_step` cannot step a `BL`
+    # whose target is outside `code`, so the walk halted there for every
+    # function.  A straight-line program got a `…_reaches_call_at_…` theorem
+    # instead of a value theorem, and one with a source `if` was refused
+    # outright ("the halt address … is behind a CONDITIONAL").  `70b76755` put
+    # the read back in the startup stub, below `func_offset`, so both halves are
+    # gone.  This row pins the conditional half; the `_program_extern_calls`
+    # assertion beside its test pins the "below the entry" half.
+    CONDITIONAL = ("def either(n: Int) -> Int:\n"
+                   "    if n == 0:\n"
+                   "        return 1\n"
+                   "    return 0\n")
 
     @classmethod
     def setUpClass(cls):
@@ -4363,7 +4377,8 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         cls.built = {}
         for name, src in (("plain", cls.PLAIN),
                           ("string", cls.RETURNS_A_STRING),
-                          ("prints", cls.PRINTS)):
+                          ("prints", cls.PRINTS),
+                          ("cond", cls.CONDITIONAL)):
             path = os.path.join(cls.tmp, f"{name}.mojo")
             with open(path, "w") as f:
                 f.write(src)
@@ -4561,6 +4576,47 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
+
+    def test_a_source_conditional_gets_its_value_theorem_back(self):
+        """The stack guard's `getrlimit` is off the walked path, both halves.
+
+        `bfeec991` moved the `RLIMIT_STACK` read into every arm64 prologue, and
+        `arm64_step` cannot step a `BL` out of the image, so the universal walk
+        halted at the guard's `getrlimit` for every function. Over the 93
+        `formal/examples`, that left **zero** value theorems: a straight-line
+        program generated a `…_reaches_call_at_…` theorem instead, and every
+        program with a source conditional was refused ("the halt address … is
+        behind a CONDITIONAL"). `70b76755` moved the read back into the startup
+        stub, below `func_offset`.
+
+        Asserted here as the text the generator emits, because the two failure
+        modes are both text: a `cond` proof that carries a reachability theorem
+        (or a `NO CONCRETE RUN TEST` note) is still the defect, even though the
+        file generates. The `getrlimit` BELOW the entry is asserted beside it,
+        which is why this is not vacuous — if the call moved back above the
+        entry it would be a program call and the value theorem would go again.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self._info("arm64", "cond")
+        entry = info.get("func_offset")
+        self.assertIsNotNone(entry)
+        stub = [c for c in info.get("extern_calls") or ()
+                if c.get("addr") is not None and c["addr"] < entry]
+        self.assertEqual([c["sym"] for c in stub], ["getrlimit"],
+                         "the startup stub's `getrlimit` is not below the "
+                         "entry any more, so it is on the walked path")
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the startup stub's `getrlimit` is being read as a "
+                         "call the PROGRAM makes")
+        text = self._text("arm64", "cond")
+        self.assertIn("theorem either_compiles_correctly_universal", text,
+                      "a program with a source conditional no longer gets its "
+                      "universal value theorem: the stack guard's `getrlimit` "
+                      "is back on the walked path")
+        self.assertNotRegex(text, r"theorem \w+_reaches_call_at_",
+                            "a reachability theorem is the failure mode this "
+                            "row exists for: the run is not proved to return")
+        self.assertNotIn("NO CONCRETE RUN TEST", text)
 
     def test_arm64_publishes_its_exit_flush_as_a_compiler_trap(self):
         """arm64's own trap is a `BL fflush`, and it must be published as one.
