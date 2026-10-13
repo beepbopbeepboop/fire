@@ -943,6 +943,15 @@ CAUSE_SAMPLES = [
      "print() is asked to render the value of g(…), and g returns nothing: "
      "CPython evaluates that call to `None` and prints `None`, and a value on "
      "this path is one 64-bit word with no way to say `no value`"),
+    # …and the RETURNED position of the same divergence, a SEPARATE cause rather
+    # than a variant: `def main(): return g()` returns `None` under CPython and
+    # the callee's leftover word here, and the two messages share no clause, so a
+    # single sample in the row above would leave this cause unreached. Cut from
+    # `formal/model.py::returnless_return_refusal`'s own f-string.
+    ("a returned value that is not a value: the callee returns nothing",
+     "main returns the value of g(…), and g returns nothing: CPython's `main` "
+     "returns `None` there, and a value on this path is one 64-bit word with no "
+     "way to say `no value`"),
     # A REAL message, not a constructed one: `test_llm/dumb_gemm.mojo` is
     # `[0.0] * (m * k)` three times over, and it is the file whose
     # "print() cannot classify" row this replaced. Pinned here so a rewording

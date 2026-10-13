@@ -592,6 +592,21 @@ CAUSES = (
     ("a printed value that is not a value: the callee returns nothing",
      (("CPython evaluates that call to `None`",),
       ("is asked to render the value of",))),
+    # The RETURNED position of the same divergence: `def f(): return g()` for a
+    # `g` with no `return`, where CPython's `f` returns `None` and this path
+    # handed the caller the callee's leftover word — the third position this
+    # value leaves the computing function, refused since 2026-10-13
+    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # yields_None.md` §0e). Its own row rather than a second marker on the row
+    # above: `classify_message` is first-match and the two messages share no
+    # clause, so a file refused at the `returned` position was landing in
+    # `other refusal` — the bucket this table exists to empty.
+    #
+    # The markers are the CONSTRUCT and the FACT, both stated in `formal/model.py
+    # ::returnless_return_refusal`'s own f-string, which is where
+    # `test_refusal_taxonomy.py`'s sample for this row is cut from.
+    ("a returned value that is not a value: the callee returns nothing",
+     (("returns the value of", "returns `None` there"),)),
     # A REPETITION whose count this path cannot read at compile time. It is its
     # own row and not `other refusal` for the reason the `==` row above gives:
     # `xs * n` is a construct this backend now LOWERS (both architectures, a
