@@ -1796,7 +1796,17 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
             'formal/model.py', 'bugs/FORMAL_known_limits.md',
-            'build_stdlib_dylib.py'],
+            'build_stdlib_dylib.py',
+            # `FORMAL.md` is read too — its §2.2 census rows, its §4 `all N
+            # entry points` sentence and (since 2026-10-13) its §6 phase-2
+            # word row are all in `CENSUS_QUOTES` — and it was absent from this
+            # list, so a `FORMAL.md`-only edit replayed a recorded PASS over
+            # exactly the edit that breaks the check. That is the hole
+            # `bugs/FORMAL_runtime_library_on_the_link_line.md`'s 2026-10-13
+            # Status records from the other side: the header grew, `--fix`
+            # moved §2.2, §6 stayed stale, and only a job that was re-run could
+            # see it.
+            'FORMAL.md'],
      desc='runtime header export scan sees every declaration')
 # `mem='mid'` (6 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.

@@ -428,8 +428,20 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 272,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
+    # The §6 figure is READ OUT of the document rather than typed here. It used
+    # to be a literal `272`, and that literal is the copy that went stale on
+    # 2026-10-11: the header grew by `mojo_str_register` (580 -> 581),
+    # `test_runtime_header_scan.py --fix` moved §2.2's row, and the only way to
+    # move §6 was a hand edit nobody made. §6's word row is now in that file's
+    # quote table (so `--fix` rewrites it) and this check reads the same row, so
+    # neither is a second hand-typed answer to a computed number.
+    published_word, ok_word = read_int(
+        text, r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+        'FORMAL.md §6 phase 2 word-shaped count')
+    check(ok_word, 'FORMAL.md §6 phase 2 still publishes the word-shaped count')
+    check(published_word == len(word),
+          f'FORMAL.md §6 phase 2 publishes {published_word} word-shaped entry '
+          f'points, runtime_abi() says {len(word)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')

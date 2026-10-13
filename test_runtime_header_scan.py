@@ -703,6 +703,24 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
      ('word', 'total')),
+    # §6 phase 2's own copy of the WORD figure. It is the SAME number as §2.2's
+    # `word in, word out` row, quoted a second time a few thousand lines down,
+    # and that is exactly how it went stale: on 2026-10-11 the header grew by
+    # `mojo_str_register` (580 -> 581), `--fix` rewrote §2.2's row to 273 and
+    # left §6's at 272, and `test_formal_runtime_link.py` went red for it. The
+    # two rows §6 sits between (`exports`, `reachable`) need a built dylib and
+    # are checked by `test_formal_runtime_link.py`, but the word row is a header
+    # scan like this one, so it belongs here: one computed figure, one entry per
+    # place the tree writes it down.
+    ('FORMAL.md',
+     r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+     ('word',)),
+    # …and the sentence in §2.5 that quotes the TOTAL for the same reason: it read
+    # "all 683 entry points" through the 2026-10-11 drift because no entry here
+    # named it. Both are the same one-census-figure-per-sentence rule.
+    ('FORMAL.md',
+     r'field, so it covers all\s*\n(\d+) entry points rather than',
+     ('total',)),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',

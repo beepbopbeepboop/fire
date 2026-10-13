@@ -1,5 +1,47 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-13 (`work/formal380-docs`): the published triple had drifted by
+ONE again, and the reason it drifts at all is now closed.** `38d19a52` added
+`mojo_str_register` — the registration a generated `_mojo_register_str_pool`
+startup constructor makes once per `__rodata` literal — which took
+`fire_runtime.h` 580 → 581 and the census 272 → **273** word-shaped. `791ca1d5`
+was the `test_runtime_header_scan.py --fix` run for it and moved `FORMAL.md`
+§2.2's `word in, word out` row, **but §6 phase 2's word row is a SECOND copy of
+the same computed number and was not in that file's quote table**, so it stayed
+at 272 and both jobs went red for it. Measured on this tree, both architectures
+byte-identical:
+
+```
+arm64  273 word-shaped, 217 exported by the runtime library, 177 reachable
+x86-64 273 word-shaped, 217 exported by the runtime library, 177 reachable
+```
+
+Re-published in `FORMAL.md` from the measured scan: §1's `fire_runtime.c` size
+(524 → 528 KB, grown by `38d19a52`), §2.2's percentage (39.8 → 39.9), §6's three
+rows and every sentence that spells their arithmetic, §2.5's `all 683 entry points`
+sentence (→ 684), and §11.2's `[3] per-export contracts` pair (272 of 683 / 176 →
+273 of 684 / 177). The eleven names §6's table gained are named, with
+`mojo_str_register` added to the ten already there — one row, all three figures,
+because it adds no `void *`.
+
+**The mechanism fix, which is the part that matters.** `FORMAL.md` §6's word row
+and §4's total are now in `test_runtime_header_scan.py`'s `CENSUS_QUOTES`, so
+`--fix` rewrites them from the same header scan as §2.2's — one computed figure,
+one entry per place the tree writes it down. And `test_formal_doc_truth.py`'s
+literal `272` — a THIRD hand-typed copy, the one no `--fix` could reach — now
+reads the published §6 row instead of asserting its own.
+
+**Green after:** `test_formal_runtime_link.py` **189/189**, `test_formal_doc_
+truth.py` **434/434**, `test_runtime_header_scan.py` **74/74** (`--fix` now a
+no-op).
+
+**The ceilings are unchanged.** Ceiling 1 is still the 56 entry points the dylib
+does not link; ceiling 3 is still the 40 needing a `void *` handle this path
+cannot produce (273 − 217 = 56, 217 − 177 = 40). `mojo_str_register` adds no
+`void *`, so it joined all three rows at once and moved the two gaps by zero —
+which is the same additive shape every previous re-measurement in this document
+records. Neither ceiling is this document's to close (see § below).
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
@@ -726,18 +768,22 @@ identical and a reader should be able to see that rather than take it:
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label ceil -- python3 .tmp/ceilings.py
 python3 tools/memslot.py --gb 8 --label t -- \
-    python3 test_formal_runtime_link.py            # 159 passed, 4 failed
+    python3 test_formal_runtime_link.py            # 189 passed, 0 failed
 python3 tools/memslot.py --gb 8 --label t -- \
     python3 -c "import test_formal_runtime_link as T; \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py` **was red when this paragraph was written** — a
+now-deleted branch's run compared the live count against `FORMAL.md` §6 phase 2's
+then-published `206`/`166`, which the tree had outgrown (`1dd68a48` published
+those on 2026-10-04). That drift was swept on 2026-10-05 and the figures have
+been re-published from the measured scan at every move since, including the
+`273`/`217`/`177` of the 2026-10-13 Status at the head of this file; **it is 0
+failures today**, and the sentence that used to say otherwise is kept only
+because the mechanism it names — a hand-typed figure going stale against a
+computed one — is the subject of this document. `test_formal_doc_truth.py` was
+red on the same drift (8 checks, 7 of them the same figures) and is green now too. `.tmp/ceilings.py` is scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as
