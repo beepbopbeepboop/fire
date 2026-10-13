@@ -766,6 +766,15 @@ class TestGeneratorSource(unittest.TestCase):
                     f"UInt64.ofNat {imm}", G._step_rhs(w, idx),
                     "the immediate is not scaled by the sh field, or an "
                     "unshifted one was scaled")
+                self.assertIn(
+                    "arm64_ext_imm12", G._step_rhs_generic(idx) or "",
+                    "the word-relative form must name the shared reader "
+                    "so the two right-hand sides agree about the shift")
+        proof = open(os.path.join(HERE, "lib", "ProofLib.lean")).read()
+        self.assertIn(
+            "def arm64_ext_imm12", proof,
+            "the shared immediate reader is gone, so the generator "
+            "names a definition the library does not declare")
 
     def test_adds_writes_its_destination_and_cmn_is_the_same_class(self):
         """The `0xab000000` class is `ADDS Xd, Xn, Xm` AND `CMN Xn, Xm` (`Rd = 31`).
@@ -808,6 +817,10 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertIn("arm64_reg 1 s + arm64_reg 15 s",
                       G._step_rhs(adds, 66),
                       "the value written is the SUM of the operands")
+        self.assertIn(
+            "arm64_set_reg", G._step_rhs_generic(66) or "",
+            "the word-relative form must write `Rd` for the whole class, "
+            "not only the concrete spellings")
         # The model's own arm must read `Rd`, not just the two sources — the
         # generator agreeing with a model that still drops `Rd` would make a
         # generated step-result lemma about the wrong machine.
@@ -6186,6 +6199,25 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         ("sub x25, x14, #545, lsl #12",
          lambda A: A.encode_sub_xd_xn_imm_sh(25, 14, 545, 1)),
         ("add x12, x29, #1675", lambda A: A.encode_add_xd_xn_imm_sh(12, 29, 1675, 0)),
+        # `ADDS Xd, Xn, Xm` with `Rd ≠ 31` and the `CMN` spelling of the SAME
+        # word pinned TOGETHER: the arm's mask (`0xffe00000`) covers the whole
+        # class, so the first version of it set the flags correctly and wrote NO
+        # register, and a test that pinned either spelling alone would pass a
+        # model that fixed one and broke the other. `x1`/`x15` are ordinary
+        # registers (the pool's address registers are translated between the two
+        # address spaces and would make a register-result case a harness
+        # mismatch), so the sum is byte-identical on both sides.
+        ("adds x7, x1, x15", lambda A: A.encode_adds_xd_xn_xm(7, 1, 15)),
+        ("cmn x1, x15", lambda A: A.encode_cmn_xn_xm(1, 15)),
+        # The `#imm12` forms with their `sh` field (`LSL #12`), on BOTH classes
+        # (ADD and SUB), plus an UNSHIFTED row: the decode used to read the
+        # 12-bit field and drop its shift, and a fix that always shifted would
+        # pass the first two and fail the third.
+        ("add x7, x1, #1024, lsl #12",
+         lambda A: A.encode_add_xd_xn_imm_sh(7, 1, 1024, 1)),
+        ("sub x7, x1, #545, lsl #12",
+         lambda A: A.encode_sub_xd_xn_imm_sh(7, 1, 545, 1)),
+        ("add x7, x1, #9", lambda A: A.encode_add_xd_xn_imm(7, 1, 9)),
     )
 
     @classmethod
