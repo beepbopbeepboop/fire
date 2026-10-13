@@ -310,10 +310,14 @@ it affordable is the measured 0 above.
 and the tests, no builds for the census:
 
 ```sh
-python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_refused \
-  a_nested_comprehension_as_the_element_is_refused \
+python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_tuple_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_set_literal_is_per_iteration \
+  a_nested_comprehension_as_the_element_is_per_iteration \
+  a_nested_comprehension_with_a_container_element_is_refused \
+  a_doubly_nested_comprehension_as_the_element_is_refused \
   a_dict_comprehension_whose_value_opens_a_container_is_refused \
-  a_comprehension_element_that_is_a_set_literal_is_refused \
+  a_list_of_lists_as_the_element_is_refused \
   a_one_iteration_comprehension_element_container_still_builds \
   nested_comprehension_in_a_generator_iterable \
   comprehension_body_is_not_a_container_position
