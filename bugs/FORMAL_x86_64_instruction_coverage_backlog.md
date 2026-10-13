@@ -8,6 +8,53 @@ property of the harness) and `.BACKLOG` (twelve, each with its own doc). This
 file is the x86-64 answer, and it is **not** closed: 18 of the 85 emitted forms
 have no fuzz case, no model sample, or no decoder arm.
 
+## Status 2026-10-13: THE X86-64 BACKLOG IS EMPTY — the last three entries are
+## gone, and this file is now only its two INSTRUMENT notes
+
+The census's own anti-rot ratchet was RED on master and named the last two
+stale entries: `test_formal_isa_census.py::TestExemptions.
+test_every_backlog_entry_still_describes_a_gap` reported
+`['encode_and_r8_r8', 'encode_or_r8_r8']` — a fixed gap that kept its exemption.
+Both read `yes yes yes` (the byte-wise ALU decoder arm, the shared
+`x86_step_alu_r8` model arm, the four `samples()` rows and the pool entries all
+landed), so their `BACKLOG` entries were the thing that was wrong.
+
+* **`encode_and_r8_r8` / `encode_or_r8_r8` leave `BACKLOG`.** They are covered
+  forms now, not gaps.
+* **`encode_call_r64` moves from `BACKLOG` to `HARNESS_LIMITS`.** Its DECODER
+  half is done — `FF /2` with `mod=11` has a decoder arm, a model arm, two
+  `samples()` rows and a `test_x86_64_decode.py` row — so the only column it
+  cannot have is FUZZ, for a reason that is a property of the HARNESS: the
+  instruction branches to a register's CONTENTS, and a random 64-bit value is
+  outside the harness's one `MAP_FIXED` region. That is the same reason arm64's
+  `encode_br_xn` carries, and the old "the decoder maps `FF` only to `FF 15`/
+  `FF 25`" note was stale.
+* **The census line is now** `0 form(s) with no LEAN/FUZZ/AS and no exemption;
+  6 exempt (6 harness, 0 backlog)`.
+* **Pinned by `test_formal_isa_census.py::TestTheInstrument`, two new tests:**
+  no x86-64 form is left on `BACKLOG`, and `call_sites` reads AST `Name`/
+  `Attribute` nodes so a docstring mention is not emission (the
+  `encode_cmov_r64_r64` false row, whose `call_sites` fix is on master already —
+  this is the pin, not the fix). 9 tests green.
+
+**What remains in this file is the two INSTRUMENT notes, and neither is a gap in
+the matrix** (they are measurements of `tools/formal_isa_census.py` itself, and
+each is another claim's write set):
+
+1. the EX column matches a form against an image by DISASSEMBLY MNEMONIC, so two
+   encodings of one instruction are indistinguishable; the fix is to key it on
+   (mnemonic, operand shape) and report `ambiguous` where that does not
+   separate two encodings — tracked under `bug:FORMAL_arm64_instruction_coverage`
+   (it is the survey's tool, not this file's subject);
+2. a fuzz-attribution hole in `formal/x86_64_model_fuzz.py`'s
+   `_impossible_on_hardware`, which explains a flag difference only when the
+   program's LAST flag-writing instruction is a multiply or divide: a flag set
+   by an `and` whose OPERAND was an anomalous `setcc` destination is reported
+   `WRONG`. Measured `-n 16 --ninstr 6 --seed 5` reports 1 such row.
+
+The x86-64 matrix itself has no remaining `BACKLOG` row; a NEW gap gets a new
+entry and a new doc, which is what the pin above is for.
+
 ## Status 2026-10-06 (`work/x86-coverage-endtoend`): SHAPE 1 IS DONE — all nine SSE2 forms, executed and compared against the CPU
 
 This host can now RUN x86-64 Mach-O images (Rosetta 2), so each row was closed

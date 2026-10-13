@@ -543,6 +543,19 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    # `encode_call_r64` was in `BACKLOG` until 2026-10-13. Its DECODER half is
+    # done (`FF /2` with mod=11 has a decoder arm, a model arm, two `samples()`
+    # rows and a `test_x86_64_decode.py` row), so the only column it still
+    # cannot have is FUZZ, and for a reason that is a property of the HARNESS
+    # and not of work nobody has done: the instruction branches to a register's
+    # CONTENTS, and a random 64-bit value is outside the harness's one
+    # `MAP_FIXED` region. That is exactly arm64's `encode_br_xn` entry.
+    "encode_call_r64": "`FF /2` with mod=11 branches to a register's "
+                       "CONTENTS, which no engine can be given, so a fuzz case "
+                       "would leave the harness's stub rather than fall "
+                       "through — the same reason as arm64's `encode_br_xn`; "
+                       "the decoder arm, the model arm and the `samples()` "
+                       "rows are all in place",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -596,41 +609,36 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
-    # ── x86-64: runnable, and the pool does not draw them ────────────────
-    # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
-    # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
-    # engines' RIPs differ by the load slide" for the `lea` and "a call cannot
-    # run in the harness's straight-line stub without leaving it" for the
-    # `call`.  Both reasons are FALSE of this harness and were worth measuring
-    # rather than repeating: the emulated region is ONE `MAP_FIXED` mapping and
-    # the model is handed the same base, so a pc-relative result is the same
-    # number in both halves; and a branch to the NEXT instruction stays inside
-    # whatever the program has already put there.  All four are in the pool now
-    # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
-    # reason is the one that fits IT: this project does not map the arm64
-    # harness's code at a fixed address, so a pc-relative RESULT cannot be
-    # compared and only pc DELTAS are.
+    #
+    # **The x86-64 backend has NO `BACKLOG` row any more (2026-10-13).** The
+    # three that remained described gaps that had already closed:
+    #
+    #   * `encode_and_r8_r8` / `encode_or_r8_r8` read `yes yes yes` — the
+    #     byte-wise ALU decoder arm, the shared `x86_step_alu_r8` model arm, the
+    #     four `samples()` rows and the pool entries all landed, and
+    #     `test_every_backlog_entry_still_describes_a_gap` was RED naming both.
+    #     They are covered forms now, so their entries go.
+    #   * `encode_call_r64` still has no FUZZ column, and the reason is the
+    #     HARNESS rather than a gap (a branch to a register's contents), so its
+    #     entry moved to `HARNESS_LIMITS` above beside arm64's `encode_br_xn`.
+    #
+    # All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
+    # (`work/x86-coverage-endtoend`): `addsd`, `subsd`, `mulsd`, `divsd`,
+    # `ucomisd`, `xorpd`, `movq_r64_xmm`, `cvtsi2sd` and `cvttsd2si` each gained
+    # a decoder arm, a model arm, a `samples()` row and a fuzz-pool entry, and
+    # the census reads `yes yes yes` for every one.  All four of shape 3's
+    # runnable rows (`encode_lea_r64_rip`, `encode_jcc_rel32`,
+    # `encode_jmp_rel32`, `encode_call_rel32`) came out on 2026-10-05 for the
+    # same reason: both recorded reasons ("the two engines' RIPs differ by the
+    # load slide" and "a call cannot run in the harness's straight-line stub")
+    # were FALSE of this harness — the emulated region is ONE `MAP_FIXED`
+    # mapping and the model is handed the same base, and a branch to the NEXT
+    # instruction stays inside whatever the program has already put there.  All
+    # four are in the pool (`formal/x86_64_model_fuzz.py`), measured AGREE at
+    # four initial states each.  arm64's `encode_adrp` keeps its
+    # `HARNESS_LIMITS` entry, and that reason is the one that fits IT: this
+    # project does not map the arm64 harness's code at a fixed address, so a
+    # pc-relative RESULT cannot be compared and only pc DELTAS are.
 }
 
 
