@@ -5198,7 +5198,6 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # block's own `def`s rather than by `rfl` — see `_state_proof` for the
     # reduction `rfl` asks for and why it is not free.  Each `k` unfolds only
     # the chain up to itself, which is all its own projection needs.
-    defs = _block_state_defs(S, m)
     defs_unfold = _block_state_unfold(S, m)
     pc_facts = []
     pc_facts.append(f"  have hpc0 : ({S}_qS0 st).pc = {run_pcs[0]} := by")
