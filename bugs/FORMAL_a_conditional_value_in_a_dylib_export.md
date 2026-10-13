@@ -15,6 +15,7 @@ owned it, and a reader could not tell which half was settled:
 | modelling `CSEL` turns a NAMED OBLIGATION into a build failure, and it is not a budget question | §2 below |
 | the `hprior_*` cost centre and the certificate's Lean bound | **`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`** (live claim) |
 | the `CSEL` model row itself | **`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`** (live claim) |
+| the last export's unprovable `_semantics_total` (the two red rows below, §1.4) | **`FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`** (live, 2026-10-13) |
 | the loop-fuel obligation (`OPUS-4`) | **`FORMAL_dylib_export_loops_and_frame_bounds.md`** (live claim) |
 
 The two documents it replaces were the dylib block-layer doc (deleted in f40f9eaf)
@@ -131,17 +132,23 @@ and two cases in `test_formal_call_proof_gen.py`'s `TestBitTestBranches` pin it
 (a TBZ and a CBZ whose two bits disagree).
 
 **That fix is necessary for this document's test but not sufficient for it
-today**, and the rest is not this document's: with the step lemmas compiling,
-the two tests now fail one assertion later, on a HOLE COUNT — `dylib_export_N_
-…_semantics_total` is emitted as a `sorry` because the export's CFG contains a
-`bl`. That `bl` is the arm64 stack-floor guard's `getrlimit` call in every
-prologue, which is exactly the regression
-`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` measures and owns
-(its own text: "with the call in the prologue, `test_formal_call_proof_gen.py`
-goes from 21 failures to 42 failures and 15 errors"); the fix it names is to
-move the read into the startup stub. So the block layer's half of this document
-is landed and pinned, and the test goes green when that claimed regression is
-fixed — not before.
+today**, and the rest is not this document's. With the step lemmas compiling,
+the two tests now fail one assertion later, on a HOLE COUNT. **That attribution
+was measured WRONG on 2026-10-13 (`work/formal404-docs`), and the correction is
+the useful part:** the extra hole is the LAST export's `dylib_export_N_…
+_semantics_total`, and its cause is not a `bl` at all — the regression the
+earlier reading named (`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`)
+has since been FIXED and its doc deleted, `TestTheStackFloorGuardLeavesNoCallOnThe
+WalkedPath` passes, and there is no `bl` in the last export's extent. The real
+cause is that the last export's `DylibExport.exportEnd` is `base + codeSize`, and
+`code` carries the image's interned strings past the last function's `RET`, so
+the constant-fuel CFG walk decodes string bytes, finds a spurious back edge, and
+declines. It is measured and filed in full — with the test to reproduce it and
+the only two honest fixes — as
+`bugs/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`.
+So the block layer's half of THIS document is landed and pinned; the two red
+rows are a separate, now-named defect that reaches into `lib/ProofLib.lean`'s
+export-table fold and is not this document's to close.
 
 ---
 
