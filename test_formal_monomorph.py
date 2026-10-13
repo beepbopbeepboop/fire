@@ -1260,61 +1260,6 @@ def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
               f"{text.strip()[-400:]}")
 
 
-def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir):
-    """`Tagged[Int, 0]()` in the file that declares `Tagged` names a comptime
-    PARAMETER LIST, and the refusal must say so — not call it a tuple index.
-
-    The construct is the one
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
-    measures: a generic applied with a TYPE argument and a comptime VALUE, which
-    this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
-    `""` for a top-level literal, by design, so no demand is computed). What is
-    refused is therefore correct, and the case is about the DIAGNOSIS.
-
-    It regressed silently because `formal/monomorph.py::without_template_bodies`
-    removes a template's DECLARATION from the statement list — a template body
-    has no instantiation in scope, so analysing it is a refusal — and
-    `structs_by_name`, which `formal/model.py::subscript_index_is_a_comptime_
-    parameter_list` consults for "is this base a type", is built from what is
-    left. So `Tagged` was absent from the one table that would have classified
-    the bracket, the classifier answered `MULTI_INDEX_DATA`, and the source was
-    told it wrote `Tagged[Int, 0]` as a two-dimensional/tuple index — a
-    container lookup this path never wrote. The fix hands the unit's own
-    template struct names to the classifier separately
-    (`formal/build.py::_own_template_structs`), and this pins both directions:
-    the true sentence is present and the false one is gone.
-
-    The same-unit shape is the one no case had: an imported `Tagged` reaches
-    `structs_by_name` through `imported_struct_defs` and was already diagnosed
-    correctly, so the missing coverage was exactly the file that declares the
-    template itself — which is why this is a row and not a re-measurement.
-    """
-    prog = ("struct Tagged[T, origin: Int]:\n"
-            "    var v: Int\n"
-            "\n"
-            "def main():\n"
-            "    var t = Tagged[Int, 0]()\n"
-            "    return 42\n")
-    for arch in ARCHES:
-        fresh_cas()
-        _root, _out, result = build_pair_case(
-            tmpdir, arch, "mm_own_comptime", None, prog)
-        text = (result.stderr or "") + (result.stdout or "")
-        check(result.returncode != 0,
-              f"[{arch}] `Tagged[Int, 0]()` built, and this path has no comptime "
-              f"VALUE substitution, so the instantiation it would carry is not "
-              f"the source's: {text.strip()[-400:]}")
-        check("compile-time explicit-parameter list" in text,
-              f"[{arch}] the refusal does not name the construct. A generic "
-              f"applied with a comptime value is an explicit-parameter list, "
-              f"which is what a reader acts on: {text.strip()[-500:]}")
-        check("subscript whose index is a tuple" not in text,
-              f"[{arch}] the refusal says the source wrote a tuple index. "
-              f"`Tagged[Int, 0]` names two compile-time parameters and no "
-              f"container, so this sentence is false about the program — the "
-              f"`refuse_without:` class of defect: {text.strip()[-500:]}")
-
-
 # ── the decisions, pinned without an image ──────────────────────────────────
 
 
@@ -1871,7 +1816,7 @@ def test_a_value_typed_bracket_is_not_read_as_a_type(tmpdir):
             "    var xs = [1, 2]\n"
             "    print(a.get_first(), xs[0])\n")
     stmts = parse_module(prog)
-    n = MM.rewrite_instantiation_uses(stmts, {("Pair", ("Int",)): "Pair_Int"})
+    n = MM.rewrite_instantiation_calls(stmts, {("Pair", ("Int",)): "Pair_Int"})
     check(n == 1,
           f"exactly one call site is a constructor — `xs[0]` is a subscript on "
           f"a VALUE and `Pair[Int]` in the comment and the docstring is not a "
@@ -1991,36 +1936,6 @@ def main():
     print(total(10, [1, 2, 3]))
     print(total(10, [7, 8, 9]))
     print(total(10, (4, 5)))
-"""
-
-# The bare-literal half of the same construct — §2 row 4 of
-# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
-# comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
-# the literal is what proves the value was substituted (a collapsed mangling, or
-# a body that read the parameter as a type, would print a different number). The
-# reference passes the value as an ordinary argument, exactly as
-# `VALUE_BRACKET_CPYTHON` does — the two programs are the same computation.
-VALUE_LITERAL_LIB = """\
-def plus[T: AnyType, n: Int](x: Int) -> Int:
-    return x + n
-"""
-
-VALUE_LITERAL_PROG = """\
-from vlib import plus
-
-def main():
-    print(plus[Int, 7](10))
-    print(plus[Int, 0](10))
-    print(plus[Int, -3](10))
-"""
-
-VALUE_LITERAL_CPYTHON = """\
-def plus(x, n):
-    return x + n
-def main():
-    print(plus(10, 7))
-    print(plus(10, 0))
-    print(plus(10, -3))
 """
 
 
@@ -2539,7 +2454,7 @@ def test_a_phantom_struct_template_is_kept(_tmpdir):
     needs the declaration in the unit; the filter used to remove every struct
     template, so the binding got no classification and every field access
     through it was refused. That is
-    `FORMAL generic local binding has no home`, and the phantom
+    `bugs/FORMAL_generic_local_binding_has_no_home.md`, and the phantom
     predicate is `elaborate.phantom_type_params`.
 
     The USED parameter is the control and it is the important half: a template
@@ -3418,19 +3333,6 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
           "parenthesised expression is not a tuple and `len((1))` is a type "
           "error the reader would have to decode")
 
-    # …and the call-site brackets ARE a demand, which is the half that used to
-    # be dropped: `type_arg_text` answers "" for a literal, so
-    # `Pair[Int, 1, 2, 3]()` was not an instantiation at all and the call site
-    # kept its brackets. A bracket that names a TYPE beside its values is an
-    # explicit-parameter list; an all-value bracket (`tile[2, 3](…)`) is still
-    # a comptime specialization and not a demand.
-    callers = MM.all_instantiation_calls(
-        "def main():\n"
-        "    var a = Pair[Int, 1, 2, 3]()\n"
-        "    var b = tile[2, 3](7)\n")
-    check(callers.get("Pair") == [("Int", "1", "2", "3")],
-          f"`Pair[Int, 1, 2, 3]` is a demand and `tile[2, 3]` is not: {callers}")
-
     # THE REFUSAL THAT SURVIVES, because a rule that reads `*` as an exemption
     # from the arity check would take the check with it: too FEW arguments binds
     # a declaration the bracket does not supply, whatever the declaration says.
@@ -3458,186 +3360,6 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
         raise TestFailure(
             "`**kwargs` was bound as a positional variadic; a bracket argument "
             "is a positional spelling and a keyword collection is not one")
-
-
-CLS_ATTR_LIB = """\
-struct TypeDict[T: AnyType, values: List[T]]:
-    comptime length = len(Self.values)
-    var n: Int
-
-    def get(self) -> Int:
-        return self.n
-"""
-
-
-CLS_ATTR_PROG = """\
-from sizelib import TypeDict
-
-def main():
-    var d = TypeDict[Int, [1, 2, 3, 4]]()
-    print(TypeDict.length)
-    d.n = 7
-    print(d.get())
-"""
-
-
-CLS_ATTR_CPYTHON = """\
-class TypeDict:
-    length = 4
-
-    def __init__(self):
-        self.n = 0
-
-    def get(self):
-        return self.n
-
-def main():
-    d = TypeDict()
-    print(TypeDict.length)
-    d.n = 7
-    print(d.get())
-"""
-
-
-CLS_ATTR_TWO_PROG = """\
-from sizelib import TypeDict
-
-def main():
-    var d = TypeDict[Int, [1, 2, 3, 4]]()
-    var e = TypeDict[Int, [9]]()
-    print(TypeDict.length)
-    print(d.get())
-    print(e.get())
-"""
-
-
-def test_a_class_attribute_through_the_templates_name_answers_one_instantiation(
-        tmpdir):
-    """`TypeDict.length` builds, runs, and answers CPython on both backends.
-
-    The construct is a `comptime` class attribute of a generic STRUCT — a value
-    of the CLASS BODY — read through the TEMPLATE's name instead of through an
-    instance. It was refused on both architectures with
-    `formal/model.py::struct_parameter_not_bound_refusal`, whose sentence is
-    about the class body: at the class body there is no instantiation, and
-    `Self.values` names a parameter nothing has supplied. Both halves of that
-    sentence are false HERE — the consumer's own program supplies the value as an
-    argument, and the declaration that carries the value has already been built,
-    under a mangled name, by `formal/imports.py::borrowed_structs` — so the
-    reader was sent to a line that does not exist.
-
-    The fix is the same rewrite `Pair[Int]()` already got, reaching the one
-    position it did not: `monomorph.rewrite_instantiation_uses` rewrites a
-    `Template.<attr>` read's BASE to the mangled instantiation when this file
-    applies that template at exactly one instantiation, and the class-constant
-    machinery then reads the instantiated body's own `comptime length =
-    len([1, 2, 3, 4])`, which is a foldable literal. One traversal and one
-    table, which is the property `imported_instantiations` is built around: a
-    rewritten read with no declaration is a read of a struct nothing published.
-
-    `4` and not `0`: the wrong answer this path gave before the rewrite was the
-    TEMPLATE's own alias, unsubstituted, and a lowering that dropped the
-    substitution would print the other instantiation's value here just as
-    plausibly.
-    """
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_clsattr", CLS_ATTR_LIB,
-                            CLS_ATTR_PROG, CLS_ATTR_CPYTHON,
-                            libname="sizelib.mojo")
-        check(got == "4\n7\n",
-              f"[{arch}] printed {got!r} for a `comptime` class attribute read "
-              f"through the template's name")
-
-
-def test_the_class_attribute_read_is_the_rewrite_in_one_file_too(tmpdir):
-    """The ONE-FILE shape of the same read, because `_own_instantiations` is a
-    different caller of the same rewrite and neither is covered by the other.
-
-    `build_pair_case(lib=None)` writes the shape where this module declares AND
-    applies the template, so the demand comes from `monomorph.own_demands` and
-    the instantiated body is appended to the executable's own statements. If the
-    read were rewritten only on the imported half, this would build and print
-    the unsubstituted alias — or refuse — and the two-file case would stay green.
-    """
-    one_file = CLS_ATTR_LIB + """
-def main():
-    var d = TypeDict[Int, [1, 2, 3, 4]]()
-    print(TypeDict.length)
-    d.n = 7
-    print(d.get())
-"""
-    cpython = CLS_ATTR_CPYTHON.split("\ndef main():")[0] + """
-def main():
-    d = TypeDict()
-    print(TypeDict.length)
-    d.n = 7
-    print(d.get())
-"""
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_clsattrone", None, one_file,
-                            cpython)
-        check(got == "4\n7\n",
-              f"[{arch}] printed {got!r} for the same read in one file, which "
-              f"is `formal/imports.py::_own_instantiations`'s caller of the "
-              f"rewrite rather than the imported half's")
-
-
-def test_a_class_attribute_through_two_instantiations_is_refused(tmpdir):
-    """Two instantiations and a read through the template name: a refusal.
-
-    The third arm of the same rule, and the one that has to be a refusal
-    because the other two answers are both wrong in the way this repository
-    refuses everywhere: the TEMPLATE's own alias is a number no instantiation
-    stands behind, and the first instantiation built is an order the source does
-    not state. `d.length` is the spelling that names one, and it answers — the
-    case above is that it answers correctly.
-
-    Asserted as a REFUSAL that names both instantiations, because a message
-    that said only "ambiguous" would leave the reader with nothing to act on and
-    the two mangled names are the two things they could have written.
-    """
-    for arch in ARCHES:
-        text = run_pair_case(tmpdir, arch, "mm_clsattrtwo", CLS_ATTR_LIB,
-                             CLS_ATTR_TWO_PROG, "", expect_ok=False,
-                             libname="sizelib.mojo")
-        check("applies TypeDict at 2 of them" in text,
-              f"[{arch}] two instantiations of one template with a read through "
-              f"its name did not stop with the ambiguity refusal: "
-              f"{text.strip()[-500:]}")
-        check("values_52__x005B1" in text and "values_13__x005B9" in text,
-              f"[{arch}] the refusal did not name both instantiations: "
-              f"{text.strip()[-500:]}")
-
-
-def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
-    """A VALUE binding of the template's name is a value, and the guard is the
-    same scope table the bracket reader uses.
-
-    `var Sized = 3` beside `Sized.length` is a read of an integer's nonexistent
-    attribute, and rewriting its base to a mangled struct name would turn a
-    program that is wrong into one that answers. The scope tables are
-    `formal/build.py::_names_bound_in` for a function and
-    `formal/model.py::collect_module_symbols` at module level — the two
-    `monomorph.all_instantiation_calls` already walks with, so the position that
-    says "this name is a value here" and the position that says "this name is a
-    type here" cannot disagree.
-    """
-    from formal import monomorph as MM
-    from formal.build import parse_module
-    prog = ("def main():\n"
-            "    var Sized = 3\n"
-            "    var a = Sized[Int]()\n"
-            "    print(Sized.length, a.get_first())\n")
-    stmts = parse_module(prog)
-    n = MM.rewrite_instantiation_uses(stmts, {("Sized", ("Int",)): "Sized_Int"})
-    check(n == 1,
-          f"only the CONSTRUCTOR is an instantiation use — `Sized.length` reads "
-          f"the local `Sized`, and rewriting it would invent a struct out of an "
-          f"integer — and {n} were rewritten")
-    read = stmts[0].body[2].value.args[0]
-    check(getattr(read.obj, "name", None) == "Sized",
-          f"the read's base is {getattr(read.obj, 'name', None)!r}, so a local "
-          f"of a template's name was rewritten into a mangled struct name")
 
 
 TESTS = [
@@ -3675,8 +3397,6 @@ TESTS = [
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
-    ("an own struct template with a comptime value is diagnosed as one",
-     test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
     ("an annotated construction is a demand only when it can be named",
@@ -3717,14 +3437,6 @@ TESTS = [
      test_the_template_attribute_read_works_in_one_file),
     ("the same read works in one file",
      test_the_same_read_works_in_one_file),
-    ("a class attribute through the template's name answers one instantiation",
-     test_a_class_attribute_through_the_templates_name_answers_one_instantiation),
-    ("…and the class-attribute read is the rewrite in one file too",
-     test_the_class_attribute_read_is_the_rewrite_in_one_file_too),
-    ("a class attribute through two instantiations is refused",
-     test_a_class_attribute_through_two_instantiations_is_refused),
-    ("a local of a template's name is not rewritten",
-     test_a_local_of_a_templates_name_is_not_rewritten),
     ("a function template's body is still compiled",
      test_a_function_templates_body_is_still_compiled),
     ("a phantom struct template is kept",

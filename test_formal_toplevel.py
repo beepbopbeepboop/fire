@@ -1357,99 +1357,6 @@ def test_a_folded_constant_the_body_rebinds_keeps_its_store(tmpdir, verbose):
         expect_stdout="total=10", expect_exit=0)
 
 
-def test_a_module_level_conditional_store_carries_its_value(tmpdir, verbose):
-    """`TOP = 9 if 1 else 3` at file level: every read sees the arm taken.
-
-    The store path's answer about a value the FOLDER cannot decide, and the
-    row that exists because a whole bug document was filed against this shape
-    on the strength of an EXIT STATUS rather than a value — see the second half
-    of this docstring, which is the part worth having.
-
-    A module-level name the module BODY writes gets a `__DATA` slot the body
-    fills (`formal/model.py::collect_global_slots`'s `filled_by_body`), so the
-    value is in the image before `main` runs and every read — in the body, in a
-    function of this unit, through an arithmetic expression — is the arm the
-    condition selected. Both arms are in the program and one of them is FALSE,
-    so a store path that dropped the word would answer the same `3` twice and
-    this row would see it on the first line.
-
-    The second half is the refutation, and it is the reason this case has a
-    `def main` in it at all. This program was reported as "a module-level store
-    of a conditional expression is ZERO on both architectures":
-
-        TOP = 9 if 1 else 3
-        def main() -> Int:
-            return TOP
-
-    Its exit status IS 0 — and so is CPython's, on the same file, because a
-    module body that does not call `main` does not run `main`
-    (`test_body_does_not_run_main_it_does_not_call` above), so the process runs
-    the store and returns 0 without ever calling anything. The value was never
-    zero. `formal/build.py::_lower_builtin_extremum` fenced this rewrite off the
-    module body on the strength of that measurement, and refused `TOP = max(3,
-    9)` at file level — a program which builds and answers 9 — on two
-    architectures at once. Pinning BOTH halves is what keeps the fence from
-    coming back: the value row fails if the store path ever does drop the word,
-    and the exit-status row fails if the entry convention ever does change, and
-    only the second one alone would let a reader conclude the store is broken.
-    """
-    ok = case_agrees_with_cpython(
-        "conditional_store_value",
-        "TOP = 9 if 1 else 3\nNEG = 9 if 0 else 3\n"
-        "def get() -> Int:\n    return TOP + NEG\n"
-        "def main(n) -> Int:\n    a: Int = TOP\n    b: Int = NEG\n"
-        "    print(a)\n    print(b)\n    print(get())\n    return 0\n"
-        "main(0)\n", tmpdir, verbose,
-        expect_stdout="9\n3\n12\n", expect_exit=0)
-    # And the refuted measurement, as its own program: exit 0 here and exit 0
-    # under CPython, because nothing in the file calls `main`.
-    ok &= case_agrees_with_cpython(
-        "conditional_store_uncalled_main",
-        "TOP = 9 if 1 else 3\ndef main() -> Int:\n    return TOP\n",
-        tmpdir, verbose, expect_stdout="", expect_exit=0)
-    return ok
-
-
-def test_a_module_level_extremum_store_is_a_select_not_a_refusal(tmpdir,
-                                                                verbose):
-    """`TOP = max(3, 9)` at file level: a select, and it answers 9.
-
-    The other end of the same fence, and the row that keeps
-    `formal/build.py::_lower_builtin_extremum` from growing one back.
-
-    `max(a, b)` is a compare and a select on both architectures, so the rewrite
-    turns it into a `T.TernaryExpr` and every consumer downstream — either
-    instruction selector, the comptime folder, the proof layer's model — knows
-    the construct already. At file level the rewritten store is the one shape
-    whose value is NOT a folded literal, so the module body computes it and
-    `collect_global_slots` gives the name a `__DATA` slot the body fills, and
-    every read is the selected arm. This program used to be REFUSED, on both
-    architectures, with the table row's own sentence about `max` — a refusal
-    about a name whose two-positional-argument form the same pass lowers three
-    lines away in the same file.
-
-    The reads are inside `get()` on purpose. A module BODY cannot read a name
-    that has a slot (`NUMS = [1, 2, 3]` then a read of `NUMS` at file level is
-    refused by `model.module_global_refusal`), so reading `TOP` from the body
-    would be testing that older refusal and nothing about this store. The
-    trailing `main(0)` is what keeps the two engines agreeing about what ran,
-    for the reason `test_formal_globals.py` spells out at length: the module
-    body IS the entry, so `main` runs because the source says so.
-
-    `test_formal_value_model.py::BUILTIN_EXTREMUM_CASES` is the same rewrite
-    inside a function, where the store is a register; this is the position the
-    fence used to exclude, and the two rows together are the rewrite's whole
-    reach.
-    """
-    return case_agrees_with_cpython(
-        "module_level_extremum",
-        "TOP = max(3, 9)\nLO = min(3, 9)\n"
-        "def get() -> Int:\n    return TOP * 10 + LO\n"
-        "def main(n) -> Int:\n    print(\"v:\", get())\n    return 0\n"
-        "main(0)\n", tmpdir, verbose,
-        expect_stdout="v: 93\n", expect_exit=0)
-
-
 # ── driver ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -1490,8 +1397,6 @@ def main():
         test_a_module_body_can_still_be_refused_by_the_ordinary_codegen,
         test_a_name_collision_with_the_body_function_is_refused,
         test_a_folded_constant_the_body_rebinds_keeps_its_store,
-        test_a_module_level_conditional_store_carries_its_value,
-        test_a_module_level_extremum_store_is_a_select_not_a_refusal,
     ]
     for fn in cases:
         if args.verbose:

@@ -683,9 +683,9 @@ def test_the_survey_does_not_count_an_encoder_nothing_emits():
     # stopped being an example on its own: the call through a function VALUE
     # (`formal/arm64_codegen.py`, the `through_value` arm of a call) emits
     # `encode_blr_xn(16)`, so `blr` moved from "encoded, never emitted" to
-    # emitted and the pin went stale rather than wrong -- the survey's own
-    # measurement moving with the `work/formal18-tile-specialization` lowering.
-    # A pin that names an
+    # emitted and the pin went stale rather than wrong —
+    # `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+    # records the move as this survey's own measurement. A pin that names an
     # encoder is a claim that that encoder has no caller, and it is a claim
     # about the ORDER WORK LANDS IN: every lowering that arrives before the
     # survey is re-run flips one. The direction survives all of them.

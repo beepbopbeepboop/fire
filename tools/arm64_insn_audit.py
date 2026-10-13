@@ -60,8 +60,9 @@ rather than an oversight:
     leaves it the moment a lowering emits it, which is the ordinary order of
     work here. `blr` has — the call through a function VALUE emits
     `encode_blr_xn(16)` (`formal/arm64_codegen.py`, the `through_value` arm of a
-    call), so `blr` is covered now — that is this survey's own measurement moving
-    with the `work/formal18-tile-specialization` lowering, not a change to it.
+    call), so `blr` is covered now and
+    `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+    records the move as this survey's own measurement rather than a change to it.
     Run the tool for the current number; nothing here states one that a
     lowering cannot invalidate.
 
