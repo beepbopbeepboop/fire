@@ -1,5 +1,21 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**RE-MEASURED 2026-10-12 (`work/formal303-docs`): the one-call-site proof had
+gone RED since the paragraph below was written, and the cause was the emitted
+`maxRecDepth` constant, not the walk.** The header set
+`set_option maxRecDepth 100000`, and the followed call's first block-state `rfl`
+hits `maximum recursion depth has been reached` there — so the proof never
+checked, and `formal/examples/main_calls_helper.mojo` sat in `test_formal.py`'s
+`EXPECTED_FAILURES` under the now-stale reason "the CFG walk cannot follow a call
+out of the entry". The constant is `1000000` now (measured on
+`main_calls_helper`: rc=0 at 200000 and at 1000000, red at 100000, 80 s /
+2.6 GB; see the `set_option` note in `formal/arm64_proof_gen.py`), the corpus
+entry is removed, and the proof checks again. **What is left here is still step 2
+(two call sites) and step 3 (recursion), unchanged** — an experiment on step 2
+(distinct-callee support in `_same_image_call_plan`) generated a proof but it
+failed at a `FrameOk` window peel, so step 2 needs the frame-address machinery
+and is not the small change it reads as.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1
