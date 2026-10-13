@@ -382,6 +382,31 @@ class TestGeneratorSource(unittest.TestCase):
                       "Lean reads a comma as a pair, so `(f_go a, b)` has the "
                       "wrong type for every multi-argument call")
 
+    def test_a_callee_nested_in_an_argument_is_modelled(self):
+        """`scale(shift(n))` needs a `_go` for BOTH names, and two things
+        stopped it: `_callees_of` saw only the OUTER call's name (so `shift`
+        was not reachable and `_go_defs_for` emitted no `shift_go`), and the
+        UNTYPED arm of `_expr_go` passed `_expr_go` bare as `_call_go`'s
+        argument renderer, so the nested call arrived with `scope=None` and was
+        refused as "a function this generator emits no `_go` for" even after
+        the first was fixed.  The model is the whole of what the universal
+        theorem is about, so a missing `_go` is a refusal (arm64) or — on the
+        x86-64 path that catches it — a silent identity placeholder."""
+        src = ("def scale(a):\n"
+               "    return a * 2\n"
+               "def shift(a):\n"
+               "    return a + 1\n"
+               "def main(n):\n"
+               "    return scale(shift(n))\n")
+        defs = _models(src, "main")
+        self.assertIn("def scale_go", defs)
+        self.assertIn("def shift_go", defs,
+                      "a callee reachable only as another call's ARGUMENT "
+                      "gets no `_go` and the model refuses the program")
+        self.assertIn("(scale_go (shift_go n))", defs,
+                      "the nested call must render against the scope it was "
+                      "resolved in; a bare `_expr_go` loses it")
+
     def test_nullary_function_gets_no_parameter(self):
         defs = _models(PROGRAMS["no_params"][0], "seven")
         self.assertIn("def seven_go : UInt64 :=", defs,

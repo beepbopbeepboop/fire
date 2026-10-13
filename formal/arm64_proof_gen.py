@@ -1176,14 +1176,22 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             f"render; answering 0 would be a statement about the source "
             f"rather than a model of it")
     if isinstance(e, Call):
-        return _call_go(e, param, env, scope, _expr_go)
+        # The argument renderer must carry the SAME tables this call was
+        # resolved with: `_call_go` renders every argument through `render`, so
+        # passing `_expr_go` bare gives a nested call `scope=None` and it is
+        # refused as "a function this generator emits no `_go` for" even though
+        # the `_go` exists — `scale(shift(n))` refused on `shift`.  The typed
+        # arm below has always wrapped this way; this is the same wrap.
+        return _call_go(e, param, env, scope,
+                        lambda a, p, en: _expr_go(a, p, en, vtypes,
+                                                  call_types, scope))
     if isinstance(e, F.TernaryExpr):
         # A conditional expression is a VALUE here, not control flow, and it is
         # the same function `_stmts_go`'s `IfStmt` arm builds for an `if` — the
         # two were separate refusals of one construct. `vtypes or {}` is not
-        # defensive noise: `_call_go` calls this renderer back with three
-        # arguments, so a ternary nested in a call's argument arrives here with
-        # no type tables, and `_cmp_go` reads them
+        # defensive noise: a ternary reached through a path that carries no type
+        # tables (the `if`-statement arm builds its condition this way) reads
+        # them, and `_cmp_go` would raise on `None`
         # (`_expr_bool_go`'s docstring is the measured `AttributeError`).
         return _ternary_go(e, param, env, vtypes or {}, call_types or {},
                            scope, _expr_go, _cmp_go)
@@ -2469,6 +2477,18 @@ def _callees_of(fn) -> list:
     def in_expr(e):
         if isinstance(e, Call):
             out.append(_call_name(e))
+            # Recurse into the ARGUMENTS: `scale(shift(n))` calls BOTH names,
+            # and a callee that appears only inside another call's argument list
+            # is a callee this graph has to see or `_go_defs_for` emits no `_go`
+            # for it and the model refuses the whole program ("call to `shift`
+            # has no model in this image").  The same omission is still in
+            # `_is_recursive`, where it makes a `g(f(n-1))` self-call invisible
+            # and the model a plain `def` that Lean rejects; see
+            # `bugs/FORMAL_a_self_call_nested_in_a_call_argument_is_invisible_to_is_recursive.md`.
+            # Pinned by `test_formal_call_proof_gen.py::TestGeneratorSource::
+            # test_a_callee_nested_in_an_argument_is_modelled`.
+            for a in e.args:
+                in_expr(a)
         if isinstance(e, BinOp):
             in_expr(e.left)
             in_expr(e.right)
