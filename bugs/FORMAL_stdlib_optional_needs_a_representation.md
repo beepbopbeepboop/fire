@@ -1,5 +1,35 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
+**Status 2026-10-12 (`work/formal298-docs`): the REPRESENTATION this doc asks for
+LANDED, as a NICHE, so the "...needs a REPRESENTATION" headline and the
+"NOT FIXED" paragraph immediately below are both wrong as of that commit.**
+`None` is now a word the payload type cannot produce rather than the integer 0
+(`formal/model.py::optional_none_word`), which is the whole of the answer to the
+question this document was filed with — see `bugs/FORMAL_optional_needs_a_niche.md`
+(§"What landed, and what it is") and its §1, which already records that
+`builtin_slice.mojo` was never blocked on `Optional` at all. What is still open
+is `Optional[Int]`, the payload with no spare word, which needs the TWO-WORD form
+and is `optional_needs_a_niche.md` §2's row — not a lowerer and not this doc.
+
+**And `builtin_slice.mojo`'s current first wall is one layer below even that.**
+Measured on this tree, both architectures, byte-identical, it is a BARE CALL TO A
+GENERIC TEMPLATE: `Slice.write_to` calls `FormatStruct(...)` with no type
+argument, which `formal/monomorph.py`'s demand pipeline does not infer, so the
+build refuses with the export-rule message and names
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`.
+The dependency chain below has therefore moved a FIFTH time, and this time off
+this document's own subject; the chain sections are history, and this paragraph
+is where a reader should start.
+
+```console
+$ for a in arm64 x86_64; do python3 fire.py build --formal --no-prove --backend=$a \
+      -o .tmp/bsl ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: Slice.write_to: `FormatStruct` is called, and it is imported from
+`std.format._utils`, so the call has to bind a symbol `std.format._utils` exports.
+That module does not export it … this call is one that asked for none — it names
+no type argument … # (identical text on both architectures)
+```
+
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
 Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
 value-model decision, and it is the last thing between the `builtin_slice` row
