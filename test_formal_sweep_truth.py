@@ -4584,9 +4584,9 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
         emit():  emitted 0, refused 49, plan-failed 1
         every one of the 49 names `call_rel32`
 
-    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
-    says the same thing from the other side ("before the guard it covered 7 of
-    43") and asks for the guard's branches to be DECIDED rather than walked.
+    The guard's own doc said the same thing from the other side ("before the
+    guard it covered 7 of 43") and asked for the guard's branches to be DECIDED
+    rather than walked.
     What was missing is anything that notices when that happens: `emit()` refusing
     every example reads exactly like a corpus of programs no straight-line
     theorem is possible for, which is a different claim and a wrong one.
@@ -4804,10 +4804,9 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
             f"emit() now covers {emitted}. Two things can do that and the "
             f"reader needs to know which: the stack-floor guard left the "
             f"prologue, or its two branches were DECIDED rather than walked — "
-            f"the second is what "
-            f"bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
-            f"image.md asks for, and the first is a much larger change. Either "
-            f"way `emit()`'s coverage number in that doc is now stale.")
+            f"the second is the fix the guard's own doc asked for, and the "
+            f"first is a much larger change. Either way `emit()`'s coverage "
+            f"number is now stale.")
         not_the_guard = [(s, b) for s, b in refused if "call_rel32" not in b]
         self.assertEqual(
             not_the_guard, [],
