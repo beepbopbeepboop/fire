@@ -135,7 +135,15 @@ HOST_UNREACHABLE = frozenset((
     # not have" for a file that now builds.  The capability is still missing; what
     # changed is that the module answers anyway, under a declared contract.
     #
-    # A second process.
+    # A second process, and the object this row names is the process itself:
+    # `multiprocessing` starts one (fork, spawn or a shared semaphore, per the
+    # start method) and a formal image is ONE process whose exec of itself is a
+    # different program.  Added 2026-10-13 WITH a consumer rather than by
+    # category: `tools/formal_proof_breadth.py` draws its work across a pool,
+    # so the sweep files it under this row's "no tier" wording today.  See the
+    # corpus rows in `test_formal_imports.py`, which used to walk only the
+    # `.mojo` half of the corpus and so missed this import entirely.
+    "multiprocessing",
     # A thread, and a proved model of one.
     "asyncio",
     # A socket.
@@ -213,6 +221,16 @@ HOST_UNREACHABLE = frozenset((
     # that arrives has a tier rather than the false "not a stdlib module"
     # refusal.
     "zlib", "gzip", "locale",
+    # AND `sqlite3`, which unlike the three above has a REAL consumer rather
+    # than a hypothetical one: `tools/codeindex.py` imports it, and the sweep
+    # files that file under this row's "no tier" wording today.  Its object is
+    # `libsqlite3`, a dylib of its own and not part of libSystem, so linking it
+    # would contradict the premise exactly as libz would — and unlike `zlib`
+    # there is no honest route that does not link it, because SQL is an engine
+    # and a wire format rather than arithmetic over bytes.  Added 2026-10-13
+    # with the consumer measured (see the corpus rows in
+    # `test_formal_imports.py`).
+    "sqlite3",
     # An EMBEDDED CPython's installation, which is the reading of `sysconfig`
     # that has no other: `get_paths()` answers "where is the interpreter that
     # would run this program", and there is none. `fire.py` imports it and
@@ -842,6 +860,40 @@ HOST_MODELLED = frozenset((
     # live interpreter's frames, because there is no interpreter. Flagged as
     # considered rather than missed.
     "inspect",
+    # ── 2026-10-13: the five REACHABLE names with a real consumer, found by
+    # walking the `.py` half of the corpus the coverage test used to miss ──
+    #
+    # `test_formal_imports.py`'s corpus row asked "which of the unclassified
+    # names does a swept file import" of every `.mojo` file only, and answered
+    # zero — which is the finding the doc used to justify leaving all 200
+    # unplaced.  The sweep's corpus is `.mojo` AND `.py` (this repository's 390
+    # `.py` files are most of its 516), and `imported_modules` reads both, so
+    # the question had a second half.  Asked of it: EIGHT consumers, SEVEN
+    # names, and these five are the reachable half (`sqlite3` and
+    # `multiprocessing` are in `HOST_UNREACHABLE` above).
+    #
+    # Each is placed by the rule at the top of this module and not by "it would
+    # be convenient to be rid of it": the object is present, or the module is
+    # pure computation over values this path already represents, so the module
+    # is a gap with an owner rather than a permanent fact about the target.
+    #
+    #   `token` / `tokenize` / `keyword` — pure computation over source text:
+    #     `keyword` is CPython's own `kwlist`, `token` is the constant
+    #     vocabulary plus `tok_name`, and `tokenize` is the tokenizer those two
+    #     describe.  Nothing here touches the C library.  Consumers:
+    #     `test_ast_formal.py` (`token`, `tokenize`) and `formal/model.py`
+    #     (`keyword`).
+    #   `pwd` — libSystem's `getpwuid`, `getpwnam` and `getpwent` over a fixed
+    #     record layout, which is the `resource` shape above.  Consumer:
+    #     `test_formal_os.py`.
+    #   `plistlib` — a data format: the BINARY plist reader/writer is
+    #     arithmetic over bytes, and the XML half delegates to
+    #     `xml.parsers.expat`.  That is the `datetime` shape exactly (the
+    #     arithmetic is modelled and the C library's part — here expat — is a
+    #     separate module with its own verdict), which is why this is
+    #     `modelled` rather than `unreachable`.  Consumer:
+    #     `test_formal_platform.py`.
+    "token", "tokenize", "keyword", "pwd", "plistlib",
 ))
 
 # The THIRD tier, and it exists because the other two could not say what is now

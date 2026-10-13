@@ -190,14 +190,16 @@ class TestWhatAWallIs(TempTree):
 
         `host_module_tier` answers "has this tree CLASSIFIED the name" and
         `is_cpython_stdlib` answers "does CPython ship it"; a name for which the
-        first says no and the second says yes is a wall with no tier. `pwd` is
-        a real one — `formal/hostmods/` has no `pwd.mojo` and no tier names it,
-        and it is the only wall in `test_formal_os.py` today.
+        first says no and the second says yes is a wall with no tier. `binascii`
+        is a real one — `formal/hostmods/` has no `binascii.mojo` and no tier
+        names it. (`pwd` stood here until 2026-10-13, when a real `.py` consumer
+        put it in `HOST_MODELLED`; a case that names an untiered module is
+        exactly the tripwire for that, and this comment is what it caught.)
         """
-        self.assertEqual(host_module_tier("pwd"), "")
-        self.assertTrue(W._is_wall("pwd"))
-        top = self.path("os_test.py", "import pwd\n")
-        self.assertEqual(W.walls_of(top), frozenset({"pwd"}))
+        self.assertEqual(host_module_tier("binascii"), "")
+        self.assertTrue(W._is_wall("binascii"))
+        top = self.path("os_test.py", "import binascii\n")
+        self.assertEqual(W.walls_of(top), frozenset({"binascii"}))
 
     def test_a_name_nothing_provides_is_not_a_wall(self):
         """The negative, which is what keeps the row from being everything.

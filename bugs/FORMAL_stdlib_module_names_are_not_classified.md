@@ -1,5 +1,56 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
+**Status (2026-10-13, `work/formal368-docs`): §0.1's measurement had a SECOND
+HALF, and it was not empty — SEVEN names are now classified, each with a real
+consumer behind it.** `test_formal_imports.py`'s corpus question ("which of the
+unclassified names does a swept file import") was asked of every `.mojo` file
+and answered zero, which is the whole of §0.1's "worth nothing for coverage"
+and the ground §"Why the 222 are filed and not fixed here" rests on. **The
+corpus is `.mojo` AND `.py`**: `bugs/FORMAL_sweep_work_map.md` §1.2 measures the
+`-14` scope at 768 files, 516 of them this repository's `.py`/`.mojo`, and
+`formal/build.py` resolves a `.py` file's imports through `formal/imports.py`
+exactly as it does a `.mojo` file's (measured: this build of a two-line `.py`)
+
+```
+build: imp_py.py imports 'sqlite3', which is a CPython standard-library module,
+which has no Mojo source in this tree and no tier in `formal/imports.py` …
+```
+
+**so the question was asked of half the corpus, and the other half answers EIGHT
+consumers and SEVEN names.** The sweep's own log had them all along — `-14`'s
+`not-answerable/host-import by module:` line reads `tokenize x2,
+multiprocessing x1, plistlib x1, pwd x1, sqlite3 x1` — which is the measurement
+§0.1 said did not exist:
+
+| name | consumer (a swept `.py`) | tier |
+|---|---|---|
+| `token`, `tokenize` | `test_ast_formal.py`, `test_no_new_container_casts.py` | `modelled` |
+| `keyword` | `formal/model.py` | `modelled` |
+| `pwd` | `test_formal_os.py` | `modelled` |
+| `plistlib` | `test_formal_platform.py` | `modelled` |
+| `sqlite3` | `tools/codeindex.py` | `unreachable` |
+| `multiprocessing` | `tools/formal_proof_breadth.py` | `unreachable` |
+
+**What landed, and it is placed by the RULE and not by category.** `token`,
+`tokenize` and `keyword` are pure computation over source text; `pwd` is
+libSystem's `getpwuid`/`getpwnam` over a fixed layout (the `resource` shape);
+`plistlib` is arithmetic over bytes whose XML half delegates to `expat`, a
+separate module with its own verdict (the `datetime` shape); `sqlite3` needs
+`libsqlite3`, a dylib of its own and not libSystem; `multiprocessing` starts a
+second process and a formal image is one. Public unclassified 200 → **193**.
+`test_no_unclassified_stdlib_name_is_imported_by_anything` now walks BOTH halves
+— it was a coverage hole of exactly the kind CLAUDE.md names, "a check that did
+not look at what it produced" — and a new row
+`test_the_names_with_a_python_consumer_are_classified` pins each name's tier
+against its consumer; `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`
+carries all seven. `test_formal_imports.py` 91 → **92** checks / 0 failed,
+`test_formal_link_accounting.py` 289 → **324**.
+
+**What is still §0.1's queue, unchanged in kind:** the remaining 193 names have
+no consumer in either half of the corpus, so there is still no measurement to
+tell a right entry from a plausible one. This section moves the number rather
+than the argument.
+
 **Status (2026-10-07, `work/formal135-docs`): the FIVE names §0.5 said the
 `find_spec` oracle decides are LANDED.** `_gdbm`, `_tkinter`, `_overlapped`,
 `_winapi` and `_wmi` join `HOST_UNREACHABLE` — the rule at the top of
@@ -9,7 +60,7 @@ Windows-only. All five are private, so the PUBLIC unclassified count moves by
 zero, exactly as §0.5 said. The census is now `unclassified 200` (was 205),
 `unreachable 27` (was 22); the file's other counts (223/216/217 in the older
 sections) are the historical readings §0.5 already corrected. Pinned by
-`test_formal_imports.py::test_the_five_gdbm_style_names_are_unreachable` and by
+`test_formal_imports.py::test_the_find_spec_decided_names_are_unreachable` and by
 `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`, which names each with
 its tier and reason. **The remaining 200 per-name judgements are still NOT
 done, and §0.1's reason still stands: nothing imports them, so there is no

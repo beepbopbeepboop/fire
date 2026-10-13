@@ -660,6 +660,23 @@ HOST_SET_ADDED_TIERS = {
     "_tkinter": "unreachable",
     "_winapi": "unreachable",
     "_wmi": "unreachable",
+    # ── and the seven names a `.py` consumer decides, added 2026-10-13 by the
+    # worker holding `FORMAL_stdlib_module_names_are_not_classified.md`.  The
+    # corpus question that doc's §0.1 rested on was asked of the `.mojo` half of
+    # the sweep corpus only; the sweep is `.mojo` AND `.py`, so the question had
+    # a second half, and it names these seven.  Same RULE as every row above
+    # (the object is missing from the target, or the module is pure computation
+    # over values this path already represents), and each has a real consumer in
+    # a `.py` file this repository sweeps — the measurement §0.1 said did not
+    # exist.  `test_formal_imports.py::test_the_names_with_a_python_consumer_are_
+    # classified` pins each name's tier against its consumer.
+    "token": "modelled",
+    "tokenize": "modelled",
+    "keyword": "modelled",
+    "pwd": "modelled",
+    "plistlib": "modelled",
+    "sqlite3": "unreachable",
+    "multiprocessing": "unreachable",
 }
 
 

@@ -1968,16 +1968,29 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
     say whether the module is reachable. What it cannot pin is whether that
     matters, because "unclassified" is a statement about the table and not about
     the corpus. The corpus question is the one that decides how much of the
-    table is worth filling, and it is cheap to ask of every `.mojo` file rather
+    table is worth filling, and it is cheap to ask of every SOURCE file rather
     than of the ones a sweep happened to reach:
 
         unclassified names  x  files that IMPORT one of them  =  (must be empty)
 
-    Measured over this repository and the stdlib on 2026-10-03, it is EMPTY --
-    not one of the 223 was imported by any of the 370 files, which is why
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` stopped asking for
-    222 per-name judgements: there is no measurement to tell a right entry from
-    a plausible one, and no file whose answer changes. Asserting it here makes
+    **The corpus is `.mojo` AND `.py`, and for two years this row walked only
+    the `.mojo` half.**  The sweep's corpus is this repository's 516 `.py`/`.mojo`
+    files plus the stdlib (`-14` §1.2), the build resolves a `.py` file's
+    imports through exactly the machinery below, and `imported_modules` reads
+    both languages.  So the 2026-10-03 answer of EMPTY was an artefact of the
+    filter: asked of BOTH halves it is EIGHT consumers and SEVEN names —
+    `token`, `tokenize`, `keyword`, `pwd`, `plistlib`, `sqlite3` and
+    `multiprocessing`, each in a `.py` file this repository sweeps
+    (`test_ast_formal.py`, `formal/model.py`, `test_formal_os.py`,
+    `test_formal_platform.py`, `tools/codeindex.py`,
+    `tools/formal_proof_breadth.py`).  That refutes the "worth nothing for
+    coverage" premise `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    §0.1 rested on, and the seven are now placed by the rule in
+    `formal/imports.py` rather than by category — `test_the_names_with_a_python_
+    consumer_are_classified` below pins each with its consumer.  What is left
+    of the 200 is still the no-measurement queue §0.1 describes.
+
+    Asserting it here makes
     that a standing invariant rather than a snapshot, and it is a TRIPWIRE with
     a direction: the day a file imports `binascii`, this goes red and the fix is
     to place the name by the rule in `formal/imports.py`, which is the only
@@ -2026,7 +2039,7 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
             dirs[:] = [d for d in sorted(dirs)
                        if d not in (".git", "build", ".tmp", "__pycache__")]
             for name in sorted(files):
-                if not name.endswith(".mojo"):
+                if not (name.endswith(".mojo") or name.endswith(".py")):
                     continue
                 path = os.path.join(dirpath, name)
                 try:
@@ -2041,13 +2054,81 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
                     if top in unclassified:
                         consumers.append((mod, os.path.relpath(path, root)))
     check(scanned > 100,
-          f"only {scanned} .mojo files were scanned, so this row is not "
+          f"only {scanned} source files were scanned, so this row is not "
           "covering the corpus it claims to cover")
     check(not consumers,
           "these files import a CPython standard-library name that no tier "
           "classifies, so nothing here can say whether the module is "
           f"reachable and the file's host-import row has no verdict: "
           f"{consumers[:10]}")
+
+
+def test_the_names_with_a_python_consumer_are_classified(tmpdir, _shared):
+    """The seven names the CORRECTED corpus question found, each with its tier.
+
+    `test_no_unclassified_stdlib_name_is_imported_by_anything` used to ask only
+    the `.mojo` half of the corpus and answer zero, which is what
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.1 rested on for
+    leaving all 200 names unplaced. The sweep's corpus is `.mojo` AND `.py`
+    (`bugs/FORMAL_sweep_work_map.md` §1.2: 516 of the 768 files are this
+    repository's `.py`/`.mojo`), and the build resolves a `.py` file's imports
+    through the same machinery — so the question had a second half, and this
+    row pins its answer: SEVEN names, EIGHT consumers.
+
+    Each is placed by the RULE at the top of `formal/imports.py` and not by
+    category — the object is missing from the target (`sqlite3`'s
+    `libsqlite3`, `multiprocessing`'s second process) or the module is pure
+    computation over values the model already represents (`token`, `tokenize`,
+    `keyword`) or libSystem over a fixed layout (`pwd`) or arithmetic over
+    bytes (`plistlib`, whose XML half delegates to `expat`, a separate module
+    with its own verdict — the `datetime` shape).
+
+    Two assertions per name, and the second is what keeps this from becoming a
+    list of readings: the TIER, and that the named `.py` consumer really
+    imports it through the build's own `imported_modules`. A tier with no
+    consumer is the "plausible entry" §0.1 warns against; a consumer with no
+    tier is the coverage hole this pair of rows closes.
+    """
+    placed = {
+        "token": ("modelled", "test_ast_formal.py",
+                  "the constant vocabulary, pure data over source text"),
+        "tokenize": ("modelled", "test_ast_formal.py",
+                     "the pure-Python tokenizer, nothing from the C library"),
+        "keyword": ("modelled", "formal/model.py",
+                    "CPython's own `kwlist`, pure data"),
+        "pwd": ("modelled", "test_formal_os.py",
+                "libSystem's getpwuid/getpwnam over a fixed record layout, "
+                "the `resource` shape"),
+        "plistlib": ("modelled", "test_formal_platform.py",
+                     "arithmetic over bytes; the XML half delegates to expat, "
+                     "which is a separate module with its own verdict"),
+        "sqlite3": ("unreachable", "tools/codeindex.py",
+                    "libsqlite3 is a dylib of its own, not libSystem"),
+        "multiprocessing": ("unreachable", "tools/formal_proof_breadth.py",
+                            "a formal image is one process, and this starts a "
+                            "second"),
+    }
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    for name, (tier, consumer, why) in sorted(placed.items()):
+        check(name in sys.stdlib_module_names,
+              f"{name} is not a name CPython ships on this tree")
+        check(I.host_module_tier(name) == tier,
+              f"host_module_tier({name!r}) answered "
+              f"{I.host_module_tier(name)!r}, want {tier!r} — {why}")
+        path = os.path.join(HERE, consumer)
+        check(os.path.isfile(path), f"the consumer {consumer} does not exist")
+        with open(path, "rb") as f:
+            stmts = I.parse_module_for_closure(f.read(), path)
+        mods = {m.split(".")[0] for m in I.imported_modules(stmts)}
+        check(name in mods,
+              f"{consumer} does not import {name!r} through the build's own "
+              f"reader (it imports {sorted(mods)}), so the tier has no "
+              "measurement behind it and this row is asserting a reading")
+        answer, _detail = I.host_module_verdict(name, relative_to=probe,
+                                                project_root=probe)
+        check(answer == tier,
+              f"host_module_verdict({name!r}) answered {answer!r}, want "
+              f"{tier!r}")
 
 
 def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
@@ -5352,6 +5433,8 @@ TESTS = [
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
     ("the names find_spec decides are unreachable, not unclassified",
      test_the_find_spec_decided_names_are_unreachable),
+    ("the names with a .py consumer are classified, each with its consumer",
+     test_the_names_with_a_python_consumer_are_classified),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

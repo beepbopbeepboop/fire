@@ -1465,14 +1465,19 @@ class TestTheThirdImportWording(unittest.TestCase):
     """`unresolvable_import_error` has THREE wordings and this tool knew two.
 
     The third is for a CPython stdlib name that `formal/imports.py` does not
-    put in any tier — `tokenize`, `plistlib`, `sqlite3` — and it says so
+    put in any tier — `binascii`, `getopt`, `cmath` — and it says so
     ("no tier in `formal/imports.py` saying whether implementing it would need
     an object this target does not have"). Before the marker existed, the
     2026-10-03 sweep filed four files as `unknown`: a class that is in NO rate,
     with the backend's own correct answer printed in full on the row.
+
+    (`tokenize`/`plistlib`/`sqlite3` stood here as the examples until
+    2026-10-13, when real `.py` consumers put all three in a tier — the
+    anti-rot row below is what made that visible rather than letting the fixture
+    go quietly stale.)
     """
 
-    WORDING = ("build: test_ast_formal.py imports 'tokenize', which is a "
+    WORDING = ("build: test_ast_formal.py imports 'binascii', which is a "
                "CPython standard-library module, which has no Mojo source in "
                "this tree and no tier in `formal/imports.py` saying whether "
                "implementing it would need an object this target does not "
@@ -1480,9 +1485,9 @@ class TestTheThirdImportWording(unittest.TestCase):
 
     def test_it_is_host_import_and_not_unknown(self):
         cls, reason = S.classify(False, self.WORDING,
-                                 source="import tokenize\n", path="a.py")
+                                 source="import binascii\n", path="a.py")
         self.assertEqual(cls, S.CLASS_HOST)
-        self.assertEqual(reason, "tokenize")
+        self.assertEqual(reason, "binascii")
 
     def test_the_backend_still_produces_this_wording(self):
         """The anti-rot: a marker with no producer is a marker with no cause.
@@ -1492,13 +1497,13 @@ class TestTheThirdImportWording(unittest.TestCase):
         quietly going back to `unknown`.
         """
         import formal.imports as I
-        got = I.unresolvable_import_error("x.py", "tokenize")
+        got = I.unresolvable_import_error("x.py", "binascii")
         self.assertIn(S._STDLIB_UNCLASSIFIED_MARK, got,
                       "the wording the classifier matches is not the one the "
                       "backend emits; re-read it rather than adding a second "
                       "spelling")
-        self.assertEqual(I.host_module_tier("tokenize"), "",
-                         "the fixture names an UNTYPED module; if tokenize "
+        self.assertEqual(I.host_module_tier("binascii"), "",
+                         "the fixture names an UNTYPED module; if binascii "
                          "gained a tier this row is about something else")
 
     def test_it_is_not_added_to_the_reach_mirror(self):
@@ -1510,7 +1515,7 @@ class TestTheThirdImportWording(unittest.TestCase):
         without anyone writing a module. A name that gains a tier stops being
         refused, and then it leaves here on its own.
         """
-        self.assertNotIn("tokenize", S.IN_REACH_HOST_MODULES)
+        self.assertNotIn("binascii", S.IN_REACH_HOST_MODULES)
 
 
 # ── 4. an interpreter that cannot import the backend ─────────────────────────
