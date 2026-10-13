@@ -621,8 +621,10 @@ class TestGeneratorSource(unittest.TestCase):
         one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
         reading a branch condition out of a COMMENT above the TBZ case, which put
         `test_formal.py` in a state where it raised before generating a single
-        proof for every example it has — see
-        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+        proof for every example it has. That audit bug is fixed by `c18fe3a2`,
+        which made `audit_step_table` call the same `_decoder_branch_conds` that
+        `check_step_conds` uses — de-duplication rather than a reworded comment,
+        so the two readers cannot disagree about what a branch condition is.
 
         The regression this pins is the one whose fix was to REMOVE a row:
         `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
@@ -4690,9 +4692,10 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
-    `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
-    recorded twelve red examples on 2026-10-03 and measured them one family at a
-    time, which is the right discipline and produced a list that has since gone
+    The census began as twelve red examples measured 2026-10-03, one family at a
+    time — the twelve were invisible until `c18fe3a2` de-duplicated the two
+    step-table auditors and let the suite generate a proof again. That discipline
+    produced a list that has since gone
     stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
     `sorry`, and `sum_range` was the last one refusing at generation — its
     back edge is a conditional branch, and a `for`-range loop lowers with the
@@ -4711,7 +4714,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     A census that has gone stale is worth exactly as much as the measurement
     that refreshed it, and the refresh is cheap: **emission needs no Lean**, so
     this file (whose rule is generation only, no Lean) can pin it on every run
-    and the doc's list cannot rot again between sessions. What it cannot do is
+    and the list cannot rot again between sessions. What it cannot do is
     say whether Lean ACCEPTS each of them — an emitted proof can still be
     rejected at typecheck — and this class says so in its own name rather than
     letting "generates" read as "is proved".
@@ -4721,8 +4724,8 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The eleven that still generate, grouped as the doc grouped them, so a
-    #: reader can see which family each is in.
+    #: The eleven that still generate, grouped by family as the original
+    #: census did, so a reader can see which family each is in.
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
                 "both", "either",                               # family 3

@@ -3,9 +3,9 @@
 **Area:** FORMAL / proof generation — `formal/arm64_codegen.py`'s
 `_emit_stack_floor_guard` and `formal/arm64_proof_gen.py`'s `_calls` /
 `_opaque` selection. **Status: NOT FIXED.** Found 2026-10-06 while
-re-measuring `TestTheRecursionFamiliesStillGenerate` (the pin the
-`FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` doc
-names).
+re-measuring `TestTheRecursionFamiliesStillGenerate` (the census pin in
+`test_formal_call_proof_gen.py`, added after the step-table audit was
+de-duplicated in `c18fe3a2`).
 
 ## What I ran
 
