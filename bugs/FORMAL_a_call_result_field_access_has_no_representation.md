@@ -6,6 +6,9 @@ rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 **Status: the ranking is DONE and it says the task's "next 4-6 modules by files
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
 this file is about is NOT built and §5 says what building it takes.**
+**2026-10-13: the instrument's own ratchet was brought back to green — two dead
+`subprocess` imports deleted and `find_spec` recorded on the `importlib.util`
+row — and §3 has the measurement; the capability below is unchanged.**
 
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
