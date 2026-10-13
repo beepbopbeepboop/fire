@@ -6388,6 +6388,65 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A STARRED for-target: `for a, *rest in …` binds the fixed name to the
+    # element and `rest` to the tail as a fresh blob.  On this group because it
+    # failed identically on both backends for two DIFFERENT reasons — arm64
+    # built a wrong tail (`sub x3, x3, #6` read the literal six as `n_fixed` and
+    # the copy loop branched out on the inverted `cbz`, running into the OOB
+    # `exit(1)`), and x86-64 stripped the star before the unpack and refused the
+    # spelling `'*rest' has no home`.  The expected 323 is `(a + len(rest))`
+    # then `rest[0]*10 + rest[1]*100` over the single element `(1, 2, 3)`:
+    # `1 + 2 + 20 + 300`.  A backend that bound the tail wrong answers a
+    # different number (or dies), and a `sub…#6`/`cbz` tail reads past the blob.
+    ("both_arch_a_starred_for_target_binds_the_fixed_names_and_the_tail",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1, 2, 3)]:\n"
+     "        s = s + a + len(rest) + rest[0] * 10 + rest[1] * 100\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=323"),
+    # The same construct with TWO fixed names: `n_fixed` is 2, so a helper that
+    # hard-coded the arity (the `#6` bug) or that required an exact count fails
+    # here even when the one-fixed-name row passes.  Expected `1 + 2 + 3` = 6.
+    ("both_arch_a_starred_for_target_with_two_fixed_names",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, b, *rest in [(1, 2, 3, 4, 5)]:\n"
+     "        s = s + a + b + len(rest)\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=6"),
+    # An EMPTY tail: the rest blob is a valid `[0][…]` blob and `len(rest)` is 0,
+    # which is the one case a `>=` arity check must still accept (an equality
+    # would call it a mismatch and exit(1)).  Expected `1 + 0` = 1.
+    ("both_arch_a_starred_for_target_with_an_empty_tail",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(1,)]:\n"
+     "        s = a + len(rest)\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=1"),
+    # A NESTED group beside the star, so the rest binding and the nested-group
+    # unpack are exercised on the same target tree.  Expected
+    # `1 + 2 + 3 + 2 + 4 + 5` = 17 over `(1, (2, 3), 4, 5)`.
+    ("both_arch_a_starred_for_target_with_a_nested_group",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, (b, c), *rest in [(1, (2, 3), 4, 5)]:\n"
+     "        s = s + a + b + c + len(rest) + rest[0] + rest[1]\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=17"),
+    # The measured `#6` bug's own shape: a seven-element tuple has a tail of
+    # SIX, so `len(rest)` is 6 here and 1 under the old `sub x3, x3, #6` (which
+    # always subtracted the literal six).  Expected `6`, and the tail's own
+    # bytes are all 9 so a wrong element read is also visible.
+    ("both_arch_a_starred_for_target_tail_length_is_the_arity_minus_the_fixed",
+     "def main():\n"
+     "    var s = 0\n"
+     "    for a, *rest in [(9, 9, 9, 9, 9, 9, 9)]:\n"
+     "        s = a + len(rest) + rest[0]\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n", 0, "s=24"),
+
     # `len()` of an UNANNOTATED parameter, whose kind reaches the reader
     # through `model._parameter_argument_shape` -- the call site's argument
     # kind, propagated into the callee and unanimous over every site of the name.
