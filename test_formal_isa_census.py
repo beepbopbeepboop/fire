@@ -189,8 +189,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    return unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                         exit=False).result.wasSuccessful() and 0 or 1
+    # `and 0 or 1` was here and always answered 1: on success it evaluates
+    # `(True and 0) or 1` = `0 or 1` = 1, so the test's exit STATUS disagreed
+    # with the "OK" it printed and every run read as a failure. The suite is
+    # the reader of a test's exit code, so a verdict that cannot be right is a
+    # hole: a red run and a green one were indistinguishable by `$?`.
+    ok = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                       exit=False).result.wasSuccessful()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
