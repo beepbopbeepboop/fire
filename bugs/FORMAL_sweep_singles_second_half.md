@@ -1,5 +1,29 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
+**Re-measured 2026-10-12 (`work/formal298-docs`): §1's and §3's rows are no
+longer their file's first refusal — both now stop at the f-string buffer, one
+shared wall, exactly as §2's `module_loader.py` row already does.** Measured,
+`--no-prove`, both architectures, byte-identical per file:
+
+```console
+$ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/x formal/x86_64_decode.py
+build: an f-string literal on line 133 is refused on this path: its value is its
+INTERPOLATED text … (`FORMAL_string_composition_has_no_buffer`)
+$ … regex_compile.py
+build: an f-string literal on line 116 is refused … (the same refusal)
+```
+
+So neither §1's `field(default_factory=F)` row nor §3's frame-rebind row is
+reachable from a build any more: the string-composition refusal
+(`formal/string` — 115 files, another worker's claim) fires first, and the two
+file-local rows sit behind it. **Their verdicts do not change** — both are still
+the RIGHT refusal and still not a patch — but "the row this file reaches" is no
+longer them. §5 is unchanged and still reproduces on this tree:
+`std/format/repr.mojo`'s `value.write_repr_to()` and
+`std/utils/_serialize.mojo`'s `unsafe_offset()` both refuse as a method call on a
+value, which is the repr-model row and the only one of the three still first.
+See `bugs/FORMAL_string_composition_has_no_buffer.md`.
+
 **Status: filed 2026-10-03 from the sweep map
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
