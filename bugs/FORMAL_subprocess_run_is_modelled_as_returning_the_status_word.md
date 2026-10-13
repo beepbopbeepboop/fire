@@ -172,3 +172,76 @@ contract leave the `UInt64 → UInt64` shape" (option 1). Both are FOR
 already named; this update is the measurement that makes the boundary concrete.
 `version.py` remains exactly as closed — refused at `r.returncode` — and no
 caller-side substitution was made for the same reason the doc originally gave.
+
+## Status 2026-10-13 (`work/formal371-docs`): option 1's stated mechanism is
+## REFUTED — a call's result does not establish the binding, struct or not
+
+All three options above rest on the same premise: that what stands between the
+caller and `r.returncode` is the model's WORD return, so making `CompletedProcess`
+a real one-field struct would let `.returncode` lower "through the one-field
+convention (receiver IS its field)". **Measured, that is not what fires.** The
+field-access refusal asks whether the base is bound by something the image can
+see, and a CALL RESULT is not — even when the callee's declared return type is a
+one-field struct declared in the same unit. Nine lines, built on BOTH
+architectures, byte-identical wording:
+
+```python
+struct CompletedProcess:
+    var returncode: Int
+
+def make() -> CompletedProcess:
+    var c = CompletedProcess(returncode=3)
+    return c
+
+def main() -> Int:
+    var r = make()
+    if r.returncode == 0:
+        return 1
+    return 0
+```
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build \
+      --formal --no-prove --backend=arm64 -o .tmp/subproc/t3.aout .tmp/subproc/t3.mojo
+build: main: 'r.returncode' is a field access through 'r', and this path has no
+  way to say what 'r' holds. … nothing this image can see about 'r''s binding
+  establishes which … Bind the base from a constructor whose declaration THIS
+  IMAGE can see (`x = S()`) …
+# and on --backend=x86_64, identical
+```
+
+The SAME struct bound from a constructor builds and runs on both:
+
+```python
+def main() -> Int:
+    var c = CompletedProcess(returncode=3)
+    if c.returncode == 0:
+        return 1                      # Built, both arches
+    return 0
+```
+
+**So option 1 as priced above does NOT work: the one-field convention is
+selected by the BINDING, and a call's result is not a constructor.** Making
+`run` return a struct value changes the admitted contract shape and still leaves
+`r.returncode` refused. (Passing the field into a constructor —
+`CompletedProcess(returncode=r.returncode)` — is refused the same way, so the
+constructor does not launder the binding either.)
+
+**That moves the in-reach fix to the capability this family already owns, and
+the doc's own option 3 is a spelling of it.** `r.field` on a call result is
+exactly the `FIELD` column of
+`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §0, whose
+§5.1 next step is a reader of the form `fs_stat_mode(p, follow)` — an ACCESSOR
+the caller re-spells, which for this row is `completed_process_returncode(r)`,
+the accessor `formal/hostmods/subprocess.mojo` already exports (line 334). So
+the honest options narrow to **option 2 (refuse `r.returncode` by name, pointing
+at the word model) and the accessor spelling**, and option 1 is off the table
+rather than merely expensive. The accessor's blocker is unchanged and is the one
+the 2026-10-09 update measured: the name must resolve in the corpus, in
+`fire.py run` and in the image, which is a tree-owned shim and not the real
+`subprocess` module.
+
+Reproducing: `.tmp/subproc/{t3,t4}.mojo` above are scratch; the two-line
+constructor case and the six-line call-result case are the whole measurement,
+and `python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build --formal
+--no-prove [--backend=x86_64] -o /dev/null <file>` is the command.
