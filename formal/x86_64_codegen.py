@@ -7415,6 +7415,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             M.spelled(expr.operand))
         if ureason is not None:
             raise CodegenError(ureason)
+        # A return-less call negated or complemented is an arithmetic OPERAND,
+        # refused on `model.NONE_INTOLERANT_UNOPS` because CPython raises
+        # `TypeError` for `-None`; `not` is absent because its answer is the
+        # truthiness rather than a number. The message and the operator sets are
+        # arm64's, so the two backends cannot disagree about one operator.
+        if expr.op in M.NONE_INTOLERANT_UNOPS:
+            callee = self._vkinds.no_value_callee_of(expr.operand)
+            if callee is not None:
+                raise CodegenError(
+                    M.returnless_operand_refusal(expr.op, callee))
         if expr.op == "not":
             self._emit_truthy_word(expr.operand, Reg.RAX)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
@@ -7509,6 +7519,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
+        # A return-less call used as an OPERAND, refused on the operator set
+        # `model.NONE_INTOLERANT_BINOPS` for the reason `_emit_unary`'s note and
+        # `model.returnless_operand_refusal` give: CPython raises `TypeError`
+        # there, so the refusal matches the language. Shared with arm64 through
+        # the one `ValueKinds.no_value_callee_of` reader.
+        if op in M.NONE_INTOLERANT_BINOPS:
+            for side in (e.left, e.right):
+                callee = self._vkinds.no_value_callee_of(side)
+                if callee is not None:
+                    raise CodegenError(
+                        M.returnless_operand_refusal(op, callee))
         # `|` on a container is a SET UNION only between two SETS, and it has
         # to be asked HERE rather than at the concat branch below: that branch
         # recognises a container by `_is_container_expr`, which on this backend

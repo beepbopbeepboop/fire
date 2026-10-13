@@ -18,8 +18,64 @@ was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
 gate counts §4 asked for are no longer the decisive measurement — the position
 the rule is asked at is.
 **What is left is §0b's "What is still not fixed": the positions where nothing
-OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
-read local), which need either a liveness pass or direction (b) below.**
+OBSERVES the value (an argument, a returned, an assigned-then-never-read local),
+which need either a liveness pass or direction (b) below — and §0e closes the
+OPERAND half, the one position of the four that is not a false refusal because
+CPython raises `TypeError` there rather than answering.**
+
+## 0e. The OPERAND position, landed 2026-10-13 (`work/formal347-docs`)
+
+**The third position a value this path cannot carry is consumed, and the one
+where CPython does not print but RAISES. §0b landed `print`/`printf` (a word
+becoming TEXT) and left the operator positions; `print(g(1, 2) + 5)` built on
+BOTH architectures and printed `5`, where CPython raises `TypeError` for
+`None + 5`. The `5` is `0 + 5`, the `0` being whatever `g`'s epilogue left in
+the return register — the same number-nothing-wrote §1 is about, computed with
+rather than printed.**
+
+**Why an operand is answerable where the other three positions are not, and
+this is the line the fix is drawn on.** §0c measured `assigned`/`argument of a
+call`/`returned` as positions a refusal cannot be asked at, because CPython
+ANSWERS those (`x = g()` is `x = None`) and a refusal would refuse ordinary
+Python. An ARITHMETIC operand is not one of them: `None + 5` is a `TypeError`,
+so a refusal there matches the language instead of second-guessing it. The
+boundary is therefore an OPERATOR SET and not "every binary op":
+
+* `model.NONE_INTOLERANT_BINOPS` — `+ - * / // % ** << >> & | ^ < > <= >=`;
+* `model.NONE_INTOLERANT_UNOPS` — `- + ~`.
+
+`==`, `!=`, `is`, `is not`, `and`, `or` and `not` are deliberately ABSENT:
+`None == 5` is `False`, `x is None` is the identity answer, and `not None` is
+`True`, so refusing one of those WOULD be refusing a program CPython runs.
+`test_formal_value_model.py`'s ORACLE row
+`equality_and_truthiness_of_a_return_less_call_are_still_answered` pins that
+boundary, so a future widening of either set fails a green row.
+
+**What landed.** `model.NONE_INTOLERANT_BINOPS`/`NONE_INTOLERANT_UNOPS`,
+`model.returnless_operand_refusal(op, callee)` (one message, naming the operator
+and the callee), and a gate asked from `_emit_binop` and the `UnaryOp` arm of
+BOTH emitters — through the SAME `ValueKinds.no_value_callee_of` the
+`print`/`printf` refusals use, so one reader decides "this operand carries no
+value" for all three positions. The corpus cost is zero: the same-file candidate
+census's only remaining position is `returned`, there is no `operand` row, and
+`test_formal_hostmods_census.py` (74/74 rows build) and `test_formal_argparse.py`
+(PASS=10) stay green with the gate in.
+
+Rows: `test_formal_value_model.py`'s `REFUSALS` —
+`an_arithmetic_operand_of_a_return_less_call_is_refused`,
+`an_arithmetic_operand_named_by_a_return_less_local_is_refused` (the local
+shape, which needs the `no_value_callee_of` evidence rather than a test on the
+operand) and `a_negated_return_less_call_is_refused`, each a build on BOTH
+architectures that must refuse naming the operator — plus the boundary ORACLE
+row above. PASS=128 FAIL=0.
+
+**What is still not fixed** is unchanged from §0b, and this section closes the
+OPERATOR half only. The positions where CPython ANSWERS (`argument`, `returned`,
+`assigned`) still need direction (b), representing `None`, because a refusal
+there is a refusal of ordinary code; and a return-less call used as a SUBSCRIPT
+base or a CALL target (`g(…)[0]`, `g(…)()`) is the same `TypeError` boundary one
+position over and is not gated here — an OBSERVED one is refused earlier, by the
+`print()` kind check, so the remaining gap is the unobserved spelling.
 
 ## 0d. The other spelling of "render this word" was unguarded and is now fixed
 ## (2026-10-07, `work/formal142-docs`)

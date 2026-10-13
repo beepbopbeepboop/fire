@@ -4096,6 +4096,16 @@ dylib_exports: list = None, globals_base: int = None,
                 M.spelled(expr.operand))
             if ureason is not None:
                 raise CodegenError(ureason)
+            # A return-less call negated or complemented is an arithmetic
+            # OPERAND, so it is refused here for the reason `_emit_binop`'s gate
+            # gives: CPython raises `TypeError` for `-None`. `not` is not in
+            # `model.NONE_INTOLERANT_UNOPS`, because it is the truthiness answer
+            # rather than a numeric one.
+            if expr.op in M.NONE_INTOLERANT_UNOPS:
+                callee = self._vkinds.no_value_callee_of(expr.operand)
+                if callee is not None:
+                    raise CodegenError(
+                        M.returnless_operand_refusal(expr.op, callee))
             if expr.op == "not":
                 # The TRUTHINESS conversion and its negation, so one table
                 # answers `not s` and `if s:` and they cannot disagree:
@@ -8051,6 +8061,21 @@ ctor_field_value=self._ctor_field_value_for(name),
             untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
+        # A return-less call used as an OPERAND is the same divergence one
+        # position over from `print(g(…))`, and the position where CPython does
+        # not print but RAISES: `print(g(1, 2) + 5)` built on both architectures
+        # and printed `5`, where CPython raises `TypeError` for `None + 5`. The
+        # operator set is `model.NONE_INTOLERANT_BINOPS` — `==`/`!=`/`is`/`and`/
+        # `or` are deliberately absent, because CPython ANSWERS those for a
+        # `None` and refusing them would refuse ordinary code. Asked through the
+        # same `ValueKinds.no_value_callee_of` the print and printf refusals use,
+        # so one reader decides "this operand carries no value" for all three.
+        if op in M.NONE_INTOLERANT_BINOPS:
+            for side in (e.left, e.right):
+                callee = self._vkinds.no_value_callee_of(side)
+                if callee is not None:
+                    raise CodegenError(
+                        M.returnless_operand_refusal(op, callee))
         # `|` on a container is a SET UNION only between two SETS, and it must
         # be asked HERE rather than at the concat branch below, because that
         # branch recognises a dict blob by `_is_container_expr`, which does not

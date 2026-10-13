@@ -14049,6 +14049,8 @@ CONTAINER_OP_MEANING = {
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
 SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
@@ -23521,6 +23523,73 @@ def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
         if callee is not None:
             return returnless_value_refusal(callee, "printf()")
     return None
+
+
+#: The BINARY operators whose RESULT CPython cannot compute from a `None`
+#: operand: it RAISES `TypeError` rather than answering, so a refusal asked at
+#: such an operand refuses a program CPython also refuses.
+#:
+#: `==`, `!=`, `is`, `is not`, `and`, `or` and `not` are deliberately ABSENT,
+#: and that is the line this table keeps: `None == 5` is `False`, `x is None`
+#: is the identity answer, and a boolean context reads `None` as falsy — CPython
+#: ANSWERS all of those, so refusing them would refuse ordinary code. The
+#: distinction matters because the census that sized this
+#: (`tools/formal_returnless_census.py`) groups every binary operand under one
+#: `operand of `<op>`` position, and the two halves of it are not one claim.
+NONE_INTOLERANT_BINOPS = frozenset((
+    "+", "-", "*", "/", "//", "%", "**",
+    "<<", ">>", "&", "|", "^",
+    "<", ">", "<=", ">=",
+))
+
+#: And the UNARY operators with the same property. `not` is absent: it is the
+#: truthiness answer, which `None` has (falsy) rather than raising.
+NONE_INTOLERANT_UNOPS = frozenset(("-", "+", "~"))
+
+
+def returnless_operand_refusal(op: str, callee: str) -> str:
+    """Why computing with the result of `callee(…)`, which returns nothing, is
+    wrong when that result is an OPERAND.
+
+    The THIRD position a value this path cannot carry is consumed, after the two
+    `returnless_value_refusal`/`returnless_printf_argument_refusal` cover: both
+    of those are about a word becoming TEXT (`print`/`printf`), and this is the
+    one where CPython does not print anything at all — it RAISES, because there
+    is no value to compute with. `print(g(1, 2) + 5)` built on BOTH
+    architectures and printed `5`, where CPython raises `TypeError` for
+    `None + 5`; the `5` is `0 + 5`, with the `0` whatever `g`'s epilogue left in
+    the return register, which is a number nothing in the source wrote.
+
+    **Why the operand position is answerable while the other consuming positions
+    are not.** `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython
+    _yields_None.md` §0c measures `assigned`/`argument of a call`/`returned` as
+    positions a refusal cannot be asked at, because CPython ANSWERS those
+    (`x = g()` is `x = None`) and refusing would refuse ordinary code. An
+    ARITHMETIC operand is not one of them: CPython raises `TypeError` there, so
+    the refusal matches the language rather than second-guessing it, and
+    `NONE_INTOLERANT_BINOPS`/`NONE_INTOLERANT_UNOPS` above are exactly the
+    operators that boundary holds for. The corpus census agrees — the one
+    same-file candidate position left is `returned`, and there is no `operand`
+    row — so asking here costs zero builds over the repository and the stdlib.
+
+    One message for both backends and both arities, asked from `_emit_binop` and
+    the `UnaryOp` arm of each, so the two architectures cannot come to disagree
+    about one operator. The wording discipline is `returnless_value_refusal`'s:
+    name the callee, say what CPython does, say what this path has instead, and
+    say what to do.
+    """
+    return (
+        f"the `{op}` operator is asked to compute with the value of {callee}(…), "
+        f"and {callee} returns nothing: CPython raises `TypeError` for an "
+        f"operand that is `None` (there is no value to compute with), and a "
+        f"value on this path is one 64-bit word with no way to say `no value` — "
+        f"the epilogue writes no return register, so the operand here would be "
+        f"whatever {callee}'s last instruction left there, which is a number "
+        f"nothing in the source wrote (measured on BOTH architectures: CPython "
+        f"raises, this path computed `print(g(1, 2) + 5)` as `5`). Refused "
+        f"rather than emitted, because a plausible number is worse than a "
+        f"refusal. Give {callee} a `return`, or do not use its value"
+    )
 
 
 class ValueKinds:

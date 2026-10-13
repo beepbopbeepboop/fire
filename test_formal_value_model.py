@@ -730,6 +730,26 @@ CASES = [
      "    print(\"v:\", v)\n"
      "    return 0\n",
      "v: 5\n"),
+    # THE BOUNDARY the arithmetic-operand refusal (below) must not cross. A
+    # return-less call in a BOOLEAN or EQUALITY position is ANSWERED by CPython —
+    # `None` is falsy and `None == 5` is `False` — so this is an ORACLE row and
+    # not a refusal. `model.NONE_INTOLERANT_BINOPS`/`NONE_INTOLERANT_UNOPS` are
+    # deliberately missing `==`/`!=`/`is`/`and`/`or`/`not` for exactly this
+    # reason, and a fix that widened either set would turn this green row into a
+    # refusal of a program CPython runs. CPython prints the same two lines.
+    ("equality_and_truthiness_of_a_return_less_call_are_still_answered",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    if not g(1, 2):\n"
+     '        print("falsy")\n'
+     "    if g(1, 2) == 5:\n"
+     '        print("equal")\n'
+     "    else:\n"
+     '        print("not equal")\n'
+     "    return 0\n",
+     "falsy\nnot equal\n"),
 ]
 
 # ── the rule the return-less refusal is decided by, asked directly ──
@@ -2191,6 +2211,50 @@ REFUSALS = [
      "    printf(\"%d\\n\", v)\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # A RETURN-LESS CALL USED AS AN ARITHMETIC OPERAND — the THIRD position a
+    # value this path cannot carry is consumed, after the two `print`/`printf`
+    # ones above, and the one where CPython does not print but RAISES. Measured
+    # before the fix, on BOTH architectures: `print(g(1, 2) + 5)` built and
+    # printed `5` (that `5` is `0 + 5`, the `0` being whatever `g`'s epilogue
+    # left in the return register), where CPython raises `TypeError` for
+    # `None + 5`. Refused on `model.NONE_INTOLERANT_BINOPS` — an OPERATOR SET
+    # and not every binary operator, because `==`/`!=`/`is` answer a `None` and
+    # are pinned by the ORACLE row `equality_and_truthiness_of_a_return_less_
+    # call_are_still_answered` above. `model.returnless_operand_refusal` is the
+    # one message, asked from `_emit_binop` in both emitters, and the needle is
+    # the operator, which is what locates the refusal.
+    ("an_arithmetic_operand_of_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    print(g(1, 2) + 5)\n"
+     "    return 0\n",
+     "the `+` operator is asked to compute with the value of g(…)"),
+    # …and through a LOCAL, the shape that needs `ValueKinds.no_value_callee_of`'s
+    # evidence on the name rather than a test on the operand — the same second
+    # shape the `print` and `printf` pairs above have, so a fix that only
+    # recognised the direct call would build this one and compute with the word.
+    ("an_arithmetic_operand_named_by_a_return_less_local_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    v = g(1, 2)\n"
+     "    print(v * 3)\n"
+     "    return 0\n",
+     "the `*` operator is asked to compute with the value of g(…)"),
+    # The UNARY spelling, on `model.NONE_INTOLERANT_UNOPS`: CPython raises for
+    # `-None`, so the refusal matches the language rather than inventing a rule.
+    # `not g(…)` is deliberately ABSENT from that set and is pinned in `CASES`.
+    ("a_negated_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    print(-g(1, 2))\n"
+     "    return 0\n",
+     "the `-` operator is asked to compute with the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──
