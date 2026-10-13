@@ -1005,6 +1005,19 @@ class Analysis:
             return all(self._int_expr(e, known) for e in node.elts)
         return False
 
+    def is_int_expr(self, node):
+        """The public form of `_int_expr` at the PUBLISHED `int_only`.
+
+        A transform asks this rather than reading `int_only` directly, and the
+        difference is the whole of `swap_add`'s reach: `int_only` is the set of
+        INTEGER-VALUED NAMES, and an operand of a commutative `+` may be any
+        integer-valued EXPRESSION. Wrapping `_int_expr` here (rather than at the
+        one call site) keeps the question "is this expression an integer" in one
+        place, answered the same way for the `+` transform as for the analysis
+        that feeds it.
+        """
+        return self._int_expr(node, self.int_only)
+
     def _int_expr(self, node, known):
         """Whether `node` provably evaluates to an integer.
 
@@ -1492,8 +1505,10 @@ def t_swap_add(module, an, rng):
     `a + b mod 2^64`, and modular addition is commutative too.  The predicate
     is not "any `+`": `a + b` is NOT commutative for lists, tuples or dicts
     (`[1] + [2]` and `[2] + [1]` are different values), so both operands must be
-    integer literals or names in `Analysis.int_only`, and `int_only` requires
-    every store of the name to be an integer literal in one scope.
+    provably-integer EXPRESSIONS — `Analysis.is_int_expr`, which is `int_only`
+    read through `_int_expr` so a name qualifies when every store of it is an
+    integer expression in one scope and an operand like `u1 * 1` qualifies when
+    its own leaves do.
     """
     cands = [n for n in ast.walk(module)
              if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)
@@ -1506,8 +1521,31 @@ def t_swap_add(module, an, rng):
 
 
 def _operand_ok(node, an):
-    return (_is_int_literal(node)
-            or (isinstance(node, ast.Name) and node.id in an.int_only))
+    """Whether `node` is provably an INTEGER, so a `+` over it commutes.
+
+    This used to be `_is_int_literal(node) or node.id in an.int_only` — a bare
+    literal or a bare name — and that is a strict SUBSET of what the analysis
+    can already prove: `Analysis._int_expr` answers "is this expression an
+    integer" for every shape it carries.  The difference is every operand the
+    corpus writes as an EXPRESSION rather than as a bare name, and the `unpack`
+    mix is the clearest case (`u1 * 1 + u2 * 2`, where neither operand is a
+    name).
+
+    Measured, 27 generator mixes at `--stmts 10 30`, seed `x402`, 8 programs
+    each: the literal-or-name predicate reached a `+` in 146 of 216 programs and
+    the expression predicate in 156.  The gains are exactly the mixes where
+    `int_only` is NOT the binding constraint — `limits` 1→4, `environ` 4→5,
+    `argshape` 7→8, `strings` 5→6, `strmeth` 4→5, `comps` 2→3, `slicing` 2→3,
+    `unpack` 3→4 — which is the ledger's §6 item 4 measured rather than guessed
+    at.  The `int_only`-bound mixes (`refs`, `comps`' multi-scope names) do not
+    move, which is the other half of the reading: broadening the OPERAND
+    predicate cannot reach a name the analysis cannot classify.
+
+    Soundness is the same argument as before and does not depend on the shape:
+    `+` is commutative over integers, and `_int_expr` is "provably an integer",
+    so it declines a subscript, an attribute and every container.
+    """
+    return an.is_int_expr(node)
 
 
 # -- 7. `x = e` + uses -> the expression -------------------------------------

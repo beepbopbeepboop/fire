@@ -210,6 +210,11 @@ PROGRAMS = [
      "def main() -> Int32:\n"
      "    print(f(2))\n"
      "    return 0\n"),
+    ("product_operands", "def main() -> Int32:\n"
+     "    u1 = 3\n"
+     "    u2 = 7\n"
+     "    print(u1 * 1 + u2 * 2)\n"
+     "    return 0\n"),
 ]
 
 #: transform -> (corpus label, index) pairs it MUST apply to.  A row is a claim
@@ -222,7 +227,7 @@ MUST_APPLY = {
     "extra_param": [("single_return_helper", 0)],
     "noop_loop": [("adjacent_independent", 0)],
     "if_true": [("adjacent_independent", 0)],
-    "swap_add": [("chain_of_bindings", 0)],
+    "swap_add": [("chain_of_bindings", 0), ("product_operands", 0)],
     "extract": [("chain_of_bindings", 0)],
     "reorder": [("adjacent_independent", 0)],
     "def_order": [("single_return_helper", 0)],
@@ -419,9 +424,10 @@ class ScopeResolution(unittest.TestCase):
 
     These are the load-bearing answers: `rename` rewrites an occurrence only
     when `bind_of` names the scope it is rewriting, and `swap_add` swaps only
-    operands `int_only` contains.  Both were wrong during development in ways
-    CPython caught, so they are pinned here where the failure is a unit test
-    rather than a 40-program sweep.
+    operands `is_int_expr` proves are integers (which is `int_only` for a bare
+    name and the analysis's own `_int_expr` for anything else).  Both were wrong
+    during development in ways CPython caught, so they are pinned here where the
+    failure is a unit test rather than a 40-program sweep.
     """
 
     def _an(self, source):
@@ -717,6 +723,34 @@ class ScopeResolution(unittest.TestCase):
                       "def main() -> Int32:\n"
                       "    return 0\n")
         self.assertNotIn("n", an.int_only)
+
+    def test_an_expression_operand_is_an_int_when_its_leaves_are(self):
+        """An operand of a commutative `+` need not be a bare name.
+
+        `_operand_ok` accepted only an int literal or a name in `int_only`, so
+        every `+` the corpus writes as an EXPRESSION was declined — `unpack`'s
+        `u1 * 1 + u2 * 2` is the shape, and neither operand is a name.  The
+        predicate is now `Analysis.is_int_expr`, the analysis's own answer to
+        "is this an integer", so the question is asked once.  Pinned both ways:
+        the product is accepted, and a STRING `+` is not, because `'a' + 'b'`
+        and `[1] + [2]` are exactly the values that make the transform unsound.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    u1 = 3\n"
+                      "    u2 = 7\n"
+                      "    s = 'x'\n"
+                      "    print(u1 * 1 + u2 * 2)\n"
+                      "    return 0\n")
+        self.assertIn("u1", an.int_only)
+        self.assertTrue(an.is_int_expr(ast.parse("u1 * 1", mode="eval").body),
+                        "a product of an int name and a literal is an integer")
+        self.assertTrue(an.is_int_expr(ast.parse("u2", mode="eval").body))
+        self.assertFalse(an.is_int_expr(ast.parse("'a' + 'b'",
+                                                  mode="eval").body),
+                         "a string `+` is not an integer expression, so "
+                         "`swap_add` must not touch it")
+        self.assertFalse(an.is_int_expr(ast.parse("s", mode="eval").body),
+                         "a name whose store is a string is not in `int_only`")
 
 
 class ReorderAliasing(unittest.TestCase):

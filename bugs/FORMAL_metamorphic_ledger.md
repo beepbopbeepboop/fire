@@ -90,6 +90,36 @@ hand-written pin is covered by `ReorderAliasing`. Measured on the merged
 tree: `test_formal_metamorph.py` is 62/62 (the file has grown since the 160
 entry's 55), peak 0.2 GB; `test_formal_mlir_precedence.py` is 40/0.**
 
+**Status 2026-10-13 (`work/formal402-docs`): §6 item 4 is MEASURED, and the
+measurement is a sound broadening of `swap_add`'s operand predicate.** The item
+asked for the remaining `int_only` decline reasons "measured rather than guessed
+at". Measured they are, and the reading splits the row in two:
+
+* one half is `int_only`-bound — a `+` operand that is a name the analysis
+  cannot prove integer (a subscript, an attribute, a comprehension target, a
+  string store). Broadening the OPERAND predicate cannot reach those, and the
+  numbers say so: `refs` stays 2/8 and `comps` moves 2→3 and no further.
+* the other half was the predicate being too NARROW about a name it HAD
+  classified: `_operand_ok` accepted only an int literal or a bare name in
+  `int_only`, so a `+` written as an EXPRESSION was declined even when both
+  sides were provably integers. `unpack`'s `u1 * 1 + u2 * 2` is the shape and
+  neither operand is a name.
+
+So `_operand_ok` is now `Analysis.is_int_expr` — the analysis's own `_int_expr`
+at the published `int_only` — and the soundness argument is unchanged (`+` is
+commutative over integers; `_int_expr` declines a subscript, an attribute and
+every container, so nothing whose commutativity is in doubt is admitted).
+Measured over the 27 generator mixes at `--stmts 10 30`, seed `x402`, 8 programs
+each, driving the transform itself rather than a predicate stand-in: **146 of
+216 programs had a `swap_add` candidate before and 156 after**, on `argshape`
+7→8, `comps` 2→3, `environ` 4→5, `limits` 1→4, `slicing` 2→3, `strings` 5→6,
+`strmeth` 4→5 and `unpack` 3→4. `strfmt` did NOT move, and that is the useful
+negative: its declines are `int_only`-bound, which is the other half of the
+reading. Pinned by `test_formal_metamorph.py`'s `product_operands` program (a
+`MUST_APPLY` row) and `test_an_expression_operand_is_an_int_when_its_leaves_
+are` (accepted both ways, a string `+` declined); the CPython gate over all 27
+mixes is what keeps the broadening sound.
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
@@ -397,13 +427,18 @@ first three items of the previous session's list are now DONE and are recorded i
    ledger's; the honest reading is that **these two transforms are measured on the
    examples corpus and barely measured on the generated one**, which is the
    opposite of what §2's twenty-mix sweep implied by its tally.
-4. **`Analysis.int_only` is still a lower bound, and where it now stops is not
-   written down.** §2a raised `swap_add` reach from 133 to 275 of 440 programs, so
-   the four questions it lacked were worth 142 programs — and the remaining 165 are
-   spread over `environ` (6/20), `unpack` (4/20), `strfmt` (3/20), `limits` (2/20)
-   and `slicing` (7/20), which are now the mixes to look at. A future session
-   should MEASURE the remaining decline reasons as §2a did rather than guess at
-   them; that is the one piece of advice here this file has to earn twice.
+4. **`Analysis.int_only` is still a lower bound, and where it now stops is
+   MEASURED (2026-10-13, `work/formal402-docs`).** §2a raised `swap_add` reach
+   from 133 to 275 of 440 programs, so the four questions it lacked were worth
+   142 programs — and the remaining 165 were spread over `environ` (6/20),
+   `unpack` (4/20), `strfmt` (3/20), `limits` (2/20) and `slicing` (7/20). The
+   measurement the item asked for is the Status at the top of this file: the
+   row splits into `int_only`-bound names (which an operand predicate cannot
+   reach) and expressions the OPERAND predicate was wrongly narrow about, and
+   the second half is now closed — 146 → 156 of 216 programs over the 27 mixes
+   at `--stmts 10 30`, seed `x402`. What remains is the first half, and the
+   mixes it lives in are the ones the table above names (`refs`, `comps`,
+   `strfmt`).
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 
