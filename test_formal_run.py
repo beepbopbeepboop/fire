@@ -8736,6 +8736,27 @@ BOTH_ARCH_CASES = [
      "    s = s + a + b + c\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n", 0, "49"),
+    # An imported hostmod dylib's outbound `stat`, which is the shape of the
+    # x86-64 `getsize` SIGSEGV.  `getsize` went through
+    # `os.path` -> `os_path___syscalls`' `fs_stat_field64` chain and died
+    # executing at address 0 on x86-64 while arm64 answered, and the row's own
+    # subject was host-only so nothing ran it on x86.  The cause was
+    # `__LINKEDIT`'s segment ORDER, not the call: Rosetta computes the image's
+    # extent from the LAST segment, so a `__LINKEDIT` mapped below a later
+    # `__DATA` made every rip-relative pointer land 0x3f8000 below its mapping.
+    # arm64's dyld tolerated the misordered segments and x86-64's did not, which
+    # is exactly why this has to run on BOTH (`3ac56981`).
+    #
+    # The program measures its OWN effect rather than a constant: it writes five
+    # bytes and stats them back, so 5 is the only answer a working image can
+    # produce, on either machine.  The path is unique to this row so the two
+    # backends, run one after the other, cannot race on it.
+    ("both_arch_getsize_of_a_file_this_program_just_wrote",
+     "from os.path import getsize\n"
+     "\n"
+     "def main(n):\n"
+     "    open(\"/tmp/formal_getsize_both_arch.txt\", \"w\").write(\"hello\")\n"
+     "    return getsize(\"/tmp/formal_getsize_both_arch.txt\")\n", 5, None),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
