@@ -5,6 +5,38 @@
 (`test_the_false_goal_survives_the_documented_next_step`,
 `test_the_residual_is_the_same_with_and_without_the_branch_fact`).
 
+**Status 2026-10-13 (`work/formal368-docs`): the SYMPTOM has moved a THIRD
+time, the fixture no longer RAISES, and the doc's own step-1 check is what
+names it.** The emitter half of the compiler-trap recording has landed and
+`getrlimit` now runs in the startup stub below `func_offset`, so the two-call
+refusal the status below reports is gone. `_symbolic_divisor_proof` now
+GENERATES, and what it generates is a file whose universal theorem is absent
+and whose `q_reaches_call` note is present — measured directly, arm64,
+`compile_formal(prove=True, check=False)`:
+
+```
+bytes 291978  theorems 554  sorry 0
+"theorem q_compiles_correctly_universal" present: False
+"q_reaches_call" occurrences: 2
+extern_calls:  getrlimit 0x100000420  (below func_offset 0x100000458)
+               fflush    0x100000504
+compiler_traps: [0x100000504]
+```
+
+So the class is red for the reason `setUpClass`'s `blind` records by NAME —
+"the fixture generates no `q_compiles_correctly_universal` carrying `_ADMIT`"
+— and NOT for the `FormalBuildError` the status below reports. The cause is
+ONE opaque `fflush`: the div0 arm's own compiler trap is still counted by
+`formal/arm64_proof_gen.py::_unfollowable_calls` (only `_program_extern_calls`
+subtracts `compiler_traps`), so the universal walk is left with a
+`q_reaches_call_at_0x100000504` and no universal theorem. That is exactly
+`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` (the
+SILENT half) and
+`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` (the
+capability) — **so this doc is the same defect's third record, and its step 2
+is theirs, not this branch's.** What is this doc's is step 1, which is landed
+and is the thing that made the new symptom readable at all.
+
 **Status: OPEN, diagnosed, not fixed. Pre-existing on this tree — verified by
 reverse-applying the `formal/arm64_codegen.py` +
 `formal/arm64_proof_gen.py` diff of the branch that found it and re-running the
