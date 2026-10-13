@@ -24,8 +24,10 @@ one row from green: `wdiff` refuses in the loop contract because the stack-floor
 guard's `getrlimit` (`bfeec991`, every arm64 prologue) is counted as a program
 call and becomes the theorem's halt boundary, and because the arm64 half of
 `38880520` (the `_emit_trap_flush` that populated `compiler_traps`) was dropped
-by a merge. Both are filed as
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`. So
+by a merge. Both are the same family — a COMPILER call read as the program's —
+and both are fixed on this tree: the guard reads `RLIMIT_STACK` once in the
+startup stub below `func_offset` and `_program_extern_calls` subtracts that call
+by address, and `_emit_trap_flush` is restored. So
 "all twelve generate" below is true of the ten recursive examples and false of
 `wdiff`; `sum_range` refuses by design (the signed-loop contract, its `REFUSED`
 row).

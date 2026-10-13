@@ -89,6 +89,17 @@ PROGRAMS = {
               "an extern call: the target is outside the image"),
     "no_params": ("def seven():\n    return 7\n",
                   "a function with no parameters must not be given one"),
+    # The stack-floor guard's `getrlimit` is a call the COMPILER makes. When it
+    # was read in every guarded PROLOGUE (rather than once in the startup stub,
+    # below `func_offset`) the walk saw it beside the program's own `printf` and
+    # refused with "2 calls this walk cannot follow … ONE halt address cannot
+    # discharge them", so a program that calls any C function had no universal
+    # theorem. The guard's read now lives in the startup stub and
+    # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts it by
+    # address; this row fails if either half regresses.
+    "guard_and_a_call": ('def main(n):\n    printf("hi")\n    return 0\n',
+                         "the stack-floor guard's `getrlimit` is the compiler's "
+                         "call, not a second program call beside `printf`"),
 }
 
 # Programs whose SEMANTIC MODEL has to state a string's value, which on this
@@ -2280,6 +2291,29 @@ class TestCallProofs(unittest.TestCase):
             self.assertIsNone(self.errors[name],
                               f"{name}: proof generation raised "
                               f"{self.errors[name]}")
+
+    def test_the_stack_guards_getrlimit_is_not_a_second_program_call(self):
+        """A program whose only C call is `printf` still gets a theorem.
+
+        The stack-floor guard reads `RLIMIT_STACK` once, in the startup stub
+        below `func_offset`, and `_program_extern_calls` subtracts that call by
+        address. When the read sat in every guarded PROLOGUE instead, the walk
+        saw the guard's `getrlimit` beside the program's own `printf` and
+        refused with "2 calls this walk cannot follow … ONE halt address cannot
+        discharge them", so no arm64 program that calls a C function had a
+        universal theorem. This row is that reproduction, and it fails if
+        either half — the read moving out of the prologue, or the by-address
+        subtraction — regresses.
+        """
+        text = open(self.proofs["guard_and_a_call"]).read()
+        self.assertNotIn("2 calls this walk cannot follow", text,
+                         "the guard's `getrlimit` is being counted as a second "
+                         "program call")
+        self.assertNotIn("getrlimit", text,
+                         "the compiler's own call reached the generated proof")
+        self.assertIn("printf", text,
+                      "the program's own call is what the theorem must name")
+        self.assertIn("theorem main", text)
 
     def test_one_call_into_the_same_image_is_followed(self):
         """The shape the return-address map is exact for, end to end.
