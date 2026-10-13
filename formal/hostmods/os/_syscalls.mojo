@@ -1238,8 +1238,29 @@ def le16(b: Pointer[UInt8], i) -> int:
 
 
 def le32(b: Pointer[UInt8], i) -> int:
-    """The little-endian 32-bit field at byte `i` of `b`."""
+    """The little-endian 32-bit field at byte `i` of `b`, UNSIGNED."""
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
+
+
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` reads the same four bytes and is the right answer for a `uint32`
+    field (`st_uid`, `st_gid`); it is the wrong answer for the two the layout
+    declares `int32`. `st_dev` and `st_rdev` are `dev_t`, so widening the field
+    to this path's 64-bit word SIGN-EXTENDS it: `/dev/null`'s low four bytes are
+    `0xA8FB1A80`, whose bit 31 is set, so the word is `-1459938688`
+    (`0xFFFFFFFFA8FB1A80`) and an unsigned read gives `+2835028608`
+    (`0xA8FB1A80`). CPython widens the same `int32` to an unsigned 64-bit value,
+    so its answer is the SAME BITS as the positive `18446744072249612928`;
+    `test_formal_os_backing.py` compares the two through `_wrap64`. Measured,
+    both architectures: `stat_null` is the one stat shape whose `st_dev` has bit
+    31 set.
+    """
+    v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
 
 
 def le64(b: Pointer[UInt8], i) -> int:
@@ -1593,16 +1614,31 @@ def fs_stat_field16(p, follow, at) -> int:
 
 
 def fs_stat_field32(p, follow, at) -> int:
-    """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+    """The UNSIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
-    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
-    and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    `st_uid` and `st_gid`. The field is 32 bits in the layout above and reading
+    it as 64 would take the four bytes of padding after it, so the width is the
+    field's and not the alignment's. The signed 32-bit fields are `dev_t`
+    (`st_dev`, `st_rdev`) and go through `fs_stat_field32s` below: a `uint32`
+    and an `int32` are the same four bytes and different Python ints.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    One reader for the two `int32` fields (`st_dev`, `st_rdev`), widened to
+    this path's 64-bit word with the sign the field declares. See `le32s` for
+    why the sign is the difference from `fs_stat_field32` and not a widening.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:

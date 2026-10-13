@@ -760,6 +760,25 @@ def main(n):
 '''
 
 
+def _wrap64(v):
+    """`v` as this backend's SIGNED 64-bit word.
+
+    CPython's `int` is arbitrary-precision and a formal value is one signed
+    64-bit word, so a `stat` field CPython reports above `2**63 - 1` is the
+    same bits reinterpreted rather than a different number. `/dev/null`'s
+    `st_dev` is the one such field on this host: macOS's `dev_t` is `int32`,
+    and CPython widens the field's `0xA8FB1A80` to `0xFFFFFFFFA8FB1A80`
+    (`18446744072249612928`) while the word holds `-1459938688`. Comparing the
+    two spellings as written would be comparing a 64-bit word with an
+    arbitrary-precision integer — the category error
+    `test_formal_core_hostmods.py`'s `_wrap64` keeps separate — so the oracle
+    is read through the same wrap. For every field whose answer fits in the
+    signed range this is the identity.
+    """
+    v &= (1 << 64) - 1
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 
@@ -767,7 +786,8 @@ def _stat_oracle(p):
     and `os.stat` for the rest. A path CPython cannot stat is answered as
     -1/`0` rather than raising, because this path has no exception to raise and
     a case that raised would be testing CPython's error handling rather than the
-    module.
+    module. Every integer field is read through `_wrap64`, because the image
+    holds a signed 64-bit word and CPython holds an arbitrary-precision `int`.
     """
     out = {}
     out["pred"] = "isfile=%d isdir=%d islink=%d lexists=%d exists=%d" % (
@@ -784,7 +804,7 @@ def _stat_oracle(p):
         pass
 
     def field(st, name):
-        return -1 if st is None else getattr(st, name)
+        return -1 if st is None else _wrap64(getattr(st, name))
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
@@ -798,7 +818,7 @@ def _stat_oracle(p):
         g = os.path.getsize(p)
     except OSError:
         g = -1
-    out["g1"] = "getsize=%d" % g
+    out["g1"] = "getsize=%d" % _wrap64(g)
     return out
 
 
@@ -1871,6 +1891,41 @@ def build_stat_case(path, tmpdir):
                                path.replace("\\", "\\\\").replace('"', '\\"'))
     return Case("stat_" + os.path.basename(path).replace(".", "_"),
                 src, None, oracle=lambda: _stat_oracle(path))
+
+
+# ── 6b. `st_dev` is SIGNED ─────────────────────────────────────────────────
+#
+# `dev_t` is `int32` on this target, so widening the field to a 64-bit word
+# SIGN-EXTENDS it: a device whose low 32 bits set bit 31 is a negative word.
+# CPython widens the same `int32` to an **unsigned** `long long`, so its
+# `/dev/null` answer is `18446744072249612928` where the word is `-1459938688`
+# — the same bits, read sign-extended, and `_wrap64` is how the oracle and the
+# word are made comparable. `stat_null` above pins the answer incidentally; this
+# case pins the SIGN on purpose, and the guard in the oracle is what keeps it
+# from going vacuous: on a host where `/dev/null`'s `st_dev` has bit 31 clear,
+# the unsigned read this case caught would also agree and the pin would be gone.
+def _stat_dev_signed_oracle():
+    v = os.stat("/dev/null").st_dev
+    assert (v & 0x80000000) != 0, (
+        "stat_dev_is_signed is vacuous on this host: CPython reports "
+        f"/dev/null's st_dev as {v}, whose low 32 bits have bit 31 clear, so "
+        "an UNSIGNED 32-bit read would agree and the sign-extension pin would "
+        "be gone")
+    return {"dev": str(_wrap64(v))}
+
+
+CASES.append(Case(
+    "stat_dev_is_signed",
+    '''\
+from os.path import stat_dev
+
+def main(n):
+    printf("dev=%d@@", stat_dev("/dev/null", 1))
+    return 0
+''',
+    None,
+    oracle=_stat_dev_signed_oracle,
+))
 
 
 def _line(status, name, arch, detail):

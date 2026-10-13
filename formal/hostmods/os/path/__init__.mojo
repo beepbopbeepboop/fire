@@ -72,7 +72,7 @@ from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
-from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32s, fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -615,13 +615,17 @@ def stat_ino(p, follow) -> int:
 
 
 def stat_dev(p, follow) -> int:
-    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+    """`st_dev` — the device the inode lives on, an `int32` at offset 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
     next four bytes are padding, and a 64-bit read of a 32-bit field is a
     number assembled out of the field and whatever the compiler put after it.
+    Read SIGNED, because the field is an `int32`: widening it to this path's
+    64-bit word sign-extends it, and an unsigned read drops the sign — measured
+    on `/dev/null`, where the two are `2835028608` and `-1459938688`. `st_uid`
+    and `st_gid` are the unsigned 32-bit fields and keep `fs_stat_field32`.
     """
-    return fs_stat_field32(p, follow, 0)
+    return fs_stat_field32s(p, follow, 0)
 
 
 def stat_nlink(p, follow) -> int:
