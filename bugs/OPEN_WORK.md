@@ -132,7 +132,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md` | **unclaimed** | what is left, which of it is reachable, and why four of the next six are not this wave's |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 14 documents, 1 claimed
+### `formal/lean` — 13 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -145,10 +145,9 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_contract_ladder_reach.md` | **unclaimed** | The contract ladder cannot do arithmetic on `UInt64`, and its conjunction was split against the wrong nesting |
 | `FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md` | **unclaimed** | 15 of 52 `formal/examples` have no accepted Lean proof on this tree, and `test_formal.py`'s `EXPECTED_FAILURES` names 7 of them |
 | `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | **unclaimed** | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
-| `FORMAL_proof_census_baseline_has_a_stale_fact_row.md` | **unclaimed** | `formal-proof-census-tool` is red because `fact.mojo` changed after the baseline was written, and the write that banked the 41 new rows did not refresh it |
+| `FORMAL_proof_census_tool_has_no_prooflib_dep.md` | **unclaimed** | `formal-proof-census-tool` reads `lib/*.olean` but declares only `deps=['preflight']`, so it is red on a clean worktree until a library build runs |
 | `FORMAL_proof_coverage_census_2026-10-03.md` | **unclaimed** | FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on |
 | `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | **unclaimed** | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
-| `FORMAL_the_committed_proof_baseline_is_stale_for_fact_mojo.md` | **unclaimed** | `tools/formal_proof_census_baseline.json`'s `fact` row no longer matches `formal/examples/fact.mojo`, so `formal-proof-census-tool` is RED on master |
 | `LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody.md` | **unclaimed** | one careless `repo_root` poisons the CAS for every other caller |
 
 ### `formal/macho` — 1 document, 0 claimed
