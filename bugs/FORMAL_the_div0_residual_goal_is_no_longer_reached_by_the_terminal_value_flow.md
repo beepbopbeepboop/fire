@@ -7,6 +7,38 @@ merge. NOT reproduced on `master`, and the difference is the library, not the
 code** — see §1. **Needs a Lean-backed read, so it is filed rather than
 guessed at**; this session is a light worker and may not launch lean.
 
+**Status 2026-10-13 (`work/formal371-docs`): the diagnosis has moved past this
+document twice, and §5's "exact next step" (rebuild the library, then read the
+div0 theorem's body) is MOOT — the fixture's generated proof does not carry the
+theorem this class dissects.** Re-measured with the library materialised from
+the cas (`lib/*.olean` present):
+
+    $ python3 tools/memslot.py --gb 8 --label t -- \
+          python3 -m unittest test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean
+    Ran 3 tests in 68.713s
+    FAILED (failures=5)
+
+The class no longer raises in `setUpClass` and no longer fails a bare
+`assertIn("⊢ 1 =")`: `setUpClass` now records, per spelling, that
+`_symbolic_divisor_proof` `generates no q_compiles_correctly_universal carrying
+all_goals (first | done | sorry)`, so its own
+`test_the_measurement_class_can_still_see_what_it_measures` fails by NAME. So a
+proof IS generated, and the residual goal this document is about is not in it.
+
+**The subject is owned by two live docs and this document adds nothing to
+either.** `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`
+is the mechanism (ONE opaque `fflush` replaces the universal theorem with a
+reachability `match` carrying no `x0`, and its "Item 2 LANDED" section pins the
+announcement), and
+`FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` is the
+class's own status (its step-1 check is the `blind` diagnosis seen here). What
+is left is that doc's item 1 — what ONE opaque call should say — a
+`formal/arm64_proof_gen.py` decision owned by
+`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`'s
+worker, not this document's. Nothing here says the goal CLOSED: `fdiv64`'s
+div0 arm is unchanged, so the false theorem is still false; only the route to
+it is gone.
+
 ## 1. What I ran, and why `master` is green
 
 ```console
