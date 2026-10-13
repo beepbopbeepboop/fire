@@ -1,5 +1,27 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
+**Status (2026-10-07, `work/formal383-docs`): §0.1's "ZERO corpus exposure" is
+REFUTED for two names, and both are LANDED — `unclassified 200 → 198`.** §0.1
+counted exposure with `imported_modules` over `.mojo` files alone. The formal
+corpus is wider than that: `tools/formal_host_import_wall.py` walks this
+repository's `.py` files too, and it names **eight** names in no tier that are
+real WALLS — a file's closure reaches each — of which two the rule at the top of
+`formal/imports.py` decides and `find_spec` does NOT (both have a spec here):
+`multiprocessing` needs a SECOND PROCESS (`tools/formal_proof_breadth.py`
+imports it) and `sqlite3` needs libsqlite3, a library OUTSIDE libSystem
+(`tools/codeindex.py` imports it). Same shape as the five §0.5 landed: a
+per-name judgement with a measurement behind each rather than a reading, and it
+moves no `not-answerable/host-import` row into a pass — only the tier the report
+prints. Pinned by
+`test_formal_imports.py::test_the_two_corpus_walls_a_spec_cannot_decide_are_unreachable`
+and by `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`. **The other six
+walls stay unclassified and are named here so the next reader does not re-derive
+them**: `keyword` (103 reach), `tokenize`/`token`, `plistlib` and `html.parser`
+are in §"The next step"'s `modelled` reading but each is a CLAIM the rule asks a
+reader to justify rather than a spec, and `pwd`'s `getpwuid` is libSystem, so its
+tier is a modelled-vs-unreachable reading and not "missing from the target".
+None is taken here, and the 198 are still §0.1's queue.
+
 **Status (2026-10-07, `work/formal135-docs`): the FIVE names §0.5 said the
 `find_spec` oracle decides are LANDED.** `_gdbm`, `_tkinter`, `_overlapped`,
 `_winapi` and `_wmi` join `HOST_UNREACHABLE` — the rule at the top of

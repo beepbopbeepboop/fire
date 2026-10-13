@@ -135,7 +135,16 @@ HOST_UNREACHABLE = frozenset((
     # not have" for a file that now builds.  The capability is still missing; what
     # changed is that the module answers anyway, under a declared contract.
     #
-    # A second process.
+    # A second process. `multiprocessing` needs one whatever it does with it,
+    # and `tools/formal_proof_breadth.py` imports it — so it is a real wall in
+    # the corpus and not a name waiting for a reader. It is a judgement by the
+    # rule at the top of this section with a measurement behind it, and it is
+    # NOT one `find_spec` decides: that oracle returns a spec for it (the module
+    # is pure Python), which is the half of §0.5's oracle sentence
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` measures as FALSE
+    # as a rule. `dbm` and `mmap` are its neighbours in that document's reading
+    # and are deliberately NOT added: no file in this tree reaches either.
+    "multiprocessing",
     # A thread, and a proved model of one.
     "asyncio",
     # A socket.
@@ -213,6 +222,14 @@ HOST_UNREACHABLE = frozenset((
     # that arrives has a tier rather than the false "not a stdlib module"
     # refusal.
     "zlib", "gzip", "locale",
+    # `sqlite3` is the same shape as the three above and arrived the same way:
+    # the database is libsqlite3, a library outside libSystem, so a file this
+    # tree compiles cannot link it — and unlike `dbm`, `mmap` and `bz2`, which
+    # §0.5's reading also puts here, one file in this tree actually imports it
+    # (`tools/codeindex.py`). So it is the same per-name judgement with a
+    # measurement behind it as `multiprocessing` above, and `find_spec` does not
+    # decide it: the module has a spec here.
+    "sqlite3",
     # An EMBEDDED CPython's installation, which is the reading of `sysconfig`
     # that has no other: `get_paths()` answers "where is the interpreter that
     # would run this program", and there is none. `fire.py` imports it and

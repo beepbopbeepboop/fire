@@ -2230,6 +2230,49 @@ def test_the_find_spec_decided_names_are_unreachable(tmpdir, _shared):
               "the target and the entry is wrong")
 
 
+def test_the_two_corpus_walls_a_spec_cannot_decide_are_unreachable(tmpdir,
+                                                                   _shared):
+    """Two more of the unclassified set, decided by the RULE and not the oracle.
+
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measures
+    `find_spec` as the oracle and finds it splits the unclassified set 5 and
+    200 — and its own text says the second half of that sentence is FALSE as a
+    rule: a spec existing is evidence the name is not a typo and nothing else.
+    `tools/formal_host_import_wall.py` then names the eight names in NO tier
+    that are real WALLS, a file in the corpus reaches each, and two of them the
+    rule at the top of `formal/imports.py` decides against that oracle:
+
+      * `multiprocessing` needs a SECOND PROCESS, which a freestanding image
+        does not have, and `tools/formal_proof_breadth.py` imports it;
+      * `sqlite3` needs libsqlite3, a library OUTSIDE libSystem, and
+        `tools/codeindex.py` imports it.
+
+    Both have a spec on this host, which is why this row asserts the opposite
+    direction from `test_the_find_spec_decided_names_are_unreachable`: the
+    oracle cannot decide them and the rule plus the corpus exposure does. A
+    revert that drops either back to `unclassified` fails here and in
+    `test_formal_link_accounting.py`'s ledger; a `find_spec` that starts
+    answering None for one fails the last row and says the stated reason moved.
+    """
+    import importlib.util
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    for name in ("multiprocessing", "sqlite3"):
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the rule's verdict on a "
+              "name the corpus actually reaches is not claimed")
+        check(I.host_module_tier(name) == "unreachable",
+              f"host_module_tier({name!r}) answered "
+              f"{I.host_module_tier(name)!r}, want 'unreachable'")
+        answer, _detail = I.host_module_verdict(name, relative_to=probe,
+                                                project_root=probe)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}")
+        check(importlib.util.find_spec(name) is not None,
+              f"find_spec found NO spec for {name}, so the `find_spec` oracle "
+              "DOES decide it and this row's stated reason (a spec exists and "
+              "the rule still makes it unreachable) is not the measurement")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5352,6 +5395,8 @@ TESTS = [
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
     ("the names find_spec decides are unreachable, not unclassified",
      test_the_find_spec_decided_names_are_unreachable),
+    ("two corpus walls the rule decides and find_spec cannot",
+     test_the_two_corpus_walls_a_spec_cannot_decide_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

@@ -660,6 +660,17 @@ HOST_SET_ADDED_TIERS = {
     "_tkinter": "unreachable",
     "_winapi": "unreachable",
     "_wmi": "unreachable",
+    # ── and the two the RULE decides of the unclassified set, which the
+    # `find_spec` oracle does NOT, added 2026-10-07. §0.5 of the same document
+    # says the oracle's modelled half is false as a rule — a spec existing is
+    # evidence a name is not a typo and nothing else — and
+    # `tools/formal_host_import_wall.py` names the eight names in no tier that
+    # are real WALLS (a file in the corpus reaches each). Two of them the rule
+    # at the top of `formal/imports.py` decides: `multiprocessing` needs a
+    # second process (`tools/formal_proof_breadth.py` imports it) and `sqlite3`
+    # needs a library outside libSystem (`tools/codeindex.py` imports it).
+    "multiprocessing": "unreachable",
+    "sqlite3": "unreachable",
 }
 
 
