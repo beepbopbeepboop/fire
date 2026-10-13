@@ -18,8 +18,10 @@ was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
 gate counts §4 asked for are no longer the decisive measurement — the position
 the rule is asked at is.
 **What is left is §0b's "What is still not fixed": the positions where nothing
-OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
-read local), which need either a liveness pass or direction (b) below.**
+OBSERVES the value (an operand that is not itself rendered — §0e closed the
+rendered-operand spelling — an argument of a call, a returned, an
+assigned-then-never-read local), which need either a liveness pass or direction
+(b) below.**
 
 ## 0d. The other spelling of "render this word" was unguarded and is now fixed
 ## (2026-10-07, `work/formal142-docs`)
@@ -80,6 +82,59 @@ value of g(…)`. PASS=124 FAIL=0.
 
 **What is still not fixed is unchanged** — the positions where nothing OBSERVES
 the value are §0c's, and direction (b) is still the only answer for them.
+
+## 0e. The OPERAND spelling was unguarded and is now fixed (2026-10-13,
+## `work/formal391-docs`)
+
+**The four rows above ask whether the operand IS a return-less call (or a local
+bound to one). A rendered value can also DEPEND ON one through an operator, and
+that spelling was unguarded.** Measured, both architectures, before the fix:
+
+```mojo
+def g(a, b):
+    w = 1
+
+def main() -> Int32:
+    print(g(1, 2) + 1)
+    return 0
+```
+
+CPython raises `TypeError: unsupported operand type(s) for +: 'NoneType' and
+'int'`; this path built, ran and printed `1` — the leftover word plus the
+literal, a number nothing in the source wrote. It is the same divergence §1 is
+about (a value this path cannot carry becomes TEXT) at the same position
+(`print`/`printf`), one operator away from the shapes §0b/§0d guard.
+
+**What landed, one reader and one direction.** `ValueKinds.no_value_callee_of`
+now falls through to `ValueKinds._no_value_callee_within` for a COMPOUND
+expression: the walk asks the direct reader at every subtree node
+(`_node_subtree_fields`, `list`/`tuple` included because a call's `kwargs` is a
+list of `(name, expr)` pairs) and returns the first return-less callee. Two
+things it deliberately does NOT descend into, and both are scopes rather than
+values: a nested `def`/`lambda` body (evaluated when its own frame is entered)
+and the `func` of a `CallExpr` (the callee name is not a read of a local, so
+`f = g(); f(1)` where `g` returns nothing must not turn the callee `f` into a
+caught value). All four rendering call sites — `print` and `printf` in each
+emitter — already go through `no_value_callee_of`, so the two architectures and
+the two spellings cannot answer this differently. CPython raises for the operand
+case, so refusing replaces a fabricated number with the refusal CPython's own
+`TypeError` already is.
+
+Rows: `test_formal_value_model.py`'s `REFUSALS` —
+`a_printed_operand_that_depends_on_a_return_less_call_is_refused`,
+`a_printed_operand_named_by_a_return_less_local_is_refused` and
+`a_printf_argument_that_depends_on_a_return_less_call_is_refused` — each a build
+on BOTH architectures that must refuse naming the rendering call. PASS=127
+FAIL=0 (was 124). The builds behind it stay green: `test_formal_run.py`
+PASS=1209 FAIL=0, `test_formal_hostmods_census.py` 74/74 rows build,
+`test_formal_argparse.py` PASS=10.
+
+**What this does NOT close.** The positions where nothing observes the value
+remain: `x = g(1, 2)` whose local is never printed (the census's `assigned`,
+weakest bucket), `return g()` (the `returned` bucket), and a return-less call as
+another call's argument when the result is not itself rendered. This change is
+the RENDERING position one operator deep, not a general operand rule, and the
+rest still needs either a liveness pass or direction (b) below.
 
 ## 0c. What is left, measured per POSITION (2026-10-04, `work/formal28-1`) —
 ## and the one bucket that decides nothing is 62 sites in one file the gate

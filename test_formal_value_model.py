@@ -2191,6 +2191,50 @@ REFUSALS = [
      "    printf(\"%d\\n\", v)\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # ── the same rendering position, one operator deeper ──────────────────────
+    #
+    # The four rows above ask about an operand that IS the no-value call (or a
+    # local bound to one). A rendered value can also DEPEND ON one through an
+    # operator, and that shape was unguarded: `print(g(1, 2) + 1)` built on BOTH
+    # architectures and printed `1` — the leftover word plus the literal — where
+    # CPython raises `TypeError` (`None + 1`). It is the same divergence (a
+    # number nothing in the source wrote becomes text) at the same position, and
+    # the reason the walk is over the WHOLE operand is that the text is the
+    # whole expression: `ValueKinds.no_value_callee_within` asks the direct
+    # reader at every subtree node but a call's `func`, so a name that happens to
+    # share a function's name is not read as a value. CPython raises for the
+    # operand case and the source has no value there to print, so refusing is
+    # the same direction the four rows above already took.
+    ("a_printed_operand_that_depends_on_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    print(g(1, 2) + 1)\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
+    # …through the LOCAL as well, so the walk and the no-value map are asked
+    # together rather than the walk being a second implementation of the map.
+    ("a_printed_operand_named_by_a_return_less_local_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    v = g(1, 2)\n"
+     "    print(v + 1)\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
+    # …and at the printf spelling, because `printf` asks its own reader
+    # (`returnless_printf_argument_refusal`), so an operand there has to reach
+    # the walk too or the two rendering positions would disagree.
+    ("a_printf_argument_that_depends_on_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\\n\", 1 + g(1, 2))\n"
+     "    return 0\n",
+     "printf() is asked to render the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

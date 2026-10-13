@@ -24098,15 +24098,23 @@ class ValueKinds:
             self._no_value_calls[name] = None
 
     def no_value_callee_of(self, operand):
-        """The callee whose EMPTY result `operand` is, or None.
+        """The callee whose EMPTY result `operand`'s value DEPENDS ON, or None.
 
         The one reader of "does this expression carry a value at all", and it
-        answers for the two shapes a `print` can be handed: the call itself
-        (`print(g(1, 2))`) and a local whose every binding in this function is
-        such a call (`v = g(1, 2); print(v)`). The second shape is why this is
-        not a single `isinstance` test at the print site, and it is asked of the
-        map `_note_no_value_call` filled rather than of the body, so the print
-        decision and the scan cannot disagree about which binding it was.
+        answers for the three shapes a rendering call can be handed: the call
+        itself (`print(g(1, 2))`), a local whose every binding in this function
+        is such a call (`v = g(1, 2); print(v)`), and a COMPOUND expression one
+        of whose operands or arguments is one of the first two
+        (`print(g(1, 2) + 1)`). The second shape is why this is not a single
+        `isinstance` test at the print site, and it is asked of the map
+        `_note_no_value_call` filled rather than of the body, so the print
+        decision and the scan cannot disagree about which binding it was. The
+        third is why a compound operand falls through to `_no_value_callee_within`:
+        the rendered value is the WHOLE expression, so a word this path cannot
+        carry reaches the text through any operator, not only the one operand
+        that is itself the call — CPython raises `TypeError` for `None + 1`
+        where this path computed with the leftover word and printed a number
+        nothing in the source wrote.
 
         None for everything else, which is the direction that matters: a caller
         that reads None keeps the answer it had, so an expression this does not
@@ -24118,6 +24126,42 @@ class ValueKinds:
             return None if self._callee_returns_value(name) else name
         if isinstance(operand, F.IdentExpr):
             return self._no_value_calls.get(operand.name)
+        return self._no_value_callee_within(operand)
+
+    def _no_value_callee_within(self, expr):
+        """`no_value_callee_of` for a COMPOUND expression: the first return-less
+        call anywhere in `expr`'s value flow, or None.
+
+        Walks every subtree field of every node (a `list`/`tuple` too, because a
+        call's `kwargs` is a list of `(name, expr)` pairs) and asks the direct
+        reader at each. Two things it deliberately does not descend into, and
+        both are scopes rather than values:
+
+          * a nested `def`/`lambda` body — it is evaluated when ITS frame is
+            entered, not here;
+          * the `func` of a `CallExpr` — the callee name is not a read of a
+            local, so a local that happens to share a function's name
+            (`f = g(); f(1)` where `g` returns nothing) must not turn the callee
+            `f` into a caught value.
+        """
+        if isinstance(expr, (list, tuple)):
+            for c in expr:
+                r = self.no_value_callee_of(c)
+                if r is not None:
+                    return r
+            return None
+        names = _node_subtree_fields(expr)
+        if names is None:
+            return None
+        if type(expr).__name__ in ("LambdaExpr", "FunctionDef", "StructDef",
+                                   "TraitDef"):
+            return None
+        for name in names:
+            if name == "func" and isinstance(expr, F.CallExpr):
+                continue
+            r = self.no_value_callee_of(getattr(expr, name, None))
+            if r is not None:
+                return r
         return None
 
     def _note_field_stores(self, target) -> None:
