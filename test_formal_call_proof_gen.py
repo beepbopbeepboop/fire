@@ -2818,6 +2818,66 @@ class TestSameImageCallLean(unittest.TestCase):
                          f"closed was a goal and not the return value")
 
 
+class TestALongProgramCertificateLean(unittest.TestCase):
+    """Lean accepts the block certificate of the LONGEST corpus example.
+
+    `formal/examples/mod_by_var.mojo` is a division program whose `__TEXT` is
+    long enough that a block certificate's base-case `rw [runs_cons_seq …]`
+    forced `arm64_step` to reduce the whole `{name}_code` byte list, a depth
+    that grows with the image: at the old `maxRecDepth 100000` the check died
+    with `maximum recursion depth has been reached` (the declarations being
+    unfolded were `List.get?Internal` / `List.rec`), and it CHECKS at 200000
+    (measured 60 s, 3.9 GB peak).  The generator now emits 200000
+    (`arm64_proof_gen._MAX_REC_DEPTH`) and this class is the pin: it generates
+    and Lean-checks the file, skipped loudly without Lean or a built library.
+
+    The reduction is deep-and-FINITE, not a loop, which is what makes a bound
+    the fix.  A longer image would want the certificate to stop reducing the
+    code rather than a bigger bound, and this row is where that would first be
+    noticed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            raise unittest.SkipTest(
+                "no Lean / no lib/ProofLib.olean: skipping the typecheck. "
+                "Run `make prooflib` (or `python3 tools/suite.py prooflib`) "
+                "first.")
+        cls.tmp = tempfile.mkdtemp(prefix="a2-longcert-")
+        path = os.path.join(HERE, "formal", "examples", "mod_by_var.mojo")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        p, err = _generate(cls.tmp, src, "mod_by_var")
+        cls.result = None if err else _check_proof(p)
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "tmp"):
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_long_program_proof_checks_with_no_admission(self):
+        ok, detail, n = self.result
+        self.assertTrue(
+            ok,
+            "a long image's block certificate must PROVE, not merely generate: "
+            f"{detail}")
+        self.assertEqual(n, 0, f"the proof admits {n} `sorry`")
+
+    def test_the_generated_file_raises_the_recursion_bound(self):
+        """The bound is what makes the file check, so it is emitted, not
+        assumed.  Read from the emitted text rather than from the module
+        constant, because the template is where the figure is written."""
+        import formal.arm64_proof_gen as G
+        path = os.path.join(self.tmp, "mod_by_var_proof.lean")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(f"set_option maxRecDepth {G._MAX_REC_DEPTH}", text)
+        self.assertGreaterEqual(G._MAX_REC_DEPTH, 200000)
+
+
 class TestEntryArity(unittest.TestCase):
     """A TWO-PARAMETER ENTRY POINT, end to end, on both architectures.
 

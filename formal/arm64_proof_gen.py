@@ -58,6 +58,21 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 # Defined once, before its first use (`_COND_ARITH_DEFAULT`).
 _HOLE = "so" + "rry"
 
+# The elaborator recursion bound the generated Lean files set.  The Lean default
+# is 1000; this generator has always overridden it, because a block
+# certificate's `rw [runs_cons_seq …]` can force `arm64_step` to reduce the
+# whole `{name}_code` BYTE LIST — a depth that grows with the image — and
+# 100000 is not enough for the longest example in the corpus.  Measured on
+# `formal/examples/mod_by_var.mojo`: at 100000 the check dies with `maximum
+# recursion depth has been reached` at the base-case `runs_cons_seq`, with
+# `List.get?Internal`/`List.rec` the declarations being unfolded; at 200000 it
+# CHECKS (60 s, 3.9 GB peak).  The reduction is deep-and-FINITE, not a loop —
+# which is why a bound is the fix and why the figure is a bounded headroom: 4x
+# would exceed the project's 4 GB line, so a longer image still wants the
+# certificate to stop reducing the code (the real repair is in the `rw`, not in
+# this number).
+_MAX_REC_DEPTH = 200000
+
 # ── The CFG leaves that admit ────────────────────────────────────────────────
 # A CFG leaf is a place where the walk has followed every edge it can and the
 # generated proof still has a goal it cannot close from the value flow.  Each
@@ -11582,7 +11597,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             + "\n\n".join(_narrow_lemmas) + "\n")
 
     return f"""{SPECS.header_imports(bool(refines))}
-set_option maxRecDepth 100000
+set_option maxRecDepth {_MAX_REC_DEPTH}
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false
@@ -12392,7 +12407,7 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
 import work
 import Refine
 
-set_option maxRecDepth 100000
+set_option maxRecDepth {_MAX_REC_DEPTH}
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false
@@ -13394,7 +13409,7 @@ import work
 import Refine
 import Contracts
 
-set_option maxRecDepth 100000
+set_option maxRecDepth {_MAX_REC_DEPTH}
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false
