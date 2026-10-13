@@ -6,8 +6,13 @@ it costs to close, and — the part that matters — **the wall does not have to
 widened at all**.
 
 **Status: the receiver is lowered BY REFERENCE, on both machines, and the
-switch is ON.** Steps 1–6 below have all landed. Steps 1–3 were landed by wave
-2; steps 4–6 by wave 3 (agent C2). The 53 repo findings and the 100 stdlib
+switch is ON.** Steps 1–5 below have all landed — 1–3 by wave 2, 4–5 by wave 3
+(agent C2); **step 6 (a method proved END TO END by the generator) is NOT done**
+and is not this file's, which is the first of the five things "What landed" lists
+at the end. (This line said "Steps 1–6" until 2026-10-08, which contradicted
+step 6's own heading two thousand lines down; the by-reference lowering is
+landed and its run tests are green, but no method is proved yet.) The 53 repo
+findings and the 100 stdlib
 findings that named this diagnostic now name **zero**; what they name instead is
 a specific refusal (a field of a field, a receiver that escapes, a member this
 path cannot place) or a host import that was previously masked. See

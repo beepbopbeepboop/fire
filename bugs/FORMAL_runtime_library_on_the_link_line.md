@@ -738,18 +738,23 @@ identical and a reader should be able to see that rather than take it:
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label ceil -- python3 .tmp/ceilings.py
 python3 tools/memslot.py --gb 8 --label t -- \
-    python3 test_formal_runtime_link.py            # 159 passed, 4 failed
+    python3 test_formal_runtime_link.py            # recorded 159 passed, 4 figure-drift failed
 python3 tools/memslot.py --gb 8 --label t -- \
     python3 -c "import test_formal_runtime_link as T; \
         T.test_elf_is_refused_for_the_container_and_not_for_the_link_line()"
 ```
 
-`test_formal_runtime_link.py`'s **4 failures are pre-existing and are not this
-document's**: they compare the live count against `FORMAL.md` §6 phase 2's
-published `206`/`166`, which the tree has outgrown (`1dd68a48` published them on
-2026-10-04; `runtime/` and `build_stdlib_dylib.py` have changed since, and this
-branch touches neither). `test_formal_doc_truth.py` is red on the same drift
-(8 checks, 7 of them the same figures). `.tmp/ceilings.py` is scratch and is not
+`test_formal_runtime_link.py`'s **4 failures were pre-existing and were not this
+document's**: they compared the live count against `FORMAL.md` §6 phase 2's
+published `206`/`166`, which the tree had outgrown (`1dd68a48` published them on
+2026-10-04). `test_formal_doc_truth.py` was red on the same drift (8 checks, 7
+of them the same figures). Both are green now that the figure sweep landed
+(2026-10-08, and again on this merged tree 2026-10-12, where the triple is
+273 / 217 / 177 — the first paragraph above has the full history), and the
+census half — `test_link_line_is_the_dylibs_exports`, which is the one that
+builds the dylib — measures exactly what §6 phase 2 publishes, so the counted
+run is the `159 passed, 4 failed` above minus the four. `.tmp/ceilings.py` is
+scratch and is not
 committed — `.tmp/` is git-ignored — and the loop is five lines: `word` from
 `model.runtime_abi()`, `exported` from `runtime_library(arch, "macho")["map"]`,
 `ceiling 1` as the difference, `ceiling 2` as

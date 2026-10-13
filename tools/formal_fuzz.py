@@ -3052,7 +3052,7 @@ class Gen:
     # where this path prints `""`. That is a documented difference
     # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
-#
+    #
     # **`environ_len` was `len(os.getenv(k))` and is gone: the backend refuses
     # that spelling, so every program this mix drew was refused and the harness
     # (`test_formal_fuzz.py::check_mix_builds`) correctly reported a family that
