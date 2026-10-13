@@ -1135,11 +1135,13 @@ CASES = [
      "    printf(\"len=%d %d\", b.length, c.length)\n"
      "    return 0\n", 0, "len=3 4"),
     # The comptime-over-a-variadic-parameter refusal this row once pinned is
-    # unreachable: constructing the variadic struct trips the TUPLE-INDEX
-    # refusal first (staged 2026-10-06: with any actual use of `Pair[Int, 7,
-    # 8, 9]` in main, both architectures refuse at the subscript, measured).
-    # With no use it builds and proves nothing either way. The row now pins
-    # the refusal that actually stands in front of the variadic comptime.
+    # unreachable: constructing the variadic struct trips a refusal at the
+    # subscript first. Staged 2026-10-06 it was the TUPLE-INDEX sentence, which
+    # was false about the source — `Pair[Int, 7, 8, 9]` names comptime
+    # parameters, not a container index. The row now pins the sentence that is
+    # true of the construct: it is a compile-time parameter list, and the demand
+    # is dropped because the literal lands on `*values: T`, whose annotation is
+    # a TYPE name and not a declared value parameter.
     ("comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal",
      "struct Pair[T: AnyType, *values: T]:\n"
      "    comptime length = len(Self.values)\n"
@@ -1151,7 +1153,7 @@ CASES = [
      "    var p = Pair[Int, 7, 8, 9]()\n"
      "    printf(\"len=%d\", p.size())\n"
      "    return 0\n",
-     "refuse:a subscript whose index is a tuple", None),
+     "refuse:is a compile-time explicit-parameter list on a generic", None),
     # …and the CONTROL. The bare `Box.length`-from-a-free-function spelling
     # this row used no longer builds — it is refused by the no-home family
     # (measured 2026-10-06 on both architectures), so the control now reads
@@ -13325,6 +13327,24 @@ SUBSCRIPT_CASES = [
      "    i = 2\n"
      "    a[i] = 9\n"
      "    return a[i] + a[0]\n", 10, None),
+    # A module-DECLARED generic STRUCT template with a comptime VALUE
+    # parameter, applied with a literal — `Tagged[Int, 7]` — is a real
+    # instantiation and not a refusal. The instantiation machinery
+    # (`monomorphize.monomorphize_source`) already substituted a value
+    # correctly; what was missing is the READ of a bare literal at the top
+    # level of the bracket (`own_demands`, scoped to struct templates so the
+    # local specialisation machinery keeps `tile[2, 3](…)`), and the GATE that
+    # refuses to substitute one into a TYPE parameter. `origin` is read in the
+    # body, so a value substituted into the wrong position would answer
+    # something other than 7 rather than merely failing to build.
+    ("sub_declared_struct_template_with_a_value_parameter_builds",
+     "struct Tagged[T, origin: Int]:\n"
+     "    var v: T\n"
+     "    def get(self) -> Int:\n"
+     "        return origin\n\n"
+     "def main(n):\n"
+     "    var t = Tagged[Int, 7]()\n"
+     "    return t.get()\n", 7, None),
     # ── the multi-index forms, all of which must be refused identically ──
     # `a[i, j]` on a LIST. The one that motivated the group. Pre-change this
     # was refused on arm64 and SILENTLY LOWERED on x86-64: the index tuple
@@ -13399,20 +13419,22 @@ SUBSCRIPT_CASES = [
      "    v = pick[1, 2]\n"
      "    return 0\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
-    # A module-DECLARED generic STRUCT template whose bracket list names a
-    # comptime value. The template is DROPPED from the image before the
-    # multi-index question is asked (`_declared_struct_templates`), so neither
-    # the function table nor the instantiated struct table names it — and
-    # without `declared_struct_templates` this was refused as "a subscript
-    # whose index is a tuple", which describes a container lookup that never
-    # happens. The construct is a compile-time parameter list, exactly as it is
-    # for the imported `Span[StaticString, ImmStaticOrigin]` the message names.
+    # A module-DECLARED generic STRUCT template whose bracket list puts a
+    # LITERAL in a TYPE parameter's position. The literal is not a demand: it
+    # would substitute a value into `T` (`var v: 2`), which this backend ACCEPTS
+    # and runs — the fabrication `_undeclared_literal_arg` exists to stop. The
+    # demand is dropped, so the call site keeps its brackets, and the message
+    # names the construct — which needs the module's own struct templates, since
+    # a template is DROPPED from the image before this question is asked
+    # (`_declared_struct_templates`). Without that table this was refused as "a
+    # subscript whose index is a tuple", describing a container lookup that
+    # never happens.
     ("sub_multi_index_declared_struct_template_is_comptime_params",
      "struct Tagged[T, origin: Int]:\n"
      "    var v: T\n\n"
      "def main(n):\n"
-     "    var t = Tagged[Int, 0]()\n"
-     "    return 0\n",
+     "    var t = Tagged[0, 5]()\n"
+     "    return t.v\n",
      "refuse:is a compile-time explicit-parameter list on a generic", None),
     # The refusal NAMES WHICH ELEMENT has no word, and this is the row for the
     # shape `std/sys/arg.mojo:51` has: a first element this image can resolve to

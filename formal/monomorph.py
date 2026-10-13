@@ -662,9 +662,11 @@ def _display_text(expr, values) -> str:
     return f"({body}{',' if len(items) == 1 else ''})"
 
 
-def all_instantiation_calls(consumer_src: str) -> dict:
+def all_instantiation_calls(consumer_src: str, literals=False) -> dict:
     """`{base name: sorted([(type arg, …), …])}` — every bracketed callee in
-    `consumer_src` whose bracket spells concrete TYPE arguments.
+    `consumer_src` whose bracket spells concrete TYPE arguments (and, with
+    `literals`, a bare literal — see `_bracket_type_args`; the default is off
+    because the only caller that wants it is `own_demands`'s struct half).
 
     Unfiltered: it does not know which module declares what, because that is a
     question about the import closure and this is a question about ONE source.
@@ -707,12 +709,13 @@ def all_instantiation_calls(consumer_src: str) -> dict:
                 base = _callee_base(node)
                 if base is None:
                     continue
-                args = _bracket_type_args(node.func, values)
+                args = _bracket_type_args(node.func, values, literals)
                 if args:
                     found.setdefault(base, set()).add(tuple(args))
         return {k: tuple(sorted(v)) for k, v in found.items()}
     return {k: list(v) for k, v in _derived_from_source(
-        "all_instantiation_calls", consumer_src, derive).items()}
+        "all_instantiation_calls" + (":literals" if literals else ""),
+        consumer_src, derive).items()}
 
 
 def demands_from_calls(found: dict, templates, own=()) -> dict:
@@ -790,8 +793,38 @@ def own_demands(module_src: str) -> dict:
     same source and different own instantiations cannot share a path) and the
     rewrite of this module's own call sites — which is why it is a function and
     not a line in one of them.
+
+    **A STRUCT template's bracket may name a comptime VALUE, and that is read
+    here and nowhere else.**  `Tagged[Int, 0]` on
+    `struct Tagged[T, origin: Int]` needs a mangled boundary symbol exactly as
+    `Pair[Int]` does — the local machinery that answers a FUNCTION template's
+    value specialisation (`tile[2, 3](…)`) emits nothing for a struct — so this
+    asks the demand walk for literals too, scoped to the struct half.  The
+    literal is only NAMED here; `instantiate_all`'s gate
+    (`_undeclared_literal_arg`) decides whether it is legal for the declaration,
+    so a literal in a TYPE parameter's position is dropped rather than
+    substituted into the body.
     """
-    return demands(module_src, template_names(module_src), own=())
+    names = template_names(module_src)
+    typed = demands(module_src, names, own=())
+    # A STRUCT template is the one case a bare comptime VALUE argument is a
+    # demand: its instantiation is emitted under a mangled name nothing else
+    # emits, so `Tagged[Int, 0]` needs a boundary symbol — where a FUNCTION
+    # template's value specialisation is the local machinery's (`tile[2, 3](…)`),
+    # which is why the literal read is scoped to the struct half. The literal
+    # is only NAMED here; whether it is legal for the declaration is
+    # `instantiate_all`'s gate (`_undeclared_literal_arg`), so a `Pair[2]` on a
+    # one-TYPE-parameter struct is still dropped rather than built.
+    structs = [n for n in names
+               if template_kind(module_src, n) == KIND_STRUCT]
+    if structs:
+        value = demands_from_calls(
+            all_instantiation_calls(module_src, literals=True), structs)
+        for name, args in value.items():
+            merged = set(typed.get(name, ()))
+            merged.update(args)
+            typed[name] = sorted(merged)
+    return typed
 
 
 def demap_from(made) -> dict:
@@ -852,6 +885,110 @@ def publish_source(mangled: str, concrete: str) -> str:
                        ".mojo", concrete.encode())
 
 
+#: The bracket-parameter annotations that make a parameter a comptime VALUE.
+#:
+#: **A conservative allowlist, and the direction of its conservatism is the
+#: safety property.** `own_demands` reads a bare literal at the top level of a
+#: struct template's bracket (`Tagged[Int, 0]`), and the ONE thing that must not
+#: happen is substituting that literal into a TYPE parameter — `Pair[2]` on
+#: `struct Pair[T]` would become `var first: 2`, which this backend accepts and
+#: runs (measured: exit 0). So a literal is accepted ONLY where the declaration
+#: annotates the parameter as one of these value types. The failure mode of a
+#: MISSING entry is the safe one: a value parameter not listed here stays
+#: refused, exactly as every value parameter is refused today, rather than a type
+#: parameter being filled with a number.
+#:
+#: A parameter with no annotation, or annotated `AnyType`, is a TYPE parameter
+#: (`struct Pair[T]`, `def f[T: AnyType]`) and is deliberately absent. A trait
+#: bound (`T: Writer`, `T: Intable`) is absent too — it is a type parameter, and
+#: the base-name extraction below would otherwise read `Writer` as a value.
+_VALUE_PARAM_ANNOTATION_BASES = frozenset({
+    "Int", "Int8", "Int16", "Int32", "Int64",
+    "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+    "Bool", "Float16", "Float32", "Float64",
+    "String", "StaticString", "DType", "CompilationTarget",
+    "List", "Tuple",
+})
+
+#: A bare literal, as `_display_element_text` renders one, and nothing that
+#: could be a type spelling: `Int`, `Float64`, `List[Int]` and `T` do not match.
+_BARE_LITERAL_TEXT = re.compile(
+    r"^(?:[-+]?\d+\.\d*|[-+]?\.\d+|[-+]?\d+|True|False|None|'.*'|\".*\")$")
+
+
+def _param_annotations(template_src: str) -> dict:
+    """`{parameter name: its bracket annotation text}` for a template header.
+
+    The parameter names come from `elaborate.type_param_names`, which is the
+    ONE reader of a template's bracket list, so the names align with the
+    arguments `instantiate` binds. The annotation is read from the same header
+    text, with the default (if any) and any bracketed argument stripped:
+    `origin: Int`, `keys: List[T]`, `invariant: Bool = False` -> `Int`, `List`,
+    `Bool`. It is used only by `_undeclared_literal_arg` and only for the
+    value/type question.
+    """
+    import elaborate                                # lazy
+    import monomorphize as mm                       # lazy
+    from fire_compiler import split_top_level_commas
+    m = mm.head_match(template_src)
+    if not m:
+        return {}
+    out = {}
+    for p in split_top_level_commas(m.params):
+        p = p.strip()
+        # The same marker rule `elaborate._is_param_marker` states, kept in
+        # step so the names here align with `elaborate.type_param_names`.
+        if not p or all(ch in "/*" for ch in p):
+            continue
+        head, _, ann = p.partition(":")
+        ann = ann.split("=")[0].strip()
+        out[head.strip()] = ann.split("[")[0].strip().split(".")[-1]
+    return out
+
+
+def _undeclared_literal_arg(module_src: str, name: str, args) -> bool:
+    """True when `args` names a LITERAL for a parameter that is not a value one.
+
+    The gate `own_demands`'s literal read needs and the ONLY thing standing
+    between `Pair[2]` (a type parameter given a number) and a fabricated
+    instantiation. `instantiate_all` drops such a demand rather than
+    substituting it, so the call site keeps its brackets and is refused with the
+    sentence that is true of it — a comptime parameter list — instead of a body
+    built from a value the declaration never bound.
+
+    A declaration whose header cannot be read answers `False` (no opinion), and
+    the arity/`monomorphize_source` checks downstream are unchanged.
+    """
+    src = _template_source_of(module_src, name)
+    params = _param_annotations(src)
+    if not params:
+        return False
+    import elaborate                                # lazy
+    order = elaborate.type_param_names(src)
+    value_names = {n for n, ann in params.items()
+                   if ann in _VALUE_PARAM_ANNOTATION_BASES}
+    for i, arg in enumerate(args):
+        if not _BARE_LITERAL_TEXT.match(str(arg)):
+            continue
+        if i >= len(order) or order[i] not in value_names:
+            return True
+    return False
+
+
+def _template_source_of(module_src: str, name: str) -> str:
+    """The declaration text of `name` in `module_src`, or "".
+
+    Whatever `template_kind` says the name is. A thin wrapper so the gate above
+    reads the same text `instantiate` reads, and answers "" rather than raising
+    for a name that is not a template here (the caller then has no opinion).
+    """
+    try:
+        kind = template_kind(module_src, name)
+        return _template_source(module_src, name, kind)
+    except (MonomorphError, ValueError):
+        return ""
+
+
 def instantiate_all(module_src: str, wanted: dict) -> tuple:
     """`([(template, mangled, args, path), …], [(name, args, reason), …])`.
 
@@ -877,6 +1014,16 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
     made, failed = [], []
     for name in sorted(wanted or {}):
         for args in sorted(wanted[name]):
+            # A literal the declaration does not declare a VALUE parameter for
+            # is not a demand at all (see `_undeclared_literal_arg`): dropped,
+            # not failed, so the call site keeps its brackets and is refused
+            # with the sentence about the construct rather than a message about
+            # a demand nobody made. Asked only when an argument IS a bare
+            # literal — the common demand has none, and the gate reads the
+            # declaration to answer.
+            if (any(_BARE_LITERAL_TEXT.match(str(a)) for a in args)
+                    and _undeclared_literal_arg(module_src, name, args)):
+                continue
             try:
                 mangled, concrete = instantiate(module_src, name, args)
             except MonomorphError as e:
@@ -984,7 +1131,7 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
             base = _callee_base(node)
             if base is None:
                 continue
-            args = tuple(_bracket_type_args(node.func, values))
+            args = tuple(_bracket_type_args(node.func, values, literals=True))
             mangled = demap.get((base, args))
             if mangled is None:
                 continue
@@ -1057,7 +1204,7 @@ def _callee_base(call):
     return comptime_eval.specialization_name(getattr(call, "func", None))
 
 
-def _bracket_type_args(sub, values=()) -> list:
+def _bracket_type_args(sub, values=(), literals=False) -> list:
     """The bracket's items as concrete type-argument spellings, or [].
 
     A COMMA LIST is several arguments and not one: `Pair[Int, Bool]` is `Pair`
@@ -1076,9 +1223,46 @@ def _bracket_type_args(sub, values=()) -> list:
     docstring warns against, and an unrecognised item here would be mangled into
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
+
+    **`literals` adds ONE item shape, a bare literal at the TOP level of the
+    bracket, and nothing else**, so that a generic STRUCT template applied with
+    a comptime VALUE (`Tagged[Int, 0]`, a shape `formal/build.py` used to refuse
+    as a tuple index) can be named.  It is off by default and on only for this
+    module's own struct templates (`own_demands`), because a bare literal on a
+    FUNCTION template is the `tile[2, 3](…)` case the LOCAL specialisation
+    machinery already answers — demanding a boundary symbol for it would publish
+    a second body for a specialisation the build emits under its own name.  A
+    nested occurrence is still refused (`type_arg_text`'s own answer), which is
+    the `Pair[2]` distinction the design already holds: only a display is a
+    value ARGUMENT, and a bare literal is one only where the declaration says the
+    parameter is a value.
+
+    **`literals` does NOT decide whether the literal is legal for the
+    declaration** — that is `instantiate_all`'s gate, which DROPS a demand whose
+    literal lands on a TYPE parameter rather than substituting a body built from
+    it (the `Pair[2]` → `var first: 2` fabrication).  This function only reads
+    the source.
     """
-    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
+    spelled = [_bracket_arg_text(i, values, literals)
+               for i in bracket_items(sub)]
     return spelled if spelled and all(spelled) else []
+
+
+def _bracket_arg_text(expr, values, literals) -> str:
+    """One bracket ITEM as an argument spelling: a type, or (when allowed) a
+    bare top-level literal.
+
+    The literal fallback reuses `_display_element_text`'s own reader, so a
+    literal renders the one way this module renders literals everywhere and
+    `monomorphize.safe_suffix` (injective on text) keeps two values two symbols.
+    `type_arg_text` is asked FIRST, so a type spelling — and a literal DISPLAY,
+    which is a value argument the design already accepts — is answered by the
+    reader that owns it rather than by the fallback.
+    """
+    text = type_arg_text(expr, values)
+    if text or not literals:
+        return text
+    return _display_element_text(expr, values)
 
 
 def bracket_items(sub) -> list:
