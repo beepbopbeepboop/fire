@@ -17,8 +17,9 @@ is the shared predicate and each emitter's `_materialize_compr_element` is the
 copy (see "What landed 2026-10-06" below). **2026-10-13: the same copy now covers
 a NESTED COMPREHENSION whose own element builds nothing** — the doc's own
 reproducer `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63` on both
-backends where it answered `93` and exited 1, because the inner result stores its
-words INLINE and a shallow copy carries content rather than an address (see "What
+backends, where the flat half had left it refused (and where the original defect
+had answered `93` and exited 1), because the inner result stores its words INLINE
+and a shallow copy carries content rather than an address (see "What
 landed 2026-10-13" below). What is STILL refused is every element whose
 per-iteration materialisation needs a RUNTIME blob base — a nested comprehension
 whose own element opens a container, a comprehension-of-a-comprehension, a list
