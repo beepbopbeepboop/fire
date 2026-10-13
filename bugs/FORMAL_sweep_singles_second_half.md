@@ -1,5 +1,31 @@
 # FORMAL_sweep_singles_second_half: four of §3.2's eight remaining single-file causes are not patches, measured
 
+**Status 2026-10-13 (`work/formal400-docs`): two of the three remaining rows
+have moved one wall DEEPER, behind the f-string refusal — so neither
+`formal/x86_64_decode.py` nor `regex_compile.py` reaches the refusal this
+document measures any more. Re-measured, one build per file, arm64 and x86-64,
+byte-identical:**
+
+    $ python3 tools/memslot.py --gb 8 --label b -- python3 fire.py build \
+          --formal --no-prove -o .tmp/x formal/x86_64_decode.py
+    build: an f-string literal on line 133 is refused on this path: its value is
+    its INTERPOLATED text, and this path has no buffer to compose one in. …
+    $ python3 tools/memslot.py --gb 8 --label b -- python3 fire.py build \
+          --formal --no-prove -o .tmp/x regex_compile.py
+    build: an f-string literal on line 116 is refused on this path …
+
+So §1's `Insn.extra: field(default_factory=F)` and §3's `atom is assigned
+_Parser_parse_atom(self)` are no longer their files' terminal causes: the
+f-string on the way in — `FORMAL_string_composition_has_no_buffer`'s wall, the
+same one §2 already records for `module_loader.py`'s line 108 — stops both
+first.  The two refusals below are still CORRECT and their read of the value
+model is unchanged; what moved is only which wall a reader meets first, which is
+what a future session would otherwise re-derive from the wrong row.  §5's
+`std/format/repr.mojo` row is UNCHANGED, re-measured here: it still refuses at
+`value.write_repr_to()`.  So the file's remaining content is still three rows,
+none a patch, and two of them are now one wall deeper (the f-string on the way
+in, not this document's subject).
+
 **Status: filed 2026-10-03 from the sweep map
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2/§5, claim
 `sweep12:singles-b`. Three of the eight rows in the second half of that list
