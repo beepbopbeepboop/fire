@@ -1,5 +1,7 @@
 # FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's
 
+**Status 2026-10-13 (`work/formal324-docs`): §5's file now PASSES, and both places that say it does not are stale.** `builtin/float_literal.mojo` is the one file §5's commit (`26f0ee62`) worked on, and §5 recorded it as worth 0 files because the file still stopped at the same construct. Re-measured on this tree, `python3 fire.py build --formal --no-prove --backend={arm64,x86_64}` on `std/builtin/float_literal.mojo` prints `Built:` on **both** architectures — so the file is a PASS now and §5's "Why 0 files" and §6.1's row for it (which lists it among the ten rows "still the construct this table names") are both stale. That is the movement the rules of this series exist to catch: a file that stops being refused is a fix landing underneath the table, not a row a reader should still quote. The rest of §1's class table and §6.1's other thirteen rows were NOT re-swept here (74 further builds over a slice whose CAS any edit under `formal/` invalidates), so §6.1's own warning — "the per-file cause table ... has to be re-measured before it is quoted" — still applies to them.
+
 **Status 2026-10-05 (`work/formal27-5`): §3's row 12 is no longer "the same
 monomorphisation wall as 11, from the other side" — it is its own wall, it now
 has a doc, and the "other side" is a comptime VALUE parameter rather than a
@@ -204,12 +206,12 @@ the receiver first, because `model.rewrite_tree` does not descend into a
 construct it has consumed and the receiver of a method call is usually another
 method call.
 
-**Why 0 files, measured rather than argued:** the one file in this slice with
-that shape is `float_literal.mojo`, and `IntLiteral` is declared in
+**~~Why 0 files, measured rather than argued:~~ SUPERSEDED 2026-10-13 — the file PASSES now (Status at the head).** At the time, the one file in this slice with
+that shape was `float_literal.mojo`, and `IntLiteral` was declared in
 `std/builtin/int_literal.mojo`, which `float_literal.mojo` neither imports nor
-compiles — so there is no callee in that unit to bind. The commit therefore
+compiles — so there was no callee in that unit to bind. The commit therefore
 also **replaced that file's message with a true one**, which is the part worth
-having on its own:
+having on its own (and the message a reader used to get is kept below as history):
 
 ```
 build: FloatLiteral___int__: `self.__int_literal__().__int__(…)` cannot be
@@ -351,7 +353,7 @@ lock:
 
 | | rows |
 |---|---|
-| **still the construct this table names** | **10 of 14** — `bit/bit.mojo` (`is_negative` from `std.bit.mask`), `builtin/_format_float.mojo` (`isnan`), `builtin/builtin_slice.mojo` and `utils/variant.mojo` (`FormatStruct`), `random/_rng.mojo` (`PhiloxRandom`), `builtin/len.mojo` (the `...` body), `builtin/none.mojo` (a `Writer` receiver), `builtin/type_aliases.mojo` (an MLIR type in a `comptime`), `sys/arg.mojo` (the explicit-parameter list), and §5's `builtin/float_literal.mojo` with §5's own new sentence |
+| **still the construct this table names** | **9 of 14** (was 10 — see the 2026-10-13 Status at the head) — `bit/bit.mojo` (`is_negative` from `std.bit.mask`), `builtin/_format_float.mojo` (`isnan`), `builtin/builtin_slice.mojo` and `utils/variant.mojo` (`FormatStruct`), `random/_rng.mojo` (`PhiloxRandom`), `builtin/len.mojo` (the `...` body), `builtin/none.mojo` (a `Writer` receiver), `builtin/type_aliases.mojo` (an MLIR type in a `comptime`), `sys/arg.mojo` (the explicit-parameter list). §5's `builtin/float_literal.mojo` has left this row: re-measured 2026-10-13, it now PASSES on both architectures |
 | **the construct has MOVED** | **4** — §3 rows 4, 10, 11 and 13, corrected in place above |
 
 **Two different things moved those four, and the difference matters for whoever

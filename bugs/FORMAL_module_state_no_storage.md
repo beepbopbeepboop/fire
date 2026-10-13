@@ -1,5 +1,7 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status 2026-10-13 (`work/formal324-docs`): §(3)'s `len()` remainder is CLOSED, and the paragraph was FALSE.** §(3) says a `malloc`'d blob crosses a dylib boundary and reads by SUBSCRIPT, but that `len()` of one is refused "because the path has no KIND that says this word is a heap allocation with a run-time length". Measured on this tree, on §(3)'s own `triple() -> List[Int]` shape: the KIND channel is `model.imported_callee_kind`, which reads the callee's own `-> List[Int]` rather than the manifest's C signature (`-> List[Int]` and `-> Int` are both `int64_t`), and it landed 2026-10-02 (recorded in `bugs/FORMAL_listdir_no_run_time_sequence.md`'s Status). §(3) was never updated for it. Pinned by `test_formal_cross_module.py`'s `test_a_container_returning_export_whose_helpers_take_the_buffer` (`len(paths)` over a collected `List[Int]`; 36/36) and the `len`/`for`/subscript rows in `test_formal_globals.py` (56/56). **So §(3)'s "still missing" is now only the run-time-LENGTH half (a blob whose count is not a build-time constant), which is `FORMAL_listdir_no_run_time_sequence`'s item 2 and not the KIND.** Nothing else in this document moves: `sys.argv` and `sys.executable` are still refused at §(2), and the two remainders "What is left" names — an EXPORTED SLOT and `sys.argv`'s source — are unchanged.
+
 **Status (2026-10-04, `formal18-4`): §(2)'s member refusal had a THIRD arm
 missing, and it was the same disease that function was written to cure — a
 sentence false about the name it names. Fixed; the two items this document's
@@ -534,22 +536,25 @@ that was the most dangerous to leave: a frame address printed as a plausible
 number is indistinguishable from a computation, so every downstream read of it
 was wrong rather than absent.
 
-**What is still missing is narrower than the item claimed, and the narrowing
-is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
-one does not, because the path has no KIND that says "this word is a heap
-allocation with a run-time length":
+**~~What is still missing is narrower than the item claimed, and the narrowing
+is measured:~~ SUPERSEDED 2026-10-13 (`work/formal324-docs`) — `len()` is
+ANSWERED now; see the Status at the head.** This paragraph said a `malloc`'d blob
+crosses and reads by SUBSCRIPT, but `len()` of one did not, "because the path has
+no KIND that says this word is a heap allocation with a run-time length", and
+quoted the refusal:
 
 ```
 printf("%d\n", len(t))
-    -> len() of a value classified as 'int', and an integer has no length:
+    -> len() of a value classified as 'int', and an integer has no length:   # no longer what a build says
        there is no count to read at offset 0, and the word there is the
        integer itself
 ```
 
-That is item (1) of "What is still missing" below, unchanged, and it is the
-`BLOB_KIND` annotation channel `dylib_export_return_kind` already reads for
-`char *`. The representation is not the gap — the subscript works, so the blob
-and its count-word are read correctly — the KIND is.
+The KIND channel is `model.imported_callee_kind`, which reads the callee's own
+`-> List[Int]` rather than the manifest's C signature, and it landed 2026-10-02.
+The representation was never the gap — the subscript worked, so the blob and its
+count-word were read correctly — and the KIND is now asked. What remains under
+this paragraph is only the run-time-LENGTH half.
 
 **(4) `sys.argv` additionally has no SOURCE on this path.** The entry stub
 (`ARM64Codegen.compile`, and `X86_64Codegen`'s twin) loads the test input into
