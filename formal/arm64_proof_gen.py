@@ -13151,12 +13151,16 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                       "    rfl"]
             else:
                 # The library's own runner equation, with `hseq` discharged by
-                # `rfl`: a step whose effect is a record update on `sp` (or an
-                # `arm64_set_reg`) does not mention `pc` at all, so the two
-                # sides of the bump condition are the same term.
+                # UNFOLDING `st{i}`: a step whose effect is a record update on
+                # `sp` (or an `arm64_set_reg`) does not mention `pc` at all, so
+                # the two sides of the bump condition are the same term — but
+                # `st{i}` is a `def` over the step's effect, and `rfl` there
+                # asks Lean to `whnf` it, which re-reduces a `UInt64` immediate
+                # in the record and costs O(immediate).  `_state_proof`.
                 L += [f"    exact runs_cons_seq ({prev}) (st{i} ({prev})) "
                       f"dylib_code {k - i - 1}",
-                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) (by rfl)"]
+                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) "
+                      f"{_state_proof(_STATE_HELPERS + [f'st{i}'], paren=True)}"]
         L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
         L.append("  rfl")
         out.append("\n".join(L))
