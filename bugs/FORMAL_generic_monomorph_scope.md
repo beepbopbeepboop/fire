@@ -8,7 +8,8 @@ remainders, not a proposal · **Layer:** 1/5 of the formal work
 read §9a before §1**: §1a says §1's construct was unmeasurable until §9 was
 fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall,
 which was a third bug underneath it and is named there. What is left is §1a
-itself (a name resolution, and an ABI decision), §2 (a dotted application), §3
+itself — its VALUE half is answered and its FRAME half is the name resolution and
+the ABI decision; see §1a's Status — §2 (a dotted application), §3
 (comptime-valued parameters), §4 (a type declared in the consumer), §8 (trait
 bounds). The cross-module-library half — a LIBRARY that applies ANOTHER
 module's template — is FIXED (`build_module_dylib` now hands the imported
@@ -56,6 +57,39 @@ walks parameter annotations.
 
 ### 1a MEASURED 2026-10-04 (`formal25-3`): §1 is not a DEMAND question, and the
 ### wall in front of it is bigger than §1
+
+**Status 2026-10-13 (`work/formal361-docs`): the wall is the FRAME case and only
+the frame case, and both halves are PINNED now** —
+`test_formal_monomorph.py`'s "a parameter annotation of an imported
+instantiation", both architectures. Re-measured, `def keep(p: Pair[Int])`:
+
+| `Pair` | what the parameter is | today |
+|---|---|---|
+| **one field** | a VALUE (one word) | **builds and answers CPython** — nothing is compared across the boundary, so the type POSITION resolves for free |
+| **two fields** | a FRAME address | **refused**, exactly the sentence §1a quotes: the contract says the parameter is a holder of `Pair` (the TEMPLATE) and the caller hands it `Pair_1_T_3_Int` (the INSTANTIATION) |
+
+So this is narrower than "the annotation is unresolved": it is unresolved only
+where the layout is compared, which is a FRAME. §1a's ABI question ("a library
+asked for both `Pair[Int]` and `Pair[Bool]` has ONE `keep`") is likewise
+answered for value parameters — a library with `keep_int(p: Pair[Int])` and
+`keep_bool(p: Pair[Bool])` builds and answers CPython on both architectures,
+because the library is compiled per DEMAND SET and a one-word parameter crosses
+with no name to compare. The frame case is the remainder, and the refusal is
+true of the tree as written.
+
+**The one reader that has to change is `model.parameter_declared_structs`.** It
+answers `decls.get(annotation_base_name(ann))`, and `annotation_base_name` drops
+the type ARGUMENTS deliberately (`List[Int]`/`List[String]` are one
+representation here), so `p: Pair[Int]` resolves to the template and the contract
+publishes the template's name. The instantiation's mangled name already exists in
+the compilation (`decls` holds it, and the call-site rewrite is driven from
+`formal/monomorph.py`'s `{(base, args): mangled}` demap), so the resolution is a
+LOOKUP and not a second recogniser — but the demap is not in `_prepare_functions`'
+scope, and FIVE callers ask `parameter_declared_structs` (the frame contract and
+the library's own field accesses among them), so threading it in changes what the
+whole frame analysis answers about one instantiated parameter. That is a
+corpus-wide change and not a patch, which is why this session pinned the boundary
+instead of taking it.
 
 The cost-to-measure line above was followed, and the measurement moves the item.
 **The demand is recorded and the layout crosses; what is missing is that a type

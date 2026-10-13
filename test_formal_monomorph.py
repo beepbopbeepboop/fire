@@ -741,6 +741,86 @@ def test_a_library_that_applies_another_modules_template_instantiation(tmpdir):
               f"boundary call at all")
 
 
+def test_a_parameter_annotation_of_an_imported_instantiation(tmpdir):
+    """§1/§1a: `def keep(p: Pair[Int]) -> Int` is a type in a NON-CALL position.
+
+    An imported function's PARAMETER is where the instantiation's name has to be
+    resolved across a dylib boundary, and the two states this test pins are
+    different because a one-field struct and a two-field struct are a VALUE and
+    a FRAME on this path (`formal/model.py::struct_is_framed`):
+
+      * ONE field: the parameter is one word, nothing is compared across the
+        boundary, and the call builds and answers CPython on both arches. That
+        is why §1 is not "a demand is missing" — the demand is recorded and the
+        layout crosses.
+      * TWO fields: the parameter is a FRAME, and the contract compares the
+        struct name the library derived from the annotation (`Pair`, the
+        TEMPLATE) against the name the caller holds (`Pair_1_T_3_Int`, the
+        INSTANTIATION). It refuses with
+        `model.cross_image_frame_disagreement_refusal`, which is §1a's measured
+        refusal and is still OPEN.
+
+    The second row asserts the refusal and not its absence, so the day the
+    resolution lands this row goes red and has to become a build-and-run — the
+    same shape `test_a_bare_call_to_an_imported_generic_is_still_refused` uses
+    for the boundary it pins. §1a's next step is that a type POSITION resolve to
+    the instantiation's mangled name; the resolution site is
+    `model.parameter_declared_structs`' answer for the parameter, which is the
+    one reader the frame contract and the library's own field accesses both ask.
+    """
+    lib_value = ("struct Pair[T]:\n"
+                 "    var first: T\n"
+                 "\n"
+                 "    def get_first(self) -> T:\n"
+                 "        return self.first\n"
+                 "\n"
+                 "def keep(p: Pair[Int]) -> Int:\n"
+                 "    return p.first\n")
+    lib_frame = ("struct Pair[T]:\n"
+                 "    var first: T\n"
+                 "    var second: T\n"
+                 "\n"
+                 "    def get_first(self) -> T:\n"
+                 "        return self.first\n"
+                 "\n"
+                 "def keep(p: Pair[Int]) -> Int:\n"
+                 "    return p.first\n")
+    prog = ("from pairlib import Pair, keep\n"
+            "\n"
+            "def main():\n"
+            "    var a = Pair[Int]()\n"
+            "    a.first = 41\n"
+            "    print(keep(a))\n")
+    cpython = ("class Pair:\n"
+               "    def __init__(self):\n"
+               "        self.first = 0\n"
+               "        self.second = 0\n"
+               "\n"
+               "    def get_first(self):\n"
+               "        return self.first\n"
+               "\n"
+               "def keep(p):\n"
+               "    return p.first\n"
+               "\n"
+               "def main():\n"
+               "    a = Pair()\n"
+               "    a.first = 41\n"
+               "    print(keep(a))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_p_value", lib_value, prog,
+                            cpython)
+        check(got == "41\n",
+              f"[{arch}] the one-field parameter printed {got!r}, CPython 41")
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm_p_frame", lib_frame, prog,
+                             cpython, expect_ok=False)
+        check("is a frame holder of Pair" in text
+              and "whose frame is Pair_1_T_3_Int" in text,
+              f"[{arch}] the two-field parameter must still refuse with the "
+              f"cross-image frame contract: {text.strip()[-400:]}")
+
+
 def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
         tmpdir):
     """`from pkg import Pair` must instantiate in `pairlib`, not in `pkg`.
@@ -3002,6 +3082,8 @@ TESTS = [
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library that applies another module's template instantiation",
      test_a_library_that_applies_another_modules_template_instantiation),
+    ("a parameter annotation of an imported instantiation",
+     test_a_parameter_annotation_of_an_imported_instantiation),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
