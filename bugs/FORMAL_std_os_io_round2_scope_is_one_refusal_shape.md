@@ -57,11 +57,13 @@ features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
 §2's, and the only thing this document asked for was an instrument that can
 answer the question. §0.1 is what changed.
 
-Round 1 of this scope is `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`
-(`sweep14:std-os-io`, **not edited here** — it is that claim's document). It
-measured `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` = 46 files, 3 pass,
-and read the chain behind all 43 as `std/collections/binary_heap.mojo`, then
-`std/algorithm/backend/tile.mojo`, then `std/builtin/builtin_slice.mojo`.
+Round 1 of this scope (`sweep14:std-os-io`) measured
+`std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` = 46 files, 3 pass, and read
+the chain behind all 43 as `std/collections/binary_heap.mojo`, then
+`std/algorithm/backend/tile.mojo`, then `std/builtin/builtin_slice.mojo`. **That
+round-1 audit document has since been retired**: every link of its chain had
+moved to a different refusal owned by a live doc, and its own closing section
+already read "a history" — the same shape this round's §0 records for itself.
 
 **That chain is gone.** The per-edge export gate landed after it, and this
 round's scope is a different set of packages anyway — it drops `sys` and `time`

@@ -454,8 +454,9 @@ The four corpus sites this reaches, three of them in `std/sys` and `std/os`:
     std/_plugin/selector.mojo:74  __mlir_op.`llvm.intr.trap`()
 
 Only the first moves a file: the other three are behind other modules' refusals
-(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`
-has the chain), so this change moves them one refusal along rather than out.
+(the `std/{os,io,pathlib,sys,time,...}` scope sweep's chain, whose round-1 audit
+was retired once every link had moved to a refusal owned by a live doc), so this
+change moves them one refusal along rather than out.
 
 **One defect found and removed on the way.** `mlir_dialect_op_refusal` had an
 UNREACHABLE tail after its fallback `return`: a second copy of the unguarded arm
