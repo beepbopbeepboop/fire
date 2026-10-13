@@ -19,6 +19,30 @@ goes 9 -> 8 red (the `sgt8` rewrite was the same shift), and
 `test_formal_run.py` (1209/0), `test_formal_short_circuit_cond.py` (15 OK) and
 `test_formal_proof_shape.py` (24 OK) are unmoved.
 
+## What the fix exposed on the examples corpus
+
+Two measurements worth recording, both through
+`tools/formal_proof_census.py --remeasure` on `formal/examples`:
+
+* **`ifonly` is now `proved`** (39.5 s; it was `lean-rejected` on the current
+  tree with the same `Tactic rewrite failed` this doc's inline program had).
+  The committed baseline still records `ifonly` as `proved` from 2026-10-05 —
+  so the baseline PREDATES the stack-floor guard's `lsl #12` reservation, and
+  this fix restores a row the guard had broken.
+* **`count` admits 1 `sorry` more than the baseline** (still `lean-rejected`,
+  now at a later `maximum recursion depth`), and `identity`'s CPU reads 4x the
+  baseline — **but `identity` measures ~29.5 s CPU with and without this fix**,
+  so that one is pre-existing drift in the committed baseline, not this change.
+  `count`'s extra hole is this change: its `FrameOk` window now gets the correct
+  131072-byte depth and the proof reaches the next obligation instead of
+  stopping earlier.
+
+**So the committed baseline is stale over a large part of the corpus and the
+`formal-proof-census` re-seed is the integrator's** — this fix moves rows
+toward their real verdict; it cannot turn a `proved` row red, because a proof
+whose `sp` tracker names `sp − 32` while the model's state is `sp − 131072`
+cannot close in the first place.
+
 ## What I ran
 
 ```console
