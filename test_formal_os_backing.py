@@ -786,11 +786,29 @@ def _stat_oracle(p):
     def field(st, name):
         return -1 if st is None else getattr(st, name)
 
+    def signed_word(v):
+        """`v` as the SIGNED 64-bit word the image's `int` holds.
+
+        `st_dev` is a signed `dev_t`, and CPython exposes it as the
+        sign-extended 64-bit word read UNSIGNED (a Python int, so a device
+        number with bit 31 set is past `INT64_MAX` and prints positive). The
+        image's `int` is a signed 64-bit word, `%d` is `%lld`, and the two
+        agree on the WORD — so the oracle takes CPython's value back to the
+        signed rendering the image uses. `-1` (the stat-failed sentinel
+        `field` returns) is already signed and passes through. Measured on a
+        host whose `st_dev` has bit 31 set: CPython's
+        `18446744072249612928` is `-1459938688` here, which is what the image
+        prints; on a host with a clear bit 31 the value is small and positive
+        and the two are the same number.
+        """
+        return v - (1 << 64) if v >= (1 << 63) else v
+
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
         field(s, "st_gid"))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
-        field(s, "st_size"), field(s, "st_ino"), field(s, "st_dev"),
+        field(s, "st_size"), field(s, "st_ino"),
+        signed_word(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
         field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))

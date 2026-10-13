@@ -1242,6 +1242,29 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` above answers the same four bytes as an UNSIGNED value, which is the
+    right reading for `uid_t`/`gid_t` and the WRONG one for `dev_t` -- a signed
+    32-bit field on Darwin. `os.stat('/dev/null').st_dev` is
+    `18446744072249612928` (`0xffffffff` then the low 32 bits) because CPython
+    sign-extends the signed field into its 64-bit `dev_t`-as-unsigned slot, and
+    a zero-extended read answers the low 32 bits alone. Measured on this host,
+    both architectures, with the high bit of `st_dev` set; on a filesystem whose
+    `st_dev` has the high bit clear the two readings are the same word, which is
+    why `stat_null` is the only case that sees it.
+
+    Written as a comparison and a subtraction rather than a shift pair because
+    this path has no signed 32-bit load to ask (`b[i]` is a byte), and
+    `v - 4294967296` is the sign-extended word for exactly the half of the
+    range that has bit 31 set."""
+    v = le32(b, i)
+    if v >= 2147483648:
+        v = v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1603,6 +1626,20 @@ def fs_stat_field32(p, follow, at) -> int:
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    The signed twin of `fs_stat_field32` above, for `st_dev`/`st_rdev`
+    (`dev_t`, a signed 32-bit field) rather than for `st_uid`/`st_gid`
+    (`uint32_t`). The width and the offset are the same; only the extension
+    differs, and `le32s`'s docstring has the measurement.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
