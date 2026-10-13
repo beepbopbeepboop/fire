@@ -1,8 +1,8 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
-**Status 2026-10-07, landed in parallel by `work/formal135-docs` and
-`work/formal155-docs`: the FIVE names §0.5 said the `find_spec` oracle decides
-are in `HOST_UNREACHABLE`.** §0.5 measured the oracle's split and named
+**Status 2026-10-07, landed in parallel by `work/formal135-docs`,
+`work/formal155-docs` and `work/formal175-docs`: the FIVE names §0.5 said the
+`find_spec` oracle decides are in `HOST_UNREACHABLE`.** §0.5 measured the oracle's split and named
 `_gdbm`, `_tkinter`, `_overlapped`, `_winapi` and `_wmi` as "the first entries a
 worker could add with a measurement behind each"; all five are placed, by the
 rule at the top of `formal/imports.py` applied rather than a new category.
