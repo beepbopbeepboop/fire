@@ -2235,6 +2235,22 @@ REFUSALS = [
      "    printf(\"%d\\n\", 1 + g(1, 2))\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # …and one argument deeper than the operand walk alone can see: the printed
+    # call is to a function that DOES return a value, so the operand itself is
+    # not an empty result — but an ARGUMENT to it is, and the value that is
+    # rendered is not one the source wrote. The direct-call arm falls through to
+    # the walk rather than answering "the callee returns a value" and stopping.
+    ("a_printed_call_that_consumes_a_return_less_result_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def twice(x):\n"
+     "    return x + x\n"
+     "\n"
+     "def main():\n"
+     "    print(twice(g(1, 2)))\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

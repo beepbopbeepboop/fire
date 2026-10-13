@@ -114,17 +114,21 @@ things it deliberately does NOT descend into, and both are scopes rather than
 values: a nested `def`/`lambda` body (evaluated when its own frame is entered)
 and the `func` of a `CallExpr` (the callee name is not a read of a local, so
 `f = g(); f(1)` where `g` returns nothing must not turn the callee `f` into a
-caught value). All four rendering call sites — `print` and `printf` in each
-emitter — already go through `no_value_callee_of`, so the two architectures and
-the two spellings cannot answer this differently. CPython raises for the operand
-case, so refusing replaces a fabricated number with the refusal CPython's own
-`TypeError` already is.
+caught value). A direct call whose callee DOES return a value falls through to
+the walk rather than stopping (the printed call is not itself empty, but an
+ARGUMENT to it is: `print(twice(g(1, 2)))`). All four rendering call sites —
+`print` and `printf` in each emitter — already go through
+`no_value_callee_of`, so the two architectures and the two spellings cannot
+answer this differently. CPython raises for the operand case, so refusing
+replaces a fabricated number with the refusal CPython's own `TypeError` already
+is.
 
 Rows: `test_formal_value_model.py`'s `REFUSALS` —
 `a_printed_operand_that_depends_on_a_return_less_call_is_refused`,
-`a_printed_operand_named_by_a_return_less_local_is_refused` and
-`a_printf_argument_that_depends_on_a_return_less_call_is_refused` — each a build
-on BOTH architectures that must refuse naming the rendering call. PASS=127
+`a_printed_operand_named_by_a_return_less_local_is_refused`,
+`a_printf_argument_that_depends_on_a_return_less_call_is_refused` and
+`a_printed_call_that_consumes_a_return_less_result_is_refused` — each a build
+on BOTH architectures that must refuse naming the rendering call. PASS=128
 FAIL=0 (was 124). The builds behind it stay green: `test_formal_run.py`
 PASS=1209 FAIL=0, `test_formal_hostmods_census.py` 74/74 rows build,
 `test_formal_argparse.py` PASS=10.

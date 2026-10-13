@@ -24123,7 +24123,15 @@ class ValueKinds:
         if isinstance(operand, F.CallExpr) and \
                 isinstance(operand.func, F.IdentExpr):
             name = operand.func.name
-            return None if self._callee_returns_value(name) else name
+            if not self._callee_returns_value(name):
+                return name
+            # The callee produces a value, so the call ITSELF is not the empty
+            # result — but an ARGUMENT may still be a return-less call whose word
+            # flows into the rendered result (`print(twice(g(1, 2)))`): the value
+            # printed is not one the source wrote, and CPython raises inside
+            # `g`'s caller. Fall through to the walk rather than answering None
+            # from the callee alone.
+            return self._no_value_callee_within(operand)
         if isinstance(operand, F.IdentExpr):
             return self._no_value_calls.get(operand.name)
         return self._no_value_callee_within(operand)
