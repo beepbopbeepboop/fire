@@ -14036,10 +14036,6 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
-SET_ALGEBRA_OPS = ("-", "&", "^")
-CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
-                            if op not in SET_ALGEBRA_OPS)
-
 #: The three operators that are SET ALGEBRA, and the ones a backend may lower
 #: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
 #: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
@@ -14051,7 +14047,14 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 #: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
+#:
+#: ONE definition, and a `no_module_level_name_is_bound_twice_in_model` row is
+#: what keeps it that way: the merge of the two set-algebra branches landed this
+#: name twice with the identical value, so the second binding shadowed the first
+#: and `test_formal_external_call.py`'s module-level audit was red on `master`.
 SET_ALGEBRA_OPS = ("-", "&", "^")
+CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
+                            if op not in SET_ALGEBRA_OPS)
 
 
 def container_operator_refusal(op: str, left_kind, right_kind,
