@@ -1,7 +1,48 @@
 # `test_formal_call_proof_gen.py`'s remaining reds after merging the oct-7 formal branches
 
+**Status: PARTIALLY FIXED 2026-10-13 (`work/formal384-docs`) — the two
+`maximum recursion depth` reds are FIXED, and this doc's stated CAUSE for them
+was WRONG; the fact-count red is open and is a separate defect.** Measured:
+
+* `formal/examples/mod_by_var.mojo` and the `same_image_leaf` program both died
+  at `maxRecDepth 100000` with `maximum recursion depth has been reached` at the
+  base-case `runs_cons_seq` of a block certificate. **Both now CHECK** (mod_by_var
+  61 s / 4.0 GB peak / 0 sorries; same_image_leaf 93 s / 4.0 GB / 0 sorries) with
+  the generator emitting `maxRecDepth 200000` (`arm64_proof_gen._MAX_REC_DEPTH`).
+  Pinned by `TestALongProgramCertificateLean` (mod_by_var) and
+  `TestSameImageCallLean` (same_image_leaf), which now pass. Commit `c7ed8aea`.
+* **The cause is not `arm64_ext_imm12`.** A concrete `work_step_add_imm64`
+  application typechecks in 1 s; `arm64_ext_imm12` appears in NO diagnostics from
+  the failing file; and the reduction is not a loop — `set_option diagnostics
+  true` names `List.get?Internal`/`List.rec`/`Nat.rec`, and raising the bound
+  completes it. The certificate's `rw [runs_cons_seq …]` defeqs the goal's
+  `arm64_runs code N st` against the lemma's `arm64_runs code (f+1) st`, and on a
+  SYMBOLIC `st.pc` reduces `arm64_step`/`arm64_read_insn` over the concrete
+  `{name}_code` byte list, whose `getD` walks the whole list for an index it
+  cannot decide: a depth that grows with the image. **The real repair is to stop
+  that reduction** (restating `runs_cons_seq` with `Nat.succ f` to make the match
+  syntactic was tried and blows the library build past 8 GB, so it is not a
+  one-line change); the raised bound is bounded headroom, not the repair. A
+  longer image than `mod_by_var` will want the repair.
+* **Still open: the fact-count red.**
+  `TestNestedConditionFactSharing.test_the_fact_count_grows_with_the_paths_and_
+  not_with_the_branches` still fails (2 → 3 conditions grew `hprior_` facts by
+  x2.33, 9 → 21, over the x2.2 bound). That is a separate defect in the
+  `hprior_memo` generation, not the recursion one, and it is unrelated to the
+  `arm64_ext_imm12` story below.
+* `TestANarrowTypedParameterGetsItsRange` (sgt8) and the four
+  `TestTheZeroDivisorGuardAgainstLean` rows remain the pre-existing reds the
+  text below already calls pre-existing.
+
+**The text below is the original filing (2026-10-07, `work/merge-formal8-oct7`)
+and its mechanism for the recursion failure is the part this update corrects.**
+
+---
+
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py` and
-`lib/ProofLib.lean`'s `arm64_step` arms. **Status: OPEN.** Filed by the
+`lib/ProofLib.lean`'s `arm64_step` arms. **Status (original filing): OPEN —
+the two recursion reds are now fixed and this cause was corrected; see the
+update at the top.** Filed by the
 `work/merge-formal8-oct7` merger. The merge itself is complete; these are the
 failures the narrow `test_formal_call_proof_gen.py` run still shows after every
 *mechanical* merge artifact was fixed (undefined `_RLIMIT_STACK`, the
