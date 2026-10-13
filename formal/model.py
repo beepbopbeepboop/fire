@@ -30729,7 +30729,69 @@ def _expr_builds_a_container(e) -> bool:
     return False
 
 
-def comprehension_element_is_flat_container(element) -> bool:
+def _literal_holds_no_pointer(e) -> bool:
+    """True when `e` reserves no blob that points at another blob in its region.
+
+    The question is asked of an ITERABLE or an element of a literal, and the two
+    answers are:
+
+      * a non-container expression (a name, a subscript, arithmetic, a literal
+        number) reserves nothing, or reserves a word that points OUTSIDE the
+        region — sharing, not aliasing;
+      * a literal container whose elements are themselves non-container
+        expressions stores only those elements' words, so it holds no pointer to
+        another blob in the region either.
+
+    A literal whose element is a container has one, and the pointer it stores is
+    to a blob the per-iteration copy relocates — so it is exactly the
+    shallow-copy boundary. A nested comprehension is not a literal and answers
+    False for the same reason: its result is an in-region blob.
+    """
+    if not _expr_builds_a_container(e):
+        return True
+    if not isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
+        return False
+    children = ([x for pair in e.pairs for x in pair]
+                if isinstance(e, F.DictExpr) else list(e.elements))
+    return not any(_expr_builds_a_container(c) for c in children)
+
+
+def _comprehension_region_is_copy_safe(comp) -> bool:
+    """True when a nested comprehension reserves no pointer to a blob in its own
+    region, so a byte copy of the whole region is a sound per-iteration copy.
+
+    A comprehension ELEMENT that is itself a comprehension is materialised
+    per-iteration by copying its whole reserved region into a slot of the outer
+    `cap`-sized array, exactly as a flat literal is (see the emitters'
+    `_materialize_compr_element`). The copy carries every blob the region holds,
+    so it is sound only when nothing inside the region points at anything else
+    inside it: a pointer to an in-region blob survives the copy still pointing at
+    the ORIGINAL slot, so every outer iteration would share one inner object —
+    the same aliasing defect one level down that this predicate exists to
+    refuse.
+
+    The region is the comprehension's result blob plus every iterable and
+    condition it builds while the element runs. The result stores one word per
+    appended element (two for a dict pair), so the element/value must not build a
+    container; an iterable that builds a literal stores that literal's elements,
+    so those must not build a container either; and a condition must build none
+    at all. A NAME or a subscript is not a container here — it yields a pointer
+    to a blob OUTSIDE the region, which is sharing and is what CPython does too.
+    """
+    for g in comp.generators or []:
+        if not _literal_holds_no_pointer(g.iterable):
+            return False
+        for c in g.conditions or []:
+            if _expr_builds_a_container(c):
+                return False
+    if _expr_builds_a_container(comp.element):
+        return False
+    if comp.kind == "dict" and _expr_builds_a_container(comp.value):
+        return False
+    return True
+
+
+def comprehension_element_is_copy_safe(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
 
@@ -30739,13 +30801,15 @@ def comprehension_element_is_flat_container(element) -> bool:
     comprehension that built on one machine and was refused on the other is the
     divergence this whole path is built to prevent.
 
-    The element's container is stored per-iteration by copying its own blob into
-    a slot of a `cap`-sized array (see the emitters' `_materialize_compr_element`),
-    and a SHALLOW copy is sound only when nothing inside the element built a
-    second container: the copy would carry the nested container's ADDRESS, so
-    every iteration's outer container would still point at one inner object.
-    That is the same aliasing defect one level down, and it is why the predicate
-    recurses rather than looking at the element's node type alone.
+    The element's containers are stored per-iteration by copying its reserved
+    region into a slot of a `cap`-sized array (see the emitters'
+    `_materialize_compr_element`), and that copy is sound in exactly two shapes:
+
+      * a container LITERAL whose elements do not themselves build a container —
+        a shallow copy of a blob of words carries no in-region pointer; and
+      * a nested COMPREHENSION whose whole region is pointer-free
+        (`_comprehension_region_is_copy_safe`) — the region is copied whole, so
+        an in-region pointer is the one thing that would alias.
 
     A NAME is deliberately NOT a container here, and that is correctness rather
     than a narrowing: `[a, b]` where `a` and `b` are outer lists copies the outer
@@ -30754,19 +30818,17 @@ def comprehension_element_is_flat_container(element) -> bool:
     position itself BUILDS is the defect.
 
     The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    a list of lists, a slice, a constructor call, a nested comprehension whose
+    own element builds a container, and every non-literal expression. Those are
+    the cases whose per-iteration materialisation needs the runtime blob base the
+    refusal's own document describes.
     """
+    if isinstance(element, F.Comprehension):
+        return _comprehension_region_is_copy_safe(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
-    if isinstance(element, F.DictExpr):
-        children = [x for pair in element.pairs for x in pair]
-    else:
-        children = list(element.elements)
-    return not any(_expr_builds_a_container(c) for c in children)
+    return _literal_holds_no_pointer(element)
 
 
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
@@ -30779,19 +30841,26 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     `_blob_cap`, so a site's reservation happens ONCE at compile time. A
     comprehension's element is one site that runs `cap` times, so the blob is one
     allocation shared by every iteration and each iteration overwrites the last
-    one's contents. Measured on both architectures, CPython 3.14 against the
-    same source:
+    one's contents. The shapes a per-iteration copy CAN soundly relocate — a flat
+    container literal and a nested comprehension whose region holds no in-region
+    pointer — are materialised instead, by
+    `comprehension_element_is_copy_safe`; what this refuses is the shape where
+    the copy would carry an INTERNAL pointer, because the copy moves the blobs
+    without moving the pointers between them. Measured on both architectures,
+    CPython 3.14 against the same source, the two shapes that stay refused:
 
-        [[y, y + 1] for y in [10, 20, 30]]     CPython: 11 21 31
-                                              this path: 31 31 31
-        [[x + y for x in [1, 2]] for y in [10, 20, 30]] and then v[0] summed
-                                              CPython: 63   this path: 93
+        [[[y]] for y in [10, 20, 30]]      CPython: r[i][0][0] = 10 20 30
+                                           a shared blob: 30 30 30 (now refused)
+        [[[x + y] for x in [1, 2]] for y in [10, 20, 30]]
+                                           CPython: 6366   this path: 9396
 
-    The second is worse than a wrong number: it exits 1 as well, because the
-    count the third iteration writes lands one word past a blob sized for one
-    element. And the first is silent in the way this repository's rules call out
-    — a caller that appends to element 0 gets element 1's list too, which no
-    assertion in the program can notice.
+    The second is the aliasing made numeric: every outer iteration's inner-list
+    pointer still names the ONE inner array the byte copy did not relocate, so
+    the last iteration's contents are in all of them. That is why this is a
+    refusal rather than an allocation scheme — a list whose elements are all one
+    object is a wrong answer in a shape nothing in the program can observe, and
+    the general fix (relocating the appends themselves) is the runtime blob base
+    the refusal's own document describes.
 
     **`bytes_` is the ELEMENT's own footprint, measured by the ledger.** The
     emitters ask for the delta across the element's own emission and refuse when

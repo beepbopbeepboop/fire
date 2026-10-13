@@ -3649,9 +3649,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """Give the element its OWN container per iteration, or refuse.
 
         The x86-64 twin of arm64's method over the same shared predicate
-        (`M.comprehension_element_is_flat_container`) and the same message, so
-        the two architectures cannot materialise — or refuse — an element
-        differently. RAX on entry holds the element's blob and on exit the
+        (`M.comprehension_element_is_copy_safe`) and the same message, so the two
+        architectures cannot materialise — or refuse — an element differently.
+        The region is copied whole, so a flat container literal and a nested
+        comprehension whose region holds no in-region pointer both materialise; a
+        region with an internal pointer would alias through the copy and is
+        refused. RAX on entry holds the element's blob and on exit the
         per-iteration copy `_compr_append_elem` appends.
 
         `i` is the result blob's count word (elements appended so far), the
@@ -3663,7 +3666,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         bytes_ = self._list_cursor - before
         if not bytes_ or cap <= 1:
             return
-        if not M.comprehension_element_is_flat_container(element):
+        if not M.comprehension_element_is_copy_safe(element):
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
                 cap, bytes_))

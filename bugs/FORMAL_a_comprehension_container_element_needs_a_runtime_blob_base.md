@@ -5,29 +5,81 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), on
-BOTH backends, and the runtime-blob-base half has not.** A comprehension whose
-element is a list / tuple / set / dict LITERAL with no nested container-building
-sub-expression is now materialised per iteration: the element's blob is copied
-into a slot of a `cap`-sized array indexed by the result count, so the aliasing
-is gone AND those programs are no longer refused —
+**Status: the FLAT-container half landed 2026-10-06 and the nested-comprehension
+half landed 2026-10-12, both on BOTH backends; the runtime-blob-base half has
+not, and it is now one shape — a region that holds an INTERNAL pointer.** A
+comprehension whose element is a list / tuple / set / dict LITERAL with no nested
+container-building sub-expression is materialised per iteration: the element's
+blob is copied into a slot of a `cap`-sized array indexed by the result count, so
+the aliasing is gone AND those programs are no longer refused —
 `[[y, y + 1] for y in [10, 20, 30]]` answers `11 21 31` (CPython's answer) where
-the refusal had replaced `31 31 31`. `model.comprehension_element_is_flat_container`
-is the shared predicate and each emitter's `_materialize_compr_element` is the
-copy (see "What landed 2026-10-06" below). What is STILL refused is every element
-whose per-iteration materialisation needs a RUNTIME blob base — a nested
-comprehension, a list of lists, a slice, a constructor call — which is the
-relocation the rest of this document describes, and it is unchanged. Read "What
-landed" first; the paragraphs under it price the refusal, which is now one shape
-(the nested reproducer) rather than the whole class.
+the refusal had replaced `31 31 31`. Since 2026-10-12 the SAME copy covers a
+nested COMPREHENSION whose whole reserved region holds no pointer to another blob
+in that region, so the document's own reproducer
+`[[x + y for x in [1, 2]] for y in [10, 20, 30]]` answers `63`
+(`[[x * y for x in [1, 2]] for y in [10, 20, 30]]` summed → `180`) instead of
+`93`/exit 1. `model.comprehension_element_is_copy_safe` is the shared predicate
+and each emitter's `_materialize_compr_element` is the copy (see "What landed
+2026-10-12" below). What is STILL refused is every element whose region holds an
+in-region pointer — a list of lists, a slice, a constructor call, and a nested
+comprehension whose OWN element builds a container — which is the relocation the
+rest of this document describes. Read "What landed" first.
+
+## What landed 2026-10-12: a nested comprehension whose region holds no in-region pointer
+
+**The document's own reproducer is fixed, and it needed no runtime blob base at
+all — the flat half's copy already relocates the whole region; what it was
+missing was the SOUNDNESS rule for when a copy of that region is safe.** The
+predicate is renamed from `comprehension_element_is_flat_container` to
+`model.comprehension_element_is_copy_safe`, because "flat container" no longer
+describes what it accepts. A nested comprehension element is accepted when
+`_comprehension_region_is_copy_safe` holds: every generator's iterable
+(`_literal_holds_no_pointer`), every condition, and the element/value reserve no
+blob that points at another blob in the SAME region. The copy in
+`_materialize_compr_element` is a `memcpy` of the whole region, so an in-region
+pointer is the one thing it cannot fix — the copy moves the blobs without moving
+the pointers between them.
+
+Measured on both backends (`fire.py build --formal --no-prove` then run,
+arm64 host and `--backend=x86_64`):
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | **`63`** |
+| `[[x * y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]+v[1]` | `180` | refused | **`180`** |
+| `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]`, sum | `6366` | refused | **refused** (in-region pointer) |
+| `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused |
+| `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
+
+The third row is why the refusal is still the right answer for the rest: the
+inner `[x + y]` allocates its own per-inner-iteration array, the inner result
+stores a POINTER to it, and the outer byte copy would still point every outer
+iteration at the one inner array. That is what a runtime blob base is for, and
+it is unchanged here.
+
+**Pinned in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**: the
+build-and-run rows `a_nested_comprehension_with_a_pointer_free_region_is_per_iteration`
+and `a_nested_comprehension_element_still_sees_its_own_iteration` (the second
+varies the inner element by the outer variable, which is the read a shared inner
+object gets wrong), and the refusal row
+`a_nested_comprehension_whose_element_opens_a_container_is_refused`. The old
+`a_nested_comprehension_as_the_element_is_refused` row is now the first of those.
+
+```
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_run.py
+formal run: PASS=1211 FAIL=0
+```
 
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
 **The refusal was replaced by real per-iteration storage for the shapes a byte
-copy makes sound, on both backends.** `model.comprehension_element_is_flat_container`
-is the one predicate: the element is a list / tuple / set / dict literal and
-NOTHING inside it builds a second container (a nested literal, a comprehension, a
-slice or a call). Both emitters' `_materialize_compr_element` then reserve a
+copy makes sound, on both backends.** `model.comprehension_element_is_copy_safe`
+(renamed 2026-10-12 from `comprehension_element_is_flat_container`, when the
+nested-comprehension shape below was added) is the one predicate: at this date it
+accepted the element as a list / tuple / set / dict literal with NOTHING inside it
+building a second container (a nested literal, a comprehension, a slice or a
+call) — see "What landed 2026-10-12" for the comprehension case it now also
+accepts. Both emitters' `_materialize_compr_element` then reserve a
 `cap`-slot array beside the element's own scratch blob and, at the element site,
 `memcpy` the element's blob into slot `i`, where `i` is the result blob's count
 word — the number appended so far, so the append that follows stores the copy and
@@ -150,16 +202,26 @@ row there reproduces.)
 
 The natural implementation — reserve `cap` slots of the element's own size and
 index them by the iteration counter — **works for a list-literal and a
-dict-literal element, and does not work for a NESTED COMPREHENSION element,
-which is the doc's own reproducer.** Both were built and measured on arm64:
+dict-literal element, and (2026-10-12) for a NESTED COMPREHENSION element whose
+whole region is pointer-free; it still does not work for one whose region holds
+an in-region pointer.** The rows below were measured on arm64 before the
+2026-10-12 change, and the third is the one it supersedes:
 
-| element of the outer comprehension | after the array fix |
-|---|---|
-| `[[y, y + 1] for y in [10, 20, 30]]` (a list literal) | correct |
-| `[{k: 1} for k in d]` (a dict literal) | correct |
-| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` (a nested comprehension) | **still 93, and exits 1** |
+| element of the outer comprehension | after the array fix | 2026-10-12 |
+|---|---|---|
+| `[[y, y + 1] for y in [10, 20, 30]]` (a list literal) | correct | correct |
+| `[{k: 1} for k in d]` (a dict literal) | correct | correct |
+| `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` (a nested comprehension) | **still 93, and exits 1** | **`63`** |
+| `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]` (inner element opens a container) | — | **refused** (in-region pointer) |
 
-**Why the third row is different, and it is structural.** A list literal's own
+**The copy already relocates the whole region, which is why the third row needed
+no new allocator — only the soundness rule for which regions it may copy.** With
+`model.comprehension_element_is_copy_safe` extended to the nested form, the same
+`memcpy` gives the third row its own inner object per outer iteration. The FOURTH
+row is what the structural argument below still applies to: an inner element that
+opens a container leaves an in-region pointer that the copy does not relocate.
+
+**Why the fourth row is different, and it is structural.** A list literal's own
 allocation happens *inside* `_emit_list`, so making it per-iteration is a change
 to `_emit_list` alone: skip `_reserve_blob`, and recompute the base as
 `frame + array_base + result_count · stride`. The result count is the index,
@@ -247,18 +309,29 @@ it affordable is the measured 0 above.
     $ python3 .tmp/ds/alias.mojo                        # 63
     $ python3 tools/memslot.py --gb 8 --label t -- \
           python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
-    build: a comprehension in main: the element `[…] for …` opens a container, …
+    Built: .tmp/al  [arm64/macho]
+    $ .tmp/al                                          # 63  — per-iteration since 2026-10-12
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
     $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
     $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
 
-and the tests, no builds for the census:
+The shapes that still refuse are the ones whose region holds an in-region
+pointer, e.g. `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]`:
+
+    build: a comprehension in main: the element `[…] for …` opens a container, …
+
+and the tests:
 
 ```sh
-python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_refused \
-  a_nested_comprehension_as_the_element_is_refused \
+python3 test_formal_run.py \
+  a_comprehension_element_that_is_a_list_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_tuple_literal_is_per_iteration \
+  a_comprehension_element_that_is_a_set_literal_is_per_iteration \
+  a_nested_comprehension_with_a_pointer_free_region_is_per_iteration \
+  a_nested_comprehension_element_still_sees_its_own_iteration \
+  a_nested_comprehension_whose_element_opens_a_container_is_refused \
   a_dict_comprehension_whose_value_opens_a_container_is_refused \
-  a_comprehension_element_that_is_a_set_literal_is_refused \
+  a_list_of_lists_as_the_element_is_refused \
   a_one_iteration_comprehension_element_container_still_builds \
   nested_comprehension_in_a_generator_iterable \
   comprehension_body_is_not_a_container_position

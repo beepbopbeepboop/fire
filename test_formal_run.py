@@ -17405,16 +17405,19 @@ COMPREHENSION_ELEMENT_CASES = [
     # through the single frame ledger (`_reserve_blob` against `_list_cursor`)
     # ONCE at compile time, and the comprehension runs that same site once per
     # iteration — so a container built there was ONE object shared by every
-    # iteration. The first two rows are that shape, now materialised
-    # per-iteration: a FLAT container literal is copied into a slot of a
-    # `cap`-sized array indexed by the result count. Measured against CPython
-    # 3.14, before and after:
+    # iteration. The rows whose reserved region is POINTER-FREE are materialised
+    # per-iteration: the region is copied into a slot of a `cap`-sized array
+    # indexed by the result count, and that covers a FLAT container literal and a
+    # NESTED COMPREHENSION whose region holds no in-region pointer. Measured
+    # against CPython 3.14, before and after:
     #
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
+    #     [[x + y for x in [1, 2]] for y in [10, 20, 30]]  CPython 63  was refused
     #
     # The rows after them are the shapes whose per-iteration materialisation
-    # needs a runtime blob base and is still refused (see
+    # needs a runtime blob base and is still refused — a region with an INTERNAL
+    # pointer that a byte copy would not relocate (see
     # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
     # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
     # anything else fails the case.
@@ -17445,13 +17448,43 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which the refusal used to name as exiting 1 rather
+    # than merely answering wrongly. A nested comprehension whose whole reserved
+    # region is POINTER-FREE is materialised by the same copy: its result blob
+    # and its iterable blobs hold only words, so copying the region per outer
+    # iteration gives each iteration its own inner object. This is the
+    # reproducer, now answering CPython.
+    ("a_nested_comprehension_with_a_pointer_free_region_is_per_iteration",
      "def main() -> Int:\n"
      "    var s = 0\n"
      "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
      "        s = s + v[0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "63"),
+    # …and the same shape with the inner element DEPENDING on the outer
+    # variable, which is the row that tells a per-iteration copy from a copy that
+    # silently shared one inner list: the aliased build answered the last outer
+    # iteration's value in every slot.
+    ("a_nested_comprehension_element_still_sees_its_own_iteration",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [[x * y for x in [1, 2]] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0] + v[1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "180"),
+    # A nested comprehension whose OWN element builds a container is the
+    # shallow-copy boundary that survives: its region holds a pointer to an
+    # in-region blob (the inner array), and the copy relocates the blob without
+    # relocating the pointer — so every outer iteration would share it. Measured
+    # against CPython 3.14: `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]`
+    # summed is 6366 here and was 9396 aliased.
+    ("a_nested_comprehension_whose_element_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [[[x + y] for x in [1, 2]] for y in [10, 20, 30]]:\n"
+     "        s = s + v[0][0] * 100 + v[1][0]\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      "refuse:the element `[…] for …` opens a container", None),
