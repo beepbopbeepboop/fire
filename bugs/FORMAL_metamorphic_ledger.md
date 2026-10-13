@@ -4,44 +4,6 @@
 
 `bugs/FORMAL_fuzz_ledger.md` is the differential fuzzer's ledger and the two read together: `formal_fuzz` asks "does the image answer what CPython answers", this one asks "do two builds of the same meaning answer the same". See §3 for why the second question reaches a class the first cannot.
 
-## 0z. Status 2026-10-09 (`formal262-docs`): §6 item 1 is CLOSED — the `struct` decision is made, and the three files are driven
-
-`normalise_mojo` now translates a `struct`, scoped to the case where a decision
-is forced rather than guessed, and the examples corpus is **93 of 93 driven**
-(`test_formal_metamorph.py` 62/62; the examples sweep of §2 prints no
-"NOT measured" line, 0 findings, 0 `transform-invalid`/`transform-crash`, and 20
-programs firing a normalising rule where it was 17). The DECISION §6 item 1 asked
-for is this:
-
-* **A field declared an INTEGER type reads `0` on this path, so the translation
-  writes `0`.** `Point()` zero-initialises every field before any store, measured
-  on BOTH architectures through the ORIGINAL `struct` build and on CPython through
-  the twin — which is why `self.x = 0` is the meaning of `x: Int` here and not an
-  invented value. `_STRUCT_ZERO_TYPE_RE` is the closed set (`Int`/`UInt` with an
-  optional `8`/`16`/`32`/`64`), so the decision is one table rather than a rule
-  reading the type.
-* **Every other struct stays unmeasured and names `struct`.** A field whose type
-  is not in that set is a value this tool will not guess at, and a struct with an
-  explicit `__init__` is a construction body this tool does not model; both keep
-  the old outcome (reported, never silently dropped). The coverage assertion now
-  requires that NOTHING is unmeasured, so a new undrivable example fails the
-  suite rather than lowering a number.
-* **It is checked per file and not argued.** `example_program` sets `verbatim` for
-  a struct file, so `check_pair`'s step 0 builds the file AS WRITTEN and requires
-  the same answer as the twin on every backend — which is where a wrong decision
-  about a field's value would be found. The three files (`wide_recv`,
-  `struct_point`, `struct_method`) answer `4`/`1`/`5` on CPython and both
-  architectures, original and twin alike.
-
-**And a latent rule defect fell out of it: `FN_DECL_RE` removed `fn` without
-putting `def` back.** The replacement was the indent capture alone, so `fn f(n):`
-became `f(n):` — a note that fired and a file that still could not parse. It was
-invisible because the only `fn` example, `wide_recv.mojo`, was unmeasured for the
-`struct` reason anyway; making the struct translatable is what reached the broken
-`fn`. The rule now rewrites to `def`, which is what its own coverage fixture
-(`("fn g(n):…", ("fn ",), ("def g(n):",))`) always claimed and never executed,
-because the fixture was only checked on the `text is None` path.
-
 ## 0. Status 2026-10-07 (`formal126-docs`): the tool's own suite was RED in five
 ## places on `master`, and the two that are the TOOL's are fixed at the root
 
@@ -239,14 +201,13 @@ eleven examples that spell it (`absval`, `bigconst`, `bitops`, `chain`, `fact`,
 CPython's own "invalid syntax" at the decorator's line. It is the same class as
 the three the rule already covers — a decorator the PROOF layer reads and the
 run-time path never sees — so it goes through the same parenthesis-depth scan
-(its argument list wraps and contains a `;`). Measured: the examples corpus was
-**93 stems, 90 measured / 3 unmeasured** after this change, where it was 79/14
-before, and all three remaining were the one documented `struct` decision
-(`struct_method`, `struct_point`, `wide_recv`) — **since made and driven; §0z is
-the decision and 93 of 93 is the figure it leaves.** `test_the_examples_corpus_is_
-mostly_measured` asserts that no example is left unmeasured, so a future example
-that cannot be driven for a NEW reason fails the suite instead of lowering a
-number nobody reads.
+(its argument list wraps and contains a `;`). Measured: the examples corpus is
+**93 stems, 90 measured / 3 unmeasured** after the change, where it was 79/14
+before, and all three remaining are the one documented `struct` decision
+(`struct_method`, `struct_point`, `wide_recv`). `test_the_examples_corpus_is_
+mostly_measured` now asserts that exact reason rather than a floor, so a future
+example that cannot be driven for a NEW reason fails the suite instead of
+lowering a number nobody reads.
 
 **And three `TheDriver` rows were stale against the `OracleAnswer` type.** They
 stubbed `cpython_answer` with a bare `(exit, stdout)` tuple, which `oracle_answer`
@@ -324,23 +285,11 @@ every backend and requires the same answer (`NORMALISES-DIFFERLY-<arch>`), and a
 verbatim spelling that will not build is `NORMALISES-UNCOMPARABLE` rather than a
 skip, because nothing then established that the removal preserved anything.
 
-Measured: 16 of the 90 driven examples are measured in a dialect this tool
-rewrote (`absval`, `bigconst`, `bitops`, `chain`, `count`, `fact`, `fib`,
-`identity`, `localmul`, `nonzero`, `pair`, `shiftlr`, `sum` — proof decorators;
-`var_typed_loop`, `vardecl`, `vardecl_typed`, `vardecl_unused` — `var`), and
-**every one was re-run on both backends as written and answered the same**. It
-costs no build when no rule fired, which is the whole generated corpus and 74 of
-the 90.
-
-**`@refines` was the fourteenth rule gap and it was the largest single one.** The
-proof-decorator rule named `@spec`/`@require`/`@ensure` and not `@refines`, which
-the corpus grew when the refinement files landed — so the eleven `@refines`
-examples (`absval`, `bigconst`, `bitops`, `chain`, `fact`, `identity`,
-`localmul`, `nonzero`, `pair`, `shiftlr`, `sum`) were reported as "CPython still
-declines it: invalid syntax (line 11)" and dropped. The rule now names all four,
-and the three examples still unmeasured are the ones that declare a `struct`,
-which is a DECISION and not a rule (`test_the_examples_corpus_is_mostly_measured`
-asserts exactly that set now rather than a bare floor).
+Measured: 7 of the 51 examples are measured in a dialect this tool rewrote
+(`count`, `fact`, `fib`, `sum` — proof decorators; `vardecl`, `vardecl_typed`,
+`vardecl_unused` — `var`), and **all 7 were re-run on both backends as written and
+answered the same**. It costs no build when no rule fired, which is the whole
+generated corpus and 45 of the 52 examples.
 
 **2026-10-07 (`formal126-docs`): the number to the left is 7 of 51 because that
 was the tree it was taken on; the tree now has a THIRD decorator.** Eleven
@@ -353,13 +302,6 @@ as `@spec`/`@require`/`@ensure`: read by the proof layer, invisible to the
 run-time path, and `_drop_proof_decorators` already consumes its wrapped
 arguments. The `NORMALISES-DIFFERLY` gate covers them exactly as it covers the
 seven: the verbatim file keeps its annotation, and the two answers must agree.
-
-**2026-10-08: the dialect set grew by the eleven `@refines(…)` examples** (`absval`,
-`bigconst`, `bitops`, `chain`, `fact`, `identity`, `localmul`, `nonzero`, `pair`,
-`shiftlr`, `sum`), which the proof layer added after the measurement above. They are
-measured through the same verbatim-vs-normalised comparison every other rewritten
-file is, so a rule that removed more than the annotation would be
-`NORMALISES-DIFFERLY-<arch>` rather than a silent extra example in the tally.
 
 ## 5b. Three defects that only a LARGE-PROGRAM sweep could reach, and what each would have been filed as
 
@@ -423,13 +365,11 @@ Every row in §2 is reproducible from the seed and the index range:
     python3 tools/memslot.py --gb 8 --label mm -- python3 tools/formal_metamorph.py \
         -n 20 --mix core --stmts 8 20 -j 6
 
-`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus of 14 programs (one per documented rule), every generator mix, and every drivable example — and the two argument-taking examples (`twoparams`, `subscript_var`) are driven rather than silently unanswered. **The examples count in this sentence was 51 of 51 and the corpus has grown since (93 files, **all 93 drivable as of 2026-10-09 —
-§0z**); the current figure is a fact about `example_corpus()` rather than about a
-run, and §0/§0z/§5a/§6 hold what landed.**
+`tools/formal_metamorph.py --list-transforms` says what each transformation is FOR; `test_formal_metamorph.py` asserts that the soundness property holds over a hand-written corpus of 14 programs (one per documented rule), every generator mix, and every drivable example — and the two argument-taking examples (`twoparams`, `subscript_var`) are driven rather than silently unanswered. **The examples count in this sentence was 51 of 51 and the corpus has grown since (93 files, 90 drivable as of 2026-10-07); the current figure is a fact about `example_corpus()` rather than about a run, and §0/§5a/§6 hold what landed.**
 
 **What is NOT measured here**, and is the next thing a session should do. The
-first three items of the previous session's list and this list's item 1 are now
-DONE (§2a and §0z respectively); these are the three that remain:
+first three items of the previous session's list are now DONE and are recorded in
+§2a; these are the four that remain:
 
 1. **Three `formal/examples` files are unmeasured, all for a `struct` body:
    `wide_recv.mojo`, `struct_point.mojo` and `struct_method.mojo`** (§2b records
@@ -457,16 +397,13 @@ DONE (§2a and §0z respectively); these are the three that remain:
    ledger's; the honest reading is that **these two transforms are measured on the
    examples corpus and barely measured on the generated one**, which is the
    opposite of what §2's twenty-mix sweep implied by its tally.
-4. **`Analysis.int_only` is still a lower bound, and §0a has now MEASURED where
-   it stops (2026-10-13).** §2a raised `swap_add` reach from 133 to 275 of 440
-   programs; on this tree it reached 351 of 540, and 376 once the operand
-   predicate stopped requiring a bare name or a literal (`int_only` itself did
-   not move — see §0a for the census and the 12 mixes that gained). The
-   remaining decline reasons, measured rather than guessed, are §0a's list: a
-   `BinOp`/name/subscript/attribute operand that is not provably an int, a call
-   refused on purity, and 83 programs with no `+` at all. **The advice this item
-   carried — "MEASURE the remaining decline reasons as §2a did rather than guess
-   at them" — is what §0a did, so read it there rather than here.**
+4. **`Analysis.int_only` is still a lower bound, and where it now stops is not
+   written down.** §2a raised `swap_add` reach from 133 to 275 of 440 programs, so
+   the four questions it lacked were worth 142 programs — and the remaining 165 are
+   spread over `environ` (6/20), `unpack` (4/20), `strfmt` (3/20), `limits` (2/20)
+   and `slicing` (7/20), which are now the mixes to look at. A future session
+   should MEASURE the remaining decline reasons as §2a did rather than guess at
+   them; that is the one piece of advice here this file has to earn twice.
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 

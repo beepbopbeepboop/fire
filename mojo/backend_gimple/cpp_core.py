@@ -42,7 +42,6 @@ from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -5620,7 +5619,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         for kname, kexpr in call.kwargs:
             call.args.append(kexpr)
         call.kwargs = []
-        _walk_ast_invalidate(call)
     # Set True only by the free-function self-recursion branch below —
     # read further down (the non-tuple value-consumption branch) to
     # decide between an explicit `vct` declaration and `auto` type
@@ -7641,7 +7639,6 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         for kname, kexpr in call.kwargs:
             call.args.append(kexpr)
         call.kwargs = []
-        _walk_ast_invalidate(call)
     receiver_exprs = []
     if is_cls_gen_call:
         sub_name = f"{cls_struct}.{call.func.member}"
