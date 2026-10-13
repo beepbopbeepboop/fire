@@ -543,6 +543,12 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "the target is a register's CONTENTS, so a case jumps "
+                       "outside the harness's one `MAP_FIXED` region rather "
+                       "than falling through — the same reason as arm64's "
+                       "`encode_br_xn`. `x86_step` has an arm and `as` checks "
+                       "the bytes; only FUZZ is impossible, and it is a "
+                       "property of the harness rather than a gap.",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -586,7 +592,7 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: the backlog is EMPTY, and these removals are why ──────────
     #
     # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
     # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
@@ -596,26 +602,15 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
-    "encode_and_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "the byte-wise `and` the floating compare needs (no REX.W, so the "
-        "decoder's REX.W-only ALU arm does not reach it)"),
-    "encode_or_r8_r8": (
-        "bugs/FORMAL_x86_64_instruction_coverage_backlog.md",
-        "as `encode_and_r8_r8`"),
-    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
-    # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
-    # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
-    # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
-    # for every one.  `encode_imul_r64_r64_imm` above is OVER-COVERED and still
-    # listed here — it was left by the previous pass on purpose ("another
-    # claim's write set") and is a separate stale entry this removal does NOT
-    # touch.
+    #
+    # **The last three x86-64 entries left on 2026-10-12, and the self-test is
+    # what named them.** `encode_and_r8_r8` and `encode_or_r8_r8` read
+    # `yes yes yes` (the `_byte_rex_required` fix put both in the fuzz pool), so
+    # they were a fixed gap keeping its exemption. `encode_call_r64` still has no
+    # FUZZ case, but that is a harness limit — the target is a register's
+    # CONTENTS — and it now lives in `HARNESS_LIMITS` above, not here. With those
+    # gone the x86-64 census has **no `BACKLOG` row at all**; the x86-64 backlog
+    # document is deleted with this fix.
     # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
