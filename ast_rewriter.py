@@ -378,28 +378,20 @@ def match_pattern(pat, term: object, bindings):
             return None
         return _match_node_fields(pat.fields, term, bindings)
     if isinstance(pat, Seq):
-        # NOTE (still open, see selfhost-dump-full-module-drop.md):
-        # `match_pattern`'s own `term` parameter is shared across every
-        # call site in this file (dataclass nodes, strings, ints, None,
-        # lists, ...), and self-hosted whole-program parameter-type
-        # unification pulled its declared ctype down to the common
-        # int64_t -- so `isinstance(term, list)` here reads false even
-        # for a genuinely-real list argument (confirmed: a one-element
-        # `args` list). Forcing it with `_as_list(term)` instead of
-        # checking crashed with a real Bus error (SIGBUS) rather than
-        # just mismatching -- the erased int64_t bits are apparently NOT
-        # a valid MojoList* to begin with, so this needs the real
-        # underlying `getattr`/list-field dispatch fixed, not just a
-        # static-view cast at this point of use. Left as a safe,
-        # non-matching `isinstance` check (falls through to the pattern
-        # not matching, same as before) rather than risk a crash.
-        if not isinstance(term, list) or len(term) < len(pat.items):
+        # `term` is an `object` word (see the parameter's note), so the
+        # runtime's registry answers `isinstance(term, list)` and the typed
+        # view `_as_list` is then sound -- every list operation below reads
+        # it, not the word.
+        if not isinstance(term, list):
+            return None
+        _tl = _as_list(term)
+        if len(_tl) < len(pat.items):
             return None
         for i in range(len(pat.items)):
-            bindings = match_pattern(pat.items[i], term[i], bindings)
+            bindings = match_pattern(pat.items[i], _tl[i], bindings)
             if bindings is None:
                 return None
-        rest = term[len(pat.items):]
+        rest = _tl[len(pat.items):]
         if pat.tail is None:
             if len(rest) == 0:
                 return bindings

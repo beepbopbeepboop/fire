@@ -3579,6 +3579,19 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
             gen._lower_builtin_list(node.value)
             return
+        # A statement `setattr(obj, name, v)` / `delattr(obj, name)`: the same
+        # lowering the expression form gets in `_lower_call`, which stores
+        # through the struct's own field dispatch (`_mojo_dispatch_setattr`).
+        # The generic path below mapped the name through BUILTIN_VALUE_MAP to
+        # the runtime's side-table `mojo_setattr`, so a store to a REAL field
+        # went to a table no field read consults -- the self-hosted
+        # compiler's `ast_rewriter._rewrite_node` replaced every rewritten
+        # child that way, and none of the replacements was ever seen.
+        if (raw_name in ('setattr', 'delattr')
+                and len(node.value.args) >= (3 if raw_name == 'setattr' else 2)
+                and not gen._locally_binds_name(raw_name)):
+            gen._lower_call(node.value)
+            return
         # Recursive call from inner function to itself. Bare-statement
         # twin of _lower_recursive_self_call — routed through
         # _emit_call (like the sibling-closure-call branch just below)

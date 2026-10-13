@@ -1533,9 +1533,28 @@ def _emit_reflection_dispatch(self, parts):
         # append_str(_r, 46390516016);` instead of `mojo_list_append_
         # str(_r, "x");` — a real, reproducible `make bootstrap`
         # stage1-vs-stage2 divergence on any struct with real fields).
-        fieldnames_lines = ''
-        for nl in name_lits:
-            fieldnames_lines += f'  mojo_list_append_str(_r, {nl});\n'
+        # The names live in ONE static table registered with the runtime on
+        # first use. As bare inline literals they were `__TEXT` strings the
+        # runtime had never seen, and `mojo_boxed_is_str` -- sound by
+        # provenance: a registered literal or a live heap block -- answered
+        # "integer" for every one of them, so `getattr(node, f.name)` over
+        # `dataclasses.fields(node)` looked up the attribute named by the
+        # name's ADDRESS and raised AttributeError (the self-hosted
+        # compiler's own `ast_rewriter._rewrite_node` walk).
+        _fn_n = len(name_lits)
+        _fn_joined = ''
+        for _fni in range(_fn_n):
+            if _fni > 0:
+                _fn_joined += ', '
+            _fn_joined += _as_str(name_lits[_fni])
+        fieldnames_lines = (
+            f"  static char *_names[{_fn_n}] = {{{_fn_joined}}};\n"
+            f"  static int _names_registered = 0;\n"
+            f"  if (!_names_registered) {{\n"
+            f"    _names_registered = 1;\n"
+            f"    for (int _i = 0; _i < {_fn_n}; _i++) mojo_str_register(_names[_i]);\n"
+            f"  }}\n"
+            f"  for (int _i = 0; _i < {_fn_n}; _i++) mojo_list_append_str(_r, _names[_i]);\n")
         asdict_part = (
             f"static MojoDict * _mojo_asdict_{sn} ({sn} *obj) {{\n"
             f"  MojoDict *_r = mojo_dict_new();\n"
