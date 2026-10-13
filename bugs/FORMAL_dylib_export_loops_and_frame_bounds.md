@@ -321,3 +321,43 @@ pick this up: `_dec_while_pattern` returns `'n'` for the doc's shape
 counter" is true only when the counter IS the parameter. A worker writing a
 fixture must know that or will measure a refusal that has nothing to do with
 ranking.
+
+## 2026-10-12 (`work/formal305-docs`): the `_has_loop` reordering is NOT enough — the walk refuses the LAST export's appended code
+
+§6 sized the remaining work as a one-line reordering of
+`_gen_universal_e2e_cfg`'s acyclicity bail, behind the
+`getrlimit`-out-of-the-prologue change. That change has landed on master (the
+guard moved into the startup STUB), so the reordering is now testable — and it
+is not sufficient. Measured on this tree, `compile_formal_dylib(prove=True,
+check=False)` for `countdown`:
+
+* The `getrlimit` wall is gone: the export's `extern_calls` is `[]` and its CFG
+  has **0** `bl` blocks, so §6's `any(b["kind"] == "bl")` clause is `False` and
+  `fuel < _TOTAL` is `False` (`200000` vs `40`). The ONLY bail clause left is
+  `not _acyclic`.
+* With that clause relaxed to `not _acyclic and not _has_loop_shape` — where
+  `_has_loop_shape` is exactly the two shapes the loop contract recognises (a
+  `b` block targeting a `cbz`, or a `cbz` whose taken edge is its own start) —
+  `_gen_universal_e2e_cfg` **still returns `None`**. The refusal is now
+  downstream of the bail, not in it.
+* The downstream refusal is `_gen_run_cert`: the walk pre-computes a
+  run-certificate for EVERY block in `[func_entry, func_end)` and returns
+  `None` when any fails. For a **guarded** last export `func_end` is
+  `base + code_size` (`_export_extent`), which is PAST the export's own `ret`,
+  and `code_size` includes the compiler's appended startup/trap code — so
+  `_cfg_blocks` adds a block for each branch in that code and `_gen_run_cert`
+  refuses those blocks. Measured for `countdown`: the export's own body is
+  0x250–0x2e4 (6 blocks, all certifiable) and the appended code is 0x540–0x640
+  (3 blocks, all refused: two `cbz` and one 58-instruction `seq`). `triple` (no
+  guard, so no appended code) proves because its `code_size` stops at its own
+  `ret`, which is why §5's classification cannot see this.
+
+**So the next step has a third part, and it comes first:** the walk's range for
+a dylib export has to stop at the export's OWN code rather than at
+`base + code_size`. That is not a one-line reordering: `DylibExport.exportEnd`
+and the `runExport`/`total_of_halts` statement are defined over the image, so
+the experiment is whether the WALK can use a tighter end (the export's `ret`)
+without moving the halt the theorem is stated against. Until that is measured
+and passes, `countdown` stays a NAMED obligation — which is the honest state:
+the loop machinery exists, the `getrlimit` wall is gone, and the wall that
+remains is the walk's own extent.
