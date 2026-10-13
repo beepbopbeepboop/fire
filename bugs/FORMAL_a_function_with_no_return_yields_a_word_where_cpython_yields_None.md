@@ -43,10 +43,22 @@ because the evidence table is keyed on a local callee name, the same boundary
 `_print_call` has; the doc's §0c `MemberExpr` bucket is that shape and it is still
 open.
 
-**Measured.** `test_formal_value_model.py` — **PASS=126 FAIL=0** (was 124); its two
-new REFUSALS rows are `returning_a_call_of_a_return_less_function_is_refused` and
-`returning_a_local_bound_to_a_return_less_call_is_refused`, each a build on BOTH
-architectures that must refuse naming `main returns the value of g(…)`.
+**And the `...` body keeps its ROOT refusal.** `def g(a): ...` is refused by
+`ellipsis_refusal` ("write the function"), and `def f(): return g(1)` must not
+report the CONSEQUENCE instead when `f` happens to be emitted first — that would
+hide the cause. `model.function_body_is_absent` is the test and both emitters
+stand aside for it, so `test_formal_run.py`'s `limit_ellipsis_function_body` still
+reads `no body to lower`, and `test_formal_value_model.py`'s
+`returning_a_call_of_a_no_body_function_keeps_the_root_refusal` pins the deferral
+in the file that covers the new refusal.
+
+**Measured.** `test_formal_value_model.py` — **PASS=127 FAIL=0** (was 124); its
+three new REFUSALS rows are
+`returning_a_call_of_a_return_less_function_is_refused`,
+`returning_a_local_bound_to_a_return_less_call_is_refused` and
+`returning_a_call_of_a_no_body_function_keeps_the_root_refusal`, each a build on
+BOTH architectures: the first two must refuse naming `main returns the value of
+g(…)`, the third must keep `no body to lower`.
 `test_formal_hostmods_census.py` **74/74 rows build** (the host modules the gate
 compiles are unchanged) and `test_formal_argparse.py` **PASS=10 FAIL=0**, which is
 the build-level half of §0c-2's correction that the 456 `argparse.mojo` rows were

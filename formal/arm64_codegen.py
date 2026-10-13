@@ -6573,9 +6573,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         a local callee name — the same boundary `_print_call` has.
         """
         callee = self._vkinds.no_value_callee_of(value)
-        if callee is not None:
-            raise CodegenError(M.returnless_return_refusal(
-                callee, self._cur_fn.name))
+        if callee is None:
+            return
+        # A callee whose body is the `...` marker has a ROOT refusal of its own
+        # (`ellipsis_refusal`, raised when its body is lowered) that names what
+        # to write; reporting the CONSEQUENCE here — "it returns nothing" — would
+        # hide the cause when this caller happens to be emitted first. Stand
+        # aside for it, exactly as `model.function_body_is_absent` documents.
+        callee_fn = self._functions.get(callee)
+        if callee_fn is not None and M.function_body_is_absent(callee_fn):
+            return
+        raise CodegenError(M.returnless_return_refusal(
+            callee, self._cur_fn.name))
 
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
         """Raise when `e`'s FORMAT cannot be used, for any of its reasons.

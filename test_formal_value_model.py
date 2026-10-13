@@ -2218,6 +2218,19 @@ REFUSALS = [
      "    v = g(1, 2)\n"
      "    return v\n",
      "main returns the value of g(…)"),
+    # THE ROOT REFUSAL WINS over the `returned` symptom when the callee has no
+    # body at all: `def g(a): ...` is refused by `ellipsis_refusal` ("write the
+    # function"), and a `return g(1)` report would name the CONSEQUENCE and hide
+    # the cause when this caller is emitted first. `frontend/`'s
+    # `limit_ellipsis_function_body` is the same shape in `test_formal_run.py`;
+    # this row pins the DEFERRAL in the file that covers the new refusal.
+    ("returning_a_call_of_a_no_body_function_keeps_the_root_refusal",
+     "def g(a):\n"
+     "    ...\n"
+     "\n"
+     "def main():\n"
+     "    return g(1)\n",
+     "a `...` stands where this path needs instructions"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

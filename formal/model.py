@@ -27155,6 +27155,30 @@ def ellipsis_refusal(node):
         "function is refused whether or not anything ever calls it)")
 
 
+def function_body_is_absent(fn) -> bool:
+    """Whether `fn`'s body is the language's no-implementation marker.
+
+    A plain function whose body is `...` (or empty) is refused by
+    `ellipsis_refusal` when it is lowered, and that refusal names the ROOT
+    problem ("write the function") where every consequence of CALLING it names
+    only a symptom — the `returned` position of `returnless_return_refusal` says
+    the callee returns nothing, which is true and is not what the reader has to
+    fix. The two are asked at different places (the symptom at the call site, the
+    marker when the callee's own body is lowered), so a caller emitted first
+    would report the symptom and hide the cause; a caller that is about to do
+    that asks this and stands aside.
+
+    A `...` in a TRAIT method is the interface declaration, not this shape, but
+    such a method is not in an emitter's `_functions` table at all, so a call to
+    one never reaches the question this answers.
+    """
+    for st in (getattr(fn, "body", None) or []):
+        value = st.value if type(st).__name__ == "ExprStmt" else st
+        if not is_ellipsis(value):
+            return False
+    return True
+
+
 # ── Type constructors ─────────────────────────────────────────────────────
 #
 # `Int(x)`, `Int32(x)`, `String(s)` are CONVERSIONS, not calls: a value in this
