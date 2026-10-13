@@ -45,6 +45,30 @@ x86-64-only refusal pin of the TWO-SET shape — `o_set_sub`, `o_set_and`,
 section moved there) — the shape the `set` group's `BACKEND_ONLY` answer
 rows are excluded from and therefore cannot pin.
 
+**2026-10-13 (`work/formal197-docs`, merged): a FIFTH parallel
+implementation of the same fix, folded the same way.** The branch lowered
+`&`, `-` and `^` (the augmented spellings included) on BOTH backends through
+`_emit_set_algebra` and its x86-64 twin, beside `_emit_set_select`/
+`_emit_set_append`, and moved the gate from per-operator to per-backend: each
+backend passes `lowered_container_ops=model.SET_ALGEBRA_OPS` into
+`string_binary_refusal`'s new parameter, `container_operator_refusal` stands
+aside for exactly those three, and a new `model.container_setop_refusal`
+keeps refusing a LIST/dict/other operand by name — CPython's `TypeError`
+shape, which the canonical `set_algebra_refusal` already words. On the merge
+into `work/merge-qwen1` the canonical mechanism (the 2026-10-06
+`_emit_set_op` family and the shared gate) is kept unchanged and every code
+file the branch touched is restored byte-identical to the merged tree: its
+five `set`-group answer rows are the canonical six rows with the same
+content probes, and its operator-group `o_xor`/`o_and` answer rows are the
+branch-tree side of the split the `o_set_*` refusal pins record. Its
+measurement of its own tree (both backends, its own emitters) is recorded
+here because the per-backend gate design is not otherwise measured: the
+`set` group answered 8 → 13 on arm64 and 4 → 9 on x86-64, the operator group
+9 → 11 per backend, and the five `s_*_r` rows moved from refusal to answer on
+both. Re-measured 2026-10-13 on this tree, the split is exactly the
+2026-10-13 one: arm64 answers all four and x86-64 refuses all four by name
+(`test_formal_container_methods.py` 6/0 on both backends).
+
 **2026-10-13 (`work/formal189-docs`, merged): a FOURTH parallel
 implementation of the same fix, folded the same way.** The branch lowered
 `&`, `-` and `^` (the augmented spellings included) on arm64 through its own
