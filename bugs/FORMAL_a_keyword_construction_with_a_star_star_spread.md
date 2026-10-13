@@ -1,5 +1,21 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
+**Status 2026-10-12 (`work/formal318-docs`): the landed half had a false refusal
+of its own — a REPEATED key in the spread's dict LITERAL — and it is fixed.**
+`{'a': 1, 'a': 2}` is one key in CPython (a display's last value wins), so
+`S(**{'a': 1, 'a': 2, 'b': 3})` is `S(a=2, b=3)`; un-spreading the literal as
+TWO pairs made the ordinary duplicate check report "field 'a' more than one
+value" for a duplicate the literal had already collapsed. `literal_dict_items`
+now collapses a repeated key last-wins, and — because CPython evaluates EVERY
+value of a display, including an overwritten one — refuses the collapse with a
+reason that names the key when the overwritten value is not a literal, rather
+than silently dropping a call or a raise. `S(a=1, **{'a': 2})`, the duplicate the
+check exists for, is unchanged. `test_formal_run.py`'s `SPREAD_CONSTRUCTION_CASES`
+gains `a_dict_literal_spread_of_a_repeated_key_takes_the_last_value` and
+`SPREAD_REFUSALS` gains
+`a_dict_literal_spread_that_drops_a_side_effecting_value_is_refused`. **The
+variadic-ABI blocker below is unchanged and still the only remaining step.**
+
 **Status: PARTIAL — the false half is fixed and the real blocker is now
 measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
 repository, `formal/hostmods/` and 252 stdlib files the corpus holds THREE `**`
@@ -92,7 +108,10 @@ written in the source and a dict subscript by a literal key already lowers
 `f(a=1, **{'b': 2})` prints 12 — both agreeing with CPython on both architectures.
 The duplicate check then applies UNCHANGED, which is what keeps
 `S(a=1, **{'a': 2})` refused with CPython's own `TypeError` rather than with
-something this path invented.
+something this path invented. **A repeated key INSIDE the literal** is the other
+half and it is not that duplicate: `{'a': 1, 'a': 2}` is one key before the
+construction sees it, so the collapse happens in `literal_dict_items` (Status
+2026-10-12 above).
 
 **3. Any other spread is refused BY NAME**, naming the operand and saying the
 keys are not knowable at the construction site — which for

@@ -11843,6 +11843,31 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+    # A REPEATED key in the literal is one key, and the LAST value wins — a dict
+    # DISPLAY's semantics, not a keyword rule.  The two duplicate spellings are
+    # different programs and this row separates them: `{'a': 1, 'a': 2}` collapses
+    # to `{'a': 2}` BEFORE the construction sees it, so `P(**{'a': 1, 'a': 2,
+    # 'b': 3})` is `P(a=2, b=3)`.  Un-spreading it as TWO pairs made the ordinary
+    # duplicate check report "field 'a' more than one value" for a duplicate the
+    # literal had already removed — a false refusal, measured, and the sibling
+    # refusal below (`P(a=1, **{'a': 2})`) is the case that check really catches.
+    ("a_dict_literal_spread_of_a_repeated_key_takes_the_last_value",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(**{'a': 1, 'a': 2, 'b': 3})\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    p = P(**{'a': 1, 'a': 2, 'b': 3})\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -11903,6 +11928,27 @@ SPREAD_REFUSALS = [
      "    printf(\"%d\", f(a=1, **d))\n"
      "    return 0\n",
      "refuse:call f() spreads `d` with `**`", None),
+    # A repeated key whose OVERWRITTEN value is not a literal, which is the one
+    # case the collapse above must NOT perform: CPython evaluates every value of a
+    # display, so `{'a': f(), 'a': 2}` still CALLS `f()` (and still raises if it
+    # raises), and dropping that evaluation to keep only the last value would be a
+    # silent difference. The keys ARE knowable here, so the message says which key
+    # repeats and why rather than the generic "a spread's keys are not knowable"
+    # sentence, which would be false about this source.
+    ("a_dict_literal_spread_that_drops_a_side_effecting_value_is_refused",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def g(x: Int) -> Int:\n"
+     "    printf(\"g\")\n"
+     "    return x\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(**{'a': g(1), 'a': 2, 'b': 3})\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:overwrites a value that is not a literal", None),
 ]
 
 CONSTRUCTION_REFUSALS = [

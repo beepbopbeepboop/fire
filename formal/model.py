@@ -37858,9 +37858,10 @@ def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
     plain, folded, refusal = [], list(kwargs), None
     for arg in args:
         if isinstance(arg, F.UnaryOp) and arg.op == "**":
-            items = literal_dict_items(arg.operand)
+            items, why = literal_dict_items(arg.operand)
             if items is None:
-                refusal = keyword_spread_refusal(name, spelled(arg.operand))
+                refusal = why or keyword_spread_refusal(name,
+                                                        spelled(arg.operand))
                 break
             folded.extend(items)
             continue
@@ -37868,14 +37869,35 @@ def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
     return plain, folded, refusal
 
 
-def literal_dict_items(expr):
-    """`[(key, value)]` for a dict LITERAL with literal keys, else None.
+def _spread_value_is_side_effect_free(node) -> bool:
+    """Whether evaluating `node` cannot run a call or raise, so a DROPPED copy
+    of it is unobservable.
 
-    None for anything whose keys are not written where the mapping is: a name, a
-    call, a comprehension, a dict with a non-literal key. `None` is what the
-    caller turns into a refusal, so the conservative answer has to be the
-    un-answerable one — a key that is computed could be any of the struct's
-    fields, or none of them.
+    Only the literal spellings and a `+`/`-` over one: a call can print, and
+    even a subscript can raise, so CPython's evaluation of an OVERWRITTEN dict
+    value is something this path must not silently skip.  `literal_dict_items`
+    asks this before it lets a later duplicate key win.
+    """
+    if isinstance(node, (F.IntLiteral, F.StringLiteral, F.FloatLiteral,
+                         F.BoolLiteral)):
+        return True
+    if isinstance(node, F.UnaryOp) and getattr(node, "op", None) in ("+", "-"):
+        return _spread_value_is_side_effect_free(getattr(node, "operand", None))
+    return False
+
+
+def literal_dict_items(expr):
+    """`(items, refusal)` — `[(key, value)]` for a dict LITERAL with literal
+    keys, or the reason it is not one this path can un-spread.
+
+    `(None, None)` for anything whose keys are not written where the mapping is:
+    a name, a call, a comprehension, a dict with a non-literal key.  The caller
+    turns that into `keyword_spread_refusal`, the generic "a spread's keys are
+    not knowable" sentence — a key that is computed could be any of the struct's
+    fields, or none of them.  `(None, "<reason>")` is used instead when the keys
+    ARE knowable and the mapping is still un-answerable (a repeated key whose
+    overwritten value cannot be dropped), because the generic sentence would be
+    FALSE about such a source and send the reader to edit the wrong thing.
 
     Both halves are needed, not just the keys: the value is what the field gets
     stored, and a spread whose keys are known but whose values are computed
@@ -37884,21 +37906,51 @@ def literal_dict_items(expr):
     those are the two a struct field name can be spelled as in a dict display
     that this parser produces (`{'a': 1}` is a keyword; `{"a": 1}` is a
     string).
+
+    **A REPEATED key is one key, and the LAST value wins — that is a dict
+    DISPLAY's own semantics, not a keyword rule.**  `{'a': 1, 'a': 2}` evaluates
+    to `{'a': 2}` in CPython, so `S(**{'a': 1, 'a': 2, 'b': 3})` is
+    `S(a=2, b=3)` and returning BOTH pairs made the construction's duplicate
+    check report "field 'a' more than one value" for a duplicate the literal had
+    already collapsed — a false refusal, measured.  The distinction that check
+    exists for is between a literal and an EXPLICIT keyword
+    (`S(a=1, **{'a': 2})`), which is still refused because the collapse is
+    inside the literal and the explicit keyword arrives separately.
+
+    **An overwritten value must be side-effect-FREE to be dropped.**  CPython
+    evaluates every value of a display, including the ones a later key
+    overwrites, so collapsing a `{'a': f(), 'a': 2}` would skip `f()`'s call and
+    any raise in it.  A duplicate whose overwritten value is not a literal
+    therefore makes the whole spread un-answerable, with a reason that names the
+    repeated key, rather than quietly different from CPython.
     """
     if not isinstance(expr, F.DictExpr):
-        return None
-    out = []
+        return None, None
+    order, by_key = [], {}
     for pair in (getattr(expr, "pairs", None) or ()):
         key = pair[0] if isinstance(pair, (list, tuple)) and pair else None
         value = pair[1] if isinstance(pair, (list, tuple)) and len(pair) > 1 \
             else None
         if isinstance(key, F.StringLiteral):
-            out.append((key.value, value))
+            name = key.value
         elif isinstance(key, F.IntLiteral):
-            out.append((str(key.value), value))
+            name = str(key.value)
         else:
-            return None
-    return out
+            return None, None
+        if name in by_key:
+            if not _spread_value_is_side_effect_free(by_key[name]):
+                return None, (
+                    f"a spread of a dict LITERAL that repeats the key {name!r} "
+                    f"and overwrites a value that is not a literal: CPython "
+                    f"evaluates EVERY value of a display, so the value the "
+                    f"first {name!r} names still runs and this path cannot drop "
+                    f"its evaluation — write the keywords out, or make the "
+                    f"repeated key's earlier value a literal")
+            by_key[name] = value
+        else:
+            order.append(name)
+            by_key[name] = value
+    return [(name, by_key[name]) for name in order], None
 
 
 def construction_nested_slot_refusal(name: str, field: str, arg,
