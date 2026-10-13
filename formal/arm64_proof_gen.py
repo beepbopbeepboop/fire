@@ -3276,6 +3276,21 @@ def _step_branch_index(w: int):
     return None
 
 
+def _ext_imm12(w: int) -> int:
+    """The ADD/SUB/CMP `#imm12` field with its `sh` scale applied.
+
+    Bits 21:10 are the immediate and `sh` (bit 22) selects `LSL #0` or
+    `LSL #12`; `encode_add_xd_xn_imm_sh`/`encode_sub_xd_xn_imm_sh` emit the
+    scaled form, so the container-budget reservation `sub sp, sp, #131072`
+    reaches an image as `sub sp, sp, #32, lsl #12`.  A reader that drops the
+    shift reconstructs an `sp` 4096x too high, and the `mem_read_*` rewrite it
+    is used for then names an address the image never touched.  This is the
+    Python mirror of `ProofLib.arm64_ext_imm12`, which `_step_rhs` already
+    emits: the model and the address trackers have to agree about `sp`.
+    """
+    return ((w >> 10) & 0xFFF) << (12 * ((w >> 22) & 0x1))
+
+
 def _step_rhs(w: int, idx: int):
     """Return the Lean `some ...` result the model produces for word w.
 
@@ -3993,10 +4008,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     return addrs
 
 
@@ -4493,10 +4508,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     return out
 
 
@@ -4530,10 +4545,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_ext_imm12(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_ext_imm12(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4588,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _ext_imm12(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _ext_imm12(w)
     return sp_off
 
 

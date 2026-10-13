@@ -232,6 +232,48 @@ class TestBridgeTypechecks(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0, f"{name}: the proof admits {n} `sorry`")
 
+
+class TestTheAddressTrackersReadTheExtendedImmediate(unittest.TestCase):
+    """The `sp` a `mem_read_*` rewrite names has to be the `sp` the image has.
+
+    `encode_sub_xd_xn_imm_sh(31, 31, 32, 1)` is `sub sp, sp, #32, lsl #12` —
+    131072 bytes, the container-budget reservation `_emit_sub_imm(sp,
+    _SCRATCH)` writes at the top of every prologue. `_step_rhs` reads `sh`
+    (`ProofLib.arm64_ext_imm12`), but the address trackers that build the
+    `mem_read_*` terms read `imm12` alone, so a rewrite named `sp - 32` for an
+    image whose `sp` is `sp - 131072`; the value-flow proof could not close
+    and `ifonly`/`condassign`/`elif3` went red in
+    `TestBridgeTypechecks`. Both directions are asserted because a tracker
+    that ALWAYS shifted would pass the scaled row and fail the plain one.
+    """
+
+    def test_ext_imm12_reads_the_shift(self):
+        import struct
+        from formal import arm64 as A
+        import formal.arm64_proof_gen as G
+        scaled = struct.unpack("<I", A.encode_sub_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        plain = struct.unpack("<I", A.encode_sub_xd_xn_imm_sh(31, 31, 32, 0))[0]
+        self.assertEqual(G._ext_imm12(scaled), 32 << 12,
+                         "the `lsl #12` of a SUB/ADD immediate is dropped")
+        self.assertEqual(G._ext_imm12(plain), 32,
+                         "an unshifted immediate must not be scaled")
+
+    def test_a_reserving_proof_names_the_reserved_sp(self):
+        tmp = tempfile.mkdtemp(prefix="extimm-bridge-")
+        try:
+            path, err = _generate(tmp, PROGRAMS["ifonly"], "ifonly")
+            self.assertIsNone(err, err)
+            text = _read(path)
+            self.assertRegex(
+                text, r"\.sp - UInt64\.ofNat 131072",
+                "the proof does not name the 131072-byte reservation the "
+                "prologue made, so an address tracker dropped the `lsl #12`")
+            self.assertNotRegex(
+                text, r"\.sp - UInt64\.ofNat 32\)",
+                "an address still reads the raw `imm12` of a scaled SUB")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 class TestTheBridgeBindsEveryParameter(unittest.TestCase):
     """`MojoFunc.mk` carries the source's parameter NAMES, and all of them.
 
