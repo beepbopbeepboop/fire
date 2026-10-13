@@ -16641,6 +16641,16 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
+    # **`Float64` USED TO BE HERE, and it is now LOADED** rather than refused:
+    # the width of the load is `dereference_lowering`'s `("float", 8, False)`
+    # answer, and the KIND its loaded word carries is `pointer_deref_kind`'s,
+    # so a `Pointer[Float64].value()` is a double in every consumer that asks
+    # what it holds (`Int(...)` becomes `FCVTZS`, `%f` places it as a double,
+    # `%d` and an `Int` parameter are refused by the rules
+    # `call_argument_kind_refusal` and `return_annotation_kind_refusal` state).
+    # The row that stood here said the load was bit-exact and the KIND was the
+    # missing piece; that piece is `pointer_deref_kind`, and keeping the row
+    # would refuse a load this path can now place correctly.
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
