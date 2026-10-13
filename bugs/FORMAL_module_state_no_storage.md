@@ -1,5 +1,30 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status 2026-10-12 (`formal294-docs`): §(3)'s `len()` remainder is CLOSED, and
+the paragraph in §(3) that records it as open is FALSE of this tree.** §(3) says
+a `malloc`'d blob crosses a dylib boundary and reads by SUBSCRIPT, but that
+`len()` of one is refused, "because the path has no KIND that says this word is a
+heap allocation with a run-time length". Measured on both architectures, on §(3)'s
+own program (`tupr.mojo`'s `def triple() -> List[Int]: return [3, 14, 0]` and a
+`tr.mojo` that reads it across the boundary):
+
+    var t = triple()
+    printf("%d %d %d len=%d\n", t[0], t[1], t[2], len(t))
+    arm64   3 14 0 len=3      x86_64  3 14 0 len=3      CPython 3 14 0 len=3
+
+The KIND channel is `model.imported_callee_kind`, which reads the callee's own
+`-> List[Int]` declaration rather than the manifest's C signature (`-> List[Int]`,
+`-> Int` and `-> Bool` are all `int64_t`), and it landed 2026-10-02 —
+`bugs/FORMAL_listdir_no_run_time_sequence.md`'s Status carries that measurement.
+So what is left in §(3) is only the run-time-LENGTH half (a blob whose count is
+not a build-time constant), which is that doc's item 2 and not the KIND. Pinned
+by `test_formal_cross_module.py`'s
+`test_a_container_returning_export_whose_helpers_take_the_buffer` (`len(paths)`
+on a `collect() -> List[Int]` across a dylib) and by the `len`/`for`/subscript
+rows in `test_formal_globals.py`. **Nothing else in this document moves:** the
+two remainders "What is left" names — an EXPORTED SLOT and `sys.argv`'s source —
+are unchanged.
+
 **Status (2026-10-04, `formal18-4`): §(2)'s member refusal had a THIRD arm
 missing, and it was the same disease that function was written to cure — a
 sentence false about the name it names. Fixed; the two items this document's
@@ -533,6 +558,11 @@ So this is no longer a silent wrong answer, and it is the item on this list
 that was the most dangerous to leave: a frame address printed as a plausible
 number is indistinguishable from a computation, so every downstream read of it
 was wrong rather than absent.
+
+**SUPERSEDED 2026-10-12 (`formal294-docs`) — the paragraph below is FALSE of
+this tree: `len()` of a returned container DOES cross now, and the KIND is
+`model.imported_callee_kind` reading the callee's own `-> List[Int]` (see the
+Status at the head). What is left is the run-time-LENGTH half, not the KIND.**
 
 **What is still missing is narrower than the item claimed, and the narrowing
 is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
