@@ -428,8 +428,18 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 272,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
+    # §6's first row is READ, not restated. It was a literal `272` here, which
+    # is how it went stale by one entry point while §2.2's row — checked by
+    # parsing the document — stayed current: a pin that hard-codes the figure
+    # it is pinning cannot report the drift it exists to catch, it *is* the
+    # drift. `test_formal_runtime_link.py` reads the same row the same way.
+    m_word = re.search(
+        r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)', text)
+    check(m_word is not None,
+          'FORMAL.md §6 phase 2 still publishes the word-shaped entry-point count')
+    check(m_word and int(m_word.group(1)) == len(word),
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes '
+          f'{m_word and m_word.group(1)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')

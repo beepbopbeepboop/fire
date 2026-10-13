@@ -1,5 +1,30 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-13 (`work/formal366-docs`): the surface grew by ONE entry point
+since the 2026-10-05 re-measurement, and the three figures this document owns
+(and `FORMAL.md` §6 phase 2 publishes) were one behind it on both counts — the
+tree and the pin.** `mojo_str_register` (`void mojo_str_register(char *s)`) is
+declared in `runtime/fire_runtime.h` and defined in `runtime/fire_runtime.c`,
+word-shaped with no `void *` parameter, so it landed in all three rows at once:
+the measured triple is now **273 / 217 / 177**, not 272 / 216 / 176. It arrived
+with `38d19a52` (*"runtime: make `mojo_boxed_is_str` sound"*), which registers
+the codegen's `__rodata` literal pool so `mojo_boxed_is_str` can tell an interned
+string from a bare `int64_t`; `FORMAL.md` §2.2 had already counted it (273 of
+684) while §6 phase 2 had not. **`FORMAL.md` §6 phase 2's three-row table, §1's
+`fire_runtime.c` size (524 → 528 KB) and its 683 → 684 rollup are updated to the
+measured triple**, and this Status carries the current one — the §0.1/§0.3/
+§"Status 2026-10-05" tables below are the runs they measured and are left as the
+record, per this document's own re-measurement convention. The pin that let row 1 go stale
+is fixed at the root: `test_formal_doc_truth.py` **read a literal `272`** where it
+should have read §6's own row, so it restated the figure it was pinning and could
+not report the drift — it now parses `FORMAL.md`'s §6 row exactly as
+`test_formal_runtime_link.py` does. Both jobs are green: `test_formal_doc_truth.py`
+`PASS=434 FAIL=0`, `test_formal_runtime_link.py` `189 passed, 0 failed`. **The
+ceilings are unchanged**: 56 word-shaped-but-unlinked (ceiling 1), 4 exported and
+declared by no header (ceiling 2, closed), 40 needing a `void *` handle (ceiling
+3), and `runtime/fire_runtime.c` being on the compiled path means the integrator
+still owes the `make check` / `stdlib-dylib` measurement §0.4 names.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
