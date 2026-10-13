@@ -1,5 +1,37 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**RE-MEASURED 2026-10-12 (`work/formal320-docs`): the one-call-site fix holds,
+the nested-call MODEL gap behind `multi_export` is FIXED, and the two-call-site
+case is measured to be less about the return-address map and more about the
+walk's run composition.**
+
+* **The model gap is fixed.** The shared source generator could not state a
+  callee written inside another call's argument — `scale(shift(n))` — because
+  `_callees_of` saw only the OUTER name and the untyped arm's `_call_go` renderer
+  dropped the scope, so `shift` had no `_go`: arm64 refused the program by name
+  and x86-64 silently substituted the identity placeholder.  Fixed on both
+  backends (one generator); pinned by
+  `test_formal_call_proof_gen.py::TestGeneratorSource::test_a_callee_nested_in_an_argument_is_modelled`.
+  `formal/examples/multi_export.mojo` is the only corpus program with the shape.
+* **The two-call-site case was probed, not landed.** Relaxing
+  `_same_image_call_plan`'s `len(intra) > 1` refusal to emit
+  `{call_pc: call_pc + 4}` for EVERY intra call (targets still required to be
+  block starts) makes `multi_export` (two call sites in `main`) and
+  `callee_chain` (`main -> b -> c`) GENERATE, but neither proof is landable:
+  * `multi_export` needs `set_option maxRecDepth` at **~150000** — 100000 is not
+    enough, measured by bisection on this tree (344-instruction image).  That is
+    the same wall `count`/`pow2` hit, and the right shape is the x86-64
+    endtoend emitter's `max(1000, 40 * steps)` and not a constant.
+  * `callee_chain` leaves an **`unsolved goals`** at
+    `callee_chain_proof.lean:6930` even at `maxRecDepth 250000`, so the walk's
+    per-return composition is genuinely incomplete for a CHAIN rather than only
+    depth-limited.  That is the half that fails, and it is why the plan map alone
+    is not a fix.
+* The two other files behind `len(intra) > 1` in the corpus (`wide_recv`,
+  `multi_export`) are named by a probe over all 93 `formal/examples/*.mojo`;
+  `callee_chain` (the test fixture) is the chain shape.  `wide_recv` stays
+  refused for its own struct-field gap.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1
