@@ -48,12 +48,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_model_fuzz_ledger.md` | **unclaimed** | what `tools/formal_model_fuzz.py` has measured |
 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` | **unclaimed** | `algorithm/backend/tile.mojo`: a specialization call through a FUNCTION-VALUE field, and 4 stdlib files behind it |
 
-### `formal/arm64_codegen` — 15 documents, 2 claimed
+### `formal/arm64_codegen` — 16 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal326-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | `formal327-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
+| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | `formal328-docs` | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
@@ -68,14 +69,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md` | **unclaimed** | FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 
-### `formal/arm64_proof_gen` — 20 documents, 4 claimed
+### `formal/arm64_proof_gen` — 19 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal326-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | `formal327-docs` | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | `formal327-docs` | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
-| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | `formal328-docs` | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | **unclaimed** | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
 | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | **unclaimed** | `bv_decide` reports a counterexample for a flag the spill hid |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | **unclaimed** | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |

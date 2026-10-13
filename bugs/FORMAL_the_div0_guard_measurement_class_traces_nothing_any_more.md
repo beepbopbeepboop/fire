@@ -1,5 +1,41 @@
 # FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more
 
+**Re-measured 2026-10-13 (`work/formal328-docs`): §2's defect 2 is FIXED, the
+fixture has moved BACK to the original symptom, and the "it REFUSES" readings in
+the two 2026-10-07 sections below are stale.** Measured on this tree:
+
+* **`info["compiler_traps"]` is no longer empty on arm64.** `formal/arm64_codegen.py::
+  _emit_trap_flush` records each `BL fflush` the compiler emits (`38880520`), and
+  `_program_extern_calls` subtracts them; the startup stub's `getrlimit` is now
+  below `func_offset` (`_emit_stack_floor_init`), so `_unfollowable_calls` — which
+  scans only `[func_entry, func_end)` — never sees it either. For
+  `def q(a, b): return a // b` the image carries `extern_calls` = `getrlimit@…a0`
+  (below entry) and `fflush@…c4`, and `compiler_traps` = `[…c4]`. Pinned by
+  `test_formal_call_proof_gen.py::TestExternCallTheRunDoesNotReach` and
+  `TestTheArm64SubtractionIsByAddress…`'s `_program_extern_calls` rows.
+* **So the fixture no longer raises.** `_symbolic_divisor_proof` returns a file
+  (head 291 898 bytes, tail 0 bytes) with NO `q_compiles_correctly_universal`,
+  NO `sorry`, and `_ADMIT` absent from the tail — the reachability statement
+  replaces the universal theorem because the div0 arm's `BL fflush` is still read
+  as a call the PROGRAM makes (`_unfollowable_calls` does not subtract
+  `compiler_traps`; subtracting it is necessary and not sufficient, as §2
+  measured). The `FormalBuildError: 2 calls this walk cannot follow` in the two
+  2026-10-07 sections below no longer reproduces: there is only ONE opaque call
+  now, and it is the div0 arm's flush.
+* **What the class reports is therefore the ORIGINAL blindness again, and by
+  NAME.** With `lib/*.olean` absent it skips; with it present,
+  `test_the_measurement_class_can_still_see_what_it_measures` fails with
+  "the fixture generates no `q_compiles_correctly_universal` carrying `<ADMIT>`",
+  which is the correct report — the class is not dissecting the wrong thing, it
+  has no universal theorem to dissect.
+
+The blocker is unchanged and not this doc's to fix: `_unfollowable_calls` does
+not subtract `compiler_traps`, and making the walk treat a compiler call on a
+CONDITIONAL path as terminal is
+`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`'s
+(`arm64_go_exit` is single-address). Option 2 (a literal-divisor fixture) still
+changes what the class measures, and is not taken here.
+
 **Area:** FORMAL, the arm64 proof generator's own doc-truth test.
 `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean`
 (`test_the_false_goal_survives_the_documented_next_step`,
@@ -48,7 +84,11 @@ GREEN, and it changes what the class measures.
 moved one step further away, not closer. Three measurements, each a correction
 to the plan below:**
 
-1. **The fixture no longer produces a blind file — it REFUSES.** This document
+1. **The fixture no longer produces a blind file — it REFUSES.** *(STALE
+   2026-10-13: the `FormalBuildError` below no longer reproduces — the startup
+   stub's `getrlimit` moved below `func_offset`, so the image has only ONE
+   opaque call and the fixture generates a blind file again; see the Status at
+   the top.)* This document
    records the class dissecting a generated file that has 234 theorems, no
    `compiles_correctly_universal` and no `sorry`, so `tail` is empty and the
    trace is a no-op. Measured on this tree, `_symbolic_divisor_proof` now raises
@@ -66,8 +106,9 @@ to the plan below:**
    its failure is an `ERROR` in `setUpClass` rather than the three assertion
    failures this document records.
 
-2. **`info["compiler_traps"]` IS EMPTY ON ARM64, and that is a second defect on
-   this path.** `formal/arm64_codegen.py` declares `_compiler_trap_addrs` (line
+2. **`info["compiler_traps"]` WAS EMPTY ON ARM64, a second defect on this path —
+   FIXED 2026-10-13 (`_emit_trap_flush` now records each `BL fflush`; see the
+   Status at the top of this doc). The paragraph is kept as history.** `formal/arm64_codegen.py` declares `_compiler_trap_addrs` (line
    724) and publishes it as `info["compiler_traps"]` (line 1100), and its own
    comment says the set holds "the ADDRESSES of the `BL fflush` this backend
    emits inside its own bounded stops" — but **nothing ever adds to it** (the
