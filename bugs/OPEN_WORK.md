@@ -63,8 +63,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | **unclaimed** | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | **unclaimed** | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
-| `FORMAL_os_backing_sub_word_pointer_and_stat_dev_are_red.md` | **unclaimed** | 6 of 70 cases in `test_formal_os_backing.py` disagree with CPython, on BOTH architectures, and no doc records either cause |
-| `FORMAL_pointer_subscript_loads_a_word_for_a_sub_word_pointee.md` | **unclaimed** | `p[i]` on a `Pointer[Int32]` reads eight bytes, and `formal-os-backing` is red for it |
 | `FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition.md` | **unclaimed** | FORMAL_the_conditional_reachability_check_refuses_a_call_before_the_condition |
 | `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` | **unclaimed** | every arm64 program that calls a C function now refuses the universal theorem |
 

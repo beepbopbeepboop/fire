@@ -271,6 +271,37 @@ def main(n):
     {"a": "5", "b": "6", "c": "0"},
 ))
 
+# The WIDTH and the SIGNEDNESS of a sub-word element, which is what a read that
+# loaded a word for a 32- or 16-bit pointee got wrong: `Int32` answered
+# `(q[1] << 32) | q[0]`. The `i32`/`i64` rows above pin the width for a
+# positive value; these pin the two things those cannot see — a width-2 load
+# (which the old one-arm loader read as eight bytes) and a negative element,
+# where a zero-extending load answers `65535` for an `Int16` holding `-1`. The
+# unsigned widths are the other half: a signed load of `UInt32`'s `0xFFFFFFFF`
+# would answer `-1` where CPython answers `4294967295`.
+CASES.append(Case(
+    "pointer_subscript_sub_word_signedness",
+    '''\
+def main(n):
+    var h: Pointer[Int16] = malloc(16)
+    h[0] = 0 - 1
+    h[1] = 0 - 300
+    var u: Pointer[UInt16] = malloc(16)
+    u[0] = 65535
+    var w: Pointer[UInt32] = malloc(16)
+    w[0] = 4294967295
+    var i: Pointer[Int32] = malloc(16)
+    i[0] = 0 - 7
+    printf("a=%d@@", h[0])
+    printf("b=%d@@", h[1])
+    printf("c=%d@@", u[0])
+    printf("d=%d@@", w[0])
+    printf("e=%d@@", i[0])
+    return 0
+''',
+    {"a": "-1", "b": "-300", "c": "65535", "d": "4294967295", "e": "-7"},
+))
+
 # `p[i]` and `p.value()` are the same question, so they must give the same
 # answer. Measured before the route existed, they did not: `p[0]` on a
 # `Pointer[UInt8]` was -1879048144 and `p.value()` was 97.
@@ -760,6 +791,21 @@ def main(n):
 '''
 
 
+def _word(v):
+    """CPython's stat value as the 64-bit word this path's `%d` prints.
+
+    The oracle has to compare the WORD and not CPython's decimal spelling of it,
+    because those two are different for a field CPython exposes through its
+    unsigned 64-bit form. `st_dev` is the case that exists: it is a signed
+    `int32` (`dev_t`) in the layout, CPython renders it as
+    `18446744072249612928` for the bytes `A8FB1A80`, and a program here holds
+    the same word but prints it through a signed `%d` as `-1459938688`. Both
+    are `0xFFFFFFFFA8FB1A80`; only the sign of the top half differs. Every
+    other field is positive and is unaffected.
+    """
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 
@@ -784,7 +830,7 @@ def _stat_oracle(p):
         pass
 
     def field(st, name):
-        return -1 if st is None else getattr(st, name)
+        return -1 if st is None else _word(getattr(st, name))
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),

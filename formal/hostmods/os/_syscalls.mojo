@@ -1242,6 +1242,26 @@ def le32(b: Pointer[UInt8], i) -> int:
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
+def le32s(b: Pointer[UInt8], i) -> int:
+    """The little-endian SIGNED 32-bit field at byte `i` of `b`.
+
+    `le32` reads the same four bytes as an UNSIGNED quantity, which is right
+    for `st_uid`/`st_gid` and wrong for `st_dev`/`st_rdev`: the layout above
+    spells both of those `int32`, so a device number whose top bit is set is a
+    NEGATIVE `dev_t` in C and its word is the sign-extended one. `os.stat`'s
+    own `st_dev` is that word (CPython renders it as the 64-bit unsigned
+    spelling of it), and a zero-extended read of the same bytes is a different
+    word, not a different rendering of this one.
+
+    The subtraction is the sign extension: a value at or above `2**31` is the
+    low half of a negative `int64`, and `v - 2**32` is that `int64`.
+    """
+    var v = le32(b, i)
+    if v >= 2147483648:
+        return v - 4294967296
+    return v
+
+
 def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
@@ -1593,16 +1613,31 @@ def fs_stat_field16(p, follow, at) -> int:
 
 
 def fs_stat_field32(p, follow, at) -> int:
-    """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+    """The UNSIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
-    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
-    and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    `st_uid` and `st_gid`. The field is 32 bits in the layout above and reading
+    it as 64 would take the four bytes of padding after it, so the width is the
+    field's and not the alignment's. `st_dev` is at 32 bits too and is SIGNED,
+    so it is read by `fs_stat_field32s` below rather than here.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     return le32(buf, at)
+
+
+def fs_stat_field32s(p, follow, at) -> int:
+    """The SIGNED 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_dev` and `st_rdev`, which the layout above spells `int32`, so the word
+    the reader produces is the sign-extended one `le32s` builds. The width is
+    the field's `le32` reads; the difference is only which half of the `int64`
+    a value at or above `2**31` is taken to be.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32s(buf, at)
 
 
 def fs_realpath(p) -> str:
