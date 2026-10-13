@@ -2191,6 +2191,33 @@ REFUSALS = [
      "    printf(\"%d\\n\", v)\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    # THE `returned` POSITION, the second place a word this path cannot carry
+    # leaves the function that computed it: CPython's `main` returns `None`
+    # where this path handed back whatever word `g`'s last instruction left.
+    # The census singles this position out (`tools/formal_returnless_census.py`'s
+    # `returned` bucket) as the one consuming position with no other observable
+    # escape, so it is pinned here rather than left to the `print`/`printf`
+    # rows, which are a DIFFERENT position and cannot see it.
+    ("returning_a_call_of_a_return_less_function_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    return g(1, 2)\n",
+     "main returns the value of g(…)"),
+    # …and through a LOCAL, which is the shape the direct row cannot see: the
+    # returned operand is a name, and what makes the name's word not a value is
+    # a binding two lines up. It needs `ValueKinds`' no-value evidence rather
+    # than a test on the returned expression, exactly as the `print` and
+    # `printf` positions do.
+    ("returning_a_local_bound_to_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    v = g(1, 2)\n"
+     "    return v\n",
+     "main returns the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

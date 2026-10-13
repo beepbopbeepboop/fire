@@ -2403,6 +2403,7 @@ dylib_exports: list = None, globals_base: int = None,
                 # wrong about what it is holding. `model.return_annotation_kind_
                 # refusal`, shared with x86-64, so the two cannot differ.
                 self._refuse_return_annotation_kind_mismatch(stmt.value)
+                self._refuse_return_of_a_return_less_call(stmt.value)
                 if self._returns_frame is not None:
                     self._emit_frame_return(stmt.value)
                 else:
@@ -6555,6 +6556,26 @@ ctor_field_value=self._ctor_field_value_for(name),
             fn.name, ann, value, self._printf_arg_conversion_class, TYPE_NAMES)
         if reason is not None:
             raise CodegenError(reason)
+
+    def _refuse_return_of_a_return_less_call(self, value) -> None:
+        """Raise when this function returns the value of a call that has none.
+
+        The `returned` position of `bugs/FORMAL_a_function_with_no_return_yields_
+        a_word_where_cpython_yields_None.md` §0c, and the one position among the
+        consuming ones that has no other observable escape: `def f(): return
+        g()` for a `g` with no `return` — CPython's `f` returns `None`, and this
+        path's `return` hands the caller whatever word `g`'s last instruction
+        left. The evidence is `ValueKinds.no_value_callee_of`, the same reader
+        `_print_call` asks for `print(g())`, so the two positions cannot
+        disagree about which call produces no value; the words are
+        `model.returnless_return_refusal`, shared with x86-64. A method call
+        (`self.foo()`) is not asked here, because the evidence table is keyed on
+        a local callee name — the same boundary `_print_call` has.
+        """
+        callee = self._vkinds.no_value_callee_of(value)
+        if callee is not None:
+            raise CodegenError(M.returnless_return_refusal(
+                callee, self._cur_fn.name))
 
     def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
         """Raise when `e`'s FORMAT cannot be used, for any of its reasons.

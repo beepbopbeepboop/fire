@@ -23496,6 +23496,38 @@ def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:
     )
 
 
+def returnless_return_refusal(callee: str, containing: str) -> str:
+    """Why `return callee(…)` from `containing`, when `callee` returns nothing.
+
+    The `returned` position of `bugs/FORMAL_a_function_with_no_return_yields_a_
+    word_where_cpython_yields_None.md` §0c, and the second of the two positions
+    where a word this path cannot carry LEAVES the function that computed it.
+    `returnless_value_refusal` is the same question at the position where the
+    word becomes TEXT; this is the position where it becomes the caller's
+    RESULT. CPython's `return g()` for a `g` with no `return` returns `None`, and
+    a value here is one 64-bit word with no way to say `no value` — `g`'s
+    epilogue writes no return register, so the word `containing` hands back is
+    whatever `g`'s last instruction left behind, which is a number nothing in the
+    source wrote.
+
+    One message for both backends, asked from `_refuse_return_of_a_return_less_
+    call` in each of them, so the two machines cannot disagree about which call
+    has no value. The wording is `returnless_value_refusal`'s, because it is the
+    same divergence seen from the other end: name the callee, say what CPython
+    answers, say what this path has instead, and say what to do.
+    """
+    return (
+        f"{containing} returns the value of {callee}(…), and {callee} returns "
+        f"nothing: CPython's `{containing}` returns `None` there, and a value on "
+        f"this path is one 64-bit word with no way to say `no value` — "
+        f"{callee}'s epilogue writes no return register, so the word {containing} "
+        f"returns would be whatever {callee}'s last instruction left behind, "
+        f"which is a number nothing in the source wrote. Refused rather than "
+        f"emitted, because a plausible number is worse than a refusal. Give "
+        f"{callee} a `return`, or do not return its value"
+    )
+
+
 def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
     """The refusal for a printf vararg that renders a return-less call, or None.
 

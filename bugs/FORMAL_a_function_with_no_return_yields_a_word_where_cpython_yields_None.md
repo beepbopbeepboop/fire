@@ -17,9 +17,47 @@ was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
 510, all of them at positions where nothing observes the value), so the two
 gate counts §4 asked for are no longer the decisive measurement — the position
 the rule is asked at is.
-**What is left is §0b's "What is still not fixed": the positions where nothing
-OBSERVES the value (an operand, an argument, a returned, an assigned-then-never-
-read local), which need either a liveness pass or direction (b) below.**
+**What is still left is §0b's "What is still not fixed", minus the `returned`
+half now that §0e has landed it: the positions where nothing OBSERVES the value
+(an operand, an argument, an assigned-then-never-read local), which need either a
+liveness pass or direction (b) below.**
+
+## 0e. The `returned` position is refused too (2026-10-13, `work/formal375-docs`)
+
+**§0c's `returned` bucket — the one consuming position with "no other observable
+escape" — is now refused on both architectures.** `def f(): return g()` for a `g`
+with no `return` used to hand `f`'s caller whatever word `g`'s last instruction
+left, where CPython's `f` returns `None`. That is the same value §0b refuses at
+`print`/§0d at `printf`, at the third position a word this path cannot carry
+leaves the function that computed it.
+
+**What landed.** `formal/model.py::returnless_return_refusal(callee, containing)`
+is the one message, and `_refuse_return_of_a_return_less_call` in BOTH emitters
+asks it from the `ReturnStmt` arm of `_emit_stmt`, beside the existing
+`_refuse_return_annotation_kind_mismatch`. The evidence is
+`ValueKinds.no_value_callee_of` — the same reader `_print_call` already asks for
+`print(g())` — so the two positions cannot disagree about which call produces no
+value, and the direct-call (`return g(1, 2)`) and local (`v = g(1, 2); return v`)
+shapes are both covered. A METHOD call (`return self.foo()`) is not asked,
+because the evidence table is keyed on a local callee name, the same boundary
+`_print_call` has; the doc's §0c `MemberExpr` bucket is that shape and it is still
+open.
+
+**Measured.** `test_formal_value_model.py` — **PASS=126 FAIL=0** (was 124); its two
+new REFUSALS rows are `returning_a_call_of_a_return_less_function_is_refused` and
+`returning_a_local_bound_to_a_return_less_call_is_refused`, each a build on BOTH
+architectures that must refuse naming `main returns the value of g(…)`.
+`test_formal_hostmods_census.py` **74/74 rows build** (the host modules the gate
+compiles are unchanged) and `test_formal_argparse.py` **PASS=10 FAIL=0**, which is
+the build-level half of §0c-2's correction that the 456 `argparse.mojo` rows were
+phantom: this refusal reaches no host module.
+
+**What this does NOT do, and it is why the doc stays open.** The `operand`, the
+general `argument of a call` and the `assigned` positions still hand back a word,
+and `assigned` is the one that needs a liveness pass (refusing `x = g()` when `x`
+is never read would refuse a program CPython runs). Direction (b) — representing
+`None` — is still the only answer that makes all of them correct rather than only
+each newly refused one.
 
 ## 0d. The other spelling of "render this word" was unguarded and is now fixed
 ## (2026-10-07, `work/formal142-docs`)
