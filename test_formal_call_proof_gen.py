@@ -2132,9 +2132,7 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         code = result["code"]
         info = result["info"]
         base = info["base_addr"]
-        str_addrs = list((info.get("str_addrs") or {}).values())
-        code_end = (min(str_addrs) - base) if str_addrs else len(code)
-        code = code[:max(0, min(code_end, len(code)))]
+        code = code[:G._executable_code_end(code, base, info)]
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, len(code) - len(code) % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
@@ -2253,6 +2251,87 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_result_lemmas("syn", code, 0x1000))
                 self.assertIn("rw [syn_sr_0 s h]",
                               G._gen_step_lemmas("syn", code, 0x1000))
+
+
+class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
+    """`_step_result_plan`'s callers walk the executable PREFIX of `code`, not
+    the interned string data the emitter appends after the bodies.
+
+    A data word that happens to decode as a branch is planned a step lemma whose
+    `hne` is FALSE (`model.stack_trap_message`'s `909189220` is a `TBZ`, and
+    every guarded image carries that string), so the whole proof fails to
+    typecheck.  `_executable_code_end` is the one reader of the executable end,
+    and the entry-program, by-reference-frame and dylib paths all use it.  The
+    entry-program path is already pinned by `TestStepOkDerivesFromStepResult::
+    test_no_step_ok_lemma_was_dropped`; this class pins the shared helper and the
+    DYLIB path, which is the other one a unit test can reach without the frame
+    path's source model.
+    """
+
+    def test_the_helper_reads_the_string_table(self):
+        import formal.arm64_proof_gen as G
+        code = b"\x00" * 32
+        self.assertEqual(G._executable_code_end(code, 0x1000, {}), 32)
+        self.assertEqual(
+            G._executable_code_end(code, 0x1000, {"str_addrs": {"x": 0x1010}}),
+            16, "the first string's address is the end of the executable region")
+        # A string BELOW the base (or a table naming nothing in `__TEXT`) clamps
+        # to zero rather than going negative, which would read the whole image as
+        # data.  A string past the code clamps to the code length.
+        self.assertEqual(
+            G._executable_code_end(code, 0x1000, {"str_addrs": {"x": 0x800}}), 0)
+        self.assertEqual(
+            G._executable_code_end(code, 0x1000, {"str_addrs": {"x": 0x2000}}), 32)
+
+    def test_the_dylib_step_lemmas_stop_at_the_data(self):
+        import re
+        import formal.build as fb
+        import formal.arm64_proof_gen as G
+        tmp = tempfile.mkdtemp(prefix="a2-execreg-")
+        try:
+            src = os.path.join(tmp, "s.mojo")
+            with open(src, "w") as f:
+                # A string literal forces the emitter to append interned data
+                # after the bodies (and the guard appends the trap message in
+                # any case).
+                f.write('def greet(n):\n'
+                        '  if n > 0:\n'
+                        '    printf("hello")\n'
+                        '  return n\n')
+            r = fb.compile_formal_dylib([src], output=os.path.join(tmp, "s.dylib"),
+                                        prove=True, check=False, arch="arm64")
+            code = r["code"]
+            info = r["info"]
+            base = info["base_addr"]
+            end = G._executable_code_end(code, base, info)
+            self.assertLess(
+                end, len(code),
+                "the fixture no longer carries string data, so this row cannot "
+                "see the defect it is about")
+            data_words = [
+                i for i in range(end - end % 4, len(code) - len(code) % 4, 4)
+                if G._step_branch_index(
+                    int.from_bytes(code[i:i + 4], "little")) is not None]
+            self.assertTrue(
+                data_words,
+                "no decodable data word in this image, so the executable-range "
+                "bound is not what is being tested")
+            with open(r["proof_path"]) as f:
+                text = f.read()
+            emitted = {int(m.group(1)) for m in
+                       re.finditer(r"theorem dylib_step_ok_(\d+)\b", text)}
+            self.assertTrue(emitted, "no step-OK lemma was emitted at all")
+            self.assertLess(
+                max(emitted), end // 4,
+                "a step-OK lemma was emitted for a word past the end of the "
+                "executable region")
+            for i in data_words:
+                with self.subTest(index=i):
+                    self.assertNotIn(
+                        i, emitted,
+                        f"step-OK lemma emitted for the DATA word at index {i}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestCallProofs(unittest.TestCase):
