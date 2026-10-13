@@ -1,19 +1,31 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
-**Status (2026-10-07, `work/formal135-docs`): the FIVE names §0.5 said the
-`find_spec` oracle decides are LANDED.** `_gdbm`, `_tkinter`, `_overlapped`,
-`_winapi` and `_wmi` join `HOST_UNREACHABLE` — the rule at the top of
-`formal/imports.py` applied rather than a new category: `_gdbm` needs libgdbm and
-`_tkinter` needs Tk (libraries outside libSystem), and the other three are
-Windows-only. All five are private, so the PUBLIC unclassified count moves by
-zero, exactly as §0.5 said. The census is now `unclassified 200` (was 205),
-`unreachable 27` (was 22); the file's other counts (223/216/217 in the older
-sections) are the historical readings §0.5 already corrected. Pinned by
-`test_formal_imports.py::test_the_five_gdbm_style_names_are_unreachable` and by
-`test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`, which names each with
-its tier and reason. **The remaining 200 per-name judgements are still NOT
-done, and §0.1's reason still stands: nothing imports them, so there is no
-measurement to tell a right entry from a plausible one.**
+**Status 2026-10-07, landed in parallel by `work/formal135-docs` and
+`work/formal155-docs`: the FIVE names §0.5 said the `find_spec` oracle decides
+are in `HOST_UNREACHABLE`.** §0.5 measured the oracle's split and named
+`_gdbm`, `_tkinter`, `_overlapped`, `_winapi` and `_wmi` as "the first entries a
+worker could add with a measurement behind each"; all five are placed, by the
+rule at the top of `formal/imports.py` applied rather than a new category.
+`importlib.util.find_spec` returns no spec for every one here, and the object
+each is missing is one a freestanding image cannot have (`_gdbm`/`_tkinter` need
+a library outside libSystem, a fact about the TARGET; the other three are
+Windows-only, so their no-spec measurement is host-independent). All five are
+private, so the PUBLIC unclassified count moves by zero — five per-name
+judgements with an oracle, not a moved row. The merge kept the five ONCE:
+`formal/imports.py` and `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`
+carried a duplicate set from each side, and the 10-07 paragraph's test pointer
+(`test_the_five_gdbm_style_names_are_unreachable`) was already stale on master —
+the row that pins the tier, the verdict, and (for the three whose absence is
+host-independent) the no-spec measurement is
+`test_formal_imports.py::test_the_five_find_spec_decided_names_are_unreachable`.
+Re-measured on the merged tree 2026-10-12 (CPython 3.14.8): `unclassified 231`,
+`unreachable 27` (was 22), `modelled 32`, `admitted 4`, `not-a-module 3` — the
+205→200 unclassified reading in the 10-07 paragraph is a point-in-time one, and
+the queue grows with the interpreter's own `stdlib_module_names` list, not with
+any tier removal in this repo. **What is still not done is unchanged:** the
+remaining per-name judgements, which §0.1's ZERO-corpus-exposure measurement
+says cannot be told apart from plausible ones without a consumer to measure
+against.
 
 **Area:** FORMAL (module classification — `formal/imports.py`'s
 `HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED` / `HOST_NOT_A_MODULE`,

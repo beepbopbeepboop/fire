@@ -250,7 +250,12 @@ HOST_UNREACHABLE = frozenset((
     # `_winapi` and `_wmi` are Windows-only. All five are CPython internals (the
     # leading underscore), so this moves the PUBLIC unclassified count by zero;
     # what it changes is that a name a coverage report used to count as "no
-    # verdict" now answers with the tier it belongs to.
+    # verdict" now answers with the tier it belongs to. `work/formal155-docs`
+    # measured the same five the same way (2026-10-07); its placement notes stay:
+    # the `_gdbm` fact is about the TARGET (libSystem does not carry gdbm), so it
+    # does not turn on this host having it; the Windows trio's no-spec is
+    # host-independent (none of their objects exist on this target at all); and
+    # `_tkinter` is a terminal as well as a library.
     "_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi",
 ))
 

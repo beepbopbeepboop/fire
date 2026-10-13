@@ -150,7 +150,10 @@ over 71 forms, **all steppable** (was 185/67).  Its successor comparison is now
 **green on all 12 forms**: the three `shift_imm8:shl` / `:shr` / `:sar` rows
 that set only ZF and SF where `x86_shift_post` sets four were corrected to
 quote `x86_shift_post` itself, and the rows added here are what found the drift
-(its own doc was deleted with the fix, and `SUCCESSOR_FORMS` is the pin).  The
+(its own doc was deleted with the fix, and `SUCCESSOR_FORMS` is the pin; the
+copy-against-the-model half is
+`test_formal_sweep_truth.py::TestX86EndToEndTables`, which `work/formal155-docs`
+measured to keep a stale row from returning silently).  The
 same three rows' `_SIMP_FORMS` fold sets still spelled the PRE-correction
 wrappers (`x86_set_reg`, `UInt64.ofNat`, `x86_trunc32`, `x86_sign_extend32`),
 so a fold that had to project through them unfolded nothing; those are now
