@@ -2,9 +2,9 @@
 
 **Area:** `tools/formal_isa_census.py` — the `EX` (examples) column, via
 `_encoder_mnemonics` + `_forms_in_image`. **Found** 2026-10-05 by
-`work/formal42-5`, carried by `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`
-and recorded here when that backlog closed (2026-10-12, `work/formal300-docs`),
-because the backlog is empty but this instrument inaccuracy is not fixed.
+`work/formal42-5`, carried by the x86-64 ISA-census backlog document (deleted
+2026-10-12 with this fix, `work/formal300-docs`), because the backlog is empty
+but this instrument inaccuracy is not fixed.
 
 ## What it is
 
