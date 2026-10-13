@@ -239,17 +239,24 @@ EXPECTED_FAILURES = {
     # the frame slot, and the frame-address machinery that owns it is claimed
     # (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
     # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
-    # the declaration, not the fix.  `pow2` is the same goal: same address, same
-    # two error sites, and its example is the multiplication rather than the
-    # bare tail call.
+    # the declaration, not the fix.
+    #
+    # `pow2` shared this entry until 2026-10-12, when the SP trackers were
+    # taught the `sh` bit of an `ADD`/`SUB` immediate
+    # (`formal/arm64_proof_gen.py::_addsub_imm_bytes`, pinned by
+    # `test_formal_call_proof_gen.py::TestTheFrameSizeAddSubImmediateIsShifted`):
+    # they read `imm12` and dropped `sh`, so the 128 KiB frame
+    # (`sub sp, sp, #32, lsl #12`) was tracked as 32 bytes and every spill-read
+    # address a condition block computed was 131040 too low. That was a HARD
+    # failure for `fact`, `sum`, `sqsum` and `pow2` -- the rewrite matched no
+    # store -- and all four PASS now. `count` is the one dec1 example whose proof
+    # still fails, and the diagnostics it leaves are a Lean recursion-depth error
+    # over the return frame's read plus the stack-floor-word branch the CBZ-leaf
+    # doc owns, not the mis-scaled frame.
     "count": "tree recursion whose return frame reads x30 back through an "
              "ADRP/ADD-materialised address, so the read is at a literal rather "
              "than at sp - K and mem_read_after_write_u64_slot cannot peel it; "
              "the address is sp - 1984 and nothing emitted says so",
-    "pow2": "the same return-frame read as count, on the multiplication's "
-            "example: the epilogue reads x30 from a slot whose address was "
-            "materialised by adrp/add, so the read is at a literal rather than "
-            "at sp - K and the slot peel cannot match it",
 
     # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
     #

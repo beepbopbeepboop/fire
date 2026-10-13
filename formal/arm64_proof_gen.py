@@ -3972,6 +3972,27 @@ def _work_step_lemma_text() -> str:
 # A program is represented by its control-flow graph.  The proof then works
 # for ANY code the codegen emits, not just a fixed set of shapes.
 
+def _addsub_imm_bytes(w: int) -> int:
+    """The BYTE immediate of an `ADD`/`SUB` (immediate) instruction word.
+
+    `imm12` occupies bits 21-10 and bit 22 is `sh`: `sh = 1` means `LSL #12`,
+    so the immediate is `imm12 << (12 * sh)`.
+
+    **This is the whole of the 128 KiB frame.** `formal/arm64_codegen.py` takes
+    its frame with `sub sp, sp, #32, lsl #12` -- 131072 bytes, the only way A64
+    can encode it, since `imm12` alone tops out at 4095 -- so every SP tracker
+    that read `imm12` and ignored `sh` under-counted the frame and produced
+    `sp - 48` where the model's store was at `sp - 131088`. Measured: `fact`'s
+    condition block's spill rewrite matched no store, so the whole proof failed
+    on a `rw` that is not wrapped in `try`.
+
+    `_STEP_CONDS`' mask for entries 9-12 (`0xff800000`) deliberately clears
+    bit 22, so index detection still ignores `sh`; only the VALUE of the
+    immediate needs it, which is why this is one function and not a mask edit.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _frame_ldp_addrs(blocks_path, words: dict, state: str):
     """SP expression at each LDP along a path of blocks (tracked from `state`)."""
     sp = f"({state}).sp"
@@ -3993,10 +4014,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_addsub_imm_bytes(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_addsub_imm_bytes(w)})"
     return addrs
 
 
@@ -4493,10 +4514,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm_bytes(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm_bytes(w)})"
     return out
 
 
@@ -4530,10 +4551,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_addsub_imm_bytes(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_addsub_imm_bytes(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4573,9 +4594,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _addsub_imm_bytes(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _addsub_imm_bytes(w)
     return sp_off
 
 
@@ -9513,11 +9534,11 @@ def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
             imm7 = (w >> 15) & 0x7f
             sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
         elif idx in (11, 12):           # SUB Xd, Xn, #imm
-            if (w >> 5) & 0x1f == 31:
-                sp -= ((w >> 10) & 0xfff) * 8
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp -= _addsub_imm_bytes(w)
         elif idx in (9, 10):            # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += ((w >> 10) & 0xfff) * 8
+                sp += _addsub_imm_bytes(w)
     return sorted(out)
 
 
@@ -11669,11 +11690,11 @@ def _frame_store_depths(words: dict, entry: int, end: int) -> list:
             if idx == 21 and (w >> 5) & 0x1f == 31:
                 out.append(-sp)
         elif idx in (11, 12):           # SUB Xd, Xn, #imm
-            if (w >> 5) & 0x1f == 31:
-                sp -= ((w >> 10) & 0xfff) * 8
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp -= _addsub_imm_bytes(w)
         elif idx in (9, 10):             # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += ((w >> 10) & 0xfff) * 8
+                sp += _addsub_imm_bytes(w)
     return sorted(set(out))
 
 
@@ -11872,11 +11893,11 @@ def _frame_store_writes(words: dict, m: dict) -> list:
             imm7 = (w >> 15) & 0x7f
             sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
         elif idx in (11, 12):               # SUB Xd, Xn, #imm
-            if (w >> 5) & 0x1f == 31:
-                sp -= ((w >> 10) & 0xfff) * 8
+            if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
+                sp -= _addsub_imm_bytes(w)
         elif idx in (9, 10):                # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += ((w >> 10) & 0xfff) * 8
+                sp += _addsub_imm_bytes(w)
         elif idx == 31:                     # STR [Xn, #imm]: the receiver frame
             out.append((None, True))
     return out

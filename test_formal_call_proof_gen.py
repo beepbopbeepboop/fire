@@ -4687,6 +4687,143 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertEqual(_program_extern_calls({}), [])
 
 
+class TestTheArm64StackFloorReadIsInTheStartupStub(unittest.TestCase):
+    """The arm64 stack-floor guard reads `RLIMIT_STACK` ONCE, in the stub.
+
+    This is the pin for a measured regression and its fix. With the `getrlimit`
+    read in every guarded PROLOGUE, `getrlimit` was the one call the universal
+    theorem's walk could not follow in *every* function: `arm64_step` cannot
+    step a `BL` whose target is out of the image, so the model halted there and
+    the whole data-dependent corpus lost its value theorem (measured: 0 of 93
+    examples emitted `<stem>_compiles_correctly_universal`). The fix is the
+    arm64 twin of x86-64's `_emit_stack_floor_init`, which already read the
+    limit once before `main`: `formal/arm64_codegen.py::_emit_stack_floor_init`
+    is called from `compile()`'s `emit_startup` branch, so the `BL getrlimit`
+    sits BELOW `func_offset`, where no run test starts and no path tree walks.
+
+    Two facts, and the second keeps the first from being a coincidence:
+
+    * a source-conditional program has a value theorem again — `either` and
+      `absval` are both in the refused group the doc names, and both generate
+      one now;
+    * the image's ONLY extern call below the entry is the stub's `getrlimit`, so
+      the read is outside every walked function body.
+
+    The second is asserted by ADDRESS, because the point is WHERE the call is: a
+    build-only change that moved the read back into the prologue while the
+    theorem survived for some other reason would keep the first assertion and
+    still be the bug the doc describes.
+
+    Cheap: proof generation, no Lean.
+    """
+
+    #: A conditional program from each side of the doc's own before/after table
+    #: (`either` was already covered by the recursion-family census; `absval`
+    #: is the straight `if n > 0` its table names), plus the straight-line
+    #: control that proves the value theorem was not a conditional-only thing.
+    PROGRAMS = ("either", "absval", "ret42")
+
+    def _proof(self, stem):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-stub-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(HERE, "formal", "examples", stem + ".mojo")
+        self.assertTrue(os.path.isfile(src), f"no example at {src}")
+        r = fb.compile_formal(src, arch="arm64",
+                              output=os.path.join(tmp, stem + ".aout"),
+                              prove=True, check=False)
+        with open(r["proof_path"], encoding="utf-8") as f:
+            return r, f.read()
+
+    def test_a_source_conditional_program_has_a_value_theorem(self):
+        for stem in self.PROGRAMS:
+            with self.subTest(program=stem):
+                _r, text = self._proof(stem)
+                self.assertRegex(
+                    text,
+                    rf"(?m)^theorem {stem}_compiles_correctly_universal",
+                    f"{stem} has lost its value theorem; the stack-floor read "
+                    f"is on a walked path again, so `getrlimit` is back in the "
+                    f"prologue")
+
+    def test_the_only_call_below_the_entry_is_the_stub_getrlimit(self):
+        from formal.arm64_proof_gen import _program_extern_calls
+        r, _text = self._proof("either")
+        info = r["info"]
+        entry = info.get("func_offset")
+        self.assertIsNotNone(entry, "the image has no entry to be below")
+        below = [c for c in info["extern_calls"]
+                 if c["addr"] is not None and c["addr"] < entry]
+        self.assertEqual(
+            [c["sym"] for c in below], ["getrlimit"],
+            f"the run test starts at the entry, so the only call below it must "
+            f"be the stub's `getrlimit`: "
+            f"{[(c['sym'], hex(c['addr'])) for c in info['extern_calls']]}")
+        self.assertEqual(
+            [c["sym"] for c in _program_extern_calls(info)], [],
+            "the compiler's own `getrlimit` is being read as a call the "
+            "program makes")
+
+
+class TestTheFrameSizeAddSubImmediateIsShifted(unittest.TestCase):
+    """`sub sp, sp, #32, lsl #12` is 131072 bytes, not 32.
+
+    Every SP tracker in `formal/arm64_proof_gen.py` read an `ADD`/`SUB`
+    immediate's `imm12` (bits 21-10) and ignored `sh` (bit 22), so the 128 KiB
+    frame the codegen takes for a function with a call -- `sub sp, sp, #32,
+    lsl #12`, the only way A64 can encode 131072 since `imm12` alone tops out at
+    4095 -- was tracked as 32 bytes. Every spill-read address a condition block
+    computed was then 131040 bytes too low, the
+    `mem_read_two_writes_adj_uint` rewrite matched no store, and because that
+    `rw` is not wrapped in `try` the whole proof failed on a goal that was TRUE.
+    Measured on this tree: `fact`, `sum`, `sqsum` and `pow2` all FAIL before the
+    fix and PASS after it; `count` is still the one dec1 example left.
+
+    Two rows, and the second is why the first is not enough: the decoder itself,
+    and the generated text of a recursive program, because a decoder is only
+    worth anything where it is CALLED. The `sh` bit is `0` for every frame that
+    is 4095 bytes or smaller, which is every frame in the corpus except this one
+    -- so a regression that dropped the shift again would be invisible to every
+    example that is not recursive.
+
+    No Lean.
+    """
+
+    def test_the_decoder_applies_the_shift(self):
+        from formal.arm64_proof_gen import _addsub_imm_bytes
+        # `sub sp, sp, #32, lsl #12` — the 128 KiB frame, imm12 = 32, sh = 1.
+        self.assertEqual(_addsub_imm_bytes(0xd14083ff), 131072)
+        # `sub sp, sp, #16` — sh clear, so imm12 IS the answer (16).
+        self.assertEqual(_addsub_imm_bytes(0xd10043ff), 16)
+        # `add sp, sp, #16` and `add sp, sp, #0`.
+        self.assertEqual(_addsub_imm_bytes(0x910043ff), 16)
+        self.assertEqual(_addsub_imm_bytes(0x910003ff), 0)
+
+    def test_a_recursive_programs_spill_rewrite_names_the_frame(self):
+        import formal.build as fb
+        tmp = tempfile.mkdtemp(prefix="a2-frame-sh-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src = os.path.join(HERE, "formal", "examples", "fact.mojo")
+        r = fb.compile_formal(src, arch="arm64",
+                              output=os.path.join(tmp, "fact.aout"),
+                              prove=True, check=False)
+        with open(r["proof_path"], encoding="utf-8") as f:
+            text = f.read()
+        rws = re.findall(r"mem_read_two_writes_adj_uint _ (\(.*\)) _ _", text)
+        self.assertTrue(rws, "`fact` emitted no spill-pair rewrite at all, so "
+                             "this row is not looking at the code it pins")
+        for addr in rws:
+            self.assertIn(
+                "131072", addr,
+                f"a spill read is addressed at {addr!r}, which does not name "
+                f"the 128 KiB frame the codegen took; the `sh` bit of the "
+                f"`sub sp, sp, #32, lsl #12` is being ignored again")
+            self.assertNotIn(
+                "UInt64.ofNat 32) - UInt64.ofNat 16", addr,
+                f"a spill read is addressed at {addr!r}, the value the "
+                f"UNSHIFTED imm12 produced: the bug this row exists for")
+
+
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
