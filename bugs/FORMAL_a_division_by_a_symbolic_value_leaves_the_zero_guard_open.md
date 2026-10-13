@@ -28,6 +28,31 @@ exact next step" below are still the right three, but option 1 is now a claim
 about a block the walk does not walk at all, which moves option 2 from third to
 first.
 
+## Status 2026-10-13 (`work/formal295-docs`): the unreached-residual doc is absorbed here
+
+`FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow`
+(named without the `bugs/` prefix because the file is not there any more — it is
+deleted with this note), filed 2026-10-05 on the `work/formal28-2` merge tree,
+asked whether `fdiv64`'s div0 residual had CLOSED or merely become UNREACHED,
+and guessed at the merge's `bv_decide` growth as the cause. Re-measured on this
+tree through the generator (no Lean needed for the shape): the fixture BUILDS —
+the stack-floor `getrlimit` is a stub read now, not a second program call — and
+the generated file has **no `q_compiles_correctly_universal` at all**: the walk
+stops at
+
+    /- CALL BOUNDARY.  This function calls out of the image: the `BL` at
+       0x100000504 branches to 0x100000870, which is not in the code the model
+       was given …
+
+`0x100000504` is this doc's own div0 arm (`_emit_div_shift_pow`'s `fflush` on the
+raise path), so the answer is **UNREACHED**: no terminal value flow is emitted,
+no `⊢ 1 = …` residual exists to be read, and nothing about the false theorem has
+changed. That is this doc's §0 and
+`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
+three-way taxonomy; the earlier doc's cause hypothesis was wrong, and its doc is
+deleted with this note, exactly as its own step 3 (fail on UNREACHED → fold into
+this doc) instructed.
+
 ## 0. What the measurement is, and what it refutes
 
 **Half of the doc's stated blocker is gone, and which half matters.** The claim
