@@ -8840,6 +8840,40 @@ BOTH_ARCH_CASES = [
      "    s = s + a + b + c\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n", 0, "49"),
+    # …and the SAME target shape with a starred leaf, which is the other half of
+    # the shared shape reader: arm64 validated the target through
+    # `_lbn_target_names`, which STRIPS the star (`[a, b]` for `(a, *b)`), so
+    # `*b` passed the identifier check and the loop was lowered against a name
+    # nothing allocated — a build that produced NO output and exited 1, where
+    # x86-64 refused it by name. Both backends now read `M.for_target_leaves`,
+    # whose leaves keep the `*`, so the two refuse with the same sentence. These
+    # are in `BOTH_ARCH_CASES` and not a single-backend row because the subject
+    # IS the two-architecture agreement — the same reason the row above is here.
+    ("both_arch_refuse_a_starred_for_target",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, *b in [(1, 2, 3)]:\n"
+     "        s = s + a + b[0] + b[1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:for-loop target must be a plain name or tuple of plain names",
+     None),
+    ("both_arch_refuse_a_starred_leaf_in_a_nested_for_target",
+     "def main():\n"
+     "    s = 0\n"
+     "    for a, (b, *c) in [(1, (2, 3, 4))]:\n"
+     "        s = s + a + b + c[0] + c[1]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:for-loop target must be a plain name or tuple of plain names",
+     None),
+    ("both_arch_refuse_a_starred_comprehension_target",
+     "def main():\n"
+     "    t = [a + b[0] for a, *b in [(1, (2, 3))]]\n"
+     "    printf(\"%d\", t[0])\n"
+     "    return 0\n",
+     "refuse:comprehension target must be a plain name or tuple of plain names",
+     None),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before

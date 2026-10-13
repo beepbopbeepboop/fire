@@ -144,3 +144,49 @@ source — so either option moves no sweep number; the value is closing the
 divergence and replacing arm64's silent exit 1 with an answer. No Lean is
 needed for either: the defect is visible in the built image's behaviour and in
 the build refusal.
+
+## Update 2026-10-13 (`work/merge-qwen1`, work/formal188-docs merge): option
+(1) landed on both backends, and the star machinery is deleted
+
+The merged branch implemented the first of the two options the Next step
+prescribes: a starred for/comprehension target is now refused at target
+VALIDATION, on both backends, in one shared sentence, before any emitter runs.
+The shared reader is `formal/model.py::for_target_leaves` — a leaf walk over
+`for_target_tree`'s output that KEEPS the star on a `*rest` leaf — and the
+identifier check at both backends' for- and comprehension-target sites refuses
+it (`"*rest".isidentifier()` is False):
+
+* **arm64** asked the SHAPE's leaves at both sites instead of
+  `_lbn_target_names` (which strips the star, so `for a, *b in …` passed
+  validation and was stored under a name nothing allocated — the 2026-10-05
+  build-then-exits-1 half). The unreachable star machinery is deleted with the
+  refusal, exactly as the Next step prescribes: `_emit_for_unpack`'s star arm
+  (including the star-only `*rest,` string case) and
+  `_emit_for_unpack_star_rest` are gone, not left as dead code that reads as
+  support.
+* **x86-64** reads the same `M.for_target_leaves` at both sites (replacing its
+  local `_for_tree_leaves`) and no longer strips the star — `_strip_stars` is
+  deleted with the refusal that made it necessary. The 2026-10-12 home-walk
+  refusal (`'*rest' has no home`) no longer fires: validation refuses first,
+  with the shared sentence.
+
+Re-measured 2026-10-13 on this tree, every shape the 2026-10-12 table measured
+now refuses on BOTH backends with the one shared sentence — `for a, *b in [(1,
+2, 3)]` (`got '(a, *b)'`), the star-only `for *b in …` (`got '*b'`), the nested
+`for a, (b, *c) in …` (`got '(a, (b, *c))'`), the comprehension `[… for a, *b
+in …]` (`got 'a, *b'`, the comprehension spelling) — and the empty-iterable
+row of the table now refuses at the build on both rather than arm64 answering
+`0` where x86-64 refused. The two halves of the old divergence are both gone:
+arm64 no longer builds-then-exits-1, and x86-64 no longer refuses with a
+different sentence. The neighbours do not move: `for a, (b, c) in [(1, (2,
+3))]` answers 6 on both backends (the nested pin rows), and the arity mismatch
+`for a, b in [(1, 2, 3)]` still exits 1 with no output on both.
+
+Pinned by three new `BOTH_ARCH_CASES` rows in `test_formal_run.py` —
+`both_arch_refuse_a_starred_for_target`,
+`both_arch_refuse_a_starred_leaf_in_a_nested_for_target`,
+`both_arch_refuse_a_starred_comprehension_target` — the same-arch agreement
+rows the 2026-10-05 section asked for. Nothing in the corpus uses a starred
+for-target, so the refusal moves no sweep number; what it moves is that the
+two machines cannot answer differently, and arm64's silent exit 1 is a named
+refusal on both.

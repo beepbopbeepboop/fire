@@ -246,22 +246,6 @@ def _range_args(iterable):
     return None
 
 
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
-
 
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
@@ -596,22 +580,6 @@ def _binds_name(target, name: str) -> bool:
         from mojo.middle.boundnames import _lbn_target_names
         return name in _lbn_target_names(target)
     return False
-
-
-def _for_tree_leaves(tree) -> list:
-    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
-
-    A star leaf keeps its `*`, so the caller's identifier check refuses it —
-    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
-    the reason the for-loop's target validation is a leaf walk rather than
-    `_lbn_target_names` (which strips the star and would pass a `*rest`
-    through to a store under a name nothing allocated)."""
-    if isinstance(tree, list):
-        out = []
-        for child in tree:
-            out.extend(_for_tree_leaves(child))
-        return out
-    return [tree]
 
 
 def _dotted(func) -> str:
@@ -6683,12 +6651,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # answer. arm64 reads the same tree through the same `M` reader.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
+            # The SHAPE's leaves, for the same reason the arm64 site asks for
+            # them: a star leaf keeps its `*`, so a starred for-target is
+            # refused HERE, by this identifier check, with the same sentence
+            # arm64 gives it — the option (1) refusal of
             # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
@@ -9417,8 +9385,10 @@ preference.
             # `M.for_target_tree`.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            # The SHAPE's leaves, for the same reason the `for` site asks for
+            # them: a star leaf keeps its `*`, so a starred comprehension
+            # target is refused HERE with the same sentence arm64 gives it.
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "

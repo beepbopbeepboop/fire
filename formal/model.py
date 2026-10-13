@@ -27140,6 +27140,25 @@ def for_target_tree(target):
     return tree if tree else None
 
 
+def for_target_leaves(tree) -> list:
+    """Leaf names of `for_target_tree`'s output, nested groups flattened.
+
+    A star leaf keeps its `*`, so the caller's identifier check refuses it —
+    a `for`/comprehension target is validated by this walk rather than by
+    `boundnames._lbn_target_names`, which STRIPS the star and would pass a
+    `*rest` through to a store under a name nothing allocated. `_tuple_target_key`
+    makes the same refusal of a starred tuple ASSIGNMENT target, and this is the
+    loop's half of that rule. Both backends read this, so a starred leaf is one
+    refusal rather than arm64 lowering it and x86-64 refusing it.
+    """
+    if isinstance(tree, list):
+        out = []
+        for child in tree:
+            out.extend(for_target_leaves(child))
+        return out
+    return [tree]
+
+
 def _comprehension_target_names(target) -> list:
     """The names ONE generator target binds, in source order.
 
