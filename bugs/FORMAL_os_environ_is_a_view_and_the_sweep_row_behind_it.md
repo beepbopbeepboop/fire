@@ -107,10 +107,13 @@ and the module's own header said why, in two halves that were both wrong:
 `dlopen(0, 0)` then `dlsym(h, "environ")`, then one dereference each for
 `char ***` → `char **` → `char *`. Measured on both architectures; the reason it
 is `dlsym` and not libSystem's own `_NSGetEnviron()` is in that function's
-docstring: a callee whose name begins with `_` cannot be bound on this path,
-because `model.libc_source_name` strips the underscore and macOS's `dlsym` does
-not put it back (`FORMAL_libc_call_whose_name_starts_with_an_underscore`,
-which is a two-one-line fix in the LINKER and therefore not a light change).
+docstring, and the reason it gives is now HISTORICAL: a callee whose name begins
+with `_` could not be bound then, because `model.libc_source_name` stripped the
+underscore and macOS's `dlsym` does not put it back. **That linker defect is
+fixed (`ca8cf5a6`, 2026-10-03): the strip now happens only before `$INODE64`,
+so `libc_source_name("_NSGetEnviron")` answers `_NSGetEnviron`.** The `dlsym`
+route is unchanged and still lowers; whether `_NSGetEnviron()` should replace it
+is now a fresh measurement rather than a known wall.
 
 **The spelling was the other half**, and it was already written down in the same
 header: "`getenv`, `putenv` and `unsetenv` are the whole of what can be reached,
@@ -160,9 +163,12 @@ CPython spelling left as written:
 
 **So an importer rewrite of `os.environ.get(k, d)` buys 0 passes**, and that is
 the finding rather than an omission: the next construct for each file belongs to
-a different row (`FORMAL_tempfile_context_manager…`'s neighbourhood for
-`determinism_trace.py`'s file writer, and the `sys.exit` export decision for
-`test_coro_runtime.py`). The same conclusion §4.1 reached for `binary_heap.mojo`
+a different row — for `determinism_trace.py` it was its file writer's way out of
+a `with`, the row whose doc is now deleted because the `with` protocol landed
+(`d4d828a6`, the by-reference receiver), and for `test_coro_runtime.py` it is
+the `sys.exit` export decision. So `determinism_trace.py`'s CURRENT terminal
+construct should be re-measured rather than read from this paragraph, which is
+the 2026-10-03 finding. The same conclusion §4.1 reached for `binary_heap.mojo`
 and the same shape as its price: measured, and not a patch.
 
 **What a reader can do TODAY, with no compiler change at all**, is the thing the

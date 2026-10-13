@@ -735,22 +735,20 @@ def fs_environ_vec() -> Pointer[Pointer[UInt8]]:
     keys are there" needs the array, so this is where the two halves meet.
 
     **WHY `dlsym` AND NOT `_NSGetEnviron`.** libSystem has a function that
-    returns this array — `_NSGetEnviron()` — and it is the obvious spelling,
-    and it does not lower on this path: a callee whose name begins with `_`
-    cannot be bound.  `model.libc_source_name` strips the leading underscore
-    before asking the C library whether it provides the name, and macOS's
-    `dlsym` does NOT add the underscore back — measured:
-
-        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib')._NSGetEnviron   # OK
-        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib').NSGetEnviron    # dlsym: not found
-
-    so the audit asks about a name that does not exist and refuses the build
-    with "the image would bind 1 symbol(s) that nothing provides:
-    _NSGetEnviron".  The defect is real and it is written down, with its two
-    one-line repairs, in
-    `FORMAL_libc_call_whose_name_starts_with_an_underscore`; this is
-    not that fix and does not touch the linker, because a light change to
-    `_bind_info` on both architectures is not a light change.
+    returns this array — `_NSGetEnviron()` — and it is the obvious spelling.
+    The reason it was not used is now HISTORICAL: a callee whose name begins
+    with `_` could not be bound then.  `model.libc_source_name` stripped the
+    leading underscore before asking the C library whether it provides the
+    name, and macOS's `dlsym` does NOT add the underscore back, so the audit
+    asked about `NSGetEnviron` (not found) and refused the build with "the
+    image would bind 1 symbol(s) that nothing provides: _NSGetEnviron".
+    **That defect is FIXED (`ca8cf5a6`, 2026-10-03)**: `libc_source_name`
+    strips a leading underscore only immediately before `$INODE64` (the one
+    case the strip exists for — `_readdir$INODE64` -> `readdir`), so
+    `libc_source_name("_NSGetEnviron")` returns `_NSGetEnviron` and the symbol
+    is spellable.  This comment is kept as the record of why the `dlsym` route
+    was taken; whether `_NSGetEnviron()` should replace it is a fresh
+    measurement rather than something this comment may assume.
 
     So the array is reached the way every other program reaches a DATA symbol
     it was not linked against — by asking the dynamic loader for it at RUN

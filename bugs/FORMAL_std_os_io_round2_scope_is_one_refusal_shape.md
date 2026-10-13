@@ -36,7 +36,7 @@ error in this dialect, and the shape it did not name (a parenthesised import
 spanning lines) is. One repair covers both, and with it the walk measured **five
 links nobody had measured** instead of three (§0.2). §6 items 1 and 2 are
 unchanged and item 4 was filed by its own branch
-(`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`, `formal21-1`), so the two
+(its own doc, since deleted, `formal21-1`), so the two
 features §2 names are still `formal19-1`'s and `formal16-2`'s and the per-file
 table is still §2's. §0.2 is what changed, and §0.1 (item 1) before it.
 
@@ -45,14 +45,14 @@ constants-only refusal was false in both of its clauses and no longer is, with
 cases on both architectures. The FEATURE it was standing in for is still
 `formal16-2`'s and still unlanded, so this document still has no fix of its own
 in it; what landed is the sentence.** §0.1 below is item 1, item 3 is unchanged,
-and item 4 was filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_
-nearer_leaf`, `formal21-1`).
+and item 4 was filed by its own branch (its own doc, since deleted,
+`formal21-1`).
 
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
-filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`,
-`formal21-1`), so **this document has nothing left of its own**: the two
+filed by its own branch (its own doc, since deleted, `formal21-1`), so **this
+document has nothing left of its own**: the two
 features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
 §2's, and the only thing this document asked for was an instrument that can
 answer the question. §0.1 is what changed.
@@ -222,9 +222,8 @@ left over are the `std/_gpu/_utils.mojo` group — so **link 1's feature account
 for 37 files, exactly §2's 37, with 3 of them filed under the wrong name.**
 `std.format._utils` resolved to `std/_gpu/_utils.mojo` ITSELF, so the importer
 was named as the refuser — a defect in the resolver the walk and the build
-share, filed at the time as
-`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md` and **fixed on 2026-10-04
-(`7927b159`, §6.4)**: `std.format._utils` now resolves to
+share, filed at the time as its own doc (since deleted, `formal21-1`) and
+**fixed on 2026-10-04 (`7927b159`, §6.4)**: `std.format._utils` now resolves to
 `std/format/_utils.mojo`, so that group is keyed on the real refuser and this
 was the only group in the walk whose key was wrong. §2's table, read off the
 sweep log rather than off this walk, is the one to use for the COUNTS, and the
@@ -645,8 +644,7 @@ still `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`'s and still
    walk now measures 8 links on this scope where it measured 3, on both
    architectures, with 0 files reporting its own damage.
 4. ~~**`formal.imports.resolve_module_path` is wrong for one importer in this
-   scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
-   — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
+   scope** — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
    because `_candidates` puts a root's leaf fallback in the same list as its
    dotted path and the root loop is nearest-first.~~ **CLOSED — the doc that
    filed it is deleted and the resolver is fixed (`7927b159`, 2026-10-04).**
