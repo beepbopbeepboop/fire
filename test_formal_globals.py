@@ -769,6 +769,34 @@ CASES = [
      "\n"
      "main(0)\n", "42\n43\n43\n"),
 
+    # ── a module global whose value is a FUNCTION ──
+    #
+    # `var g = dbl` binds `g` to a function of this unit, so the `__DATA` slot
+    # the module body fills holds a CODE ADDRESS. A call through the name used
+    # to emit a `BL g` against a symbol nothing defines and was refused by the
+    # bind audit with a message about the link line — the construct that is
+    # missing is the INDIRECT branch, not a library. The direct `g(21)`
+    # spelling is pinned by
+    # `test_formal_specialization.py::test_a_module_global_holding_a_function_is_
+    # called_through_its_slot` (the fix landed there, in the value-call arm);
+    # this row pins the other spelling, the word read into a local first and
+    # then called, so the two spellings stay on the same answer in this file's
+    # harness as well.
+    ("read_a_module_global_function_into_a_local_then_call",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n"
+     "\n"
+     "var g = dbl\n"
+     "\n"
+     "def main(n):\n"
+     "    global g\n"
+     "    h = g\n"
+     "    r: Int = h(21)\n"
+     "    print(r)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n"),
+
     # The KIND of a body-filled slot, which is the third source of a value's
     # kind beside a folded literal and a container literal. `len(G)` is the
     # consumer that needs it and the one that was refused: `("unknown", …)`

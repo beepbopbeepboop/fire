@@ -1134,6 +1134,79 @@ CASES = [
      "        print('fin')\n"
      "    print('done')\n"
      "    return 0\n", 3),
+    # ── every exit path runs the finally, not just the first ────────────────
+    #
+    # `FORMAL_a_second_exit_path_in_a_try_drops_the_finally`. The emitter's
+    # frame list used to be truncated by whichever exit site it emitted first,
+    # so every LATER exit out of the same `try` body emitted no cleanup and the
+    # program still exited 0 with the right answer — the silent class this
+    # repository treats as the worst one. Both backends take the same path, so
+    # a parity fuzzer could not see it; CPython is the oracle.
+    ("a_second_exit_out_of_a_try_still_runs_the_finally",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(1))\n"
+     "    print(two_returns(2))\n"
+     "    return 0\n",
+     "def two_returns(n):\n"
+     "    try:\n"
+     "        if n == 1:\n"
+     "            return 10\n"
+     "        return 20\n"
+     "    finally:\n"
+     "        print('fin-a')\n"
+     "\n"
+     "def main(n):\n"
+     "    print(two_returns(1))\n"
+     "    print(two_returns(2))\n"
+     "    return 0\n", 0),
+    # The same defect reached through `break` and `continue` (both flush, with
+    # different `depth`s) and through a NESTED `try`, where the first exit used
+    # to empty the whole stack so the second found nothing to flush.
+    ("a_try_in_a_loop_runs_the_finally_on_break_and_continue",
+     "def loop_exits():\n"
+     "    out = 0\n"
+     "    for i in range(0, 4):\n"
+     "        try:\n"
+     "            if i == 1:\n"
+     "                out = out + 100\n"
+     "                continue\n"
+     "            if i == 2:\n"
+     "                out = out + 1000\n"
+     "                break\n"
+     "            out = out + i\n"
+     "        finally:\n"
+     "            print('fin', i)\n"
+     "    return out\n"
+     "\n"
+     "def main(n):\n"
+     "    print(loop_exits())\n"
+     "    return 0\n",
+     "def loop_exits():\n"
+     "    out = 0\n"
+     "    for i in range(0, 4):\n"
+     "        try:\n"
+     "            if i == 1:\n"
+     "                out = out + 100\n"
+     "                continue\n"
+     "            if i == 2:\n"
+     "                out = out + 1000\n"
+     "                break\n"
+     "            out = out + i\n"
+     "        finally:\n"
+     "            print('fin', i)\n"
+     "    return out\n"
+     "\n"
+     "def main(n):\n"
+     "    print(loop_exits())\n"
+     "    return 0\n", 0),
 ]
 
 # ── the REFUSED table ───────────────────────────────────────────────────────
