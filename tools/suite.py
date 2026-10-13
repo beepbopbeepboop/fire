@@ -3778,7 +3778,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
@@ -4381,7 +4381,11 @@ BUCKETS = {
                 # `formal/lean.py` bounds `formal` pays for, and `deps` on
                 # `prooflib` for the same reason — and
                 # `formal-proof-census-tool` is the cheap half (46 assertions,
-                # no Lean, no build) that keeps that baseline honest.
+                # no Lean of its own) that keeps that baseline honest. It deps
+                # on `prooflib` too, even though it starts no Lean: its
+                # `test_library_state_agrees_with_the_question_it_asks` asserts
+                # `lib/*.olean` is complete, so without the dep it races the
+                # shared build and reports red on an unbuilt tree.
                 'formal-proof-census', 'formal-proof-census-tool',
                 # …and the five the estate check named on the formal6 merge,
                 # which is the same reason stated once more because it is now
