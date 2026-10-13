@@ -13061,11 +13061,13 @@ def set_union_refusal(left: str, right: str) -> str:
     cannot word it differently on the day the second one grows the emitter —
     and it says which backend does lower it, because "this is not supported" is
     the answer that sends a reader looking for a spec when the answer is an
-    emitter. That sentence names arm64's `_emit_set_union` FOR SETS ONLY, and
-    the qualification is the point: the same emitter is what answered
-    `{"a": 1} | {"b": 2}` with 1 before `container_union_refusal` above started
-    refusing a pair blob, so a claim that arm64 "lowers this operator correctly"
-    without the qualification was a false statement about this tree.
+    emitter. **Both backends have the emitter now** (arm64's `_emit_set_union`
+    and x86-64's), so the branch is reached by nothing that asks it today; the
+    sentence names both FOR SETS ONLY, and the qualification is the point: the
+    same emitter is what answered `{"a": 1} | {"b": 2}` with 1 before
+    `container_union_refusal` above started refusing a pair blob, so a claim
+    that the emitter "lowers this operator correctly" without the qualification
+    was a false statement about this tree.
     """
     return (
         f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
@@ -13073,7 +13075,8 @@ def set_union_refusal(left: str, right: str) -> str:
         f"of both sides, repeats included, which is not a set and answers a "
         f"different program than the source writes. Use `+` if a "
         f"concatenation is what you want, or build the union with an explicit "
-        f"membership test. arm64 lowers this operator correctly, for two SETS")
+        f"membership test. arm64 and x86-64 both lower this operator "
+        f"correctly, for two SETS")
 
 
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:

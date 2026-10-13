@@ -611,8 +611,7 @@ SET_CASES = [
      "hash order in CPython, so the walk is observed through a SUM, which is "
      "order-independent and therefore honest about what is being checked"),
     ("s_union", ["s = {1, 2}", "t = s | {2, 3}"], "len(t)",
-     "the ONE container operator arm64 lowers correctly: a union drops the "
-     "repeats. x86-64 refuses it, so this case is arm64-only"),
+     "the union, which drops the repeats, lowered on both backends"),
     ("s_union_elems", ["s = {1, 2}", "t = s | {2, 3}",
                        "u = 0", "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
@@ -875,18 +874,12 @@ GROUPS = {
 #: row, and until it does the corpus says the capability is absent rather than
 #: discovering it by a build failure.
 BACKEND_ONLY = {
-    # x86-64 has no set-union emitter; arm64's is correct for two sets. The
-    # refusal is the honest answer here rather than a wrong concatenation.
-    "s_union": "x86_64",
-    "s_union_elems": "x86_64",
-    "s_union_str": "x86_64",
-    "s_union_ior": "x86_64",
-    # `&`, `^` and `-` between two sets ARE lowered on both backends now, so
-    # their rows are gone from this table: `_emit_set_op` / `_emit_set_filter_pass`
-    # are the x86-64 emitters beside arm64's, and `s -= {2}` desugars through the
-    # same `_maybe_emit_set_binop` on each. The rows were `BACKEND_ONLY` while
-    # only arm64 had a set emitter; a backend that grows one deletes its row, and
-    # this is that deletion. `s_union` above is a DIFFERENT gap and stays.
+    # `|`, `&`, `-` and `^` between two sets are ALL lowered on both backends
+    # now, so every set row left this table: `_emit_set_union` and
+    # `_emit_set_op`/`_emit_set_filter_pass` are the x86-64 emitters beside
+    # arm64's, and the augmented forms desugar through the same predicates on
+    # each. The rows were `BACKEND_ONLY` while only arm64 had a set emitter; a
+    # backend that grows one deletes its row, and this is that deletion.
     #
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.

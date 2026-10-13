@@ -6709,6 +6709,118 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_set_filter_pass(offset, Reg.RSI, Reg.RDX, op == "&")
         self._emit_blob_base(offset, Reg.RAX)
 
+    def _emit_set_union(self, left, right) -> None:
+        """`a | b` as SET UNION over list blobs — a fresh blob of the elements
+        exactly one side or both hold, in RAX.
+
+        arm64's `_emit_set_union` is the same algorithm: copy the left into the
+        result, then for each right element scan the result and append it only
+        when it is absent. The register discipline is `_emit_set_op`'s above.
+        Before this the backend refused the operator with
+        `set_union_refusal`, which is where the `BACKEND_ONLY` rows for
+        `s_union*` in `test_formal_container_methods.py` came from.
+
+        **The count word is the only place the algorithm is easy to get
+        wrong, and arm64's own history says so.** The result starts holding the
+        nL left elements and NOTHING else, so its count is nL and the dedup loop
+        grows it by one per element it actually appends — NOT `nL + nR`, which is
+        only the RESERVATION and the guard's total. With the sum in the count
+        word, `len` and a subscript read words no store produced (arm64 measured
+        `len({1,2} | {2,3})` = 5 where CPython says 3). The writer here is the
+        append, which re-stores the count on every element for the same reason.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                    + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal("a set union", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))  # left
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal("a set union", 16, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a set union")
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RDX, 0))  # nR
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R9))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R10))      # nL + nR
+        self._emit_blob_growth_guard("a set union", Reg.RAX, cap, "uni")
+        # Copy the left operand into the result. The count word is written
+        # after the copy (to nL), not before it, because the result at this
+        # point holds nL elements and nothing else — see the docstring.
+        self._while_counter += 1
+        n = self._while_counter
+        cl = f"{self.func_name}_suc{n}"
+        cld = f"{self.func_name}_sud{n}"
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RSI))
+        self.asm.emit(encode_add_r64_imm32(Reg.R11, 8))
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self.asm.label(cl)
+        self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
+        self._emit_jcc(COND_E, cld)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R9, 1))
+        self._emit_jmp(cl)
+        self.asm.label(cld)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # count = nL
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        # Dedup the right operand into the result.
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RDX))
+        self.asm.emit(encode_add_r64_imm32(Reg.R11, 8))
+        ol = f"{self.func_name}_suo{n}"
+        od = f"{self.func_name}_suod{n}"
+        il = f"{self.func_name}_sui{n}"
+        notf = f"{self.func_name}_sunf{n}"
+        found = f"{self.func_name}_suf{n}"
+        self.asm.label(ol)
+        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
+        self._emit_jcc(COND_E, od)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, 0))  # elem
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R10, 1))
+        # The scan is over the result built SO FAR, so its bound and its base
+        # are the current count and the result base, and RDI is the scan temp.
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RDI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))
+        self.asm.label(il)
+        self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
+        self._emit_jcc(COND_E, notf)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RCX, 0))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_sub_r64_imm8(Reg.R9, 1))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_jcc(COND_E, found)
+        self._emit_jmp(il)
+        self.asm.label(notf)
+        # Append: result[count] = elem; count++ (and the count word follows).
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R8))
+        self.asm.emit(encode_imul_r64_r64_imm(Reg.RCX, Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RDI, Reg.RCX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        self.asm.label(found)
+        self._emit_jmp(ol)
+        self.asm.label(od)
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` / `needle not in haystack`, list blob or string.
 
@@ -7785,13 +7897,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                  or self._is_container_expr(e.left)
                                  or self._is_container_expr(e.right)):
             if op == "|":
-                # This backend has no union emitter, and it used to lower the
-                # operator as a plain CONCATENATION — answering `[1, 2] | [2, 3]`
-                # with `[1, 2, 2, 3]`, a list with a repeat, which sums to 8
-                # where CPython says 6. Measured on the pre-change tree, exit 0
-                # and the wrong number, so this was a wrong answer rather than a
-                # refusal. arm64 lowers it correctly FOR TWO SETS, which is what
-                # makes the refusal an answer rather than a shrug.
+                # `|` is a SET UNION only between two SETS; `container_union_
+                # refusal` was asked above and returns None for exactly that
+                # pair, so both operands are sets here and the emitter answers
+                # CPython's program. This backend USED to lower the operator as
+                # a plain CONCATENATION — `[1, 2] | [2, 3]` came out `[1, 2, 2,
+                # 3]`, summing to 8 where CPython says 6 — and then refused it
+                # by name while arm64 had the emitter; `_emit_set_union` is that
+                # emitter here now. A non-two-set pair never reaches this line,
+                # because the gate above raises for it.
+                if self._expr_is_set_like(e.left) \
+                        and self._expr_is_set_like(e.right):
+                    self._emit_set_union(e.left, e.right)
+                    return
                 raise CodegenError(M.set_union_refusal(
                     M.spelled(e.left), M.spelled(e.right)))
             self._emit_list_concat(e.left, e.right)

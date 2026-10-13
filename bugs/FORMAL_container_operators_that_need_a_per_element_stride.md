@@ -1,14 +1,14 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on BOTH backends
-(arm64 2026-10-06, x86-64 2026-10-13); items 1 (container `==`/`!=`), 2
-(ordering) and 4 (a length-changing slice store) are unchanged.** The one
-container operator this doc's item 3 has left is `|` (the union) on x86-64, and
-it is a DIFFERENT gap from the three: `test_formal_container_methods.py`
-measures the whole surface against CPython on both architectures and is green;
-this doc is about the rows in it that were green *as refusals*, which is a
-different thing from green as answers. The three set operators are answers on
-both backends now.
+**Status: PARTIALLY FIXED — item 3 (set algebra) is COMPLETE on BOTH backends
+(arm64 2026-10-06, x86-64 2026-10-13): `|`, `&`, `-` and `^` all lower for two
+sets on each, and no set row is `BACKEND_ONLY` any more. Items 1 (container
+`==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are unchanged.**
+`test_formal_container_methods.py` measures the whole surface against CPython
+on both architectures and is green; this doc is about the rows in it that were
+green *as refusals*, which is a different thing from green as answers. The set
+operators are answers on both backends now, and the `set` group is 13/13 on
+each.
 
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
@@ -24,25 +24,28 @@ them through `_maybe_emit_set_binop`, which is asked by BOTH the binary and the
 augmented emitter — the augmented one used to reach the shared gate first, and
 `s -= {2}` and `s = s - {2}` are the same operator and must not get two answers.
 
-**2026-10-13 (`formal326-docs`): the same three are lowered on x86-64, so item
-3 is done on BOTH backends.** `formal/x86_64_codegen.py` grew `_emit_set_op`,
-`_emit_set_filter_pass` and `_maybe_emit_set_binop` as the twins of arm64's,
-with the same capacity rule (an intersection or a difference reserves `nL`, a
-symmetric difference `nL + nR`) and the same shared `_emit_blob_growth_guard`.
-The register discipline is `_emit_list_concat`'s rather than a second one: the
-left and right operands are the bases, the source is walked with a countdown,
-and the result count word is re-stored on every append (the pass returned an
-EMPTY set the first time it ran because the count word was written once, as
-zero, and never again — that is the one defect the differential caught).
+**2026-10-13 (`formal326-docs`): the three set operators AND the union are
+lowered on x86-64, so item 3 is complete on BOTH backends.**
+`formal/x86_64_codegen.py` grew `_emit_set_op`, `_emit_set_filter_pass`,
+`_emit_set_union` and `_maybe_emit_set_binop` as the twins of arm64's, with the
+same capacity rules (a union or a symmetric difference reserves `nL + nR`, a
+difference or intersection `nL`) and the same shared
+`_emit_blob_growth_guard`. The register discipline is `_emit_list_concat`'s
+rather than a second one: the left and right operands are the bases, the source
+is walked with a countdown, and the result count word is re-stored on every
+append (the difference pass returned an EMPTY set the first time it ran because
+the count word was written once, as zero, and never again — that is the one
+defect the CPython differential caught, and it is why the union's count word is
+written after its left-copy rather than before).
+
 Measured, both architectures, `test_formal_container_methods.py set` and
-`operator`: **x86-64 4 answers → 9** in the set group (13 on arm64, the
-difference being the four `s_union*` rows, which are still `BACKEND_ONLY` —
-`|` is a separate gap and is unchanged), and the `operator` group is now **11
-answers on each architecture** instead of 11/6. `o_xor`/`o_and` were the two
-`operator` rows carrying the split and they are gone from `BACKEND_ONLY`, as
-are `s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
-`s_andassign_r`; the table's own rule — "a backend that grows one has to delete
-its row" — is what this deletion is.
+`operator`: **the `set` group is 13 answers / 9 refusals on EACH backend**
+(x86-64 was 4 answers), and the `operator` group is **11 answers on each**
+instead of 11/6. Every set row left `BACKEND_ONLY` — `s_union`,
+`s_union_elems`, `s_union_str`, `s_union_ior`, `s_intersection_r`,
+`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r`, `o_xor`, `o_and`
+— and the table's own rule, "a backend that grows one has to delete its row",
+is what that deletion is.
 
 **The `s_symdiff_r`/`o_xor` cases were strengthened in the same commit, and
 they were a real gap**: both were `s = {1, 2}`; `t = s ^ {2}`, whose right
@@ -151,9 +154,10 @@ the second reason this is a project rather than a rewrite.
    emitter into the ALU on two addresses. Each backend intercepts first, the
    way `|` already splits `_emit_set_union`/`set_union_refusal` on arm64. The
    `BACKEND_ONLY` rows are deleted now that the second backend grew its own.
-   See the Status at the top for the measurements and the emitters.
-   **What is still open on item 3 is `|` (the union) on x86-64, which is a
-   different lowerer from the three and is not attempted here.**
+   **`|` (the union) was ported in the same commit**, so item 3 has no open
+   half: `x86_64_codegen.py::_emit_set_union` is arm64's algorithm and the four
+   `s_union*` rows are answers too. See the Status at the top for the
+   measurements and the emitters.
 2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
