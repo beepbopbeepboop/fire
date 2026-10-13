@@ -960,7 +960,7 @@ is worth recording because it is a rule, not a typo:
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
    and the brief's own headline rule ("callable iff every parameter type AND
-   the return type are word-shaped") is the 223 column, not the 406 one. The
+   the return type are word-shaped") is the 223 column, not the 411 one. The
    brief's own warning is the reason the larger number is the wrong one.
 2. **20 of 22, with `_query` and `_query_dict` the only two refused.** Not
    derivable from the header. `_query` returns `void *`; so do `_open` and
