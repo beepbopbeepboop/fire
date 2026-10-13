@@ -1,5 +1,32 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-13 (`work/formal348-docs`): the published surface was ONE entry
+point behind the tree and is swept again — the ceilings are unchanged and the +1
+is NAMED.** `runtime/fire_runtime.h` gained
+`void mojo_str_register(char *s)` (commit `38d19a52`, the `mojo_boxed_is_str`
+provenance fix), so `runtime_abi()` is **273** word-shaped against the 272 the
+last re-measurement published, the dylib exports **217** (was 216) and **177**
+need no heap handle (was 176) — byte-identical on both architectures, and all
+three rows moved together because the new name takes no `void *` and lives in
+`fire_runtime.c`, which the dylib links on every path. `FORMAL.md` §1
+(`fire_runtime.c` 524 → **528 KB**), §6 phase 2's three-row table and every
+restatement of the triple in it are brought up to the tree, and the entry-point
+table there names `mojo_str_register` as the eleventh gained name.
+
+The pin moved with it, and the reason is the fix's other half:
+`test_formal_doc_truth.py`'s word-count check restated the published figure as
+the literal `272`, so it and `FORMAL.md` agreed with each other while BOTH were
+one behind the tree — the same shape `e2b98c23` swept once already. It now READS
+the row out of `FORMAL.md` and compares it to `runtime_abi()`, so the document is
+the one source of truth and a stale pin cannot hide a stale document.
+Measured after: `test_formal_doc_truth.py` **434 passed, 0 failed** (was 431/2)
+and `test_formal_runtime_link.py` **189 passed, 0 failed, 189 checks** (was
+183/6).
+
+**The three ceilings are untouched**: 56 word-shaped entry points the dylib does
+not export (ceiling 1) and 40 exported ones needing a `void *` handle (ceiling 3)
+are the same two numbers as before, because the +1 added neither gap.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**

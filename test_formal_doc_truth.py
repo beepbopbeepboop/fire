@@ -428,8 +428,20 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    check(len(word) == 272,
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes 272')
+    # The published figure is READ OUT of FORMAL.md and not restated here. It
+    # used to be the literal `272`, and that is exactly how it went one behind
+    # the tree when `runtime/fire_runtime.h` gained `mojo_str_register` (the
+    # drift swept when `FORMAL.md` was brought back up to the tree): a pin that
+    # is a second copy of the number it checks cannot tell a stale document
+    # from a stale pin, and this one reported the pair as equal while the tree
+    # had moved. Reading the row makes the document the one source of truth.
+    m = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
+                  text)
+    check(m is not None,
+          'FORMAL.md §6 phase 2 still publishes its word-shaped count')
+    check(m is not None and len(word) == int(m.group(1)),
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes '
+          f'{m and m.group(1)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
