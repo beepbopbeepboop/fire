@@ -805,6 +805,24 @@ OPERATOR_CASES = [
     ("o_and", ["a = [1, 2]", "b = [2]", "t = a & b"], None,
      "`&` between two LISTS: a TypeError in CPython and a refusal here — the "
      "same split as `o_xor`, with the two-set shape in the `set` group"),
+    ("o_set_sub", ["s = {1, 2}", "t = s - {2}"], None,
+     "`-` between two SETS: lowered on arm64 (the answer is pinned in the set "
+     "group) and refused by name on x86-64, which has no set-algebra emitter. "
+     "This operator-group row is the one that pins the x86-64 refusal, because "
+     "the set group's `s_difference_r` is a `BACKEND_ONLY` answer case and is "
+     "never run there. Before the gate: SIGSEGV on both architectures, no "
+     "output, because the result was a word nowhere near a blob and `len` read "
+     "a count out of it"),
+    ("o_set_and", ["s = {1, 2}", "t = s & {2}"], None,
+     "`&` between two SETS: the same x86-64 refusal pin as `o_set_sub`. "
+     "Measured before the gate: 2 on arm64 and 163061056 on x86-64 where "
+     "CPython answers 1 — the two architectures disagreeing is the clearest "
+     "possible sign that neither computed a set. `o_and` above is the non-set "
+     "blob the gate still owns on both backends"),
+    ("o_set_xor", ["s = {1, 2}", "t = s ^ {2}"], None,
+     "`^` between two SETS: the same x86-64 refusal pin, the symmetric "
+     "difference — SIGSEGV on both before the gate; `o_xor` above keeps the "
+     "non-set-blob half"),
     ("o_floordiv", ["a = [1, 2]", "t = a // [2]"], None,
      "`//` has no container meaning in CPython at all, so refusing it is "
      "doubly right: the program is already broken"),
@@ -893,6 +911,16 @@ BACKEND_ONLY = {
     # carries, so they are refused on BOTH backends and are deliberately NOT
     # backend-only: that is the row that keeps the gate's coverage of a non-set
     # blob on `^`/`&` after arm64 grew the set-algebra lowering.
+    # The two-set shape itself, pinned as an x86-64 refusal: the `set` group's
+    # answer rows are excluded from the x86-64 image and never run there, so
+    # without these the named refusal of `s & {2}` / `s - {2}` / `s ^ {2}` on
+    # x86-64 would have no pin. From `work/formal176-docs` (merged 2026-10-12,
+    # whose parallel emitters this merge folded into the canonical ones); the
+    # rows measure the REFUSAL, which is the x86-64 half, hence excluded from
+    # the arm64 image where they are answers.
+    "o_set_sub": "arm64",
+    "o_set_and": "arm64",
+    "o_set_xor": "arm64",
     # A same-length slice STORE is arm64's lowering; x86-64 has none, and
     # refusing it is the correct answer for a slice that is a materialized copy.
     "l_slice_store_same": "x86_64",

@@ -28,6 +28,23 @@ answers all four** (`{1,2} | {2,3}` → 6, `s & {2}` → 2, `s - {2}` → 1,
 branch's x86-64 emitter is recorded here as a parallel implementation of the
 same fix; the x86-64 half of item 3 is not started on the canonical tree.
 
+**2026-10-12 (`work/formal176-docs`, merged): a THIRD parallel
+implementation of the same fix, folded the same way.** The branch lowered
+`&`, `-` and `^` (the augmented spellings included) on arm64 through its
+own per-element-scan family (`_emit_set_algebra`, `_emit_set_member_scan`,
+`_emit_set_append`), and refused them on x86-64 through
+`model.set_algebra_unsupported_refusal` — a parallel of the
+`set_algebra_refusal` gate above, which it does not replace (the
+canonical gate also words the not-two-sets `TypeError` arm and is shared
+by both backends). The canonical arm64 emitters and the gate are
+unchanged by this merge. What the branch adds and keeps is coverage:
+`test_formal_container_methods.py`'s operator group gains the
+x86-64-only refusal pin of the TWO-SET shape — `o_set_sub`, `o_set_and`,
+`o_set_xor` (the branch's `o_and`/`o_xor`/`o_set_sub`, renamed where the
+`o_and`/`o_xor` names were taken by the non-set-blob rows the 2026-10-06
+section moved there) — the shape the `set` group's `BACKEND_ONLY` answer
+rows are excluded from and therefore cannot pin.
+
 **2026-10-06 (`formal109-docs`): `&`, `^`, `-` between two SETS are lowered on
 arm64.** Measured, both architectures, `test_formal_container_methods.py set`:
 `s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
