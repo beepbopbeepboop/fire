@@ -2042,6 +2042,11 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
     dropped` pins the other half, that the derivation did not narrow which
     instructions get a lemma.
 
+    `test_the_executable_code_stops_at_the_first_string` pins the shared
+    reader the step lemmas are cut with: an image's `__TEXT` carries the
+    interned strings after the bodies, and a data word that decodes as an
+    instruction must not get a step lemma (`_executable_code`).
+
     The one case the derivation cannot cover -- a word the decoder accepts and
     `_step_rhs` has no right-hand side for -- keeps the discriminator proof, and
     is covered by `test_the_fallback_covers_a_word_with_no_right_hand_side`
@@ -2132,14 +2137,44 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         code = result["code"]
         info = result["info"]
         base = info["base_addr"]
-        str_addrs = list((info.get("str_addrs") or {}).values())
-        code_end = (min(str_addrs) - base) if str_addrs else len(code)
-        code = code[:max(0, min(code_end, len(code)))]
+        # The SAME reader the three proof shapes call, so a trim that narrowed
+        # for any reason (or that one shape skipped) is what this compares.
+        code = G._executable_code(code, info, base)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, len(code) - len(code) % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
                     if G._step_branch_index(w) is not None]
         self.assertEqual(expected, self.step_ok)
+
+    def test_the_executable_code_stops_at_the_first_string(self):
+        """`_executable_code` cuts at the intern table's first address.
+
+        The step lemmas walk `code` and a string byte pattern can decode as an
+        instruction (`model.stack_trap_message`'s `TBZ` word is the measured
+        one), so the ONE reader that all three proof shapes call must end the
+        code at the first interned string — and keep everything when the image
+        has no strings, and never run past the end of `code`.  A helper that
+        answered `len(code)` for an image WITH strings would restore the very
+        lemma the ordinary shape was fixed not to emit, and one that answered
+        0 for an image without strings would delete every step lemma; both are
+        checked here rather than discovered by a proof that fails to
+        typecheck.
+        """
+        import formal.arm64_proof_gen as G
+        base = 0x100000000
+        # Two instructions then a data word: the intern table names the third
+        # word's address, so the executable code is the first eight bytes.
+        word = _STEP_ENTRY_WORD(G, 21)
+        self.assertIsNotNone(word)
+        code = struct.pack("<III", word, word, 0x36312064)
+        info = {"str_addrs": {"<trap>": base + 8}}
+        self.assertEqual(G._executable_code(code, info, base), code[:8])
+        # No strings: the whole code is executable.
+        self.assertEqual(G._executable_code(code, {"str_addrs": {}}, base), code)
+        # A string address at or below the base is not the code's end — a
+        # non-positive slice would delete every step lemma.
+        self.assertEqual(
+            G._executable_code(code, {"str_addrs": {"x": base}}, base), code)
 
     def test_the_derivation_is_total_over_the_step_table(self):
         """Every word the step decoder accepts has a right-hand side.
