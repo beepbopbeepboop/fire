@@ -47,6 +47,65 @@ in §2 re-ran, and the tool's tally was never the thing that was wrong.
 
 **What this does NOT close:** §6's four items are unchanged — the `struct` decision (now named as the 3 stems above), the stdlib sweep, the two rare transforms, and the `int_only` lower bound. Nothing here is a new SWEEP; it is the suite going from red to green with the two real defects fixed.
 
+## 0a. Status 2026-10-13 (`work/formal353-docs`): §6 item 4's measurement, taken —
+## and the bound was the transform's SPELLING, not `int_only`
+
+**§6 item 4 said `Analysis.int_only` is a lower bound and "a future session
+should MEASURE the remaining decline reasons as §2a did rather than guess at
+them". Measured on this tree, seed `mm-r3`, 20 programs per mix at `--stmts 8
+20`, over the 27 mixes `formal_fuzz.MIXES` carries: `swap_add` reached 351 of
+540 programs, and it reaches 376 after the change below.** The census of the
+operands the predicate still refuses, over the same corpus: a NAME the
+classification cannot certify (1263 operands), a `BinOp` that is not an int (570
+— string concatenation, and arithmetic over names that never got certified), a
+`Subscript` (320), an `Attribute` (202), a `Call` (123, refused ON PURPOSE — see
+below), a non-integer `Constant` (45), an `IfExp` (2); and 83 of the programs
+carry no `+` at all, so no operand predicate can reach them.
+
+**What landed is one predicate, and the finding is that `int_only` was not the
+bound — the transform's spelling was.** `t_swap_add` swapped only when both
+operands were integer literals or names in `int_only`; an operand that is an int
+EXPRESSION (`a * 2`, `(b << 3)`, `(x if c else y)`, a comparison) was refused
+even though `_int_expr` — the classifier the stores are already judged by, and
+the one §2a built — proves it an int. So `_operand_ok` now asks the two
+questions that are actually separate:
+
+  * **is it an INT**: `_int_expr`'s answer, unchanged, so the widening adds no
+    new belief about types;
+  * **is it PURE**: because swapping operands changes the order they are
+    EVALUATED in, and `_int_expr` accepts a call to a function that provably
+    returns an int (`_call_is_int`), which is a fact about the RESULT and not
+    about the effects. `_EFFECTFUL_NODES` — a call, an attribute read, a
+    subscript, a comprehension, a lambda, an `await`/`yield` — is refused
+    wherever it appears in the operand's subtree, so `g() + 1` stays declined.
+
+**The 12 mixes that gained are `bignum` 10→15, `classes` 12→13, `closures`
+19→20, `comps` 7→9, `fstrings` 6→8, `noreturn` 11→14, `refs` 7→9, `sets` 8→10,
+`strfmt` 5→7, `strings` 11→12, `strmeth` 9→12, `unpack` 8→9** — every other mix
+is unchanged, which is the shape of a change to the OPERAND predicate rather
+than to `int_only`: no name's classification moved.
+
+**Pinned by three rows in `test_formal_metamorph.py`'s `ScopeResolution`:** a
+`+` whose operand is `a * 2` is accepted; a `+` whose operand is `g()` is
+refused even though `_int_expr` calls it an int (the purity half, with the
+positive assertion beside it so the row cannot pass by classifying `g()`
+differently); and `s + t` stays refused. The whole-corpus property
+(`test_every_transform_preserves_the_meaning`, which now exercises the wider
+reach against CPython) is green: **65 tests, was 62.**
+
+**And the images were asked, because a CPython-only property cannot see a
+backend divergence.** Two build sweeps at `--stmts 8 20`, 20 programs, `-j 4`,
+peak 0.3 GB, **0 findings on both**: `bignum` (`swap_add match=13, skip=7`) and
+`refs` (`match=5, skip=15`) — the two mixes where the widening touches an
+arithmetic shape and an aliased shape respectively.
+
+**What this does NOT close:** §6's other three items are untouched (the `struct`
+decision, the stdlib sweep, the two rare transforms), and the census above is a
+measurement of what remains rather than a claim that the rest is unreachable.
+The largest single row — 1263 refused NAME operands — is largely names the
+corpus binds to strings and containers, which is a fact about the corpus rather
+than about `int_only`.
+
 ## 1. The rule this ledger keeps
 
 A row is a MEASUREMENT of a run, never a target. What makes a row worth reading is the TRANSFORM table beside it, not its tally: a run where `inline_helper` skipped every program and one where it answered 200 pairs are the same tally, and the second measured something the first did not.
@@ -354,13 +413,16 @@ first three items of the previous session's list are now DONE and are recorded i
    ledger's; the honest reading is that **these two transforms are measured on the
    examples corpus and barely measured on the generated one**, which is the
    opposite of what §2's twenty-mix sweep implied by its tally.
-4. **`Analysis.int_only` is still a lower bound, and where it now stops is not
-   written down.** §2a raised `swap_add` reach from 133 to 275 of 440 programs, so
-   the four questions it lacked were worth 142 programs — and the remaining 165 are
-   spread over `environ` (6/20), `unpack` (4/20), `strfmt` (3/20), `limits` (2/20)
-   and `slicing` (7/20), which are now the mixes to look at. A future session
-   should MEASURE the remaining decline reasons as §2a did rather than guess at
-   them; that is the one piece of advice here this file has to earn twice.
+4. **`Analysis.int_only` is still a lower bound, and §0a has now MEASURED where
+   it stops (2026-10-13).** §2a raised `swap_add` reach from 133 to 275 of 440
+   programs; on this tree it reached 351 of 540, and 376 once the operand
+   predicate stopped requiring a bare name or a literal (`int_only` itself did
+   not move — see §0a for the census and the 12 mixes that gained). The
+   remaining decline reasons, measured rather than guessed, are §0a's list: a
+   `BinOp`/name/subscript/attribute operand that is not provably an int, a call
+   refused on purity, and 83 programs with no `+` at all. **The advice this item
+   carried — "MEASURE the remaining decline reasons as §2a did rather than guess
+   at them" — is what §0a did, so read it there rather than here.**
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 

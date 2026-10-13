@@ -1493,8 +1493,8 @@ def t_swap_add(module, an, rng):
     `a + b mod 2^64`, and modular addition is commutative too.  The predicate
     is not "any `+`": `a + b` is NOT commutative for lists, tuples or dicts
     (`[1] + [2]` and `[2] + [1]` are different values), so both operands must be
-    integer literals or names in `Analysis.int_only`, and `int_only` requires
-    every store of the name to be an integer literal in one scope.
+    integer expressions, and the integer classification is `_operand_ok`, whose
+    two questions — is it an int, and is it PURE — are answered below it.
     """
     cands = [n for n in ast.walk(module)
              if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)
@@ -1506,9 +1506,39 @@ def t_swap_add(module, an, rng):
     return module
 
 
+#: Node types whose evaluation is a CALL or a read of something this analysis
+#: cannot see the shape of, so a `+` operand built out of one is not pure enough
+#: to swap.  A comprehension is a scope and a lambda is a function; a `yield`
+#: and an `await` are effects.  What is NOT here is the point: `Name`, `Constant`
+#: and every operator node (`BinOp`, `UnaryOp`, `BoolOp`, `Compare`, `IfExp`)
+#: evaluate for their value alone.
+_EFFECTFUL_NODES = (ast.Call, ast.Attribute, ast.Subscript, ast.Await,
+                    ast.Yield, ast.YieldFrom, ast.NamedExpr, ast.Lambda,
+                    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
 def _operand_ok(node, an):
-    return (_is_int_literal(node)
-            or (isinstance(node, ast.Name) and node.id in an.int_only))
+    """Whether `swap_add` may exchange this operand of a `+`.
+
+    Two questions, and they are not the same one:
+
+      * **is it an INTEGER** — `_int_expr`'s answer, the same conservative
+        classification the stores are judged by.  A bare name is not required:
+        `a * 2` is an int when `a` is, and refusing an operand that is not a
+        name or a literal was declining programs the analysis already
+        classifies.  Measured: see the ledger's §0a.
+      * **is it PURE** — because swapping two operands changes the order they are
+        EVALUATED in, and a call may print or mutate a module global on the way.
+        `_int_expr` accepts a call to a function that provably returns an int
+        (`_call_is_int`), which is a fact about the RESULT and not about the
+        effects, so `_EFFECTFUL_NODES` is refused wherever it appears in the
+        operand's subtree — not only at its root.  `g() + 1` is the case: `g()`
+        is an int and swapping it could move `g`'s print past `1`, so it is
+        declined and the row beside this one pins that it is.
+    """
+    if any(isinstance(n, _EFFECTFUL_NODES) for n in ast.walk(node)):
+        return False
+    return an._int_expr(node, an.int_only)
 
 
 # -- 7. `x = e` + uses -> the expression -------------------------------------

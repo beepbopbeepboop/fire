@@ -718,6 +718,63 @@ class ScopeResolution(unittest.TestCase):
                       "    return 0\n")
         self.assertNotIn("n", an.int_only)
 
+    # -- `swap_add`'s operand predicate, which is two questions --------------
+
+    def _add_operands(self, source):
+        """`(Analysis, the `+` node)` for a program with exactly one `+`."""
+        tree = ast.parse(source)
+        plus = [n for n in ast.walk(tree)
+                if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add)]
+        self.assertEqual(len(plus), 1, "the row wants a program with one `+`")
+        return M.Analysis(tree), plus[0]
+
+    def test_swap_add_takes_a_pure_integer_expression_operand(self):
+        """The operand may be an EXPRESSION, not only a name or a literal.
+
+        `a * 2 + b` has both operands provably int and both pure, so `+` is
+        commutative over them and the swap is sound.  Requiring a bare name or a
+        literal was a property of the transform's spelling rather than of the
+        program, and it declined programs the analysis already classifies — see
+        the ledger's §0a for the measured fraction.
+        """
+        an, node = self._add_operands("def main() -> Int32:\n"
+                                      "    a = 3\n"
+                                      "    b = 5\n"
+                                      "    print(a * 2 + b)\n"
+                                      "    return 0\n")
+        self.assertTrue(M._operand_ok(node.left, an), "`a * 2` is a pure int")
+        self.assertTrue(M._operand_ok(node.right, an))
+
+    def test_swap_add_declines_an_operand_that_calls(self):
+        """A call's RESULT being an int says nothing about its EFFECTS.
+
+        `g()` provably returns an int, so `_int_expr` classifies it — but
+        swapping `g() + 1` reorders the CALL against the other operand and `g`
+        prints.  So the operand predicate asks purity as well as type, and this
+        is the row that pins the widening did not throw that away.
+        """
+        an, node = self._add_operands("def g():\n"
+                                      "    print('side')\n"
+                                      "    return 7\n"
+                                      "def main() -> Int32:\n"
+                                      "    print(g() + 1)\n"
+                                      "    return 0\n")
+        self.assertTrue(an._int_expr(node.left, an.int_only),
+                        "`g()` is an int by `_call_is_int`")
+        self.assertFalse(M._operand_ok(node.left, an),
+                         "…and it is still refused, because it is not pure")
+
+    def test_swap_add_declines_a_string_concatenation(self):
+        """The other question, unchanged by the widening: `str + str` is not
+        `int + int`, and the two orders concatenate to different strings."""
+        an, node = self._add_operands("def main() -> Int32:\n"
+                                      "    s = 'a'\n"
+                                      "    t = 'b'\n"
+                                      "    print(s + t)\n"
+                                      "    return 0\n")
+        self.assertFalse(M._operand_ok(node.left, an))
+        self.assertFalse(M._operand_ok(node.right, an))
+
 
 class ReorderAliasing(unittest.TestCase):
     """Two names bound to ONE object are one name to `reorder`'s test.
