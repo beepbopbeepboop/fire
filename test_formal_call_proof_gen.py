@@ -621,8 +621,10 @@ class TestGeneratorSource(unittest.TestCase):
         one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
         reading a branch condition out of a COMMENT above the TBZ case, which put
         `test_formal.py` in a state where it raised before generating a single
-        proof for every example it has — see
-        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+        proof for every example it has. The doc for that regression is deleted
+        with its fix; this row and
+        `test_a_comment_that_quotes_a_condition_is_not_a_branch` below are what
+        keep the reader anchored.
 
         The regression this pins is the one whose fix was to REMOVE a row:
         `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
@@ -634,6 +636,48 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertIsInstance(notes, list)
         for note in notes:
             self.assertIn("shadows entry", note)
+
+    def test_a_comment_that_quotes_a_condition_is_not_a_branch(self):
+        """`_decoder_branch_conds` reads branch LINES, not the prose about them.
+
+        `audit_step_table` used an UNANCHORED `re.findall` for
+        `insn &&& (mask)) = (base)` over `arm64_step`'s body, so the comment
+        above the TBZ case — which quotes its own condition — read as a second
+        branch, the model list came out one entry longer than `_STEP_CONDS` with
+        no entry unique to either side, and the audit raised on every run.
+        `test_formal.py` calls `audit_step_table` BEFORE it compiles anything,
+        so the whole arm64 proof suite had not run since that comment landed.
+
+        The fix was to make the audit call this reader, which matches a branch
+        LINE (two spaces, optional `else`, `if … then`), so a comment that
+        quotes the condition it is reasoning about is a thing the model may say.
+        The doc for this regression is deleted with this pin: it is that
+        regression, exercised on the reader rather than on the file, so the pin
+        costs no Lean and no build.
+        """
+        import formal.arm64_proof_gen as G
+        src = (
+            "def arm64_step (insn : UInt32) (s : Arm64State) : "
+            "Option Arm64State :=\n"
+            "  -- data-processing case, because `(insn &&& 0xff000000) = "
+            "0x36000000` is\n"
+            "  -- specific (top byte 0x36 is the test-bit space and nothing "
+            "else)\n"
+            "  if (insn &&& 0xff000000) = 0x36000000 then\n"
+            "    some s\n"
+            "  else if insn = 0xd65f03c0 then\n"
+            "    some s\n"
+            "  else\n"
+            "    none\n"
+            "\n"
+            "def something_else := 1\n"
+        )
+        self.assertEqual(
+            G._decoder_branch_conds(src),
+            [(0xff000000, 0x36000000), (None, 0xd65f03c0)],
+            "the comment's quoted condition was read as a branch, which is the "
+            "regression that put `test_formal.py` in a state where it raised "
+            "before generating a single proof")
 
     def test_smulh_is_modelled_and_disjoint_from_mul(self):
         """The four things `SMULH` costs, and the one that is easy to get wrong.
@@ -4690,9 +4734,9 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """Which corpus examples REACH a proof file, pinned without Lean.
 
-    `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
-    recorded twelve red examples on 2026-10-03 and measured them one family at a
-    time, which is the right discipline and produced a list that has since gone
+    The arm64 step-table audit's own fix (its doc is deleted with it) recorded
+    twelve red examples on 2026-10-03 and measured them one family at a time,
+    which is the right discipline and produced a list that has since gone
     stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
     `sorry`, and `sum_range` was the last one refusing at generation — its
     back edge is a conditional branch, and a `for`-range loop lowers with the

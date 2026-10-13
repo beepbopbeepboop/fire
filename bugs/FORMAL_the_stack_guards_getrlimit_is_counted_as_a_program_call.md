@@ -3,9 +3,8 @@
 **Area:** FORMAL / proof generation — `formal/arm64_codegen.py`'s
 `_emit_stack_floor_guard` and `formal/arm64_proof_gen.py`'s `_calls` /
 `_opaque` selection. **Status: NOT FIXED.** Found 2026-10-06 while
-re-measuring `TestTheRecursionFamiliesStillGenerate` (the pin the
-`FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` doc
-names).
+re-measuring `TestTheRecursionFamiliesStillGenerate`, the pin the arm64
+step-table audit's fix landed (that fix's own doc is deleted with it).
 
 ## What I ran
 
