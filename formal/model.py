@@ -5179,8 +5179,10 @@ def _for_emptiness(s, consts=None) -> str:
     answered one of them and not the other is a graph and a walk disagreeing
     about the same loop.
 
-    It is decidable for a literal sequence (`[1, 2]`, `"ab"`) and for a `range`
-    whose arguments `_range_is_nonempty` can decide — from the literals in the
+    It is decidable for a literal sequence (`[1, 2]`, `"ab"`), for a literal
+    dict display (`{}` is empty, `{'a': 1}` is not — unless an UNPACKING entry
+    makes its size a run-time fact) and for a `range` whose arguments
+    `_range_is_nonempty` can decide — from the literals in the
     call, plus whatever `consts` (`_preheader_literals`' table) has decided about
     a name. `range` is the one call this reads because CPython's own emptiness
     rule is a closed-form function of its three arguments. Everything else is
@@ -5194,6 +5196,21 @@ def _for_emptiness(s, consts=None) -> str:
         return _ALWAYS_RUNS if getattr(it, "elements", None) else _NEVER_RUNS
     if isinstance(it, F.StringLiteral):
         return _ALWAYS_RUNS if it.value else _NEVER_RUNS
+    if isinstance(it, F.DictExpr):
+        # A dict LITERAL is the fourth literal container whose emptiness is a
+        # property of the source, and it was the one this reader did not ask
+        # about: `for q in {}: x = 1` followed by a read of `q` built, iterated
+        # zero times (measured: a counting body answers 0), and printed whatever
+        # the allocator left in the register — CPython's `UnboundLocalError`.
+        # An entry with an UNPACKING key (`{**d}`) contributes zero or more
+        # pairs and makes the display's size a run-time fact, which keeps the
+        # conservative `'maybe'`; every other entry is exactly one pair however
+        # its key is written, so a display with one is non-empty.
+        pairs = list(getattr(it, "pairs", None) or [])
+        if any(isinstance(p, (list, tuple)) and p and isinstance(p[0],
+               F.UnaryOp) and getattr(p[0], "op", None) == "**" for p in pairs):
+            return _MAYBE_RUNS
+        return _ALWAYS_RUNS if pairs else _NEVER_RUNS
     if isinstance(it, F.CallExpr) and not (getattr(it, "kwargs", None) or []):
         func = getattr(it, "func", None)
         if isinstance(func, F.IdentExpr) and func.name == "range":

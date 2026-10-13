@@ -326,6 +326,23 @@ CASES = [
      "    for c in \"\":\n        pass\n    return c\n", "refuse"),
     ("nonempty_literal_list_target_is_still_a_definition",
      "    for i in [4, 5]:\n        pass\n    return i\n", "ok"),
+    # A dict DISPLAY is the fourth literal container, and it was the one
+    # `_for_emptiness` did not ask about: `for q in {}: x = 1` then a read of `q`
+    # built, ran ZERO iterations (a counting body answers 0 on both backends),
+    # and printed the register the allocator handed `q` — where CPython raises
+    # `UnboundLocalError`. The keys are what a walk over a dict yields
+    # (`_iterable_dict_key_kind`), so the target IS a definition when the display
+    # has an entry.
+    ("empty_dict_target_is_not_a_definition",
+     "    for i in {}:\n        pass\n    return i\n", "refuse"),
+    ("nonempty_dict_target_is_still_a_definition",
+     "    for i in {'a': 1}:\n        pass\n    return i\n", "ok"),
+    # …and an UNPACKING entry (`{**d}`) is the one display whose size is a
+    # run-time fact, so the conservative `'maybe'` keeps the target defined.
+    # This is the direction that must not be widened: `{**d}` with `d` empty
+    # binds nothing, and the reader cannot see that.
+    ("unpacking_dict_target_keeps_the_definition",
+     "    d = {'a': 1}\n    for i in {**d}:\n        pass\n    return i\n", "ok"),
     # THE RESIDUAL, pinned as a case so it cannot rot: the preheader has to
     # STATE the value, and a parameter is not a literal it can state — which is
     # the same limit `while_body_store_from_a_parameter_refused` records for the
@@ -384,6 +401,13 @@ CASES = [
      "    for i in [1, 2, 3]:\n        t = i\n    return t\n", "ok"),
     ("empty_literal_list_body_store_refused",
      "    for i in []:\n        t = i\n    return t\n", "refuse"),
+    # The dict-display half of the same question, in both directions: an empty
+    # display never runs the body (so a store in it is not a definition), and a
+    # display with an entry always does.
+    ("empty_dict_body_store_refused",
+     "    for i in {}:\n        t = i\n    return t\n", "refuse"),
+    ("nonempty_dict_body_store_ok",
+     "    for i in {'a': 1}:\n        t = i\n    return t\n", "ok"),
     ("empty_range_body_store_refused",
      "    for i in range(0, 5, -1):\n        t = i\n    return t\n", "refuse"),
     # THE SECOND SOURCE OF EVIDENCE for `_loop_body_always_runs`, and the row that

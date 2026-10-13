@@ -5,6 +5,19 @@
 `_build_cfg` (the loop-target definition), with the emitter half already
 landed.
 
+**Status 2026-10-12 (`work/formal318-docs`): the decidable set had a HOLE in the
+same class and it is closed — a dict DISPLAY is a literal container too.**
+`for q in {}: x = 1` then a read of `q` built, ran ZERO iterations (a counting
+body answered 0 on both backends) and printed the register the allocator handed
+`q`, where CPython raises `UnboundLocalError`; `_for_emptiness` asked about a
+list/tuple/set/string literal and not about a `DictExpr`.  It now answers
+`'never'` for `{}`, `'always'` for a display with an entry, and `'maybe'` for one
+with an UNPACKING entry (`{**d}`, whose size is a run-time fact) — so
+`FORMAL_a_keyword_construction_…`'s sibling and this doc are the same reader.
+`test_formal_read_before_store.py` is 174 checks (+5 rows: `empty_dict_target_…`,
+`nonempty_dict_target_…`, `unpacking_dict_target_…`, `empty_dict_body_store_…`,
+`nonempty_dict_body_store_…`).  **The residual below is unchanged.**
+
 **Status: PARTIAL — the emptiness as a PREDICATE is FIXED (2026-10-04,
 `formal/model.py`: `_for_emptiness` is the one reader, `_range_is_nonempty`
 reads the preheader's literals, and `_build_cfg` seeds the body's first block
@@ -30,7 +43,9 @@ obvious:
    `_for_target_never_binds`, which were the same question asked twice (and the
    second time without the preheader). It also widens the decidable set to a
    literal SEQUENCE: `for i in []` and `for c in ""` bind no target, which they
-   did not before, because only a `range` call was ever read.
+   did not before, because only a `range` call was ever read. A dict DISPLAY is
+   the fourth literal container and joined the set 2026-10-12 (`{}` is `'never'`,
+   `{'a': 1}` is `'always'`, `{**d}` is `'maybe'`) — see the Status above.
 2. **`_range_is_nonempty(args, consts)` reads `_preheader_literals`' table**, so
    `k = 0` then `range(0, k)` is an emptiness this build decides. That is the
    doc's option 2, and the table was already there — `_loop_body_always_runs`
