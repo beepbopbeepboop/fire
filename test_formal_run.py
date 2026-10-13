@@ -17746,6 +17746,22 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
      "refuse:opens a container", None),
+    # …and the same boundary one node deeper, through a COMPREHENSION rather
+    # than a literal: a comprehension whose OWN element opens a container is
+    # still refused, because the result it appends holds a pointer to a blob
+    # the element site REUSES, so the copy would alias one level down.
+    # `[[[x + y + z for x in [1]] for y in [10]] for z in [100, 200]]` is the
+    # reproducer and answered `422` against CPython's `322` when the recursion
+    # was written without this boundary (measured 2026-10-08, work/formal182-
+    # docs; re-measured on the merged tree 2026-10-13, both backends).
+    ("a_comprehension_whose_element_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for a in [[[x + y + z for x in [1]] for y in [10]] for z in [100, 200]]:\n"
+     "        s = s + a[0][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:the element `[…] for …` opens a container", None),
     # The DICT half: the VALUE opens the container, and it is the shape the
     # `nested_comprehension_in_a_generator_iterable` row used to carry as its
     # fourth case — so this row is that coverage, strengthened from "builds and
