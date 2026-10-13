@@ -530,27 +530,41 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     The assertion is on the SPELLING, not the name, and it is stronger for it:
     `simp_all_toNat` is spelled `simp_all [...] <;> omega`, and a rung whose
     name appears in the script while a DIFFERENT tactic runs under it is the
-    same drift this row was written for, wearing the name as camouflage.  So
-    every rung's rendered spelling must occur exactly once, and the script must
-    not contain a tactic that no rung spells."""
+    same drift this row was written for, wearing the name as camouflage.
+
+    The property is the SCRIPT'S RUNG LINES, read one per rung and in order.
+    It is deliberately not `script.count(spelling) == 1`: a rung may COMPOSE
+    another rung's tactic -- the leading rung now ends `… <;> simp_all […] <;>
+    omega`, which CONTAINS the bare `simp_all` rung's own spelling and the
+    `omega` rung's, exactly as it should -- so a substring count reports a
+    composition as drift.  Reading the lines is the same check without that
+    false positive, and it still fails on a rung that is missing, duplicated or
+    reordered.
+
+    (The `check(...)` arguments below are `(condition, label)`, which is the
+    helper's own order and the order the Lean rows in this file use.  Much of
+    this file has them the other way round and those rows cannot fail -- filed
+    as `bugs/TEST_test_formal_contracts_assertions_mix_argument_order.md`; new
+    and touched rows use the real order so that they do.)"""
     from formal import contracts as CT
     script = CT._ladder_script("h0, m_go, sKey")
     spellings = [spelling.format(lemmas="h0, m_go, sKey", extra=CT._EXTRA_SIMP)
                  for _name, spelling in CT.LADDER]
-    check("the_script_spellings_every_rung",
-          all(sp in script for sp in spellings), f"{CT.LADDER} vs\n{script}")
-    for (name, _spelling), sp in zip(CT.LADDER, spellings):
-        check(f"the_script_spellings_one_{name}",
-              script.count(sp) == 1, script)
-    check("the_script_names_no_unlisted_tactic",
-          "bv_decide" not in script, script)
+
+    def rung_lines(text):
+        return [ln.strip()[3:-1] for ln in text.splitlines()
+                if ln.strip().startswith("| (") and ln.strip().endswith(")")]
+
+    check(rung_lines(script) == spellings,
+          "the_script_spellings_every_rung_once_in_order", f"{script}")
+    check("bv_decide" not in script,
+          "the_script_names_no_unlisted_tactic", script)
     # A rung's NAME is what `Verdict.why` prints, so every name has to be one
     # word a reader can be shown, and the list must not be empty or a single
     # rung (`first` with one alternative is not a ladder).
     names = [name for name, _ in CT.LADDER]
-    check("the_rungs_are_named_for_the_reader",
-          all(n and " " not in n for n in names) and len(names) >= 2,
-          f"{names}")
+    check(all(n and " " not in n for n in names) and len(names) >= 2,
+          "the_rungs_are_named_for_the_reader", f"{names}")
     src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
            "def cl(n):\n"
            "    if n < 0:\n        return 0\n"
@@ -559,12 +573,18 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     fn = functions(parse(src))[0]
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     body = e.lean.split(":= by")[-1]
-    check("the_EMITTED_theorem_uses_the_listed_rungs",
-          all(sp in body for sp in spellings), body)
-    check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
+    # One bullet, one `first`, one line per rung -- the emitted theorem uses
+    # the LISTED rungs and nothing else.  (The old row compared the emitted
+    # body to `spellings` rendered for a DIFFERENT contract's lemma set, so it
+    # could never have passed; it was invisible because its arguments are in
+    # the dead order.)
+    check(len(rung_lines(body)) == len(CT.LADDER),
+          "the_EMITTED_theorem_uses_the_listed_rungs", body)
+    check("bv_decide" not in body,
+          "the_emitted_theorem_invents_no_rung", body)
     v = CT.classify(e, lean_ok=True)
-    check("the_PROVED_reason_names_the_rungs_that_ran",
-          all(n in v.why for n in names), v.why)
+    check(all(n in v.why for n in names),
+          "the_PROVED_reason_names_the_rungs_that_ran", v.why)
 
 
 def _postcondition_shape(count):
@@ -651,8 +671,8 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
     attribute, because the attribute is the one thing a future reader would
     not think to check when they changed the set: `simp_all [ … ]` is written
     out in the theorem, so a set that lost a name is a proof that quietly stops
-    closing.  `bugs/FORMAL_contract_ladder_reach.md` is where the measurement
-    behind each name is.
+    closing.  The measurement behind each name is in the comment on
+    `formal/contracts.py::_ORDER_BRIDGE`.
     """
     from formal import contracts as CT
     for name in CT._ORDER_BRIDGE:
@@ -679,6 +699,27 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
                                               "Nat.le_of_lt"]),
           "the_bridge_is_these_three_order_names_and_no_other",
           str(CT._ORDER_BRIDGE))
+    # And the order bridge is not the whole of the set: a goal that is an
+    # EQUALITY rather than an order needs the xor cancellation, which is a
+    # second tuple with its own names (`work_u64_sign_zero_of_le`).  Pinned on
+    # the EMITTED script for the same reason as the three above -- it is the
+    # one place a reader would not look when the name moved.
+    for name in CT._SIGN_BRIDGE:
+        check(all(name in ln for ln in simp_lines),
+              f"the_emitted_simp_set_carries_{name}", "\n".join(lines))
+    check(sorted(CT._SIGN_BRIDGE) == sorted(["work_u64_sign_zero_of_le"]),
+          "the_sign_bridge_is_the_cancellation_and_no_other",
+          str(CT._SIGN_BRIDGE))
+    # and the DEFINITION is where the emitted theorem can see it: every
+    # generated arm64 proof header imports `work` (the per-instruction step
+    # lemmas live there), which is why the lemma is in `lib/work.lean` rather
+    # than `lib/ProofLib.lean`.  Read off the generator's own header text, so a
+    # header that dropped the import fails here rather than at Lean.
+    from formal import arm64_proof_gen as AP
+    import inspect as _inspect
+    src = _inspect.getsource(AP)
+    check('import work' in src, "the_generator_emits_import_work",
+          "no 'import work' in arm64_proof_gen.py")
 
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
@@ -1052,7 +1093,12 @@ def _lean_file(path, fn):
     emission = CT.contract_theorems(
         CT.read_contracts(fn, path, open(path).read()),
         CT._param_names(fn), fn=fn)
-    return (f"import Lean\nimport ProofLib\n\n"
+    # `import work` and not only `import ProofLib`: the ladder's `_SIGN_BRIDGE`
+    # cites `work_u64_sign_zero_of_le`, and a generated arm64 proof already
+    # imports `work` (the per-instruction step lemmas live there) -- so the
+    # file that checks the CONTRACT has to import what the real proof does, or
+    # the check measures a scope the emitted theorem is never seen in.
+    return (f"import Lean\nimport ProofLib\nimport work\n\n"
             f"set_option maxRecDepth 100000\n"
             f"set_option linter.unusedSimpArgs false\n\n"
             f"{model}\n\n{emission.lean}\n"), emission
@@ -1096,26 +1142,29 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
     # a rung fails, so that rung can only ADD reach, and these two still close.
     #
-    # `mini.mojo` and `abspos.mojo` are named here as the NEGATIVE half, and
-    # they are the rows that make this list a measurement of the ladder's reach
-    # rather than a list of things that happen to pass: both are still UNREACHED
-    # (their verdict is UNKNOWN) and their rows would go red the moment a rung
-    # closed them, which is what says the reach is still short of "everything".
-    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the same line at the
-    # `classify` level; the reason each is still unreached, measured, is in
-    # `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # `mini.mojo` and `abspos.mojo` USED to be the negative half of this list:
+    # both were UNREACHED, and their rows going red the moment a rung closed
+    # them was what said the reach was short of "everything".  `mini`'s
+    # postcondition is a `max`, which `_lean_of` renders as an `if` over the
+    # SAME comparison in the opposite sense, so the goal after the `toNat`
+    # rewrite is a selection over a symbolic word that neither `omega` nor
+    # `decide` can decide -- closed by the leading rung's `(try split)`;
+    # `abspos`'s goal is an EQUALITY (`-n = n`), and its context pins a word to
+    # the sign bit from both sides, so it needs the xor CANCELLATION the
+    # `toNat` bridges -- all of them about `<`/`≤` -- cannot state, which is
+    # `formal/contracts.py::_SIGN_BRIDGE`'s `work_u64_sign_zero_of_le`.
     #
-    # `mini` and `abspos` need an xor-cancellation fact this toolchain does not
-    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): the goal is an
-    # EQUALITY over `UInt64`, so the `toNat` bridges the ladder carries -- all
-    # of them about `<`/`≤` -- do not rewrite it, and `UInt64.toNat_inj` only
-    # turns it into a Nat equality the simplifier cannot discharge without that
-    # missing lemma.
+    # So both are now POSITIVE rows, and the negative half of the list is
+    # `wrong_clampv` alone -- which is the right place for it: the property the
+    # list has to keep is that the ladder cannot close a FALSE contract, and a
+    # rung that only adds tactics (a `split`, a `simp_all`, a conditional
+    # `simp` lemma) cannot.  `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds
+    # the same line at the `classify` level.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),
-             ("mini.mojo", "mini", False),
-             ("abspos.mojo", "abspos", False),
+             ("mini.mojo", "mini", True),
+             ("abspos.mojo", "abspos", True),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
         path = os.path.join(EXAMPLES, name)

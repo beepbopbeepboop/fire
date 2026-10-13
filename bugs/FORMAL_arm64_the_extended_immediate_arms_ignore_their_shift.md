@@ -45,8 +45,10 @@ returns a state the machine never reached.** Not fixed: `lib/ProofLib.lean`, and
 that build peaks at **9.8 GB** measured with `formal/lean.py::ensure_library`'s
 own invocation — over a bounded worker's 8 GB ceiling, under the tree's
 `LIBRARY_MEMORY_MB = 12288`, so the blocker is memory alone and the library is
-not broken. (The `-T 0` trap that measurement has is written up in
-`bugs/FORMAL_contract_ladder_reach.md`.)
+not broken. (The `-T 0` trap that measurement has — `heartbeats=0` is
+`maxHeartbeats 0`, and a library build under it reports a `bv_decide` "unknown
+join point" cascade that reads like a broken library — is written up in
+`formal/lean.py`'s `run_lean` docstring.)
 
 **Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
 verification is what is still owed.** One helper,

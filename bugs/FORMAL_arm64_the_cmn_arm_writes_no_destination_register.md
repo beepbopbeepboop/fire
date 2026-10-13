@@ -50,7 +50,7 @@ over a bounded worker's 8 GB ceiling, under the tree's `LIBRARY_MEMORY_MB =
 (The measurement has a trap: `run_lean`'s `heartbeats=0` becomes `-T 0` =
 `maxHeartbeats 0`, and a build under it fails with a `bv_decide` "unknown join
 point" cascade at 7.1 GB that looks exactly like an unbuildable library.
-`bugs/FORMAL_contract_ladder_reach.md` carries the full note.)
+`formal/lean.py`'s `run_lean` docstring carries the full note.)
 
 **Status 2026-10-07 (`work/formal108-docs`): the SOURCE fix landed; the
 verification is what is still owed.** `arm64_step`'s `0xab000000` arm now reads

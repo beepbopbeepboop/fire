@@ -840,8 +840,21 @@ _MASK = (1 << 64) - 1
 # `simp_all` that has already rewritten the goal has consumed the `<;> omega`
 # it would have needed.  Measured both orders on the corpus: toNat-first closes
 # `bounds_index`, bare-first does not.
+#
+# The `(try split)` in the leading rung is `mini.mojo`'s reach and it is
+# measured, not defensive.  `mini`'s postcondition is stated with `max`, which
+# `_lean_of` renders as an `if` whose two directions are the SAME signed
+# comparison in opposite senses -- so the goal after the toNat rewrite is
+# `s+3 ≤ (if s+3 < X then n else 3).toNat ^^^ s`, and neither `omega` nor
+# `decide` can decide a selection over a symbolic `X`.  `split` turns that into
+# the two cases (which then reduce to `h : s+3 ≤ X` and to `s+3 ≤ s+3`), and the
+# `simp_all` after it is what reduces the ground `(3 : UInt64).toNat ^^^ s` in
+# the else-case.  `try` rather than a bare `split` because a goal with no
+# decidable selection must fall THROUGH this rung to the next one, not fail the
+# script: `first` restores the goal, so an added rung can only widen reach.
 LADDER = (
-    ("simp_all_toNat", "simp_all [{lemmas}, {extra}] <;> omega"),
+    ("simp_all_toNat", "simp_all [{lemmas}, {extra}] <;> (try split) "
+                       "<;> simp_all [{lemmas}] <;> omega"),
     ("simp_all", "simp_all [{lemmas}]"),
     ("omega", "omega"),
     ("decide", "decide"),
@@ -867,10 +880,10 @@ LADDER = (
 # carry a failed rung's rewrites forward to the next one, so the rewrite and
 # the arithmetic it enables have to be ONE rung.
 #
-# `bugs/FORMAL_contract_ladder_reach.md` §4 prescribed a lemma here instead --
+# A sign-flip lemma was prescribed here once instead --
 # `sKey_lt_iff : sKey a < sKey b ↔ a < b`, to be added to `lib/work.lean`.  That
-# lemma is FALSE, and it is worth recording why because the doc's reasoning is
-# right and only its conclusion is wrong: `sKey` flips the top bit, so
+# lemma is FALSE, and it is worth recording why: the reasoning behind the
+# prescription is right and only its conclusion is wrong: `sKey` flips the top bit, so
 # `sKey a < sKey b` is the SIGNED reading of `a < b`, not the unsigned one
 # `Fin` gives.  Measured, `decide` refutes it: at `a = 0` and
 # `b = 0xffffffffffffffff`, `sKey a < sKey b` is FALSE (flipping the top bit
@@ -880,9 +893,8 @@ LADDER = (
 _EXTRA_SIMP = "UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le"
 
 # The order bridge the ladder's `simp_all` rung carries, beside `sKey` and the
-# two `u64_*_iff` lemmas.  `bugs/FORMAL_contract_ladder_reach.md` §3 measured why
-# it is needed and §4 named the shape of the fix; the measurement is the short
-# version:
+# two `u64_*_iff` lemmas.  It was measured into the set when `bounds_index` and
+# `clamped` were the contracts the ladder could not close; the short version:
 #
 #   * `Lean.UInt64` is NOT an integer type `omega` has.  It is a bitvector type
 #     whose `<` and `≤` are the *order on `toNat`* but whose `^^^` is a BIT
@@ -903,15 +915,44 @@ _EXTRA_SIMP = "UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le"
 # to a weak one, which is the whole of `bounds_index.mojo`'s contract -- is a
 # simp lemma rather than an absence.
 #
-# A library lemma was considered and rejected: the obvious spelling
-# (`sKey_lt_iff` in `lib/work.lean`, which is what the doc §4 prescribed) is a
-# proof about the *sign flip* being an involution, and the goal is already
-# stated over flipped words -- the flip is not what is in the way, the ORDER is.
-# So this is three names in this module's own simp set, no `lib/` change, no
-# `.olean` rebuild, and the same three names work for any goal over `UInt64`
-# rather than only for the shapes they were found on.
+# The sign-flip-involution lemma described above is a different fact and is
+# FALSE as stated, which is why it is not here; the flip is not what is in the
+# way of an order goal, the ORDER is.  But there is a SECOND fact these three
+# names cannot reach, and that one is real: an EQUALITY-shaped postcondition
+# (`abspos.mojo`'s `-n = n`), whose context pins a word to the sign bit from
+# both sides and so needs the xor CANCELLATION, which no `<`/`≤` bridge can
+# state.  `Lean`'s own `UInt64.xor_left_inj` is the cancellation, but it is
+# oriented `a ^^^ c = b ^^^ c ↔ a = b` and the hypothesis arrives as two `≤`s,
+# so `simp_all` cannot orient it.  The usable shape is
+# `lib/work.lean::work_u64_sign_zero_of_le` -- a conditional lemma `simp_all`
+# CAN discharge from that context -- and it is `_SIGN_BRIDGE` below.
+#
+# So this is three names in this module's own simp set, no `lib/ProofLib`
+# change and no `.olean` rebuild, and the same three names work for any goal
+# over `UInt64` rather than only for the shapes they were found on.
 _ORDER_BRIDGE = ("UInt64.lt_iff_toNat_lt", "UInt64.le_iff_toNat_le",
                  "Nat.le_of_lt")
+
+# The sign-bit cancellation the ladder's `simp_all` rung carries, beside the
+# order bridge above.  It is what the order bridge could NOT reach: `mini` and
+# `abspos` were the two contracts the ladder left UNKNOWN, and the missing
+# fact was this cancellation.  (An earlier, different lemma was prescribed for
+# them and is false -- see the sign-flip paragraph above.)
+#
+# `work_u64_sign_zero_of_le (n) : s ≤ n ^^^ s → n ^^^ s ≤ s → n = 0` is in
+# `lib/work.lean` rather than `lib/ProofLib.lean` for a cost reason that is
+# itself measured: every generated arm64 proof ALREADY imports `work` (it is
+# where the per-instruction step lemmas live), so a proof file can cite it the
+# moment it is defined, while a `ProofLib` change is a 27 MB `.olean` rebuild
+# the proof suite pays once per tree.  A lemma only the ladder cites belongs
+# next to the ladder's other helpers, not in the base library; if a second
+# caller appears, promote it and pay the rebuild then.
+#
+# It is a SEPARATE tuple from `_ORDER_BRIDGE` because the two answer different
+# questions -- order versus equality -- and the test that keeps the order
+# bridge to its three `UInt64.`/`Nat.` names should not have to admit a
+# `work_` name to stay green.
+_SIGN_BRIDGE = ("work_u64_sign_zero_of_le",)
 
 
 def _ladder_script(simp: str) -> str:
@@ -1067,7 +1108,7 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     simp = (", ".join(hs + pre_names + [model, "sKey",
                                         "u64_lt_iff_false_of_le",
                                         "u64_le_iff_false_of_lt"]
-                       + list(_ORDER_BRIDGE)))
+                       + list(_ORDER_BRIDGE) + list(_SIGN_BRIDGE)))
     # The ladder, BUILT FROM `LADDER` rather than written out beside it.  It
     # was written out beside it, and then `LADDER` and the script disagreed --
     # `LADDER` listed four rungs and the script had three -- so `Verdict.why`

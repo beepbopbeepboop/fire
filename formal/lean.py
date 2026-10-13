@@ -403,6 +403,21 @@ def run_lean(lean: str, args, cwd: str | None = None, env: dict | None = None,
     killed elaboration is `-SIGXCPU` or `-SIGKILL`, which a caller that only
     compares against 0 reports as "lean failed", and one that compares against
     `None` reports as success.
+
+    **`heartbeats=0` is not "no limit", and it is a trap worth naming here
+    because the failure it causes reads like a broken library.**  A `0` becomes
+    the flag `-T 0`, which sets `maxHeartbeats 0`; a `lib/ProofLib.olean` build
+    under it does not report a bound, it reports a cascade of
+
+        error: Tactic `bv_decide` failed. Error: failed to compile definition,
+        compiler IR check failed at `work_step_add_imm32._native.bv_decide…`.
+        Error: unknown join point 'block_0'
+
+    at a **7.1 GB** peak — identically at an 8 GB ceiling and at a 20 GB one,
+    which reads exactly like a library that cannot build on this toolchain.
+    It builds: the same command WITHOUT the flag exits 0.  So a caller that
+    wants no heartbeat bound (`tools/formal_model_fuzz.py` does, on purpose —
+    its `#eval`s are the work) must not copy that choice into a `lib/` build.
     """
     wall_s = PROOF_WALL_S if wall_s is None else float(wall_s)
     cpu_s = PROOF_CPU_S if cpu_s is None else float(cpu_s)
