@@ -7229,5 +7229,73 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
 
 
+class TestTheCompilerTrapsNoLongerStopTheUniversalTheorem(unittest.TestCase):
+    """A compiler-emitted call must not become the program's halt address.
+
+    The measured defect (its doc is deleted with this test): arm64's exit
+    flush (`BL fflush`) and the stack guard's `getrlimit` were read as the
+    PROGRAM's extern calls, so a program that computes correctly was given a
+    theorem that said only "control reached the compiler's own call" — and
+    `count`/`sum`/`fact` refused at generation with "the call at
+    `<guard>` -> `<halt>` is behind a CONDITIONAL".  The fix is two halves:
+    the emitter RECORDS its own calls (`info["compiler_traps"]`, so
+    `_program_extern_calls` subtracts them) and puts `getrlimit` in the
+    startup stub BELOW the entry, outside the walk's `[func_entry,
+    func_end)`.  Both are pinned by `TestCompilerTrapIsNotAProgramCall` at the
+    address level; this class pins the effect that mattered, which is the doc's
+    own anti-rot criterion: the three `formal/examples` that lost their
+    universal theorem, and a plain `return 7`, must all state
+    `_compiles_correctly_universal` again.  Generation only — no Lean.
+    """
+
+    #: `(stem, the entry function's name)` — the universal theorem is named
+    #: after the ENTRY FUNCTION, and the three examples name it after the file
+    #: while a drop-in program names it `main`.
+    EXAMPLES = (("count", "count"), ("sum", "sum"), ("fact", "fact"))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = {}
+        for stem, fn in cls.EXAMPLES:
+            src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
+            tmp = tempfile.mkdtemp(prefix=f"a2-trapuniv-{stem}-")
+            cls.addClassCleanup(shutil.rmtree, tmp, True)
+            r = _generate_dir(tmp, src, stem, os.path.join(tmp, stem + ".aout"))
+            with open(r["proof_path"]) as fh:
+                cls.texts[stem] = (fn, fh.read())
+        tmp = tempfile.mkdtemp(prefix="a2-trapuniv-plain-")
+        cls.addClassCleanup(shutil.rmtree, tmp, True)
+        path, err = _generate(tmp, "def main(n):\n    return 7\n", "plain")
+        assert err is None, err
+        with open(path) as fh:
+            cls.texts["plain"] = ("main", fh.read())
+
+    def test_each_still_states_its_universal_theorem(self):
+        for stem, (fn, text) in self.texts.items():
+            with self.subTest(stem=stem):
+                self.assertIn(f"theorem {fn}_compiles_correctly_universal",
+                              text,
+                              f"{stem} has no universal theorem: a compiler "
+                              f"call is being read as the program's halt again")
+
+    def test_no_universal_halts_at_a_compiler_trap(self):
+        """The halt address is the program's, not the guard's.
+
+        The generator names the address the universal theorem stops at.  It
+        must not be one of the emitter's own traps — which is exactly what
+        `_program_extern_calls` subtracting `compiler_traps` buys, and a reader
+        can see it without Lean: the universal theorem is about the RETURN
+        value, where the reachability-only shape names `reaches_call_at_`.
+        """
+        for stem, (fn, text) in self.texts.items():
+            with self.subTest(stem=stem):
+                idx = text.index(f"theorem {fn}_compiles_correctly_universal")
+                head = text[idx:idx + 400]
+                self.assertNotIn("reaches_call_at_", head,
+                                 f"{stem}: the universal theorem is a "
+                                 f"reachability statement, so the run halts at "
+                                 f"a compiler call")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
