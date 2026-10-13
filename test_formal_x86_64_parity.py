@@ -64,6 +64,25 @@ BACKENDS = ("arm64", "x86_64")
 # 8-byte-granular arithmetic on a 4-byte element, and a lowering that forgets
 # the width writes three bytes of a neighbour.
 CASES = [
+    # `os.path.getsize`, on BOTH backends, compared against CPython. This is a
+    # HOSTMODULE dylib's answer crossing back into the image, and on x86-64 it
+    # used to jump to address 0 (`EXC_BAD_ACCESS`): a module whose state made the
+    # Mach-O linker place `__LINKEDIT` BELOW `__DATA` was slid wrongly by
+    # Rosetta, so a value the dylib produced pointed below its own mapping (see
+    # `formal/macho_linker.py::_linkedit_vm`, which maps `__LINKEDIT` above the
+    # last fixed segment). The expectation is the size CPython reads from the
+    # same file at test time, so only a correct answer passes — a process that
+    # merely survived is not enough. The `test_formal_os.py` getsize rows are
+    # host-only and never ran on x86-64, which is how this survived.
+    ("getsize_of_a_real_file",
+     "from os.path import getsize\n"
+     "def main():\n"
+     '    printf("%d", getsize("/etc/hosts"))\n'
+     "    return 0\n",
+     "import os.path\nimport sys\n"
+     "def main():\n"
+     '    sys.stdout.write("%d" % os.path.getsize("/etc/hosts"))\n'
+     "    return 0\n"),
     ("aug_through_int32_pointer",
      "def main():\n"
      "    var q: Pointer[Int32] = malloc(16)\n"
