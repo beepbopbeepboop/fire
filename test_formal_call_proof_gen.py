@@ -2255,6 +2255,115 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_lemmas("syn", code, 0x1000))
 
 
+class TestStepLemmasStopAtTheExecutableRegion(unittest.TestCase):
+    """The step-lemma generators read the FUNCTION BODIES only, never the
+    interned string data `arm64_codegen.compile` appends after them.
+
+    `__TEXT` carries every function body and THEN every interned string, and a
+    string byte pattern can decode as an instruction the step table knows: the
+    stack-trap message, which every guarded arm64 image carries, holds the word
+    `909189220` (`0x36312064`, `TBZ w4, #…`) at an address no execution reaches.
+    Burning a step-RESULT lemma on that word states a FALSE step, so the whole
+    proof fails to elaborate with no `sorry` anywhere — the kernel rejection the
+    doc records.  All three callers (the plain path, the frame-receiver path and
+    the dylib path) cut the code with `_executable_code`; this class pins the cut
+    and the two reachable callers' output, and proves the reach by showing the
+    SAME generator over the FULL code would emit the lemma for the string word.
+    """
+
+    PROGRAM = "def main(n):\n    return 7\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-execregion-")
+        src = os.path.join(cls.tmp, "region.mojo")
+        with open(src, "w") as fh:
+            fh.write(cls.PROGRAM)
+        cls.result = _compile(src, os.path.join(cls.tmp, "region.aout"),
+                              "arm64")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _string_word_indices(code, info):
+        """`(cut, indices)` — the executable end and the string words that
+        decode, indexed over the WHOLE `code`."""
+        import formal.arm64_proof_gen as G
+        cut = len(G._executable_code(code, info["base_addr"], info))
+        words = [int.from_bytes(code[i:i + 4], "little")
+                 for i in range(cut, len(code) - len(code) % 4, 4)]
+        return cut, [cut // 4 + j for j, w in enumerate(words)
+                     if G._step_branch_index(w) is not None]
+
+    def test_the_cut_is_the_first_string_address(self):
+        import formal.arm64_proof_gen as G
+        code, info = self.result["code"], self.result["info"]
+        str_addrs = list((info.get("str_addrs") or {}).values())
+        self.assertTrue(str_addrs, "this image carries no string data, so the "
+                                   "rest of this class would be vacuous")
+        self.assertEqual(G._executable_code(code, info["base_addr"], info),
+                         code[:min(str_addrs) - info["base_addr"]])
+
+    def test_a_string_word_decodes_and_the_plan_excludes_it(self):
+        import formal.arm64_proof_gen as G
+        code, info = self.result["code"], self.result["info"]
+        cut, idxs = self._string_word_indices(code, info)
+        self.assertTrue(idxs, "no string word in this image decodes as an "
+                              "instruction, so this test pins nothing")
+        full = G._step_result_plan(code)
+        cut_plan = G._step_result_plan(code[:cut])
+        for i in idxs:
+            with self.subTest(index=i):
+                self.assertIn(i, full, "the FULL-code plan does not cover the "
+                                       "string word")
+                self.assertNotIn(i, cut_plan)
+
+    def test_the_plain_proof_has_no_step_lemma_for_a_string_word(self):
+        import formal.arm64_proof_gen as G
+        code, info = self.result["code"], self.result["info"]
+        _, idxs = self._string_word_indices(code, info)
+        with open(self.result["proof_path"]) as fh:
+            text = fh.read()
+        # The REACH: over the full code the generator does emit the lemma, so
+        # the assertions below are about the cut and not about a word the
+        # generator never covered.
+        full_text = G._gen_step_result_lemmas("x", code, 0x1000)
+        self.assertTrue(any(f"_sr_{i}" in full_text for i in idxs),
+                        "the generator does not cover the string word even "
+                        "over the full code, so this test would pass without "
+                        "the cut")
+        for i in idxs:
+            with self.subTest(index=i):
+                self.assertNotIn(f"_sr_{i}", text)
+                self.assertNotIn(f"_step_ok_{i}", text)
+
+    def test_the_dylib_proof_has_no_step_lemma_for_a_string_word(self):
+        from formal.build import compile_formal_dylib
+        from formal.arm64_proof_gen import generate_dylib_proof
+        src = os.path.join(self.tmp, "trap.mojo")
+        # `"d 16"`'s bytes are the trap message's own decodable word, so this
+        # export carries a string that decodes without depending on the trap
+        # text being present in this image shape.
+        with open(src, "w") as fh:
+            fh.write('def f(n):\n  return len("d 16")\n')
+        built = compile_formal_dylib([src],
+                                     output=os.path.join(self.tmp, "t.dylib"),
+                                     prove=False)
+        text = generate_dylib_proof(built["code"], built["info"],
+                                    built["exports"])
+        _, idxs = self._string_word_indices(built["code"], built["info"])
+        self.assertTrue(idxs, "the dylib carries no decodable string word")
+        self.assertIn("_step_ok_", text,
+                      "the dylib proof emitted no step lemmas, so this test "
+                      "would pass without the cut")
+        for i in idxs:
+            with self.subTest(index=i):
+                self.assertNotIn(f"_sr_{i}", text)
+                self.assertNotIn(f"_step_ok_{i}", text)
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 

@@ -9614,6 +9614,29 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
+def _executable_code(code: bytes, base: int, info) -> bytes:
+    """The EXECUTABLE prefix of `code` — the function bodies, without the
+    interned string data `arm64_codegen.compile` appends after them.
+
+    `__TEXT` carries every function body and THEN every interned string, and the
+    step-lemma generators walk every 4-byte word of the bytes they are handed.
+    A data word can decode as an instruction the step table knows, and the
+    step-RESULT lemma for such a word is then FALSE — measured: the stack-trap
+    message carries `909189220` (`0x36312064`, `TBZ w4, #…`), so every guarded
+    arm64 image generated a `sr` for a word no execution reaches and the kernel
+    rejected the file.  The executable region is the prefix before the first
+    published string address (`info["str_addrs"]` is that table); a build with no
+    strings keeps the whole `code`.  Every caller that feeds the step generators
+    asks this, so the three proof shapes cannot disagree about where the code
+    ends.
+    """
+    _str_addrs = list((info.get("str_addrs") or {}).values())
+    if not _str_addrs:
+        return code
+    code_end = max(0, min(min(_str_addrs) - base, len(code)))
+    return code[:code_end]
+
+
 def _step_result_plan(code: bytes) -> dict:
     """Which instruction indices get a step-RESULT lemma, and with what.
 
@@ -11197,22 +11220,12 @@ def generate_arm64_proof(prog, code, info) -> str:
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
-    # **The step lemmas cover the EXECUTABLE region only, not the string data.**
-    # `__TEXT` carries every function body and THEN every interned string
-    # (`compile`'s string-emission loop), and `_step_result_plan`/`_gen_step_
-    # lemmas` walk every 4-byte word of `code`.  A string byte pattern that
-    # decodes as an instruction the step table knows is therefore planned a step
-    # lemma for a word no execution reaches — and the step-OK lemma's `hne` for
-    # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
-    # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
-    # which every guarded image carries, so EVERY arm64 proof was red on it.
-    # `info["str_addrs"]` is the published string table, so the first string's
-    # address is the end of the code.  The run tests still read the whole
-    # `code` (`{name}_code` is unchanged), so nothing else moves.
-    _str_addrs = list((info.get("str_addrs") or {}).values())
-    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
-    code_end = max(0, min(code_end, len(code)))
-    step_code = code[:code_end]
+    # **The step lemmas cover the EXECUTABLE region only, not the string data**
+    # (`_executable_code`): the step-OK lemma for a string word whose bytes
+    # decode as a table instruction has a FALSE `hne`, so the whole proof fails
+    # to typecheck.  The run tests still read the whole `code` (`{name}_code` is
+    # unchanged), so nothing else moves.
+    step_code = _executable_code(code, base_addr, info)
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
     step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
@@ -12357,9 +12370,12 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
     decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
-    # step-OK derives from step-RESULT, so the results come first.
-    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(stem, code, base_addr))
+    # step-OK derives from step-RESULT, so the results come first.  Both walk
+    # the EXECUTABLE region only, not the interned string data appended after
+    # the code (`_executable_code`).
+    step_code = _executable_code(code, base_addr, info)
+    step_lemmas = (_gen_step_result_lemmas(stem, step_code, base_addr) + "\n\n"
+                   + _gen_step_lemmas(stem, step_code, base_addr))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -13358,6 +13374,9 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
                                for i, e in enumerate(exports))
     export_defs_text = "\n\n".join(export_defs)
     proofs_text = "\n\n".join(proofs)
+    # The step generators cover the EXECUTABLE region only, not the interned
+    # string data appended after the code (`_executable_code`).
+    step_code = _executable_code(code, base, info)
     return f"""import ProofLib
 import work
 import Refine
@@ -13372,7 +13391,7 @@ set_option linter.unusedVariables false
 
 {_gen_decode_lemmas("dylib", code, base)}
 
-{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
+{_gen_step_result_lemmas("dylib", step_code, base) + "\n\n" + _gen_step_lemmas("dylib", step_code, base)}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new
