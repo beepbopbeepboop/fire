@@ -25,6 +25,14 @@ boundary. Generalising the helper to take a dict of files would have meant
 editing a 10,000-line file several other formal branches are also editing, for a
 runner this file needs about thirty lines of.
 
+That reason covers a case that is not about generics at all, and one such case
+lives here: a ONE-FIELD STRUCT returned by an IMPORTED CALL, read through its
+field (`test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_
+field` and its module-qualified twin). The construct is a cross-module BINDING
+rather than an instantiation, but the shape is this file's: a library declaring
+the struct and its factory, a program that calls it, and a CPython differential
+on both architectures.
+
 The unit cases are the other half and are not differential on purpose: they pin
 the DECISIONS (which names are templates, what a concrete type argument is,
 which call sites get rewritten) and those are properties of the source, not of
@@ -3362,6 +3370,103 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
             "is a positional spelling and a keyword collection is not one")
 
 
+# ── A ONE-FIELD STRUCT RETURNED BY AN IMPORTED CALL ─────────────────────────
+#
+# The cross-module half of the same-image binding `both_arch_one_field_struct_
+# returned_by_a_call_reads_through_its_field` (in `test_formal_run.py`) pins.
+# `_call_returns_one_word_struct` read a callee's declared `-> T` only for a
+# function THIS unit compiled — `functions_by_name` is built from the module's
+# own function list — so `var r = make(7)` under `from pairlib import make` was
+# refused at its first field read ("'r.returncode' is a field access through
+# 'r'") even though BOTH the callee's declaration and the struct's were in the
+# image. A one-field struct has no frame, so `r.returncode` is the identity `r`,
+# and the image must answer CPython's number.
+#
+# Both spellings are covered, because they reach the callee by different routes:
+# a bare `make` (whose declaration `formal/imports.py::imported_function_defs`
+# folds under the local name a call site spells) and a module-qualified
+# `pairlib.make` (whose declaration `imported_module_function_defs` resolves
+# through the imported module's local name). 7 and 9 are the two answers, so a
+# fix that read one spelling's callee as the other's, or that dropped the field
+# read, prints a number neither program computes on one of the two.
+#
+# The module-qualified spelling is the UNALIASED `import pairlib`: `import
+# pairlib as L; L.make(…)` is a separate, pre-existing refusal ("'L' has no
+# home") that this change does not address and that is not what it is about.
+
+CP_LIB = """\
+struct CP:
+    var returncode: Int = 0
+
+def make(n: Int) -> CP:
+    var c = CP()
+    c.returncode = n
+    return c
+"""
+
+CP_CPYTHON_FROM = """\
+class CP:
+    def __init__(self):
+        self.returncode = 0
+
+def make(n):
+    c = CP()
+    c.returncode = n
+    return c
+
+def main():
+    r = make(7)
+    print(r.returncode)
+"""
+
+CP_CPYTHON_QUAL = """\
+class CP:
+    def __init__(self):
+        self.returncode = 0
+
+def make(n):
+    c = CP()
+    c.returncode = n
+    return c
+
+def main():
+    r = make(9)
+    print(r.returncode)
+"""
+
+CP_FROM_PROG = """\
+from pairlib import make
+
+def main():
+    var r = make(7)
+    print(r.returncode)
+"""
+
+CP_QUAL_PROG = """\
+import pairlib
+
+def main():
+    var r = pairlib.make(9)
+    print(r.returncode)
+"""
+
+
+def test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field(
+        tmpdir):
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_cpfrom", CP_LIB, CP_FROM_PROG,
+                            CP_CPYTHON_FROM)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field(
+        tmpdir):
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_cpqual", CP_LIB, CP_QUAL_PROG,
+                            CP_CPYTHON_QUAL)
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -3453,6 +3558,10 @@ TESTS = [
      test_the_census_does_not_count_this_worktrees_scratch),
     ("a variadic bracket parameter takes the extra arguments",
      test_a_variadic_bracket_parameter_takes_the_extra_arguments),
+    ("a one-field struct from an imported bare call reads through its field",
+     test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field),
+    ("a one-field struct from a module-qualified call reads through its field",
+     test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field),
 ]
 
 EXPECTED_FAILURES: dict = {}

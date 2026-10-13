@@ -2821,6 +2821,155 @@ def imported_struct_defs(source_path: str, stmts: list,
     return out
 
 
+def _function_def(path: str, name: str, project_root: str,
+                  seen: frozenset = frozenset(), found: list = None):
+    """The top-level `FunctionDef` called `name` reachable from `path`.
+
+    The function analogue of `module_struct_defs`, and it follows RE-EXPORTS
+    for the same reason: a package's API is its re-exports, so
+    `from pkg import make` where `pkg/__init__.mojo` only re-exports `make`
+    from `pkg/impl.mojo` has to reach `impl.mojo` to find the declaration.
+
+    **AGREE-OR-REFUSE, not first-wins**, which is the one place this differs
+    from `module_struct_defs`: two DIFFERENT definitions of one name reachable
+    from one module is two declarations with no spelling in the import that
+    says which is meant, so the answer is None and not "the first one" — the
+    same rule `_unique_functions_by_name` applies to one module's overloads.
+    A name nothing resolves is absent (the pre-existing behaviour) rather than
+    an error, so a caller cannot be handed a fabricated declaration.
+    """
+    found = [] if found is None else found
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return None
+    if real in seen:
+        return None
+    seen = seen | {real}
+    stmts = module_statements(path)
+    for st in stmts:
+        if isinstance(st, F.FunctionDef) and st.name == name:
+            if not any(f is st for f in found):
+                found.append(st)
+    for _bound, original, module in _from_import_bindings(stmts):
+        if original != name:
+            continue
+        dep = resolve_module_path(module, relative_to=path,
+                                  project_root=project_root or path)
+        if dep:
+            _function_def(dep, name, project_root, seen, found)
+    return found[0] if len(found) == 1 else None
+
+
+def _module_function_defs(path: str, project_root: str,
+                          out: dict = None, seen: frozenset = frozenset()
+                          ) -> dict:
+    """`{name: FunctionDef}` for the top-level functions `path` declares or
+    re-exports, transitively and cycle-safe.
+
+    The one-module half of the module-qualified reader below, and it collects
+    what `module_struct_defs` collects for structs: the module's OWN functions
+    plus whatever it forwards, so `mod.make(...)` binds the declaration of the
+    module `mod` actually reaches. A name declared in two modules of one
+    closure keeps the FIRST the walk met, which is the same first-wins
+    precedence `imported_struct_defs` applies to a re-exported struct.
+    """
+    out = {} if out is None else out
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return out
+    if real in seen:
+        return out
+    seen = seen | {real}
+    stmts = module_statements(path)
+    for st in stmts:
+        if isinstance(st, F.FunctionDef) and st.name:
+            out.setdefault(st.name, st)
+    for _bound, _original, module in _from_import_bindings(stmts):
+        dep = resolve_module_path(module, relative_to=path,
+                                  project_root=project_root or path)
+        if dep:
+            _module_function_defs(dep, project_root, out, seen)
+    return out
+
+
+def imported_function_defs(source_path: str, stmts: list,
+                           project_root: str = None) -> dict:
+    """`{bound name: FunctionDef}` for the FREE functions this file imports.
+
+    The function half of `imported_struct_defs`, and it is what lets a BINDING
+    analysis read an imported callee's declared `-> T`: `var r = make(7)` under
+    `from libcp import make` names the same one-field struct the same-image
+    `var r = make_box(7)` does, but `make` is not in the importing module's own
+    function registry, so `_prepare_functions`' by-name table could not find its
+    declaration and the field read `r.returncode` was refused as "a field access
+    through 'r'". Read from the imported module's own source — the same parse
+    its dylib was built from — so a declaration and the library cannot disagree.
+
+    Keyed by the LOCAL name the call site spells (`from m import f as g` binds
+    `g`), and a name this file also DEFINES is left out: a local definition
+    shadows the import, which is the same precedence `imported_bindings` states.
+    """
+    project_root = project_root or source_path
+    defined = _defined_names(stmts)
+    out: dict = {}
+    for bound, original, module in _from_import_bindings(stmts):
+        if not bound or bound in defined or not isinstance(module, str):
+            continue
+        path = resolve_module_path(module, relative_to=source_path,
+                                   project_root=project_root)
+        if not path:
+            continue
+        found = _function_def(path, original, project_root)
+        if found is not None:
+            out.setdefault(bound, found)
+    return out
+
+
+def imported_module_function_defs(source_path: str, stmts: list,
+                                  project_root: str = None) -> dict:
+    """`{module local name: {function name: FunctionDef}}` for `import m` here.
+
+    The module-QUALIFIED half of `imported_function_defs`: a call spelled
+    `libcp.make(7)` carries no bare name to look up, so the reader has to know
+    that `libcp` is a module this file imported and then find `make` inside it.
+    `import m as n` binds `n`, which is why the key is the LOCAL spelling; the
+    value is the module's whole function set (`_module_function_defs`), so a
+    `mod.f` whose `f` is re-exported is reached the same way a `mod.f` declared
+    in the module's own file is.
+    """
+    project_root = project_root or source_path
+    out: dict = {}
+    for st in stmts or []:
+        if type(st).__name__ != "ImportStmt":
+            continue
+        module = getattr(st, "module", None) or getattr(st, "name", None)
+        alias = getattr(st, "asname", None)
+        for part in str(module or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            # `import m as n` binds `n` and resolves `m`; a bare `import a.b`
+            # binds `a`, and its calls are `a.b.f`, whose base is not a single
+            # module name — so neither a dotted part with no alias nor the
+            # empty case contributes. `resolve_module_path` still gets the
+            # UNSPLIT spelling, so `import a.b as c` reaches `a.b`.
+            if alias:
+                local = alias
+            elif "." in part:
+                continue
+            else:
+                local = part
+            path = resolve_module_path(part, relative_to=source_path,
+                                       project_root=project_root)
+            if not path:
+                continue
+            out.setdefault(local, {}).update(
+                _module_function_defs(path, project_root))
+    return out
+
+
 def _attach_declared_census(struct_def, declaring_path: str) -> None:
     """`attach_field_evidence` for one struct, from ITS OWN module.
 
