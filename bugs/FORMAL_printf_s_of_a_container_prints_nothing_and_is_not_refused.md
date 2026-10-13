@@ -4,8 +4,8 @@
 defect this title measured is FIXED, and the title is the 2026-10-08
 measurement rather than the current state.** Found 2026-10-08
 (`work/formal169-docs`) while closing the `%d` sibling
-(`bugs/FORMAL_printf_d_of_a_container_prints_its_address.md`, now
-deleted with its fix). Measured 2026-10-12 on the merged tree
+(`FORMAL_printf_d_of_a_container_prints_its_address`, deleted with its fix,
+8844b0a1). Measured 2026-10-12 on the merged tree
 (`work/merge-qwen1`): the same program is **refused at the BUILD** on
 arm64 — the text-axis reader landed on master after this doc's base, with a
 message that names the blob's count word and the walk-off-the-end hazard

@@ -7,6 +7,15 @@ lane (`formal132-docs` holds that claim, and is not alive at filing), so this is
 reported rather than edited.** Found 2026-10-07 (`work/formal143-docs`) while
 running the test file one of this task's own docs cites.
 
+**Re-measured 2026-10-12 on the merged tree (`work/merge-qwen1`): the class this
+doc root-caused is FIXED on master** — the pointer-subscript load is now
+width-sign-extended (`_sub_width`/`_sub_signed` in both emitters), and
+`test_formal_os_backing.py` is 68/70: the `pointer_subscript_i32`/`_augmented`
+rows all pass, and the only remaining red is `stat_null`'s `dev` width on both
+backends, which is `bugs/FORMAL_os_backing_pointer_and_stat_widths.md`'s
+subject. This doc stays as the root-cause record of the fixed class (its
+arithmetic below is why the fix is where it is), not as a live red.
+
 ## What I ran
 
 ```console
@@ -30,13 +39,16 @@ FAIL    stat_null [x86_64]  1 of 5 answers wrong:
 64/70 passed
 ```
 
-`formal-os-backing` is registered in `tools/suite.py` with no `expect=` marker, so
-this is a red gate job and not a declared one. **This is a DIFFERENT red from
-`bugs/TEST_formal_os_backing_is_red_with_no_marker.md`**, whose subject (30 of 58,
-every one the non-ASCII string-subscript refusal) is fixed: the `listdir`/`len`/
-readdir rows this task's docs are about now all PASS, and the 6 above are the
-residual. That TEST doc's `expect=`/green decision is still owed, and it is now
-owed against THESE six.
+`formal-os-backing` was, at filing, registered in `tools/suite.py` with no
+`expect=` marker, so it was a red gate job and not a declared one. **This is a
+DIFFERENT red from the one the `TEST_formal_os_backing_is_red_with_no_marker`
+doc recorded (deleted on this tree, d7913901),** whose subject (30 of 58,
+every one the non-ASCII string-subscript refusal) is fixed: the `listdir`/
+`len`/readdir rows this task's docs are about now all PASS, and the 6 above
+are the residual. The marker decision that subject owed was made in d7913901
+(`expect='6 of 70: …'`), and the registration's current state — 68/70, this
+doc's class fixed, only `stat_null`'s `dev` width left — is in
+`bugs/FORMAL_os_backing_pointer_and_stat_widths.md`.
 
 ## The arithmetic, which is the root cause
 
