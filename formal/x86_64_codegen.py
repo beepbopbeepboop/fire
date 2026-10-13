@@ -3655,10 +3655,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """Give the element its OWN container per iteration, or refuse.
 
         The x86-64 twin of arm64's method over the same shared predicate
-        (`M.comprehension_element_is_flat_container`) and the same message, so
-        the two architectures cannot materialise — or refuse — an element
-        differently. RAX on entry holds the element's blob and on exit the
-        per-iteration copy `_compr_append_elem` appends.
+        (`M.comprehension_element_is_flat_container`, which also accepts a
+        nested comprehension whose produced values are words) and the same
+        message, so the two architectures cannot materialise — or refuse — an
+        element differently. RAX on entry holds the element's blob and on exit
+        the per-iteration copy `_compr_append_elem` appends.
 
         `i` is the result blob's count word (elements appended so far), the
         destination is `array_base + i * bytes_`, and the copy is `memcpy`,

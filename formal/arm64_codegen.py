@@ -11109,11 +11109,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         reserved), and on exit holds the per-iteration copy that
         `_compr_append_elem` appends. The two outcomes:
 
-          * a FLAT container literal (`M.comprehension_element_is_flat_container`)
-            gets a `cap`-slot array beside its scratch, and iteration `i`'s copy
-            lands at slot `i` — `i` is the result blob's count word, which is the
-            number of elements appended so far, so the append that follows stores
-            the copy and not the scratch. The copy is `memcpy`, which returns the
+          * an element `M.comprehension_element_is_flat_container` accepts — a
+            container literal with no nested container in it, or a nested
+            comprehension whose produced values are words — gets a `cap`-slot
+            array beside its scratch, and iteration `i`'s copy lands at slot `i`
+            — `i` is the result blob's count word, which is the number of
+            elements appended so far, so the append that follows stores the copy
+            and not the scratch. The copy is `memcpy`, which returns the
             destination in X0 for free.
           * anything else that allocated keeps `_refuse_an_element_blob`, whose
             message names the construct and the explicit-loop remedy.

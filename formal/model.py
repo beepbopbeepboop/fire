@@ -11018,7 +11018,7 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     argument text at all". The width question needs the first and the conversion
     question needs the second, and a caller that has no way to answer the first
     passes None — which is the permissive direction, exactly as `text_of`'s own
-    None row is. **    `class_of` is optional for the same reason**: it is
+    None row is. **`class_of` is optional for the same reason**: it is
     `printf_arg_float_evidence`'s three-way answer, and a caller that has no
     `ValueKinds` to hand passes None, which never refuses. **`container_of` is
     the same**: it answers the OPERAND'S KIND (`ValueKinds.kind_of`) and a
@@ -30730,6 +30730,25 @@ def _expr_builds_a_container(e) -> bool:
     return False
 
 
+def _comprehension_result_is_flat(comp) -> bool:
+    """True when a comprehension's own RESULT blob holds no nested container.
+
+    A comprehension's result is a `[count][element…]` blob (a list of pairs for
+    a dict), so a byte copy of it duplicates every produced value. That copy is
+    sound exactly when no produced value is itself a container built by this
+    site: a container would be carried as its ADDRESS, so every copy would point
+    at one shared scratch blob — the same aliasing defect
+    `comprehension_element_is_flat_container` exists to prevent, one level up.
+    The produced value is the comprehension's `element` (and its `value` for a
+    dict), so this asks each of those whether it builds a container.
+    """
+    if not isinstance(comp, F.Comprehension):
+        return False
+    parts = ([comp.element, comp.value] if comp.kind == "dict"
+             else [comp.element])
+    return not any(_expr_builds_a_container(p) for p in parts)
+
+
 def comprehension_element_is_flat_container(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
@@ -30754,12 +30773,24 @@ def comprehension_element_is_flat_container(element) -> bool:
     distinct outer lists over the same elements. Only a container the element
     position itself BUILDS is the defect.
 
+    A nested COMPREHENSION whose produced values are words is accepted, and the
+    reason is the same recursion: `[[x + y for x in [1, 2]] for y in …]`'s inner
+    result is a `[count][int…]` blob, so copying it per outer iteration gives
+    each outer element its own list. What is still refused is an inner result
+    that itself holds containers (`[[[z] for z in …] for y in …]`), where the
+    copied words would be addresses of one shared scratch. The copy lands the
+    inner result, already built, into the outer element array; it does NOT have
+    to relocate the inner comprehension's own base, which is why the nested case
+    does not need the runtime blob base the flat case does not need either.
+
     The shapes that return False keep `comprehension_element_blob_refusal`:
-    a nested comprehension, a list of lists, a slice, a constructor call, and
-    every non-literal expression. Those are the cases whose per-iteration
-    materialisation needs the runtime blob base the refusal's own document
-    describes.
+    a comprehension whose produced values are containers, a list of lists, a
+    slice, a constructor call, and every non-container expression. Those are the
+    cases whose per-iteration materialisation needs the runtime blob base the
+    refusal's own document describes.
     """
+    if isinstance(element, F.Comprehension):
+        return _comprehension_result_is_flat(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -30803,8 +30834,18 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
         [[x + y for x in [1, 2]] for y in [10, 20, 30]] and then v[0] summed
                                               CPython: 63   this path: 93
 
-    The second is worse than a wrong number: it exits 1 as well, because the
-    count the third iteration writes lands one word past a blob sized for one
+    **Both of those are now materialised per iteration** by
+    `comprehension_element_is_flat_container`, so this message fires only on the
+    shapes whose per-iteration copy is unsound: a container literal with a nested
+    container in it, a nested comprehension whose produced values are containers,
+    a list of lists, a slice and a constructor call. The paragraph above is the
+    measurement that made the refusal the right answer for THEM; the two
+    reproducers are kept because they are what a copy must answer, and are the
+    rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
+
+    For the nested case the second row is the one that says a refusal was
+    necessary rather than tidy: it exits 1 as well as answering wrongly, because
+    the count the third iteration wrote landed one word past a blob sized for one
     element. And the first is silent in the way this repository's rules call out
     — a caller that appends to element 0 gets element 1's list too, which no
     assertion in the program can notice.

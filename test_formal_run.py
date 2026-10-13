@@ -15657,7 +15657,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
             run = subprocess.run(
                 ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
                 capture_output=True, text=True, timeout=RUN_TIMEOUT)
-            want = 2 if must_refuse else 0
+            want = 2 if depth >= 5000 else 0
             if run.returncode != want:
                 out_rows.append((
                     name, arch, False,
@@ -17516,11 +17516,15 @@ COMPREHENSION_ELEMENT_CASES = [
     #     [[y, y + 1] for y in [10, 20, 30]]   CPython 11 21 31   was 31 31 31
     #     [{y, y + 1} for y in [10, 20, 30]]   CPython 10 20 30   was 30 30 30
     #
-    # The rows after them are the shapes whose per-iteration materialisation
-    # needs a runtime blob base and is still refused (see
-    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`).
-    # The refusal needle is the CONSTRUCT and not the remedy, so a refusal about
-    # anything else fails the case.
+    # A nested comprehension whose produced values are words is accepted too
+    # (`a_nested_comprehension_whose_result_is_words_is_per_iteration`), by the
+    # same copy over the shared predicate. The rows after the nested acceptance
+    # are the shapes whose per-iteration materialisation is still refused — a
+    # nested comprehension whose own result holds containers, a list of lists,
+    # and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_
+    # blob_base.md`) a slice or a constructor call, whose runtime blob base is
+    # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
+    # so a refusal about anything else fails the case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -17548,16 +17552,32 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
      0, "10 20 30"),
-    # …and the NESTED one, which is the reproducer and the case the refusal
-    # names as exiting 1 rather than merely answering wrongly.
-    ("a_nested_comprehension_as_the_element_is_refused",
+    # …and the NESTED one, which is the reproducer. A nested comprehension's
+    # result is a `[count][word…]` blob when the values it produces are words,
+    # so a byte copy of it per outer iteration gives each outer element its own
+    # list — no runtime blob base is needed, and the copy lands the inner result
+    # already built rather than relocating the inner comprehension's own base.
+    # The inner element is `x + y`, arithmetic, so the result is words. Measured:
+    # this answered 93 and exited 1 before.
+    ("a_nested_comprehension_whose_result_is_words_is_per_iteration",
      "def main() -> Int:\n"
      "    var s = 0\n"
      "    for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:\n"
      "        s = s + v[0]\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n",
-     "refuse:the element `[…] for …` opens a container", None),
+     0, "63"),
+    # …and the boundary the nested acceptance does NOT cross: an inner
+    # comprehension whose OWN result holds containers carries those containers
+    # as addresses, so copying it per iteration would share one scratch blob —
+    # exactly the aliasing the flat predicate refuses, one level up. The inner
+    # element is `[z]`, a list literal, so this stays refused.
+    ("a_nested_comprehension_whose_result_holds_containers_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[z] for z in [1, 2]] for y in [10, 20]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:opens a container", None),
     # The DICT half: the VALUE opens the container, and it is the shape the
     # `nested_comprehension_in_a_generator_iterable` row used to carry as its
     # fourth case — so this row is that coverage, strengthened from "builds and
