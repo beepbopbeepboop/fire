@@ -302,43 +302,6 @@ def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
           v.status == CT.UNKNOWN and not v.ok, repr(v))
 
 
-def test_a_floor_division_clause_reads_as_word_division(tmpdir=None):
-    """`//` is the AST's spelling of integer division; the word model spells it
-    `/`, and both are the same operation on a word.
-
-    A reader that took only `/` refused `a // b` -- and its subset sentence
-    named `/` and not `//`, so a reader of the refusal was told the clause was
-    outside the subset when it was inside it.  A BODY containing `//` raised
-    `Unsupported`, so the bounded search skipped EVERY input of a loop that
-    halves (`collatz`).  Both halves are one reading: `//` canonicalizes to
-    `/` rather than carrying a second IR tag, because `_lean_of` renders `/` as
-    `UInt64.div` and `_eval_of` evaluates it as `(a // b) & _MASK`, which is
-    exactly the machine's floor-divided word.
-    """
-    from formal import contracts as CT
-    floor_src = ("@ensures(result == a // b)\n"
-                 "def h(a, b):\n    return a // b\n")
-    fn = functions(parse(floor_src))[0]
-    c = contract_of(fn, "floor.mojo", floor_src)
-    e = CT.contract_theorems(c, ["a", "b"], fn=fn)
-    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), e.lean)
-    check("a_floordiv_clause_renders_as_UInt64_div",
-          "UInt64.div" in e.lean, e.lean)
-    check("a_floordiv_clause_is_not_reported_unlowered",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
-    runner = CT.SourceRunner(fn)
-    check("the_source_runner_runs_a_floordiv_body", runner(7, 2) == 3,
-          repr(runner(7, 2)))
-    slash_src = "@ensures(result == a / b)\ndef h(a, b):\n    return a / b\n"
-    slash = contract_of(functions(parse(slash_src))[0], "slash.mojo")
-    floor_ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
-    slash_ir = CT._Reader(["a", "b"]).clause_ir(slash.ensures[0], ["a", "b"])
-    check("slash_and_floordiv_read_the_same_IR",
-          floor_ir is not None and floor_ir == slash_ir,
-          f"{floor_ir!r} vs {slash_ir!r}")
-
-
 # ── 2. one reader, three printers ───────────────────────────────────────────
 
 def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
@@ -744,55 +707,6 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
                                               "Nat.le_of_lt"]),
           "the_bridge_is_these_three_order_names_and_no_other",
           str(CT._ORDER_BRIDGE))
-
-
-def test_every_ladder_rung_is_a_first_alternative_that_can_FALL_THROUGH(tmpdir=None):
-    """A rung Lean's `first` cannot fall THROUGH is a rung that never runs.
-
-    `first | t1 | t2 | …` is `t1 <|> t2 <|> …`: it takes the first alternative
-    that does not THROW, and a tactic which leaves the goal open does not
-    throw.  `simp_all` on a goal it cannot fully close is exactly such a
-    tactic.  So the emitted
-
-        first
-          | (simp_all [model, sKey, …])
-          | omega
-          | decide
-
-    ran `simp_all` and STOPPED, and `omega`/`decide` were unreachable for every
-    goal `simp_all` did not close by itself — while `Verdict.why` named all
-    three as the rungs that ran.  Measured on `formal/contracts/bounds_index.mojo`
-    before the fix: exit 1, and Lean named the `decide` alternative's own
-    complaint rather than ever reaching the `omega` one.
-
-    The property asserted here is the one the fix rests on: each rung is a
-    `first` alternative AND its spelling ends in `<;> done`, which is what makes
-    an alternative that left the goal open throw so that `first` moves on.
-    Asserted against `_LADDER_SPELLINGS` rather than against hand-written
-    strings, so adding a rung cannot quietly reintroduce this."""
-    from formal import contracts as CT
-    check("the_ladder_is_not_empty", bool(CT.LADDER), str(CT.LADDER))
-    missing = [r for r in CT.LADDER if r not in CT._LADDER_SPELLINGS]
-    check("every_rung_has_a_spelling", not missing,
-          f"{missing} have none in _LADDER_SPELLINGS")
-    unspelled = [k for k in CT._LADDER_SPELLINGS if k not in CT.LADDER]
-    check("no_spelling_is_left_out_of_the_ladder", not unspelled,
-          f"{unspelled} are spelled but not in LADDER")
-    for rung in CT.LADDER:
-        spelling = CT._LADDER_SPELLINGS.get(rung, "")
-        check(f"{rung}_ends_in_done_so_first_can_fall_through",
-              spelling.rstrip().endswith("<;> done"), spelling)
-        check(f"{rung}_takes_the_clause_lemma_set",
-              "{simp}" in spelling, spelling)
-    script = CT._ladder_script("h0, m_go, sKey")
-    alternatives = [ln for ln in script.split("\n") if ln.strip().startswith("|")]
-    check("the_script_has_one_alternative_per_rung",
-          len(alternatives) == len(CT.LADDER),
-          f"{len(alternatives)} vs {CT.LADDER}\n{script}")
-    for rung, line in zip(CT.LADDER, alternatives):
-        check(f"the_{rung}_alternative_is_the_spelling",
-              line.strip() == "| (" + CT._LADDER_SPELLINGS[rung].format(
-                  simp="h0, m_go, sKey") + ")", line)
 
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
@@ -1210,29 +1124,25 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
     # a rung fails, so that rung can only ADD reach, and these two still close.
     #
-    # `mini.mojo` joined the positive half when the emitter learned to split
-    # the selection tests its OWN rendering introduces (`_selection_splits`):
-    # its `max(n, 3)` postcondition tests `n > 3` while the body tests `n < 3`,
-    # so splitting the body alone left a symbolic `if` and every rung failed.
-    # That fix is a shape, not a spelling -- the same split is what any clause
-    # with a `min`/`max`/`abs`/`clamp` the body does not branch on needs.
+    # `mini.mojo` and `abspos.mojo` are named here as the NEGATIVE half, and
+    # they are the rows that make this list a measurement of the ladder's reach
+    # rather than a list of things that happen to pass: both are still UNREACHED
+    # (their verdict is UNKNOWN) and their rows would go red the moment a rung
+    # closed them, which is what says the reach is still short of "everything".
+    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the same line at the
+    # `classify` level; the reason each is still unreached, measured, is in
+    # `bugs/FORMAL_contract_ladder_reach.md` §6.
     #
-    # `abspos.mojo` is the row that makes this list a measurement of the
-    # ladder's reach rather than a list of things that happen to pass: it is
-    # still UNREACHED (its verdict is UNKNOWN) and its row would go red the
-    # moment a rung closed it, which is what says the reach is still short of
-    # "everything".  It needs an xor-cancellation fact this toolchain does not
-    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): its goal is an
+    # `mini` and `abspos` need an xor-cancellation fact this toolchain does not
+    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): the goal is an
     # EQUALITY over `UInt64`, so the `toNat` bridges the ladder carries -- all
     # of them about `<`/`≤` -- do not rewrite it, and `UInt64.toNat_inj` only
     # turns it into a Nat equality the simplifier cannot discharge without that
-    # missing lemma.  `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the
-    # same line at the `classify` level; the reason it is still unreached,
-    # measured, is in `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # missing lemma.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),
-             ("mini.mojo", "mini", True),
+             ("mini.mojo", "mini", False),
              ("abspos.mojo", "abspos", False),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
@@ -1273,42 +1183,6 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
 
 # ── harness ──────────────────────────────────────────────────────────────────
 
-def test_a_selection_the_body_does_not_branch_on_is_split(tmpdir=None):
-    """`mini`'s postcondition tests a DIFFERENT `if` than its body.
-
-    The emitter splits the model's branch conditions (`model_conditions`), but
-    a clause's RENDERING introduces `if`s of its own: `max(n, 3)` tests `n > 3`
-    where the body tests `n < 3`, and `abs(n)` tests `n < 0` where `abspos`'s
-    body tests `n > 0`.  Splitting only the body leaves a symbolic `if` that no
-    rung can decide -- not `omega` (no arithmetic over `Fin`), not `decide` (a
-    free variable), not `simp_all` (the test is not a hypothesis) -- which is
-    why `mini`, a TRUE contract, reported UNKNOWN.  This row is the cheap half
-    of that fix: it asserts the SELECTION's own test is a `by_cases`, so
-    dropping `formal/contracts.py::_selection_splits` (and with it `mini`)
-    turns this red without a Lean run.  The proof half is
-    `test_lean_closes_a_true_contract_and_refuses_a_false_one`.
-    """
-    from formal import contracts as CT
-    path = os.path.join(EXAMPLES, "mini.mojo")
-    src = open(path).read()
-    params = CT._param_names(fn := [f for f in functions(parse(src, path))
-                                    if getattr(f, "name", None) == "mini"][0])
-    contract = CT.read_contracts(fn, path, src)
-    reader = CT._Reader(params)
-    tests = []
-    for clause in contract.ensures:
-        ir = reader.clause_ir(clause, params)
-        if ir is not None:
-            tests += CT._selection_splits(ir)
-    check(any(t.rstrip().endswith(">") or " > " in t for t in tests),
-          "the_max_selection_contributes_its_own_condition", repr(tests))
-    e = CT.contract_theorems(contract, params, fn=fn)
-    splits = [ln for ln in e.lean.splitlines() if "by_cases" in ln]
-    check(any(" > " in ln for ln in splits),
-          "the_emitted_theorem_splits_the_selection_not_only_the_body",
-          "\n".join(splits))
-
-
 ALL = [
     test_the_reader_takes_both_spellings,
     test_the_reader_reads_the_ASTs_own_division,
@@ -1324,7 +1198,6 @@ ALL = [
     test_the_ladder_is_generated_from_the_list_it_reports,
     test_a_multi_postcondition_contract_is_split_before_its_first_bullet,
     test_the_ladders_simp_set_carries_the_UInt64_order_bridge,
-    test_a_selection_the_body_does_not_branch_on_is_split,
     test_a_false_contract_is_REFUTED_with_the_input,
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,

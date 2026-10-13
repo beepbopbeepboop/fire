@@ -758,6 +758,21 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
     exact Nat.mod_eq_of_lt hab
   exact this
 
+/-- Literal offset multiplication: `ofNat a * ofNat b = ofNat (a * b)`.
+
+    The analogue of `u64_ofNat_add`/`u64_ofNat_sub` for a product, and the
+    library fact the ALL-INPUTS refinement of
+    `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
+    waiting on: an induction over the emitted model's own recursion has a
+    `UInt64` multiplication as its arithmetic goal, and this is what reduces it
+    to the specification's `Nat` form.  Unconditional, exactly as
+    `u64_ofNat_add` is, because both sides are taken modulo `2^64`. -/
+theorem u64_ofNat_mul (a b : Nat) :
+    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) := by
+  apply UInt64.toNat.inj
+  rw [UInt64.toNat_mul, UInt64.toNat_ofNat', UInt64.toNat_ofNat', UInt64.toNat_ofNat']
+  exact (Nat.mul_mod a b (2^64)).symm
+
 /-- **Collapse a literal difference back into a single offset.**  `u64_sub_add`
     rewrites `(sp - a) + b` into `sp - (a - b)`, so an STP pair's second half
     (`(sp - 16) + 8`) comes out as `sp - (16 - 8)` rather than the
@@ -911,16 +926,7 @@ inductive MojoExpr where
   | var (name : String)
   | unop (op : String) (operand : MojoExpr)
   | binop (op : String) (left : MojoExpr) (right : MojoExpr)
-  -- A call carries its arguments AS A LIST.  It carried ONE `MojoExpr` until
-  -- 2026-10-05, which made a call of any arity but one unstatable: there was
-  -- no faithful AST for it, so `eval_eq_mojo` could not be stated for a program
-  -- containing one.  The list is what makes the node faithful; what the HANDLER
-  -- is handed is still one `UInt64`, because `callFunc` is
-  -- `String → UInt64 → UInt64` and the arguments are PACKED into it
-  -- (see `evalExpr`'s `call` arm).  Those are two different facts and the
-  -- wording in `formal/arm64_proof_gen.py::_call_go` and `formal/admitted.py`
-  -- says the second, because that is the one that is true.
-  | call (name : String) (args : List MojoExpr)
+  | call (name : String) (arg : MojoExpr)
 
 inductive MojoStmt where
   | return (expr : MojoExpr)
@@ -1110,28 +1116,7 @@ closes the bridge instead of leaving a signed/unsigned pair to be noticed by
 `bv_decide` as a "spurious counterexample". -/
 def sKey (x : UInt64) : UInt64 := x ^^^ 0x8000000000000000
 
-mutual
-
-/-- Source semantics: evaluate expressions with a call handler for recursion.
-
-    **`mutual`, and that is not tidiness.**  `MojoExpr.call` now carries a
-    `List MojoExpr` of its own type's constructors, so the type is a NESTED
-    inductive, and a fold over that list (`List.foldl`, which is what the node
-    used to carry) is not a structural recursion Lean can see: the recursive
-    call's argument is an ELEMENT of the list, and nothing in `List.foldl`'s
-    definition hands Lean the membership fact.  Spelled that way Lean compiles
-    `evalExpr` into a well-founded fixpoint and SAYS so --
-
-        failed to infer structural recursion:
-        Cannot use parameter #1: unexpected occurrence of recursive application
-        ⊢ sizeOf a✝ < 1 + sizeOf n + sizeOf args
-
-    -- and the consequence is not a warning on one arm.  `evalExpr` stops
-    -- reducing, so all 26 of its per-node lemmas (`evalExpr_int`,
-    `evalExpr_var`, `evalExpr_binop …`) lose `rfl` and fail, including the ones
-    whose statement does not mention a call at all.  An explicit recursion over
-    the argument list makes the recursive argument visibly a subterm, and then
-    this is ordinary structural recursion again and every `rfl` survives. -/
+/-- Source semantics: evaluate expressions with a call handler for recursion -/
 def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
   match e with
   | MojoExpr.int v => v
@@ -1183,26 +1168,7 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop _ l r => evalExpr callFunc l env
-  | MojoExpr.call name args => callFunc name (evalArgs callFunc args env)
-
-/-- PACK a call's arguments into the ONE value `callFunc` is handed.
-
-    `callFunc` is `String → UInt64 → UInt64`: it takes one value, so the
-    arguments are multiplied together rather than passed as a tuple.  That is
-    a real loss, and it is why `formal/admitted.py`'s refusal of a multi-argument
-    call is still CORRECT after `MojoExpr.call` was widened -- the AST packs them
-    into one value, which is not what a multi-parameter callee takes.
-
-    `[]` answers `1` so that a ONE-argument call evaluates to exactly what it did
-    before the widening: `v * 1 = v`.  That is what keeps every proof that
-    typechecks today keeping its VALUE, so the widening cannot move a verdict by
-    itself. -/
-def evalArgs (callFunc : String → UInt64 → UInt64) :
-    List MojoExpr → (String → UInt64) → UInt64
-  | [], _ => 1
-  | a :: as, env => evalExpr callFunc a env * evalArgs callFunc as env
-
-end
+  | MojoExpr.call name arg => callFunc name (evalExpr callFunc arg env)
 
 /-- Environment-threading evaluator.  Returns the optional result together with
     the final environment, so an `if` branch that assigns a local and then falls
@@ -1375,24 +1341,9 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
                                         · simp [evalExpr, h, h', h'', h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19]
 
 /-- Evaluate a function call expression. -/
-theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (args : List MojoExpr) (env : String → UInt64) :
-  evalExpr callFunc (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env) := by
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc (MojoExpr.call name arg) env = callFunc name (evalExpr callFunc arg env) := by
   rfl
-
-/-- **The one-argument case, stated separately**, because it is the shape every
-    existing proof uses: `v * 1 = v` in `UInt64`, so this is what a proof of a
-    one-argument call rewrites with.  It is `simp` rather than `rfl` because the
-    product is what the list fold leaves behind. -/
-theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
-  evalExpr callFunc (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc arg env) := by
-  simp [evalExpr, evalArgs]
-
-/-- `evalArgs` over a singleton list is its element -- the property that makes
-    the widening value-preserving, stated on its own so it is checked rather
-    than argued. -/
-theorem evalArgs_singleton (callFunc : String → UInt64 → UInt64) (a : MojoExpr) (env : String → UInt64) :
-  evalArgs callFunc [a] env = evalExpr callFunc a env := by
-  simp [evalArgs]
 
 /-- Evaluate a return statement. -/
 theorem evalBody_return (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
@@ -1460,33 +1411,6 @@ theorem u64_lt_iff_false_of_le {a b : UInt64} (h : b ≤ a) : (a < b) ↔ False 
 
 theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False :=
   ⟨fun hab => (UInt64.not_le.mpr h) hab, False.elim⟩
-
-/-- **The two POSITIVE order bridges**, which are the other half of the pair
-    above and were missing.
-
-    `u64_lt_iff_false_of_le` and `u64_le_iff_false_of_lt` both conclude
-    `False`: they discharge a comparison the hypothesis has already ruled out.
-    Nothing could go the OTHER way -- derive a positive comparison from another
-    positive one -- and that is not a small gap.  `UInt64`'s order is
-    `BitVec 64`'s, which is `Nat`'s behind two structures, so `omega` (which
-    does linear arithmetic over `Nat` and `Int` and nothing else) cannot see a
-    comparison on `UInt64` at all, and neither can `decide` on a symbolic one.
-    Every goal the contract ladder states is made of `UInt64` comparisons,
-    because the signed reading of a source comparison is spelled
-    `x ^^^ 0x8000000000000000` -- so before these two, a contract whose goal
-    needed one comparison from another was UNREACHED no matter what tactic ran.
-
-    Measured on `formal/contracts/bounds_index.mojo` (`@requires(i >= 0)
-    @requires(i < n) @ensures(result <= n)`), whose goal is
-    `sKey i ≤ sKey n` from `sKey i < sKey n` and nothing else: exit 1 without
-    them, exit 0 with.  See `bugs/FORMAL_contract_ladder_reach.md`. -/
-theorem u64_lt_iff_toNat_lt (a b : UInt64) : a < b ↔ a.toNat < b.toNat := by
-  show a.toBitVec < b.toBitVec ↔ _
-  constructor <;> intro h <;> exact h
-
-theorem u64_le_iff_toNat_le (a b : UInt64) : a ≤ b ↔ a.toNat ≤ b.toNat := by
-  show a.toBitVec ≤ b.toBitVec ↔ _
-  constructor <;> intro h <;> exact h
 
 /-- Main AST evaluation lemma.
     Takes a function-specific hypothesis `h_result` (supplied by the per-program
@@ -2210,8 +2134,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
-  -- literal floor. The immediate carries the same `sh` field as the ADD/SUB
-  -- arms, so it reads the same helper.
+  -- literal floor.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
@@ -4385,6 +4308,19 @@ theorem arm64_flag_le_s (a b : UInt64) :
       ↔ (a ^^^ 0x8000000000000000) ≤ (b ^^^ 0x8000000000000000) := by
   simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
 
+/-- The sign flip preserves the order of two words that are both BELOW the sign
+    bit: for `a b : UInt64` with `a < 2^63` and `b < 2^63`, flipping bit 63
+    keeps `a < b` true exactly when it was.  This is the OTHER direction from
+    `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
+    produced the flipped order states its hypothesis in that order, and this
+    turns it back into the plain `UInt64` order.  The reusable library fact
+    `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    signed_flag.md` names as step 1. -/
+theorem arm64_slt_iff_lt (a b : UInt64)
+    (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
+    (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
+  constructor <;> intro h <;> bv_decide
+
 theorem arm64_cset_eq (a b : UInt64) :
     (if arm64_matches_condition 0 (arm64_subs_flags a b) then (1 : UInt64) else 0)
       = (if a = b then 1 else 0) := by
@@ -5300,8 +5236,9 @@ theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
     else moves -- in particular `sp` does not, which is the whole point.  The
     base is the instruction's `Rn`, not `SP`.
 
-    Named `_uoff` (unsigned offset) to match the A64 encoding, which is the
-    name `formal/arm64_proof_gen.py`'s `_WORK_STEP` table dispatches on. -/
+    Named `_uoff` (unsigned offset) to match the A64 encoding.  The generator
+    still asks for this by its historical name `work_step_ldr_pre`, which is
+    the alias immediately below; see the note there. -/
 theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000) :
@@ -5333,6 +5270,25 @@ theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   have hne_tbz : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_pre` -- HISTORICAL NAME, see
+    `work_step_ldr_uoff` for the statement and the reasoning.
+
+    `formal/arm64_proof_gen.py`'s `_WORK_STEP` table dispatches on this name
+    (`(18, "work_step_ldr_pre", [(0xffe00000, 0xf9400000)])`), so the name is
+    load-bearing for the generator even though it is wrong: the opcode is a
+    plain unsigned-offset load, not a pre-index store.  Renaming the generator
+    entry to `work_step_ldr_uoff` and deleting this alias is a one-line change
+    in `_WORK_STEP` with no effect on any proof; it is left to a commit that
+    owns that file rather than done here, because four other agents are in
+    `formal/`. -/
+theorem work_step_ldr_pre : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9400000),
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
+      ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
+        + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) :=
+  work_step_ldr_uoff
 
 /-- Per-instruction step: `work_step_str_uoff32`.
 
@@ -5375,6 +5331,20 @@ theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
   have hne_tbz : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
+
+/-- Per-instruction step: `work_step_ldr_post` -- HISTORICAL NAME.  The word
+    0xB9000000 is `STR Wt, [Xn, #imm]`, not a post-index load, so this used to
+    state something false; the statement is now `work_step_str_uoff32`'s and the
+    name is kept only so an older `_WORK_STEP` entry still resolves. -/
+theorem work_step_ldr_post : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xb9000000),
+    arm64_step s code = some { s with
+      mem := mem_write_u32 s.mem
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
+  work_step_str_uoff32
 
 /-- Per-instruction step: `work_step_adrp`. -/
 theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
@@ -5844,7 +5814,21 @@ theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
 
-/-- Per-instruction step: `work_step_ldp_off`.-/
+/-- Per-instruction step: `work_step_str_off` -- kept as the name the proof
+    generator dispatches on (`_WORK_STEP` entry 31).  The statement is
+    `work_step_str_uoff`'s; see that lemma for what changed and why the old
+    `s.sp` base was wrong. -/
+theorem work_step_str_off : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00000) = 0xf9000000),
+    arm64_step s code = some { s with
+      mem := mem_write_u64 s.mem
+        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
+          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
+        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
+  work_step_str_uoff
+
+/-- Per-instruction step: `work_step_ldp_off`. -/
 theorem work_step_ldp_off (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffc00000) = 0xa9400000) :
@@ -8715,7 +8699,7 @@ def liftMF : MFExpr → MojoExpr
   | .field n => .var (fieldTag n)
   | .unop op e => .unop op (liftMF e)
   | .binop op l r => .binop op (liftMF l) (liftMF r)
-  | .call name a => .call name (liftMF a :: [])
+  | .call name a => .call name (liftMF a)
 
 mutual
 
@@ -8939,40 +8923,24 @@ set_option linter.unusedSimpArgs false in
 theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
     {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
     evalExpr callFunc e env = evalExpr callFunc e env' := by
-  -- **`MojoExpr.rec` with BOTH motives, not `induction e`.**  `MojoExpr` is a
-  -- nested inductive since `call` carries a `List MojoExpr`, and `induction`
-  -- refuses it outright -- "The `induction` tactic does not support the type
-  -- `MojoExpr` because it is a nested inductive type".  `MojoExpr.rec` is the
-  -- combined recursor that does, and it wants a motive for the LIST as well as
-  -- for the node, plus the `nil`/`cons` alternatives: that is the whole of what
-  -- "pushing the element-wise hypotheses through the fold" needs, and it is why
-  -- this theorem is the one genuinely new proof obligation of the widening.
-  --
-  -- The STATEMENT is unchanged.  That matters: `evalBodyEnv`'s
-  -- environment-merging proof is `evalExpr_congr`'s only caller, so keeping the
-  -- statement is what stops this from moving every generated proof in the tree.
-  refine MojoExpr.rec
-    (motive_1 := fun e => ∀ {env env' : String → UInt64},
-      (∀ x, env x = env' x) → evalExpr callFunc e env = evalExpr callFunc e env')
-    (motive_2 := fun args => ∀ {env env' : String → UInt64},
-      (∀ x, env x = env' x) → evalArgs callFunc args env = evalArgs callFunc args env')
-    (fun v {env env'} _ => rfl)
-    (fun b {env env'} _ => rfl)
-    (fun name {env env'} hh => hh name)
-    (fun op operand ih {env env'} hh => by
+  induction e generalizing env env' with
+  | int v => rfl
+  | bool v => rfl
+  | var name => exact h name
+  | unop op operand ih =>
       by_cases hop : op = "neg"
       · subst hop
-        simp only [evalExpr, ih hh]
+        simp only [evalExpr, ih h]
       · by_cases hop' : op = "not"
         · subst hop'
-          simp only [evalExpr, ih hh]
+          simp only [evalExpr, ih h]
         · by_cases hopb : op = "bnot"
           · subst hopb
-            simp only [evalExpr, ih hh]
-          · simp only [evalExpr, hop', hopb, ih hh])
-    (fun op l r ihl ihr {env env'} hh => by
-      have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl hh
-      have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr hh
+            simp only [evalExpr, ih h]
+          · simp only [evalExpr, hop', hopb, ih h]
+  | binop op l r ihl ihr =>
+      have hl : evalExpr callFunc l env = evalExpr callFunc l env' := ihl h
+      have hr : evalExpr callFunc r env = evalExpr callFunc r env' := ihr h
       by_cases h0 : op = "+"; · subst h0; simp only [evalExpr, hl, hr]
       · by_cases h1 : op = "-"; · subst h1; simp only [evalExpr, hl, hr]
         · by_cases h2 : op = "*"; · subst h2; simp only [evalExpr, hl, hr]
@@ -8993,12 +8961,8 @@ theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
                                       · by_cases h17 : op = "<<"; · subst h17; simp only [evalExpr, hl, hr]
                                         · by_cases h18 : op = ">>"; · subst h18; simp only [evalExpr, hl, hr]
                                           · by_cases h19 : op = "**"; · subst h19; simp only [evalExpr, hl, hr]
-                                            · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr])
-    (fun name args ih {env env'} hh => by simp only [evalExpr, ih hh])
-    (fun {env env'} _ => rfl)
-    (fun head tail ih1 ih2 {env env'} hh => by
-      simp only [evalArgs, ih1 hh, ih2 hh])
-    e h
+                                            · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr]
+  | call name arg ih => simp only [evalExpr, ih h]
 
 mutual
 /-- Node count of one statement, counting its nested bodies. -/

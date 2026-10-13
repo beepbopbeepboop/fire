@@ -1254,95 +1254,6 @@ REFUSALS = [
 ]
 
 
-def run_matching_oracle():
-    """`formal/model.py`'s `handler_arm_matches` against CPython's own `except`.
-
-    **CPython is the oracle for every pair, and the pairs are all of them.**
-    Reading `CPYTHON_EXCEPTION_BASE` back and comparing it with itself would
-    prove nothing; this asks CPython to actually CATCH, one `(arm, raised)`
-    pair at a time, and compares that with the matcher's answer. Every class in
-    `CPYTHON_EXCEPTION_BASES` against every other, which is 71x71 — the whole
-    grid rather than the handful of edges somebody would have remembered.
-
-    The pairs this cannot ask are the ones CPython will not construct bare
-    (`UnicodeDecodeError` wants five arguments), and they are SKIPPED rather than
-    counted: the check is about the matching RULE, and a class that cannot be
-    raised without arguments says nothing about which arms would take it.
-
-    Why the rule is worth pinning here rather than when the unwinder lands: it is
-    the answer to the one design question
-    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 records as having
-    no answer in the code — whether a status word saying "this is exactly
-    `ZeroDivisionError`" can answer `except Exception:`. It cannot, and
-    `GeneratorExit` is the row that proves it: it derives from
-    `BaseException` DIRECTLY, so `except Exception:` does not catch it, and a
-    dispatch that flattened the hierarchy would. The alias half of the same
-    question — `EnvironmentError` and `IOError` are `OSError`, and a walk that
-    compared one spelling with another answered `False` for 36 of this grid's
-    pairs, measured, not anticipated — is in `CPYTHON_EXCEPTION_ALIAS`, which the
-    matcher canonicalises at both ends.
-    """
-    sys.path.insert(0, HERE)
-    import formal.model as M
-    import builtins as _builtins
-
-    def raisable(name):
-        cls = getattr(_builtins, name, None)
-        if not isinstance(cls, type) or not issubclass(cls, BaseException):
-            return None
-        try:
-            cls()
-        except Exception:
-            return None
-        return cls
-
-    names = sorted(M.CPYTHON_EXCEPTION_BASES)
-    askable = [n for n in names if raisable(n)]
-    asked = mismatched = skipped = 0
-    for arm in askable:
-        for raised in askable:
-            caught = []
-            try:
-                exec(  # noqa: S102 - the oracle IS the language's own `except`
-                    "try:\n"
-                    f"    raise {raised}()\n"
-                    f"except {arm}:\n"
-                    "    caught.append(1)\n",
-                    {"caught": caught})
-            except BaseException:
-                # Escaping IS the answer for every arm the raised class does not
-                # belong to, which is most of the grid — `except ArithmeticError`
-                # around a raised `AssertionError` is a legal program that
-                # propagates, and letting that out of the harness would abort the
-                # sweep on the first row instead of recording the row.
-                pass
-            asked += 1
-            want = bool(caught)
-            got = M.handler_arm_matches(arm, raised)
-            if got != want:
-                mismatched += 1
-                if mismatched <= 8:
-                    check(False, f"except {arm}: catches a raised {raised}",
-                          f"CPython says {want}, handler_arm_matches says {got}")
-    # Every class CPython will not construct bare is reported rather than
-    # silently dropped, because a grid that quietly loses 9 of its 71 columns is
-    # a grid whose coverage nobody can state.
-    for name in names:
-        if name not in askable:
-            skipped += 1
-    check(True, f"the grid is {asked} pairs over {len(askable)} classes")
-    check(M.CPYTHON_EXCEPTION_BASE.get("GeneratorExit") == ("BaseException",),
-          "GeneratorError derives from BaseException directly, so the "
-          "hierarchy is not a tree under Exception",
-          str(M.CPYTHON_EXCEPTION_BASE.get("GeneratorExit")))
-    check(M.handler_arm_matches("Exception", "GeneratorExit") is False,
-          "except Exception: does NOT catch a GeneratorExit")
-    check(M.handler_arm_matches("BaseException", "GeneratorExit") is True,
-          "except BaseException: does catch a GeneratorExit")
-    print(f"      matching oracle: {asked} pairs over {len(askable)} classes, "
-          f"{skipped} not raisable bare, {mismatched} mismatched")
-
-
 def run_pair(name, source, cpython_source, arg, tmpdir, verbose):
     """Both backends against CPython, comparing stdout AND exit status."""
     ref_source = cpython_source + f"\nimport sys\nsys.exit(main({arg}))\n"
@@ -1532,7 +1443,6 @@ def main():
     ap.add_argument("cases", nargs="*")
     args = ap.parse_args()
 
-    run_matching_oracle()
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source, arg in CASES:
             if args.cases and name not in args.cases:

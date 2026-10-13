@@ -82,13 +82,10 @@ architectures cannot disagree), with the answers in the table.
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
 **The refusal was replaced by real per-iteration storage for the shapes a byte
-copy makes sound, on both backends.** `model.comprehension_element_is_copy_safe`
-(renamed 2026-10-12 from `comprehension_element_is_flat_container`, when the
-nested-comprehension shape below was added) is the one predicate: at this date it
-accepted the element as a list / tuple / set / dict literal with NOTHING inside it
-building a second container (a nested literal, a comprehension, a slice or a
-call) — see "What landed 2026-10-12" for the comprehension case it now also
-accepts. Both emitters' `_materialize_compr_element` then reserve a
+copy makes sound, on both backends.** `model.comprehension_element_is_flat_container`
+is the one predicate: the element is a list / tuple / set / dict literal and
+NOTHING inside it builds a second container (a nested literal, a comprehension, a
+slice or a call). Both emitters' `_materialize_compr_element` then reserve a
 `cap`-slot array beside the element's own scratch blob and, at the element site,
 `memcpy` the element's blob into slot `i`, where `i` is the result blob's count
 word — the number appended so far, so the append that follows stores the copy and
@@ -106,16 +103,12 @@ about which elements are representable; the message stays
 | `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
 | `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
 
-**Why the shallow copy is sound here and not for the rest.** The copy carries
-the element blob's WORDS; a nested container is carried as its ADDRESS, so
+**Why the shallow copy is sound exactly here, and only here.** The copy carries
+the element blob's WORDS; a nested container would be carried as its ADDRESS, so
 every iteration's outer container would point at one inner object — the same
 defect one level down. A NAME is deliberately not a container: `[a, b]` over two
 outer lists copies the outer list and shares `a`/`b`, which is what CPython does.
 That is why the predicate recurses rather than keying on the element's node type.
-The 2026-10-13 section at the top extends this the same way: a nested
-comprehension whose own emitted values are plain words carries words, not an
-address, so it joins the copy; one whose own element builds a container emits
-the addresses of its per-iteration array and does not.
 
 **Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): three
 literal build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because
@@ -290,10 +283,8 @@ a constructor call needs, and the three steps are still that work.**
 
 The natural implementation — reserve `cap` slots of the element's own size and
 index them by the iteration counter — **works for a list-literal and a
-dict-literal element, and (2026-10-12) for a NESTED COMPREHENSION element whose
-whole region is pointer-free; it still does not work for one whose region holds
-an in-region pointer.** The rows below were measured on arm64 before the
-2026-10-12 change, and the third is the one it supersedes:
+dict-literal element, and does not work for a NESTED COMPREHENSION element,
+which is the doc's own reproducer.** Both were built and measured on arm64:
 
 | element of the outer comprehension | after the array fix |
 |---|---|
@@ -301,14 +292,7 @@ an in-region pointer.** The rows below were measured on arm64 before the
 | `[{k: 1} for k in d]` (a dict literal) | correct |
 | `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` (a nested comprehension) | correct since 2026-10-08 — see above |
 
-**The copy already relocates the whole region, which is why the third row needed
-no new allocator — only the soundness rule for which regions it may copy.** With
-`model.comprehension_element_is_copy_safe` extended to the nested form, the same
-`memcpy` gives the third row its own inner object per outer iteration. The FOURTH
-row is what the structural argument below still applies to: an inner element that
-opens a container leaves an in-region pointer that the copy does not relocate.
-
-**Why the fourth row is different, and it is structural.** A list literal's own
+**Why the third row is different, and it is structural.** A list literal's own
 allocation happens *inside* `_emit_list`, so making it per-iteration is a change
 to `_emit_list` alone: skip `_reserve_blob`, and recompute the base as
 `frame + array_base + result_count · stride`. The result count is the index,
@@ -322,13 +306,8 @@ store. So relocating it means `res_offset` stops being a compile-time constant
 and becomes a **register holding a run-time address**, and every one of those
 recomputes has to read that register instead of calling `_emit_list_base`.
 
-**"What landed 2026-10-13" supersedes the third row of that table.** The nested
-comprehension did NOT need the relocation: its result is at the element
-footprint's start, so the copy reaches it. Steps 1-3 below are owed by the
-shapes whose element carries an inner blob's ADDRESS and so cannot be made
-independent by a byte copy — a list of lists, a slice, a constructor call, and a
-nested comprehension whose payload builds a container. **That is what is left,
-and it is not a patch.** Concretely, on each backend:
+**That is the whole of what is left, and it is not a patch.** Concretely, on
+each backend:
 
 1. `_emit_comprehension` must be able to say "my result lives at a slot of my
    parent's array" and then keep that address in a register for the whole walk,
@@ -351,11 +330,7 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
   disagree about a comprehension's result address;
 * the two rows it did fix are covered by the OTHER doc's table as cases a fix
   must not break, and they only pass *because* the nested row is broken in the
-  same build — so there is no partial landing that is a partial fix. **That
-  argument is superseded (2026-10-13): the nested row did not need this
-  relocation at all, and the per-iteration COPY already reaches it, so the
-  partial landing this bullet says is impossible has landed** (see "What landed
-  2026-10-13");
+  same build — so there is no partial landing that is a partial fix;
 * one real defect in it is worth recording: `_blob_est` counts **elements**, and
   every blob is `[count][element…]`, so a slot sized `8 * _blob_est(...)` is one
   word too small and the third iteration's count header overwrote the second
@@ -411,15 +386,7 @@ it affordable is the measured 0 above.
 ## Reproducing
 
     $ export PATH=/opt/homebrew/bin:$PATH
-    $ mkdir -p .tmp/ds && cat > .tmp/ds/alias.mojo <<'EOF'
-    def main():
-        s = 0
-        for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:
-            s = s + v[0]
-        print(s)
-        return 0
-    main()
-    EOF
+    $ cat .tmp/ds/alias.mojo      # the program above
     $ python3 .tmp/ds/alias.mojo                        # 63
     $ python3 tools/memslot.py --gb 8 --label t -- \
           python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
@@ -428,16 +395,10 @@ it affordable is the measured 0 above.
           python3 fire.py build --formal --no-prove -o .tmp/al2 .tmp/ds/lol.mojo
     build: a comprehension in main: the element `[[y]]` opens a container, …   # a list of lists, still refused
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
-    $ grep -n "def _materialize_compr_element" formal/arm64_codegen.py
-    $ grep -n "def _comprehension_result_is_a_flat_container" formal/model.py
-    $ grep -n "def _iterable_yields_a_scratch_container" formal/model.py
+    $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
+    $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
 
-The shapes that still refuse are the ones whose region holds an in-region
-pointer, e.g. `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]`:
-
-    build: a comprehension in main: the element `[…] for …` opens a container, …
-
-and the tests:
+and the tests, no builds for the census:
 
 ```sh
 python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_per_iteration \
