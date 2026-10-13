@@ -372,6 +372,13 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # A parameter ANNOTATED `object` is such a word by declaration: whatever
+    # the call sites pass, the function's own code may not assume a kind.
+    if params is not None:
+        for _dwp in params:
+            if (isinstance(_dwp, (tuple, list)) and len(_dwp) > 1
+                    and isinstance(_dwp[1], str) and _dwp[1].strip() == 'object'):
+                gen._dyn_word_locals.add(_as_str(_dwp[0]))
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a

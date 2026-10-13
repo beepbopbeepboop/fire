@@ -6831,6 +6831,18 @@ static int _value_kind(int64_t v)
  * identity, and a registry address is never a small int or a bool, so
  * "equal words" can only mean equal values. Anything else falls out of the
  * kind pair, and only the same-kind pairs are ever equal. */
+/* `a == b` for two words the codegen could not type: the same value,
+ * whatever each word turns out to be. Identity first; two strings by content;
+ * containers by `mojo_value_eq`'s structural compare; anything else (ints,
+ * struct handles) by identity, which the first test already answered. */
+int mojo_word_eq(int64_t a, int64_t b)
+{
+    if (a == b) return 1;
+    if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
+        return strcmp((char *)(intptr_t)a, (char *)(intptr_t)b) == 0;
+    return mojo_value_eq(a, b, MOJO_EQ_UNKNOWN);
+}
+
 int mojo_value_eq(int64_t a, int64_t b, int elem)
 {
     if (a == b) return 1;

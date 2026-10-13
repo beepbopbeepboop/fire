@@ -343,7 +343,14 @@ def _match_node_fields(fields, term, bindings):
     return bindings
 
 
-def match_pattern(pat, term, bindings):
+def match_pattern(pat, term: object, bindings):
+    # `term: object` -- it IS any AST value (a node, a string, an int, None,
+    # a list), and saying so is what keeps the self-hosted backend from
+    # inferring one kind from its call sites: unannotated, the string a
+    # `_match_one_field` caller passes made it `char *`, and every
+    # `isinstance(term, <node>)` below then folded to False, so no rule ever
+    # matched in the compiled compiler. An `object` parameter is an
+    # unknown-kind word there, so `term == pat.value` compares values.
     if bindings is None:
         return None
     if isinstance(pat, Var):

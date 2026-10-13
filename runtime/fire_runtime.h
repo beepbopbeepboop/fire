@@ -640,6 +640,8 @@ void mojo_str_register(char *s);
 /* A codegen-emitted struct type tag (see `_reg_struct_tag`): struct handles
  * are never strings to `mojo_boxed_is_str`. */
 void mojo_struct_tag_register(int64_t tag);
+/* `==` between two words of unknown kind (see the definition). */
+int mojo_word_eq(int64_t a, int64_t b);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);

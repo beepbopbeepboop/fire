@@ -3343,6 +3343,15 @@ def _scalar_typename(gen, ctype: str) -> str:
     return 'int'
 
 
+def _is_dyn_word(gen, node, val: str) -> bool:
+    """Is this operand a word whose kind only the runtime knows (see
+    `_dyn_word_vals` / `_dyn_word_locals`)?"""
+    if val in gen._dyn_word_vals:
+        return True
+    return (isinstance(node, IdentExpr)
+            and _as_str(node.name) in gen._dyn_word_locals)
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3882,6 +3891,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 _ans = 1 if op == '!=' else 0
                 gen._emit(f'  {_t} = {_ans};')
                 return '_Bool', _t
+
+    # `==`/`!=` between two WORDS, at least one of unknown kind (an untyped
+    # attribute read, an unpacked slot with no record, an `object` parameter):
+    # Python compares the VALUES, and a C `==` compares the bits -- two equal
+    # strings at different addresses came out unequal. `mojo_word_eq` asks the
+    # runtime what each word is. The self-hosted compiler's own pattern matcher
+    # (`ast_rewriter.match_pattern`'s `term == pat.value`) never matched a
+    # literal, so no `os.environ` rewrite ever fired in the binary.
+    if (op in ('==', '!=') and lt == 'int64_t' and rt == 'int64_t'
+            and (_is_dyn_word(gen, left_node, lv) or _is_dyn_word(gen, right_node, rv))):
+        eq_t = gen._call_expr('int', 'mojo_word_eq', [('int64_t', lv), ('int64_t', rv)])
+        t = gen._new_temp('_Bool')
+        gen._emit(f'  {t} = {eq_t} {"!= 0" if op == "==" else "== 0"};')
+        return '_Bool', t
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
