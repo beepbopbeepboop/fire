@@ -30772,16 +30772,31 @@ def comprehension_element_is_flat_container(element) -> bool:
 
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
-    """The diagnostic for a comprehension ELEMENT that opens a container.
+    """The diagnostic for a comprehension ELEMENT that opens a container and
+    whose result a byte copy cannot materialize per iteration.
 
-    **A silent wrong answer, and the reason this is a refusal rather than an
-    allocation scheme.** A container on this path is a blob in the frame, and the
-    frame is ONE sequential ledger: `_reserve_blob` steps `_list_cursor` along
-    `_blob_cap`, so a site's reservation happens ONCE at compile time. A
-    comprehension's element is one site that runs `cap` times, so the blob is one
-    allocation shared by every iteration and each iteration overwrites the last
-    one's contents. Measured on both architectures, CPython 3.14 against the
-    same source:
+    **This is now the FALLBACK, not the whole answer.** A FLAT element — a
+    display of scalars, or a dict display of scalars; one whose result blob
+    holds no pointer to a blob built in the same emission — is given its own
+    arena slot per iteration by both backends' `_materialize_compr_element`,
+    because a byte copy of its result is sound. What reaches this refusal is
+    the element that a byte copy of would STILL alias or that this path cannot
+    size, the same shapes the predicate's docstring names: a nested
+    comprehension, a list of lists, a slice, a constructor call, and every
+    non-literal expression — a call, a subscript or a member read whose result
+    this path cannot type among them.
+    `comprehension_element_is_flat_container` is the shared predicate and
+    `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
+    pins both sides.
+
+    **Where it does fire it is still a silent wrong answer if emitted, and that
+    is why it is a refusal rather than a guess.** A container on this path is a
+    blob in the frame, and the frame is ONE sequential ledger: `_reserve_blob`
+    steps `_list_cursor` along `_blob_cap`, so a site's reservation happens
+    ONCE at compile time. A comprehension's element is one site that runs `cap`
+    times, so the blob is one allocation shared by every iteration and each
+    iteration overwrites the last one's contents. Measured on both
+    architectures, CPython 3.14 against the same source:
 
         [[y, y + 1] for y in [10, 20, 30]]     CPython: 11 21 31
                                               this path: 31 31 31

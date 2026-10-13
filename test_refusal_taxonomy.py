@@ -952,10 +952,11 @@ CAUSE_SAMPLES = [
     ("a repetition whose count this path cannot read",
      "[FloatLiteral] * m * k is a REPETITION, and this path can only lower "
      "one whose count it can read while emitting"),
-    # A comprehension ELEMENT that opens a container — the one shape where this
-    # backend LOWERs the comprehension and still cannot give each iteration its
-    # own container, because the frame is one sequential ledger and the element
-    # site reserves through it once at compile time. Two samples because
+    # A comprehension ELEMENT that opens a container — the shape where the
+    # backend LOWERs the comprehension but a byte copy of the element's result
+    # is not sound, because the result holds a pointer to a blob built in the
+    # SAME emission (a flat element is materialized per iteration instead; see
+    # `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`). Two samples because
     # `formal/model.py::comprehension_element_blob_refusal`'s element spelling
     # goes through `expr_spelling`, and a nested comprehension is spelled
     # `[…] for …` rather than as the AST type name; one sample would leave half

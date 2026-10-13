@@ -57,6 +57,18 @@ build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because three
 copies of the last iteration and one element per iteration have the same count),
 the nested / dict-value / list-of-lists refusals, and the one-iteration guard.
 
+**What the copy has to beat, preserved from the deleted sibling.** Its census
+counted **113 files carrying 323 comprehension sites whose element BUILDS a
+container** — 53 files and 189 sites in `formal/` and the `test_formal_*`
+suites — which is why refusing all of them was never acceptable and why the
+relocation was worth building: a NAME element is excluded from that count on
+purpose, because `[inner for y in ys]` where `inner` is one object gives N
+references to ONE list in CPython too, so aliasing a name is the right answer
+and only a container the element position BUILDS is the bug. On this tree the
+copy serves the flat-DISPLAY share of those 323 (a display of scalars, or a dict
+display of scalars); the shapes above it — including the nested comprehension —
+are the refusal that remains.
+
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
 comprehension's element site reserves through the ONE sequential frame ledger
