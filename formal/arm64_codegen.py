@@ -3849,7 +3849,13 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
         self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
-        self.asm.emit(encode_sub_xd_xn_imm(3, 3, 6))    # rest_count
+        # `rest_count = count - n_fixed`, and `n_fixed` is in X6, so this is a
+        # REGISTER subtract. It was `encode_sub_xd_xn_imm(3, 3, 6)` — the
+        # immediate `#6` — which made rest_count `count - 6` on every image: a
+        # 3-element element with one fixed name gave `-3`, the loop below never
+        # ran (its exit condition was also inverted, see below), and the rest
+        # blob carried a count of `-3` (0xFFFF…FD).
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))     # rest_count
         self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
 
         self._while_counter += 1
@@ -3859,8 +3865,12 @@ dylib_exports: list = None, globals_base: int = None,
         oob_end = f"{tag}_sx{self._while_counter}"
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(4, 3))
+        # `x0 = (i >= rest_count)` is the loop's EXIT condition, so a branch on
+        # it must fire when it is TRUE — `cbnz`. This was `cbz x0`: i = 0 gives
+        # x0 = 0, so the first iteration branched straight to `done` and the
+        # rest blob was never filled (with the count also wrong, above).
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
         self.asm.emit(encode_cset_xd_cond(0, "cs"))

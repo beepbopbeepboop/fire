@@ -23987,6 +23987,77 @@ class ValueKinds:
             for nm in _target_names(target):
                 self._bind(nm, kind, own=own)
 
+    def _bind_for_target(self, target, elem_kind, own=None) -> None:
+        """Bind a `for`/comprehension target's names from ONE ELEMENT's kind.
+
+        A TUPLE target (`for a, b in …`, `for a, *rest in …`, `for a, (b, c)
+        in …`) does not bind the iterable's element: it binds the PARTS of that
+        element, which is itself a container. Binding every name to the
+        element's own kind is one level too high, and the answer was a
+        CONTAINER kind where the source plainly says an integer, so the
+        ordinary spelling refused on both architectures:
+
+            for a, b in [(1, 20)]:
+                printf("%d", a + b)
+            # -> reads `a + b` as a number, and `a + b` is a CONTAINER
+
+        (`_iterable_kind` answers the ITERABLE's ELEMENT, and the element here
+        is the tuple `(1, 20)` — `list:int` — which `_bind_target` then handed
+        to `a` and `b`.) The parts are asked for one level down through
+        `subscript_element_kind`, exactly as `x[i]`'s element kind is, and the
+        STAR leaf keeps the container kind because the rest blob IS one: the
+        `*rest` spelling bound `a` (a fixed leaf) to a blob too, so the whole
+        star target was refused for the wrong reason before the emitter was
+        ever reached.
+
+        `own` follows the same narrowing for the fixed leaves, so `a[0]` after
+        the unpack reads an integer rather than a blob — the same argument
+        `_unpacked_element_kind` makes for the assignment spelling. A star leaf
+        keeps the iterable element's own shape, which is what the emitter
+        builds its rest blob from.
+
+        When the element kind is not a container this file can read — a
+        parameter's blob, a call's result, a MIXED tuple — there is no part
+        kind to answer, and the whole target keeps `elem_kind`: the same
+        conservative direction, and the answer this arm gave before it existed.
+        """
+        tree = for_target_tree(target) if isinstance(target, str) else None
+        inner = subscript_element_kind(elem_kind) if isinstance(tree, list) \
+            else None
+        if inner is None:
+            self._bind_target(target, elem_kind, own=own)
+            return
+        rest_kind = list_kind(inner)
+        for child in self._for_target_leaves_with_star(tree):
+            name, is_star = child
+            if is_star:
+                self._bind(name, rest_kind, own=rest_kind)
+            else:
+                self._bind(name, inner, own=inner)
+
+    @staticmethod
+    def _for_target_leaves_with_star(tree):
+        """`(name, is_star)` for every leaf of `for_target_tree`'s output.
+
+        Nested groups are flattened with the fixed leaves — the per-position
+        kinds inside a group are one level deeper than the evidence here
+        reaches, so every fixed leaf takes the same narrowed kind — and a
+        `*name` leaf is reported with `is_star=True` so its binder can keep the
+        container kind. A leaf that is not an identifier contributes nothing,
+        the same refusal `_target_names` makes.
+        """
+        if isinstance(tree, list):
+            out = []
+            for child in tree:
+                out.extend(ValueKinds._for_target_leaves_with_star(child))
+            return out
+        if not isinstance(tree, str):
+            return []
+        if tree.startswith("*"):
+            name = tree[1:].strip()
+            return [(name, True)] if name.isidentifier() else []
+        return [(tree, False)] if tree.isidentifier() else []
+
     def _note_construction(self, target, value) -> None:
         """Record (or retract) the construction evidence a binding gives.
 
@@ -24334,8 +24405,8 @@ class ValueKinds:
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.ForStmt):
-                self._bind_target(s.target, self._iterable_kind(s.iterable),
-                                  own=self._iterable_own_shape(s.iterable))
+                self._bind_for_target(s.target, self._iterable_kind(s.iterable),
+                                      own=self._iterable_own_shape(s.iterable))
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.WithStmt):

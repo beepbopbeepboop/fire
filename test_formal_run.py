@@ -8736,6 +8736,66 @@ BOTH_ARCH_CASES = [
      "    s = s + a + b + c\n"
      "    printf(\"%d\", s)\n"
      "    return 0\n", 0, "49"),
+
+     # ── A STARRED for-TARGET, ON BOTH MACHINES ─────────────────────────────
+     #
+     # `for a, *rest in …` built on neither backend. arm64's rest-blob emitter
+     # had two defects — `sub x3, x3, #6` for `sub x3, x3, x6` (the REST COUNT
+     # came out `count - 6`, negative for a short element) and a `cbz` where the
+     # loop's exit condition wanted `cbnz`, so the first iteration left the
+     # loop — and x86-64 had no star arm at all (`_emit_for_unpack` stored the
+     # leaf `*rest` under a name nothing allocated: `'*rest' has no home`). Both
+     # are fixed, and the model no longer binds a tuple target's fixed names to
+     # the ELEMENT's container kind (which had made `printf("%d", a)` refuse `a`
+     # as "a CONTAINER"); it narrows them one level, and the star leaf keeps the
+     # container kind because the rest blob is one.
+     #
+     # 11253 is CPython's answer: `1*1000 + 2*10 + 3` = 1023 and `10*1000 +
+     # 20*10 + 30` = 10230 over the two elements, and `n` is their rest lengths
+     # 2 + 2. Every operand contributes a distinct digit, so binding `a` to the
+     # whole element blob, reading `rest[0]`/`rest[1]` from the wrong slots, or
+     # dropping the star all print a different number rather than the same one.
+     ("both_arch_a_starred_for_target_binds_the_head_and_the_rest",
+      "def main():\n"
+      "    var s = 0\n"
+      "    var n = 0\n"
+      "    for a, *rest in [(1, 2, 3), (10, 20, 30)]:\n"
+      "        s = s + a * 1000 + rest[0] * 10 + rest[1]\n"
+      "        n = n + len(rest)\n"
+      "    printf(\"s=%d n=%d\\n\", s, n)\n"
+      "    return 0\n", 0, "s=11253 n=4"),
+     # The same, with TWO fixed names and an element whose rest is EMPTY — the
+     # `n_fixed` half of the arity relaxation (`count >= n_fixed`, not `==
+     # count`) and the star's element offset `src[n_fixed + i]`. 11223 =
+     # `1*1000 + 2*10 + len([3, 4])` (1022) + `10*1000 + 20*10 + len([30])`
+     # (10201); a version that kept the exact-arity check would exit 1 on the
+     # 3-element element, and one that read from index 0 would answer 11200.
+     ("both_arch_a_starred_for_target_after_two_fixed_names",
+      "def main():\n"
+      "    var s = 0\n"
+      "    for a, b, *rest in [(1, 2, 3, 4), (10, 20, 30)]:\n"
+      "        s = s + a * 1000 + b * 10 + len(rest)\n"
+      "    printf(\"s=%d\", s)\n"
+      "    return 0\n", 0, "s=11223"),
+     # …and the ARITY failure the relaxation must still make: a run with fewer
+     # elements than fixed names is CPython's `ValueError` and this path's
+     # exit(1). Pinned so "at least n_fixed" cannot quietly become "any count".
+     ("both_arch_a_starred_for_target_short_of_its_fixed_names_exits_1",
+      "def main():\n"
+      "    for a, b, *rest in [(1,)]:\n"
+      "        printf(\"%d\", a)\n"
+      "    return 0\n", 1, None),
+     # The non-star tuple target's KIND, which is the same model change: `a` and
+     # `b` are the ELEMENTS of the loop's element, and binding them to the
+     # element's own container kind made an ordinary `printf("%d", a + b)`
+     # refuse on BOTH backends. 350 = (1*100 + 20) + (2*100 + 30).
+     ("both_arch_a_tuple_for_target_binds_its_element_kinds",
+      "def main():\n"
+      "    var s = 0\n"
+      "    for a, b in [(1, 20), (2, 30)]:\n"
+      "        s = s + a * 100 + b\n"
+      "    printf(\"s=%d\", s)\n"
+      "    return 0\n", 0, "s=350"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
