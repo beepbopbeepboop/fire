@@ -1,81 +1,23 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
-**Status: PARTIAL — the false half is fixed, and the LOCAL half of option 2 of
-"The exact next step" is now ANSWERED (2026-10-12): a `**` spread through a name
-every one of whose bindings is a dict literal is un-spread exactly like a literal
-(§0c). The `**`-PARAMETER blocker this doc is named for is UNCHANGED. Re-measured
-2026-10-04 (`work/formal23-1`): over this repository, `formal/hostmods/` and 252
-stdlib files the corpus holds THREE `**` spreads and not one of them is a dict
-literal or a local bound to one — so the key-set half of "The exact next step"
-below has NO witness in the 768-FILE CORPUS, and every one of the three is a
-`**`-PARAMETER, which `FORMAL_a_variadic_parameter_
-read_has_no_abi.md` owns. (It DID have a witness in the TEST suite, which is
-what §0c records: `test_formal_run.py` pinned `P(a=1, **d)` for a local `d` as a
-REFUSAL, i.e. it expected this path to reject ordinary Python.) The doc's own
-witness file, `formal/x86_64_decode.py`, is no longer refused here at all: it is
-now refused EARLIER, at an f-string literal on line 133
-(`bugs/FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_
-decode.md`), and it holds 13 f-strings of which five are `insn()` call sites — so
-"the source stops spreading" is no longer a one-file mechanical change but a
-chain, and the variadic ABI is the only blocker left.**
+**Status: PARTIAL — the false half is fixed and the real blocker is now
+measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
+repository, `formal/hostmods/` and 252 stdlib files the corpus holds THREE `**`
+spreads and not one of them is a dict literal or a local bound to one — so the
+key-set half of "The exact next step" below has NO witness in the corpus, and
+every one of the three is a `**`-PARAMETER, which `FORMAL_a_variadic_parameter_
+read_has_no_abi.md` owns. The doc's own witness file, `formal/x86_64_decode.py`,
+is no longer refused here at all: it is now refused EARLIER, at an f-string
+literal on line 133 (`bugs/FORMAL_an_f_string_literal_is_refused_and_is_the_first_
+refusal_in_x86_64_decode.md`), and it holds 13 f-strings of which five are
+`insn()` call sites — so "the source stops spreading" is no longer a one-file
+mechanical change but a chain, and the variadic ABI is the only blocker left.**
 Found 2026-10-03 while clearing the single-file causes in
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2. **The refusal itself is still
 CORRECT** — what changed is that the sentence it used to produce was false about
 the source, that a spread of a dict LITERAL is now answered rather than refused,
 and that the gap that remains is NOT the one this doc's §"The exact next step"
 thought. See "What landed" at the end, which is the part to read first.
-
-## 0c. The LOCAL half of option 2 landed (2026-10-12), and it is a real answer
-## rather than a corpus one
-
-**What landed.** The second clause of option 2 — "or through a local that is
-only ever bound such a literal" — is now lowered, on BOTH architectures. The
-evidence was already in the compiler and unnamed: `formal/model.py`'s
-`ValueKinds._dict_inits` is exactly "the local whose every binding is this same
-dict literal" (the tombstone rule `_note_dict_init` states in those words is the
-doc's "only ever bound such a literal"), and the subscript path already reads it.
-So the change publishes it to the spread reader:
-
-* `ValueKinds.dict_inits()` — the one reader of `_dict_inits` for this question,
-  returning `{name: DictExpr}` for the non-tombstoned names, with the docstring
-  the doc's phrase and the lowering now share;
-* `model.local_dict_literals(fn)` — `ValueKinds(fn).dict_inits()`, for the build
-  pass, which has a function and no `ValueKinds` of its own;
-* `_unspread_keyword_mappings(…, mappings)` resolves a `**name` operand through
-  that table before `literal_dict_items` sees it. A name bound twice, or to a
-  non-dict, is absent (the tombstone), so the refusal below is unchanged — the
-  same rule the subscript path follows;
-* both emitters pass `self._spread_mappings` (computed once per function beside
-  `self._vkinds`), and `check_construction_shapes` builds the same table per
-  function when, and only when, a `**` is present — so the build pass and the
-  emitters make one decision, as they must.
-
-**Measured.** `P(a=1, **d)` for `d = {'b': 2}` now builds and prints `1 2` on
-arm64 and x86-64, and so does `f(a=1, **d)` on an ordinary CALL; CPython agrees.
-The refusal SURVIVES where the keys genuinely are not in the source: a name bound
-to two different literals, a name bound to a non-dict, a function parameter, and
-the `**`-parameter of §1. Rows: `test_formal_run.py`'s `SPREAD_CONSTRUCTION_CASES`
-(two new CPython-differential rows) and `SPREAD_REFUSALS` (the two
-name-keyed rows became the answered rows above; three new refusals — two
-mappings, a non-dict, and a parameter — replace them). The existing `a_dict_
-literal_spread_*` rows and the `**`-parameter refusal are unchanged.
-
-**Why it landed though §0b says it should not be next.** §0b's argument is that
-the capability has no call site in the 768-file CORPUS to answer. That is true,
-and it is why the doc's own witness is untouched below. What decides it the other
-way is that the TEST suite DID have a call site — `P(a=1, **d)` for a local `d`
-was pinned as a REFUSAL, i.e. the suite expected this path to reject ordinary
-Python — the evidence (`_dict_inits`) was already in the compiler and already
-read by another construct, and this is the second clause of the section the doc
-itself titles "the real fix". It removes a false refusal of a program CPython
-runs without inventing a key set, which is the standard the doc applies
-everywhere else.
-
-**What this does NOT do, and §0b's point stands.** It does not reach the doc's own
-witness: `formal/x86_64_decode.py`'s spread is through a `**`-PARAMETER, and a
-callee still cannot read its own `**kwargs` (no variadic ABI). So this closes the
-second clause of option 2 and leaves the first (a `**`-parameter as something a
-callee can read) — the same place §0b says the real blocker is.
 
 ## 0b. §"The exact next step" re-measured: the key-set half has no witness (2026-10-04)
 
@@ -150,24 +92,7 @@ written in the source and a dict subscript by a literal key already lowers
 `f(a=1, **{'b': 2})` prints 12 — both agreeing with CPython on both architectures.
 The duplicate check then applies UNCHANGED, which is what keeps
 `S(a=1, **{'a': 2})` refused with CPython's own `TypeError` rather than with
-something this path invented. **A repeated key INSIDE the literal** is the other
-half and it is not that duplicate: `{'a': 1, 'a': 2}` is one key before the
-construction sees it, so the collapse happens in `literal_dict_items` (Status
-2026-10-12 above).
-
-**2b. A duplicate key INSIDE the literal collapses, last value wins, and that
-is the literal's own rule rather than the call's (2026-10-08).** `{'b': 2, 'b':
-3}` is CPython's `{'b': 3}`, so `f(a=1, **{'b': 2, 'b': 3})` is `f(a=1, b=3)`
-and it RUNS on both machines (`1 3` — the row
-`a_dict_literal_spread_collapses_its_own_duplicate_keys`). Before this the
-un-spread handed the keyword check both pairs, so that ordinary program was
-refused with "got multiple values for argument 'b'" — a sentence FALSE about the
-source, and the same class as item 1's. `literal_dict_items` collapses its own
-duplicate keys now (`out[index[name]] = …`, first position with the last value),
-which is exactly a dict display's semantics; the call-site duplicate it must NOT
-swallow is still caught, because `a=1` against a collapsed `a=3` is two
-keywords (`a_collapsed_literal_still_duplicates_an_explicit_keyword`), as is a
-key two spreads both carry.
+something this path invented.
 
 **3. Any other spread is refused BY NAME**, naming the operand and saying the
 keys are not knowable at the construction site — which for
@@ -291,40 +216,6 @@ Two ways out, and they are different jobs:
    `**`-parameter, which is the same flow question
    `“`struct` keyword arguments are silently dropped”` asks on the gimple
    side and should share an answer with.
-
-**Item 2's literal half is DONE (2026-10-12) — see the Status at the top and
-"What landed (2026-10-12)" at the end.** The "through a local" half is the part
-that landed; "keeping the set through a `**`-parameter" is the variadic ABI and
-is untouched.
-
-## What landed (2026-10-12, `work/formal304-docs`): the literal half, through a NAME
-
-The capability is one reader and one parameter, in the shared model:
-
-* `model.ValueKinds.spread_items(operand)` — the one reader of "this spread's
-  keys are written where its operand is", answering for the inline dict literal
-  (`literal_dict_items`, unchanged) and for a NAME through `_dict_inits`, the
-  unanimity map the element-kind reader already asks. A name any other
-  statement rebinds is tombstoned in that map and answers None, so it keeps the
-  old refusal.
-* `_unspread_keyword_mappings(args, kwargs, name, spread_items=None)` calls the
-  supplied reader, so a caller that has a `ValueKinds` folds a name exactly as
-  it folds a literal, and a caller that does not keeps the literal-only answer.
-* `struct_construction_plan` and `bind_call_arguments` take the reader as an
-  optional last argument and pass it down; both emitters pass
-  `self._vkinds.spread_items`, and `formal/build.py`'s construction check builds
-  one `ValueKinds` per function, lazily, only when a construction carries a
-  `**`, so the build pass and the emitter resolve the same name out of one
-  table.
-
-The rows (`test_formal_run.py`, both architectures against CPython):
-`a_spread_through_a_local_dict_literal_is_answered` (a construction) and
-`a_spread_through_a_local_dict_literal_is_answered_at_a_call` (a call) moved out
-of `SPREAD_REFUSALS` and into `SPREAD_CONSTRUCTION_CASES`, and
-`a_spread_through_a_rebound_dict_local_is_still_refused` is the new tombstone
-row. `a_spread_through_a_kwargs_parameter_is_refused_by_name` still refuses: a
-`**kw` parameter has no binding statement, so `spread_items` answers None for it
-and the variadic ABI remains the blocker.
 
 ## Why it is in no list
 

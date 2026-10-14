@@ -225,11 +225,9 @@ brackets cannot be bound …
   one, now with wall two lifted as well — the row has two walls and the second
   one hides a third row that is 8-in-10 where the 163 are.
 * **`tile.mojo`'s row reads 4 files today only because `binary_heap.mojo`
-  masks it.** Its refusal is the specialization-through-a-function-value
-  construct, which is now LOWERED on both backends
-  (`work/formal18-tile-specialization`), so `tile.mojo` stops at its variadic
-  parameter instead and that row is
-  `bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md`'s.
+  masks it.** Its doc is `bugs/FORMAL_stdlib_tile_row_is_a_specialization_
+  through_a_function_value.md` and it is **claimed** (`formal16-7`), so the
+  number belongs to that claim and not to this one.
 * **The decision this row still needs is therefore a decision and not a
   project**, and it is small enough to state: *does the importing module bind
   any CONCRETE name of the dependency?* If not, no library is needed and the

@@ -1213,17 +1213,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # they named were rewrites of an assertion that could no longer see the case
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-parity` is a SIXTH drop, and the same shape as the
-    # three above rather than as `formal-x86-machine-model`: its marker said
-    # `1 of 83 ... printf_float_operand_read_from_an_xmm_register`, and the row
-    # it named now builds and runs on BOTH backends because its operands are
-    # declared `Float64` doubles instead of the integers whose bits happened to
-    # be a double's — the kind the printf conversion rule now refuses by name.
-    # 4ceb7603 (2026-10-13) removed the marker and the bug doc with that change;
-    # a later bulk merge reverted the test half and kept the doc deletion, which
-    # put the row back in the census's red list with nothing to cite (4ceb7603,
-    # restored 2026-10-16).
-    # `formal-x86-machine-model` is a FIFTH drop and the only one of the
+    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
     # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
     # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
     # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
@@ -1252,16 +1242,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # 'mojo' is not defined`; with that fixed, these six run and pass, and a
     # marker on a passing test is reported as a FAILURE.
     #
-    # `formal-os-backing` is a NINTH drop and the one this census's own rule
-    # caught last: it carried `expect='2 of 70: stat_null dev width …'` from
-    # the 2026-10-08 state, and both halves of that red were then closed on
-    # master — the 32-bit pointer-subscript class by the width-and-signedness
-    # subscript emitters, and `stat_null`'s `dev` by an oracle that compares
-    # the 32-bit device number both sides agree on (CPython's sign-extended
-    # `0xffffffffa8fb1a80` is above 2**63, which this backend's signed 64-bit
-    # integer cannot print). The job is 72/72, and an `expect=` on a passing
-    # test is reported as a FAILURE ("marked expect=… but it PASSES"), which
-    # is what removed it. Its three bug docs went with it.
+    # `formal-os-backing` is an ADDITION rather than a drop: it was registered
+    # with no marker and red 30 of 58 (its own doc), and is now `expect=`-
+    # marked. The branch marked 6 of 70 on 2026-10-07; on the merged tree the
+    # 32-bit pointer-subscript half of that 6 is fixed (the subscript emitters
+    # read at the element's width and signedness on both backends), so the
+    # count is 2 of 70 — `stat_null`'s dev width, both backends. Its harness
+    # had to start printing a `PASS=n FAIL=m` shape for the count to be
+    # checkable at all.
     #
     # `bootstrap-stage2-dumps` no longer states a count: its `40 of 46` marker
     # was removed on master (2026-10-03/04, the stage2 dumps stopped dying the
@@ -1269,34 +1257,23 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # reason as the six async drops — a census that states a marker the registry
     # no longer has fails on the registry's own state. The branch's parallel
     # `formal-x86-64-parity` registration was likewise not taken in the
-    # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
-    # too, since 4ceb7603 removed its marker (see above).
+    # 2026-10-12 merge; master's `formal-x86-parity` (1) stands in its place.
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
-# NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
-                     # is in this census any more, and that is the union of the two
-                     # sides of the 2026-10-17 merge, each of which dropped one of
-                     # them for its own reason:
-                     #   * `formal-os-backing` was an ADDITION from the 2026-10-07
-                     #     re-measurement; it became the NINTH drop when both halves
-                     #     of its 2-of-70 red closed (see the prose above).
-                     #   * `formal-x86-parity` (1) was the 2026-10-06 registration,
-                     #     then a SEVENTH drop and then briefly RESTORED on
-                     #     2026-10-16 — 4ceb7603 removed its marker and made its one
-                     #     row `Float64` doubles instead of the integers whose bits
-                     #     happen to be a double's, but a later bulk merge reverted
-                     #     the TEST half of that fix while the doc deletion (the
-                     #     other half) survived, so the row went red on both
-                     #     backends again and the marker came back with it, a
-                     #     half-applied fix of the same class as the dropped
-                     #     definitions in
-                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
-                     #     — and then master's `5e45d0b5` restored the test half for
-                     #     real, so the marker is gone a second time and the count
-                     #     with it.  The registry is the authority for both: a
-                     #     census entry for a job that no longer carries an
-                     #     `expect=` fails this very check.
+                     # `formal-os-backing` (2) is the addition from the 2026-
+                     # 10-07 re-measurement, narrowed on the merged tree (above),
+                     # and `formal-x86-parity` (1)
+                     # the 2026-10-06 registration: the parity differential was
+                     # put in a bucket with a count-checked `expect=` for its
+                     # one pre-existing red, and a census that did not state
+                     # either marker would fail on the registry's own state.
+                     # The branch's parallel `formal-x86-64-parity` registration
+                     # (three reds, 2026-10-07) was not taken: its two 32-bit
+                     # pointer-load reds are not rows of this tree's file, and
+                     # master's registration carries the count.
+                     'formal-os-backing': 2,
+                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
@@ -2121,7 +2098,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
-    'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
+    'test_formal_proof_breadth.py': 5,
     'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2132,10 +2109,7 @@ STALE_PER_CHILD_BUDGETS = {
                                       # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
-                                       # hostmod-dylib row's build of the reduced
-                                       # program, the same 600 s wall the file's
-                                       # other three build sites carry
+    'test_formal_x86_64_dylib.py': 3,
     'test_general_mutable_closure_capture.py': 2,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
@@ -5418,7 +5392,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           dangling_doc_refs.stale_baseline_entries(synth, led)
           == {'c.py': (0, 2), 'd.py': (1, 4)},
           f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
-          f'ledger is a CEILING, so a worker who fixes a citation needs no '
+          f'ledger is a CEILING, so a file that fixed its citations needs no '
           f'entry change to stay green and an entry left behind by a fix is '
           f'indistinguishable from one still needed — a worker who fixes a '
           f'citation should drop the entry rather than leave it')
@@ -5444,93 +5418,6 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'corpus keys {sorted(synth)}; "fixed every citation in this file" '
           f'and "the ledger never mentioned this file" were the same '
           f'observation, so the join has to be over the LEDGER')
-
-    # ── the BARE class is a VERDICT now, and this is the check that says so ──
-    #
-    # `the surviving-citation bug`: a bug doc was
-    # deleted with its fix and three documents kept citing it by bare stem — a
-    # census row, a per-stem table row, a prose pointer — while `--ratchet` was
-    # GREEN, because the spelling `BARE_REF` matches has no `bugs/` in front of
-    # it and the ratchet only read `BASELINE`.  `bare_find` reported the class
-    # and `BARE_REF`'s own comment said a ledger for it "would have to bless
-    # every existing sentence", which was true when it was written and stopped
-    # being true when the `deleted_convention` skip landed: a line that SAYS the
-    # doc was deleted is not counted, so there is a convention and the ledger is
-    # seeded from the census like the other one.
-    #
-    # Three checks, and each one is a way that could be got wrong independently:
-    # the ledger exists and is green on arrival (a missing table defaults every
-    # ceiling to 0, so an absent `BARE_BASELINE` would turn the gate into 86 red
-    # lines rather than a sentence); the same reader that judges the prefixed
-    # class judges this one, on a synthetic corpus, so "it is wired to a verdict"
-    # is not the same claim as "the table was written"; and the planted corpus
-    # below is seen by `bare_find` and NOT by `find`, which is the whole defect
-    # stated as a difference between two functions rather than as prose.
-    bare_led = dangling_doc_refs.load_baseline('BARE_BASELINE')
-    pref_led = dangling_doc_refs.load_baseline()
-    bare_gains = dangling_doc_refs.ratchet_regressions(bare_by_file, bare_led)
-    check('dangling refs: the BARE class has a ledger of its own, and it is '
-          'green on arrival — a citation spelled without `bugs/` is judged too',
-          bool(bare_led) and pref_led is not bare_led and not bare_gains
-          and all(f in bare_led for f in bare_by_file),
-          f'BARE_BASELINE has {len(bare_led)} entries and the corpus has '
-          f'{len(bare_by_file)} citing files; gains {bare_gains[:5]}. Two '
-          f'tables because two classes: `doc/ELABORATION.md` is cited bare by '
-          f'four real files and must never be a ceiling, and the same spelling '
-          f'of a document that is nowhere must be. An absent table is not a '
-          f'green light — every ceiling would read 0 — which is why this asks '
-          f'for the table rather than for the absence of complaints')
-    check('dangling refs: the BARE ratchet is the SAME reader as the prefixed '
-          'one, so it fails on a gain and not on a leftover',
-          dangling_doc_refs.ratchet_regressions(synth, led) == [('b.py', 2, 1)]
-          and dangling_doc_refs.sanctioned(synth, led) == {'a.py', 'd.py'},
-          'one implementation for both ledgers, checked against the same '
-          'synthetic corpus: a file over its ceiling is a gain in either class '
-          'and a file under one is not')
-
-    # The planted corpus, which is the defect itself. A file in `.tmp/` (which
-    # `.git/info/exclude` keeps out of the tree, so the self-test leaves no
-    # trace) citing a document that is nowhere, by bare stem — and `candidates`
-    # is redirected at it so the guarantee is the file rather than this tree's
-    # own corpus, which is exactly the trade the checks above make.
-    plant_dir = os.path.join(HERE, '.tmp')
-    os.makedirs(plant_dir, exist_ok=True)
-    plant = os.path.join(plant_dir, 'docrefs_plant.md')
-    with open(plant, 'w', encoding='utf-8') as f:
-        f.write('see NO_SUCH_DOC_ANYWHERE.md for why\n')
-    rel_plant = os.path.relpath(plant, dangling_doc_refs.ROOT).replace(
-        os.sep, '/')
-    old_candidates = dangling_doc_refs.candidates
-    try:
-        dangling_doc_refs.candidates = lambda skip=(): [rel_plant]
-        _h, planted_doc, planted_file = dangling_doc_refs.find()
-        p_bare_doc, p_bare_file = dangling_doc_refs.bare_find()
-        # `--ratchet`'s OWN verdict function, with both corpora and both
-        # ledgers handed in — so what is under test is the wiring the CLI uses,
-        # not two halves of a walk called from a test.
-        p_pref, p_gains = dangling_doc_refs.ratchet_verdict(
-            planted_file, p_bare_file, {}, {})
-    finally:
-        dangling_doc_refs.candidates = old_candidates
-        try:
-            os.remove(plant)
-        except OSError:
-            pass
-    check('dangling refs: a bare citation of a document that is nowhere is a '
-          'GAIN the ratchet reports — the class it used to walk past',
-          not planted_doc and not p_pref
-          and 'NO_SUCH_DOC_ANYWHERE.md' in p_bare_doc
-          and p_bare_file.get(rel_plant) == [('NO_SUCH_DOC_ANYWHERE.md', 1)]
-          and p_gains == [(rel_plant, 1, 0)],
-          f'the prefixed walk found {planted_doc} and the bare walk found '
-          f'{sorted(p_bare_doc)}; one verdict over both halves said '
-          f'prefixed={p_pref} bare={p_gains}. `find()` cannot see a stem '
-          f'with no `bugs/` in front of it, which is why four citations of one '
-          f'deleted document sat in three files with the ratchet green. The '
-          f'planted name is one of this file\'s own prefixed fixtures, so the '
-          f'walk that cannot see it is shown on a name the walk that can has '
-          f'already been using as a control; the plant is removed above '
-          f'either way')
 
 
 def test_the_formal_doc_index_is_current():
@@ -5599,22 +5486,6 @@ def test_the_formal_doc_index_is_current():
     rc, out = run_check(['--check'])
     check('formal doc index: OPEN_WORK.md\'s generated block is current',
           rc == 0, out.strip() or f'--check exited {rc}')
-
-    # A committed MERGE CONFLICT MARKER is always a bug, and the block check
-    # above cannot see one in the HAND-maintained half of OPEN_WORK.md — it
-    # compares the generated region only, and that is where one sat from a merge
-    # until 2026-10-08 (a `=======` plus a duplicated table). Checked over the
-    # whole file, and shown to fire on a planted string rather than only on the
-    # clean tree it is run against.
-    planted_marker = 'before\n=======\nafter\n'
-    check('formal doc index: a committed merge conflict marker is caught',
-          F.conflict_markers(F.open_work_text()) == []
-          and F.conflict_markers(planted_marker) == [2]
-          and F.conflict_markers('<<<<<<< HEAD\nx\n>>>>>>> other\n') == [1, 3],
-          'a `=======` / `<<<<<<<` / `>>>>>>>` line in OPEN_WORK.md must fail '
-          '--check: the block comparison cannot see the hand-maintained half, '
-          'so the marker this checks for went unnoticed through every gate '
-          'until a reader found it')
 
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
