@@ -839,6 +839,40 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # …and the FALSY ends of the two container/chained cases the refusal rows
+    # below catch: an EMPTY display is falsy, and a chained comparison is false
+    # when any link is, so both let the exception propagate exactly as
+    # `return False` does.
+    ("an_exit_returning_an_empty_display_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return []") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return []") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_a_false_chained_comparison_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 1 > 2 > 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2 > 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1208,6 +1242,47 @@ REFUSALS = [
      "SUPPRESSING the exception in flight", "it declares no __enter__"),
     ("an_exit_returning_a_constant_remainder_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", "return 7 % 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and three shapes the int/str folders decline for a WORD reason rather than
+    # a truthiness one, which the recursion and the value reader close: a
+    # CONTAINER (truthy iff non-empty), a CHAINED comparison (its own node, so it
+    # needs values rather than truthinesses), and a branch or operand that is a
+    # FLOAT (no folder carries a float, because a float is not a word).
+    ("an_exit_returning_a_non_empty_display_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return [1]") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_chained_comparison_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2 < 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_float_select_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 2.5 if 1 else 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_boolean_over_a_float_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 and 2.5") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"

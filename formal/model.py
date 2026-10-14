@@ -49414,6 +49414,39 @@ def struct_is_context_manager(struct_def) -> bool:
     return not context_exit_returns_truthy(exit_)
 
 
+#: "this operand is not a constant", which is NOT `None`: the `None` LITERAL is a
+#: real scalar (`None < 1` is a `TypeError` in CPython, so a comparison of it must
+#: be declined rather than answered), and a reader that could not tell the two
+#: apart would either answer a comparison of `None` or decline one without it.
+_UNKNOWN_CONSTANT = object()
+
+
+def _constant_scalar(node):
+    """The Python scalar `node` denotes when it is a constant, else `_UNKNOWN_CONSTANT`.
+
+    The VALUE reader `_literal_return_truthiness` needs for a chained comparison
+    (`a < b < c`), which compares values rather than truthinesses.  It is the
+    three word folders plus exactly one thing they do not carry — a FLOAT, which
+    no folder reads because a float is not a word — and it keeps `None` as a real
+    scalar so a `None` operand reaches Python's own `TypeError` and is declined.
+    """
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return float(node.value)
+        except (TypeError, ValueError):
+            return _UNKNOWN_CONSTANT
+    if is_none_expr(node):
+        return None
+    value = fold_literal_expr(node)
+    if value is None:
+        value = fold_module_int_expr(node)
+    if value is None:
+        value = fold_module_select_expr(node)
+    if value is None:
+        return _UNKNOWN_CONSTANT
+    return value
+
+
 def _literal_return_truthiness(node):
     """CPython's truthiness of a `return`'s value when the build can DECIDE it, else None.
 
@@ -49525,6 +49558,65 @@ def _literal_return_truthiness(node):
         return value != 0
     if isinstance(value, str):
         return value != ""
+    # The shapes the int/str folders decline, and they are declined for a reason
+    # that is about a WORD rather than about the truthiness this gate asks: a
+    # branch that is a FLOAT, a CONDITION that is a float or a string (the
+    # module-level folder is deliberately int-only there, because a `char *` is
+    # non-null for the empty string on the machine), or an operand that is a
+    # CONTAINER.  Each is decided here by recursing on the operand whose
+    # truthiness decides the result, so no operator table is restated — the
+    # recursion is the same reader, one level down.
+    if isinstance(node, F.UnaryOp) and node.op == "not":
+        inner = _literal_return_truthiness(node.operand)
+        return None if inner is None else (not inner)
+    if isinstance(node, F.BinaryOp) and node.op in ("and", "or"):
+        left = _literal_return_truthiness(node.left)
+        if left is None:
+            return None
+        # CPython's short circuit: `a and b` is `a` when `a` is falsy and `b`
+        # when `a` is truthy; `a or b` is the mirror.  The left operand decides
+        # the answer outright in one of the two cases and is the reason the
+        # right operand is only asked for when it is the one that is returned.
+        if node.op == "or":
+            return True if left else _literal_return_truthiness(node.right)
+        return _literal_return_truthiness(node.right) if left else False
+    if isinstance(node, F.TernaryExpr):
+        cond = _literal_return_truthiness(node.condition)
+        if cond is None:
+            return None
+        return _literal_return_truthiness(node.then_val if cond else node.else_val)
+    # A container display is truthy exactly when it is non-empty, whatever its
+    # elements are, so its ARITY is the whole question — and a starred element
+    # (`[*a]`) or a `**` spread (`{**a}`) makes the arity unknowable.
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        elements = list(getattr(node, "elements", None) or ())
+        if any(isinstance(e, F.UnaryOp) and e.op == "*" for e in elements):
+            return None
+        return len(elements) > 0
+    if isinstance(node, F.DictExpr):
+        pairs = list(getattr(node, "pairs", None) or ())
+        if any(isinstance(k, F.UnaryOp) and k.op == "**" for k, _v in pairs):
+            return None
+        return len(pairs) > 0
+    # `a < b < c` is `a < b and b < c`, and it is its own node rather than two
+    # `BinaryOp`s, so it needs the VALUE reader above.  An operand that is not a
+    # constant, an operator the table does not know, or Python's own `TypeError`
+    # (a `None` operand) all decline rather than guess.
+    if isinstance(node, F.CompareChain):
+        for at, op in enumerate(node.ops):
+            left = _constant_scalar(node.operands[at])
+            right = _constant_scalar(node.operands[at + 1])
+            if left is _UNKNOWN_CONSTANT or right is _UNKNOWN_CONSTANT:
+                return None
+            compare = _FOLD_COMPARE.get(op)
+            if compare is None:
+                return None
+            try:
+                if not compare(left, right):
+                    return False
+            except TypeError:
+                return None
+        return True
     return None
 
 

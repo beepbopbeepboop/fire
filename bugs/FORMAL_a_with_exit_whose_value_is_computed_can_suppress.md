@@ -30,17 +30,28 @@ things no folder carries: `len(<string literal>)` (whose truthiness is "the text
 is non-empty", encoding-free) and the two arithmetic operators `/` and `%`
 (folded for TRUTHINESS only, which is one-sided in the safe direction: a constant
 the fold reads as truthy is one CPython suppresses, and `a % b` is zero exactly
-when `b` divides `a` under either floor). A constant display element
-(`(1, 2)[0]`) is read the same way. Asking more of the folders can only move a
-constant from "undecided" to "decided as truthy", never the reverse, so the
-gate stays one-sided rather than becoming a refusal of every computed return
-(which would refuse `nullcontext`). Pinned by six REFUSAL rows and two falsy
-ANSWERED siblings in `test_formal_with.py`
+when `b` divides `a` under either floor). Three shapes the int/str folders
+decline for a WORD reason rather than a truthiness one are also read, by
+recursing on the operand that decides the result: a CONTAINER display (truthy iff
+non-empty, and only when its arity is static — a `[*a]` or `{**a}` spread is left
+undecided), a `not`/`and`/`or`/`a if c else b` whose operand is a FLOAT or a
+STRING (the module-level folder is deliberately int-only in a condition, because
+the empty string is a non-null `char *` on the machine), a CHAINED comparison
+(`a < b < c`, its own node, read through a value reader that adds the float the
+word folders lack), and a constant display element (`(1, 2)[0]`). Asking more of
+the folders can only move a constant from "undecided" to "decided as truthy",
+never the reverse, so the gate stays one-sided rather than becoming a refusal of
+every computed return (which would refuse `nullcontext`). Pinned by ten REFUSAL
+rows and four falsy ANSWERED siblings in `test_formal_with.py`
 (`an_exit_returning_a_comparison_is_refused_for_the_same_reason`,
 `…a_boolean_operator…`, `…a_select…`, `…a_bitwise_operator…`,
-`…len_of_a_literal…`, `…a_constant_remainder…`, and
+`…len_of_a_literal…`, `…a_constant_remainder…`,
+`…a_non_empty_display…`, `…a_chained_comparison…`, `…a_float_select…`,
+`…a_boolean_over_a_float…`, and
 `an_exit_returning_a_false_comparison_still_runs_the_protocol`,
-`an_exit_returning_len_of_the_empty_string_still_runs_the_protocol`) — 435/0,
+`an_exit_returning_len_of_the_empty_string_still_runs_the_protocol`,
+`an_exit_returning_an_empty_display_still_runs_the_protocol`,
+`an_exit_returning_a_false_chained_comparison_still_runs_the_protocol`) — 471/0,
 up from 387. **§2's computed case — a return that depends on a RUN-TIME value,
 which is cross-field flow — is untouched and is still the whole of what is
 left.**
