@@ -2513,6 +2513,102 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_lemmas("syn", code, 0x1000))
 
 
+class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
+    """A data word in `__TEXT,__text` must not be planned a step lemma.
+
+    `__TEXT` carries every function body and THEN every interned string
+    (`arm64_codegen.compile`'s string-emission loop, which includes
+    `model.stack_trap_message`), and `_step_result_plan` walks every 4-byte word
+    of the code it is given.  A string byte pattern that decodes as an
+    instruction the step table knows gets a step-RESULT lemma, and the step-OK
+    corollary's discriminator fact is FALSE for it, so the whole generated proof
+    fails to typecheck.  Measured: `model.stack_trap_message` contains the word
+    `909189220` (`0x36312064`, `TBZ w4, #…`).
+
+    The DYLIB emitter is the live case this pins: a dylib whose export prints a
+    literal interns the string, and before `formal/arm64_proof_gen.py`'s
+    `_executable_code` was read there it emitted `dylib_sr_190` for that data
+    word (the proof the image is for is not the one that was produced, which no
+    assertion short of this one catches -- the file still elaborates until Lean
+    reaches the false corollary).  The ordinary image's half is
+    `TestStepOkDerivesFromStepResult.test_no_step_ok_lemma_was_dropped`.
+    """
+
+    SOURCE = ('def greet(n: Int) -> Int:\n'
+              '    if n > 0:\n'
+              '        print("hello")\n'
+              '    return n\n')
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.arm64_proof_gen as G
+        import formal.build as fb
+        cls.G = G
+        cls.tmp = tempfile.mkdtemp(prefix="a2-execrange-")
+        src = os.path.join(cls.tmp, "greet.mojo")
+        with open(src, "w") as fh:
+            fh.write(cls.SOURCE)
+        r = fb.compile_formal_dylib([src], output=os.path.join(cls.tmp, "greet.dylib"),
+                                    prove=True, check=False)
+        cls.code = r["code"]
+        cls.info = r["info"]
+        cls.base = cls.info["base_addr"]
+        with open(r["proof_path"], encoding="utf-8") as fh:
+            cls.text = fh.read()
+        cls.exec_code = G._executable_code(cls.code, cls.base, cls.info)
+        cls.data_idxs = sorted(
+            set(G._step_result_plan(cls.code))
+            - set(G._step_result_plan(cls.exec_code)))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_fixture_carries_a_decodable_data_word(self):
+        self.assertTrue(
+            self.data_idxs,
+            "the fixture's image interns no string whose bytes the step table "
+            "decodes, so this class asserts nothing -- use a source with a "
+            "string literal in an export")
+
+    def test_the_executable_region_stops_at_the_first_interned_string(self):
+        addrs = list((self.info.get("str_addrs") or {}).values())
+        self.assertTrue(addrs, "the fixture must have an intern table")
+        expected = self.code[:min(addrs) - self.base]
+        self.assertEqual(self.exec_code, expected)
+
+    def test_no_step_lemma_is_declared_for_a_data_word(self):
+        for i in self.data_idxs:
+            with self.subTest(index=i):
+                self.assertNotIn(f"theorem dylib_sr_{i} ", self.text,
+                                 f"the step-RESULT lemma for index {i} is a "
+                                 f"data word the decoder happened to accept")
+                self.assertNotIn(f"theorem dylib_step_ok_{i} ", self.text,
+                                 f"the step-OK lemma for index {i} is false "
+                                 f"about a data word")
+
+    def test_the_step_lemmas_still_cover_the_whole_executable_region(self):
+        plan = self.G._step_result_plan(self.exec_code)
+        self.assertTrue(plan, "the executable region planned no instructions")
+        for i in plan:
+            with self.subTest(index=i):
+                self.assertIn(f"theorem dylib_sr_{i} ", self.text)
+
+    def test_the_run_tests_still_read_the_whole_code(self):
+        """`dylib_code_list` is the WHOLE image, data words included.
+
+        The step lemmas narrow to the executable region; the concrete run tests
+        execute `dylib_code`, which must keep every byte or a program that
+        prints its literal would read the wrong memory."""
+        m = re.search(r"def dylib_code_list : List UInt8 :=\n  \[(.*?)\]", self.text,
+                      re.DOTALL)
+        self.assertIsNotNone(m, "dylib_code_list is not defined")
+        n_bytes = sum(len(part.split()) for part in m.group(1).split(","))
+        self.assertEqual(n_bytes, len(self.code) + 4,
+                         "the code list lost bytes when the step lemmas "
+                         "narrowed to the executable region")
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
