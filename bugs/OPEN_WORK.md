@@ -176,7 +176,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | **unclaimed** | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | **unclaimed** | a run-time-length blob is answerable; a run-time-length LIST is not |
 | `FORMAL_metamorphic_ledger.md` | **unclaimed** | what `tools/formal_metamorph.py` has measured, and what came of it |
-| `FORMAL_os_backing_pointer_and_stat_widths.md` | **unclaimed** | `formal-os-backing`'s remaining red — `stat`'s `dev` field is zero-extended, and the 32-bit pointer-subscript class that sat beside it is fixed |
 | `FORMAL_runtime_library_on_the_link_line.md` | **unclaimed** | the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open |
 | `FORMAL_set_value_model.md` | **unclaimed** | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 | `FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` | **unclaimed** | CLOSED for programs — every prologue of an image that has an entry carries the guard |

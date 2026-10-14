@@ -3304,18 +3304,17 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     # Re-measured 2026-10-12 on the merged tree: 68 of 70. The 2026-10-07
-     # 6-of-70 (three cases x two backends) has narrowed to ONE case: the
-     # 32-bit pointer-subscript class (`pointer_subscript_i32`,
-     # `pointer_subscript_augmented`) is fixed on master — the subscript
-     # emitters now read and store at the element's width AND signedness on
-     # both backends, so those rows pass; what is left is `stat_null`'s
-     # `dev` field, on both backends, where the 4-byte signed `st_dev` is
-     # zero-extended (2835028608) instead of sign-extended
-     # (18446744072249612928 on this host, 0xffffffffa8fb1a80).
-     expect='2 of 70: stat_null dev width on both backends — a 4-byte signed '
-            'st_dev zero-extended instead of sign-extended — '
-            'bugs/FORMAL_os_backing_pointer_and_stat_widths.md',
+     # GREEN, 72/72 on 2026-10-13, and the marker came off with the fix rather
+     # than staying to rot. The 2026-10-07 6-of-70 (three cases x two backends)
+     # narrowed in two steps: the 32-bit pointer-subscript class
+     # (`pointer_subscript_i32`, `pointer_subscript_augmented`) was fixed by
+     # giving the subscript emitters the element's width AND signedness on both
+     # backends, and `stat_null`'s `dev` was closed by comparing the 32-bit
+     # device number both sides agree on (b161a3e5). CPython renders
+     # /dev/null's raw 0xa8fb1a80 sign-extended into a 64-bit UNSIGNED long as
+     # 18446744072249612928, which is above 2**63 and so outside the signed
+     # 64-bit range this backend keeps an integer in — no value the image can
+     # produce equals it, so the oracle compares `v & 0xFFFFFFFF`.
      desc='the syscalls under the os host module, through real images')
 
 # ── the ten the batch merge left unregistered ──────────────────────────────

@@ -12,8 +12,8 @@ doc root-caused is FIXED on master** — the pointer-subscript load is now
 width-sign-extended (`_sub_width`/`_sub_signed` in both emitters), and
 `test_formal_os_backing.py` is 68/70: the `pointer_subscript_i32`/`_augmented`
 rows all pass, and the only remaining red is `stat_null`'s `dev` width on both
-backends, which is `bugs/FORMAL_os_backing_pointer_and_stat_widths.md`'s
-subject. This doc stays as the root-cause record of the fixed class (its
+backends — since closed by comparing the 32-bit device number both sides agree
+on (commit b161a3e5). This doc stays as the root-cause record of the fixed class (its
 arithmetic below is why the fix is where it is), not as a live red.
 
 ## What I ran
@@ -46,9 +46,9 @@ doc recorded (deleted on this tree, d7913901),** whose subject (30 of 58,
 every one the non-ASCII string-subscript refusal) is fixed: the `listdir`/
 `len`/readdir rows this task's docs are about now all PASS, and the 6 above
 are the residual. The marker decision that subject owed was made in d7913901
-(`expect='6 of 70: …'`), and the registration's current state — 68/70, this
-doc's class fixed, only `stat_null`'s `dev` width left — is in
-`bugs/FORMAL_os_backing_pointer_and_stat_widths.md`.
+(`expect='6 of 70: …'`), and the registration is now green at 72/72: the
+pointer-subscript fix above, then `stat_null` closed by comparing the 32-bit
+device number (b161a3e5), which took the marker off.
 
 ## The arithmetic, which is the root cause
 
