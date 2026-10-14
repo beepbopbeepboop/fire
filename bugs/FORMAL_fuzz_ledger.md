@@ -1370,35 +1370,43 @@ which is what makes them entries rather than guesses:
 
 | construct | what the backends do | why it is not a family |
 |---|---|---|
-| `nonlocal` | a READ-ONLY one BUILDS (2026-10-12); a WRITE is refused by NAME | a write has no shared cell to reach (capture is by value), so a mix that emitted one would measure the refusal, not the construct — the read-only half lowers, but a generator that emitted both shapes would be measuring two different things |
+| `nonlocal` | **FIXED, and the row was false about the tree** — a WRITE is refused by `model.nonlocal_write_refusal` with a sentence naming the declaring frame and the written names; a READ now BUILDS (it resolves to the by-value capture parameter). See "The `nonlocal` row" below | a mix must pick one half: a write is a refusal, a read is a differential answer, and the two are different programs |
 | a `try` whose HANDLER would run | the operation TRAPS (exit 1, nothing printed) where CPython takes the handler and prints `0` | this path has no exception VALUES, so the only way to reach a handler is a trap — and a program whose answer depends on a trap is not a differential test |
 | float formatting | a `double` is a word here: `print(1.5)` truncates | the tool's docstring's reason, and it stands — a fuzz oracle built on a truncated float measures the model |
 | an integer that does not fit the word | WRAPPED, silently (`print(18446744073303095535)` prints `-1`) | `formal/model.py`'s deliberate word model; §4.9|
 
-**The `nonlocal` row moved on 2026-10-12, and the move was two bugs rather than
-the feature this file expected.** The row said the statement was refused by both
-emitters as `unsupported statement NonlocalStmt` and that closing it needed "a
-`formal/model.py`-level lowering of a captured cell". Measured: the read-only
-spelling had never built either — it reached the same emitter refusal — and the
-refusal that was supposed to catch a WRITE crashed instead, with
-`NameError: name '_names_bound_in' is not defined`, because
-`model.nonlocal_write_refusal` called a reader that lives in `formal/build.py`
-(`841a41da` added the function and the reference; the reader moved to build in
-wave 6). The one test that covered it passed anyway, because the traceback's own
-frame name `nonlocal_write_refusal` CONTAINS the needle `"nonlocal"`.
+#### The `nonlocal` row, corrected 2026-10-13 (`work/formal413-docs`)
 
-What landed: the declaration is a no-op in both emitters' statement dispatch
-(`NonlocalStmt` joins `GlobalStmt`), so a READ-ONLY `nonlocal` builds and the
-read resolves to the by-value capture parameter — measured `5` on both
-architectures, pinned by `test_formal_closures.py`'s
-`nonlocal_read_only_resolves_to_the_capture`; and `nonlocal_write_refusal`
-attributes each declaration to the frame that DECLARES it (skipping nested
-`def`s, `_SKIP_DESCEND_FIELDS`) and refuses only when THAT body writes the name,
-naming the declaring function and the written names. The write half is
-`nonlocal_writes_to_a_captured_cell`, whose needle is now the sentence rather
-than the bare word. So the construct is no longer a feature this file is waiting
-on: a read-only `nonlocal` is a thing the corpus could generate, and the reason
-it is still not a family is the one in the table — the write half is a refusal.
+**The table's `nonlocal` cell was false about the tree, and the truth was worse
+than the cell.** It said `NonlocalStmt` was "REFUSED on both: unsupported
+statement NonlocalStmt" — a claim measured on 2026-10-03, before commit
+`841a41da` moved the refusal into `model.nonlocal_write_refusal`. That function
+called `_names_bound_in(fn)`, which has never lived in `formal/model.py` (it is
+`formal/build.py`'s), so from `841a41da` **every program containing a `nonlocal`
+died with `NameError: name '_names_bound_in' is not defined`** — a traceback out
+of the build, not a refusal. The row that was supposed to pin it
+(`test_formal_closures.py`'s `nonlocal_writes_to_a_captured_cell`) could not see
+either bug: its needle was `"nonlocal"`, and the traceback's own frame name
+`nonlocal_write_refusal` CONTAINS it.
+
+**What is true now, measured on both architectures.** `nonlocal_write_refusal`
+walks each frame with `_SKIP_DESCEND_FIELDS` (so a nested `def` is not crossed,
+and the ENCLOSING frame's own `c = 0` is not mistaken for a write by the nested
+declaration), asks each frame about the names IT writes, and refuses only a
+`nonlocal` whose declaring frame writes the name — naming that frame and the
+names. Both emitters treat a `NonlocalStmt` as a no-op the way they already treat
+`GlobalStmt`, so a read-only `nonlocal` (which the old code refused for the
+wrong-frame reason even had it not crashed) now builds and answers CPython.
+Pinned by `test_formal_closures.py`'s
+`nonlocal_writes_to_a_captured_cell` (needles `"`nonlocal` writes"` and
+`"captures by VALUE"`, neither of which a traceback can satisfy) and its new
+`a_read_only_nonlocal_builds_when_the_enclosing_frame_writes_the_cell`; both
+rows are RED with the fix reversed.
+
+**So the row is now a split family rather than a gap**: a WRITE is a refusal and
+a READ is a differential answer, and a mix must choose which half it measures.
+Recorded rather than generated — this session's claim was the crash, not the
+corpus.
 
 ## 6. Reproducing a row
 

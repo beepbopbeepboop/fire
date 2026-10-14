@@ -2,10 +2,8 @@
 
 **Area:** FORMAL, the arm64 proof generator's conditional-path peel.
 `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange::
-test_lean_accepts_the_three_examples` (`sgt8`), and the `maxRecDepth` half of
-the oct-7 proofgen reds, which `f7bd05ea` closed by discharging a block's
-first-step `runs_cons_seq` side condition with `first | (simp only [qT0, qS0]
-<;> done) | rfl` instead of a bare `rfl`. **Status:
+test_lean_accepts_the_three_examples` (`sgt8`), and the `Lean` argument of
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`. **Status:
 OPEN. Pre-existing — measured identical with and without this branch's fix.**
 
 ## What I ran
@@ -52,11 +50,10 @@ diagnosis look like a missing `arm64_matches_condition` lemma rather than a
 stale address.
 
 **Why this is NOT the recursion-depth defect.**
-That defect blamed the `lsl #12` immediate and `rfl`-over-a-composed-state; it
-is real and is fixed (`9e0cbcec`, and then properly by `f7bd05ea`, which replaced
-the bare `rfl` with the `first | simp <;> done | rfl` form), but it is a different
-mechanism: the two errors here are `Tactic rewrite failed`, not `maximum
-recursion depth has been reached`.
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` blamed the
+`lsl #12` immediate and `rfl`-over-a-composed-state; that is real and is fixed on
+that branch (`9e0cbcec`), but it is a different mechanism: the two errors here
+are `Tactic rewrite failed`, not `maximum recursion depth has been reached`.
 Measured by generating `formal/examples/sgt8.mojo` with the pre-fix generator
 and running Lean on it — **the same two errors, at the same two lines**:
 
