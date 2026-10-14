@@ -1,8 +1,4 @@
-# Peephole rules that are not proved: arm64 `store_load`/`mem_pair`/`movz_pair`, x86-64 `imm_zero`/`store_load`/`mem_pair`
-
-**Status 2026-10-05 (`work/formal268-docs`): §1 (`arm64/copy_chain`) and §3's
-`x86_64/mov_self` are FIXED and ENABLED; this doc is now the work list for the
-rules that remain unproved (§2, §3's remaining x86 rules, §4's note).**
+# `arm64/copy_chain`'s liveness check is wrong for a loop, and no x86-64 rule has a proof
 
 **Status 2026-10-05 (`work/formal40-5`): §1 IS FIXED AND `arm64/copy_chain` IS
 ENABLED.** The right fix was a real CFG — and the CFG was empty, because
@@ -119,41 +115,29 @@ so that run is evidence that nothing regressed and not evidence that
 counting `result["peephole"]` is what established the zero; the corpus is where
 this rule's windows live.
 
-### What is still open, and it is §2 and the unproved x86 rules
+### What is still open, and it is §2 and §3 below
 
-Nothing here touches them. §2 is three arm64 rules with no Lean theorem, §3's
-remaining x86 rules are in the same state (§3's first rule landed
-2026-10-05), and §4 is a measured fact about `add_imm_fuse`. The pass is
-unchanged for a build that does not pass `--opt`, so the shipped bytes of the
-toolchain are the same as before this section.
+Nothing here touches them. §2 is three rules with no Lean theorem, §3 is
+`X86_RULES` being empty, and §4 is a measured fact about `add_imm_fuse`. The
+pass is unchanged for a build that does not pass `--opt`, so the shipped bytes
+of the toolchain are the same as before this section.
 
 ## What this is
 
 `formal/peephole.py` is the verified peephole pass (landed 2026-10-05,
-`work/formal36-verified-peephole`, with `lib/Peephole.lean`). It has two
-`RULES` tables — `ARM64_RULES`, with three proved rules, and `X86_RULES`, with
-its first (`x86_64/mov_self`, §3, 2026-10-05). This doc is about the rules that
-are NOT proved or not enabled, and it is a work list rather than a defect
-report: nothing here is reachable from the shipped toolchain, because the pass
-is behind `--opt` and off by default.
+`work/formal36-verified-peephole`, with `lib/Peephole.lean`). Three rules are
+proved there and two are enabled. This doc is about the three that are not, and
+it is a work list rather than a defect report: nothing here is reachable from
+the shipped toolchain, because the pass is behind `--opt` and off by default.
 
 The pass's design rule is that a rule is only allowed to fire when its Lean
-theorem's side conditions are discharged. Some gaps below are a rule that IS
-proved and whose matcher cannot yet discharge the condition, and others are a
-rule with no theorem at all — and the difference is why the registry has
-`RULES` (enabled) and `PENDING_RULES` (proved, matcher unsound) rather than one
-list with exceptions in it.
+theorem's side conditions are discharged. Two of the three gaps below are a
+rule that IS proved and whose matcher cannot yet discharge the condition, and
+one is a rule with no theorem at all — and the difference is why the registry
+has `RULES` (enabled) and `PENDING_RULES` (proved, matcher unsound) rather
+than one list with exceptions in it.
 
-## 1. `arm64/copy_chain` — proved, matcher wrong for a loop — **FIXED, see above**
-
-Everything in this section is the diagnosis as it stood before
-`work/formal53-docs`, kept because the "Where to look" note below was closer
-to the truth than the section's own conclusion. **Its conclusion — that the
-liveness check was wrong for a loop and needed a better relaxation — was
-wrong**: the branch DECODE was wrong, so the relaxation had no edges to relax,
-and two further defects (the displacement re-patch and the table
-disagreements) were producing codegen failures that all looked like liveness
-failures. Read the status section above, not this one, for what to do next.
+## 1. `arm64/copy_chain` — proved, matcher wrong for a loop
 
 `peephole_arm64_copy_chain` (`lib/Peephole.lean`) says that `mov xa, xb ;
 mov xc, xa` and `mov xc, xb` leave the machine model agreeing on every
@@ -274,88 +258,34 @@ that would pay on real code and there is nothing in the corpus to develop them
 against; `formal/examples` is register-only, which is the same fact
 `bugs/FORMAL_wide_receiver_by_reference.md` records about the memory forms.
 
-## 3. x86-64: `x86_64/mov_self` is enabled and proved
+## 3. x86-64: the pass runs, no rule is proved
 
-### DONE 2026-10-05 — the first x86-64 rule
+`X86_RULES` is an empty list. `peephole_x86` runs — the decoder sweep, the
+fixed point and `_Remap` all execute — so the machinery is exercised by
+`test_formal_peephole.py` rather than written twice when the first rule lands.
 
-`X86_RULES` holds one rule, `x86_64/mov_self`, licensed by the new
-`peephole_x86_mov_self` in `lib/Peephole.lean`. The two approaches the old
-version of this section proposed were both wrong about the cost, and the reason
-is the useful discovery: **the generic step lemma already existed.**
-`x86_step_mov_rm64_r64_reg_st` (`lib/X86.lean:2830`) is the REX.W `89 /r`,
-mod=3 successor, stated with the raw ModRM fields as parameters
-(`h_mod`/`h_reg`/`h_rm`), so the rule's theorem needs no thirty negations, no
-sixteen literal lemmas and no symbolic register case — it instantiates that
-lemma and discharges two facts the emitters make true:
+**What the first one needs.** `x86_step`'s arms for the useful forms are deep:
+`op = 0x89` (`mov r/m64, r64`, 821 occurrences in the corpus) and `op = 0x8b`
+(`mov r64, r/m64`, 274) sit below about thirty `if`s, and `op = 0x81` with
+digit 0 (`add r/m64, imm32`, 108) below those. Two approaches:
 
-* **`x86_set_reg_self`** (new): `x86_set_reg s i (x86_get_reg s i) = s` for
-  `i < 16`. This is what the old "symbolic registers" bullet was circling:
-  `x86_set_reg`/`x86_get_reg` are 0..15 literal matches with a `_` fallthrough,
-  and `simp` will not reduce a `match` on a symbolic index — so the index is
-  cased out with a 16-way `omega` disjunction and sixteen `rfl`s. (The
-  unconditional statement is also true — for `i ≥ 16` the wildcard returns `s`
-  and `0` — but the stuck-match reduction is why the proof carries `i < 16`.)
-* **`h_same`**: the REX-extended `reg` field equals the r/m field,
-  `rm + x86_rex_b rex = reg + x86_rex_r rex`, because each extended 0-15 index
-  is its raw 0-7 field plus its REX extension bit. `formal/peephole.py`'s
-  `_x_mov_self` reads exactly these fields off the entry's decoded instruction
-  (`a.dec`) and fires only when `d.mod = 3` and `d.reg = d.rm`.
+* **Byte-concrete lemmas.** `x86_step` reads its instruction through
+  `code pos`, so for a *literal* encoding every condition folds with `decide`
+  and the negation list is unnecessary. The cost is one lemma per register:
+  `mov rax, rax` is `48 89 c0` and `mov r8, r8` is `49 89 c0`, so
+  `peephole_x86_mov_self` is sixteen near-identical theorems. `lib/X86.lean`
+  already has sixteen `[simp]` `x86_rex_*` facts, which is what makes the
+  literal case this cheap.
+* **Symbolic registers.** `x86_rm_read`/`x86_rm_write` take a `modrm` byte and
+  a `rex` byte as `UInt8`, and the register indices come out as
+  `(modrm.toNat >>> 3 &&& 7) + x86_rex_r rex` — symbolic `Nat`s, which is the
+  case `bv_decide` cannot discharge from the class mask alone.
 
-The theorem states the successor STATE directly, `t = { s with rip := m + 3 }`,
-and not the arm64 four-clause shape: **there is no `x86_steps` combinator** —
-`x86_step` advances the pc itself, where `arm64_step` does not — so the one
-equality is what `_Remap` and the deletions need.
-
-**The one real piece of x86 work was the repatch, not the proof.**
-`_repatch_branches` had no x86 arm (the old table's comment even said "a
-variable-length instruction's displacement is not the 32-bit field this
-writes"), so a deletion between a branch and its target corrupted control flow
-silently on x86. Every relative reference the emitters make — the rel32
-`jcc`/`jmp`/`call`, the rel8 jumps the decoder still knows, and the RIP-relative
-`lea` the string pool needs — keeps its displacement in the TRAILING bytes and
-measures it from the NEXT instruction; `_x86_relative_slot` maps a form to
-`(old_disp, size)` and the arm writes `at[target] - at[here]` back into the
-tail. This is the same defect §1 item 4 records for arm64, and it was latent
-for x86 for the same reason: no rule fired, so no deletion ever moved a branch.
-
-**Measured.** Over all `formal/examples/*.mojo` (the corpus is 93 now, not the
-52 this doc was written against), x86-64, `--opt` vs the unoptimised build: the
-rule fires **4** times and the two binaries agree **93 of 93**, removing 4
-instructions (12 bytes) from the stream. The four are all `48 89 c0`; no `0x8b`
-(`mov r64, r/m64`, form `mov_r64_rm64`) self-copy is emitted, which is why the
-matcher is deliberately restricted to the `0x89` store direction — a `0x8b`
-spelling would need its own `peephole_x86_mov_self_rev`. The affected examples
-are `list_literal_index.mojo` (3) and `subscript_var.mojo` (1), and both also
-build AND PROVE with `opt=True` for x86-64 (`check=True`, the same 2-`sorry`
-baseline as without `--opt`), so the proof generator's fresh decode of the
-shrunken stream (`_decode_function_body`) is exercised on a real deletion.
-`compiler_traps` are NOT remapped by the pass (a pre-existing, arm64-shared
-gap: `_program_externs` subtracts them by address); the four corpus deletions do
-not shift a trap — `_program_externs` is identical with and without `--opt` on
-all 93 — but a future rule that deletes before a guarded prologue would have to
-close it.
-
-`test_formal_peephole.py` is 45 tests (was 38): `TestX86Rules` pins the `0x89`
-match and its three declines (the `0x8b` reverse spelling, a copy between
-different registers, a memory operand), and `TestX86Repatch` pins a deletion
-between a `jmp` and its target and a deletion below a RIP-relative `lea` that
-drags its string-pool label down with it.
-
-### The rules that are still unproved
-
-The rules that remain have no Lean theorem. They are deliberately NOT in
-`X86_RULES`, so `unlicensed_rules()` does not refuse the pass for them; they
-are named here so the gap is visible. Their matchers read `a.dec` (an x86
-`Entry` has no `a.form`/`.reg`/`.rm` — reading them off the entry was an
-`AttributeError` on the first match, now fixed for all of them), so the
-blocker is the theorem, not the matcher:
-
-| rule | the form | the arm in `x86_step` | the obstacle |
-|---|---|---|---|
-| `x86_64/imm_zero` | `add`/`sub r/m64, 0` | `op = 0x81`/`0x83`, digit 0/5 | deep in the `if` chain; also needs the flags-dead condition `_x_imm_zero` already asks |
-| `x86_64/store_load` | `mov [m], r` ; `mov r, [m]` | `0x89`/`0x8b` with mod≠3 | needs `x86_mem` read-after-write lemmas of the shape §2 lacks on arm64 too |
-| `x86_64/mem_pair` | two identical `mov`s to one memory operand | same | same |
-| `x86_64/mov_self_rev` | `mov r, r` as `48 8b c0` | `0x8b`, mod=3 | not emitted today; the mirror of `peephole_x86_mov_self`, cheap once wanted |
+The byte-concrete route is the one to take first, and `x86_64/mov_self` is
+the rule to take it with: it needs no memory lemmas, and it is the rule whose
+absence is visible — the x86 emitter already uses real `mov` instructions
+rather than arm64's zero-adding copies, so it is worth measuring whether there
+is anything to win at all before investing in the other three.
 
 ## 4. `add_imm_fuse` is proved and enabled and fires zero times
 
@@ -369,7 +299,7 @@ program with `a += 1; a += 2` would exercise it; `formal/examples` has none.
 ## Reproducing
 
     export PATH=/opt/homebrew/bin:$PATH
-    python3 test_formal_peephole.py                    # 45 tests, the licence, both rule tables and the remap
+    python3 test_formal_peephole.py                    # 25 tests, the licence and the remap
     python3 tools/formal_bench.py                      # per-example instruction counts
     python3 tools/formal_bench.py --opt                # the same, through the pass
 

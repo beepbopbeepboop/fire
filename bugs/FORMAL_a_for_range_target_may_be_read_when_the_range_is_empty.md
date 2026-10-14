@@ -5,30 +5,58 @@
 `_build_cfg` (the loop-target definition), with the emitter half already
 landed.
 
-**Status 2026-10-12 (`work/formal318-docs`): the decidable set had a HOLE in the
-same class and it is closed — a dict DISPLAY is a literal container too.**
-`for q in {}: x = 1` then a read of `q` built, ran ZERO iterations (a counting
-body answered 0 on both backends) and printed the register the allocator handed
-`q`, where CPython raises `UnboundLocalError`; `_for_emptiness` asked about a
-list/tuple/set/string literal and not about a `DictExpr`.  It now answers
-`'never'` for `{}`, `'always'` for a display with an entry, and `'maybe'` for one
-with an UNPACKING entry (`{**d}`, whose size is a run-time fact) — so
-`FORMAL_a_keyword_construction_…`'s sibling and this doc are the same reader.
-`test_formal_read_before_store.py` is 174 checks (+5 rows: `empty_dict_target_…`,
-`nonempty_dict_target_…`, `unpacking_dict_target_…`, `empty_dict_body_store_…`,
-`nonempty_dict_body_store_…`).  **The residual below is unchanged.**
-
 **Status: PARTIAL — the emptiness as a PREDICATE is FIXED (2026-10-04,
 `formal/model.py`: `_for_emptiness` is the one reader, `_range_is_nonempty`
 reads the preheader's literals, and `_build_cfg` seeds the body's first block
-with the target), and the NAMED-LITERAL iterable is FIXED too (2026-10-08:
+with the target), the NAMED-LITERAL iterable is FIXED too (2026-10-08:
 `_preheader_facts` carries a second table, `{name: literal-node}`, and
 `xs = []` then `for i in xs` is the same `'never'` as `for i in []`, so the
-read after it is refused where it used to print the caller's leftover). What is
-left is the case whose emptiness is a RUN-TIME fact and cannot be one by any
-build-time decision — a range bound a PARAMETER, which is §"What is left" and
-which now carries the measurement that closes option 1 below.** *2026-10-12
-(`work/merge-qwen1` merge): a correction made on
+read after it is refused where it used to print the caller's leftover), and
+**the MODULE-LEVEL literal sequence — the second residual of "What is wrong"
+— is FIXED (2026-10-13, `work/formal406-docs`)** by carrying the module's
+literal constants into the preheader walk as the state it STARTS from
+(`model.module_entry_literal_facts` → `read_before_store(entry_facts=…)` →
+`_build_cfg` → `_preheader_facts`), so `XS = []` at file level and `for q in
+XS` is now the refusal CPython's `UnboundLocalError` already is, on both
+architectures. What is left is §"What is wrong"'s parameter-bound range, whose
+emptiness is a RUN-TIME fact and cannot be one by any build-time decision, and
+it carries the measurement that closes option 1 below.**
+
+**2026-10-13 (`work/formal406-docs`), the module-level half.** The reader is
+`formal/model.py::module_entry_literal_facts` — the ONE answer to "which
+module-level names are constants a function's entry may assume", built from the
+two PUBLISHED tables rather than a second walk: `module_symbols()`' folded
+literal for a name with no `__DATA` slot (the int/str constant
+`_substitute_module_constants` already puts at a read) and a `module_slots()`
+static-container slot that nothing writes AND that no statement uses in a
+position that could mutate the value in place (`_module_container_entry_literals`
+records that as the slot's `entry_literal`; `XS.append(1)` and `f(XS)` are the
+shapes `mutable`/`filled_by_body` cannot see because neither is a store).
+`formal/build.py::_unstored_read` drops every name the
+function itself binds (`_function_locals`/`_comptime_bound_names` — such a name
+is local from its first line, so the module's value is the WRONG answer for a
+read of it) and passes the rest as `entry_facts`; `_build_cfg` converts each
+node through `_cfg_literal_fact` and `_preheader_facts` seeds its roots with the
+result, so a local binding overrides a module fact exactly where it should.
+Measured, both architectures: `XS = []` then `for q in XS: …` then `printf(q)`
+is **refused** (`'q' is read at line 5 …`, was `q=6092139872`); `XS = [10, 20]`
+**builds and prints `q=20`**; `K = 0` then `for i in range(0, K)` is refused and
+`K = 3` answers `i=2` (the integer half reaches `_range_is_nonempty`, a
+different consumer from `_for_emptiness`); a `global XS` a function writes and a
+name an in-place call mutates (`XS.append(1)`) are NOT seeded, so the mutable
+case is unchanged and the append's real finding (`XS.append` has no provider)
+is not pre-empted by a false read refusal. Pinned by
+`test_formal_read_before_store.py::check_module_entry_facts` (the reader's four
+qualifying/absent cases and the seed, including a local override in both
+directions) plus `test_formal_run.py`'s
+`module_level_empty_list_target_is_not_a_definition`,
+`module_level_nonempty_list_target_is_still_a_definition` and
+`module_level_zero_int_bound_is_not_a_definition` (both backends, CPython
+checked where it answers). `test_formal_read_before_store.py` 175 CASES / 0
+fail, `test_formal_run.py` **1237/0** (three new rows; 1234 before), and
+`test_formal_hostmods_census.py` 74/74 rows.
+
+*2026-10-12 (`work/merge-qwen1` merge): a correction made on
 `work/formal156-docs` (2026-10-08) claimed §"What is wrong"'s `n = 3` row was a
 transcription error and that `n >= 1` prints CPython's value. Re-verified on
 the merged tree AND on a worktree of the merge base `4113d50e`, both
@@ -127,15 +155,6 @@ something that is not a literal must not keep the sequence fact).
 `python3 test_formal_read_before_store.py` is 175 checks, 0 fail, and
 `test_formal_run.py` is 1187/0 with the change.
 
-**A `range` with an argument count outside 1-3 is `'maybe'`, not a crash
-(2026-10-08).** `_range_is_nonempty`'s guard was `len(args) > 3`, so a call with
-NO arguments fell through to the three-way unpack and `for i in range():` raised
-`ValueError: not enough values to unpack` OUT of the model and into the build —
-a backend crash rather than a refusal. The guard is `not in (1, 2, 3)` now, and
-the row `zero_arg_range_does_not_crash_the_reader` in
-`test_formal_read_before_store.py` pins it; the build now refuses the program
-with `range() takes 1-3 arguments, got 0`.
-
 ## What is wrong
 
 THE RESIDUAL, in its own words, and it is the shape §0 did not reach:
@@ -185,7 +204,11 @@ same defect through a different binding. (The non-empty `XS = [10, 20]` answers
 "no build-time fact exists": the literal IS in the module, and closing it means
 carrying the module's literal constants into `_preheader_facts` the way the
 function's own preheader is carried — a change to what `_build_cfg` is handed
-rather than to the predicate, and it is recorded here rather than guessed at.
+rather than to the predicate. **FIXED 2026-10-13 (`work/formal406-docs`):** see
+the Status above — `model.module_entry_literal_facts` is the reader and
+`read_before_store`'s new `entry_facts` is the seed, so the program above is now
+refused on both architectures (`q=6092139872` at the time of the fix) and the
+non-empty one still answers `20`.
 
 ## What is ruled out, measured
 
