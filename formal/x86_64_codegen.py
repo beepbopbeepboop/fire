@@ -4768,8 +4768,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     # ADDRESS by the time the store is emitted.
     def _emit_pointer_store(self, target, value) -> None:
         obj = target.func.obj
+        # The VALUE's kind decides whether a store through a DOUBLE pointee is
+        # exact (a double: store its bits) or a silent wrong answer (an integer:
+        # `p.value() = 1` writes a denormal). `_expr_str_kind` is the same
+        # reader the LOAD's consumers ask, so the two sides agree.
         how, why = M.pointer_store_lowering(
-            self._cur_fn, target, self._structs, self._functions, self._structs)
+            self._cur_fn, target, self._structs, self._functions, self._structs,
+            value_kind=self._expr_str_kind(value))
         if how is None:
             raise CodegenError(M.pointer_store_refusal(
                 target.func.member, why

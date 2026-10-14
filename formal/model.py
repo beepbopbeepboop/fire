@@ -19209,7 +19209,7 @@ def pointer_store_receiver(target):
 
 
 def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
-                           structs_by_name: dict = None):
+                           structs_by_name: dict = None, value_kind=None):
     """`("store", width, signed)` | `None` — with a refusal.  The store mirror
     of `dereference_lowering`, and asked for the same reason.
 
@@ -19218,6 +19218,13 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     and the shape is what tells a store from an identity.  `signed` is the
     POINTEE's declared signedness and is carried for that symmetry only — a
     store has no result to sign-extend, and the width is what it truncates to.
+
+    `value_kind` is the RHS's kind, which only the DOUBLE-pointee store needs:
+    a store through a `Pointer[Float64]` writes the value's own BITS, which is
+    exact when the value is a double and a silent wrong answer when it is not
+    (`p.value() = 1` writes `0x1`, a denormal rather than `1.0`).  It is
+    `None` from every caller that has no kind to hand, which leaves every other
+    pointee exactly as it was.
     """
     obj = pointer_store_receiver(target)
     inner, why = pointer_pointee(fn, obj, decls, functions)
@@ -19232,21 +19239,31 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # float pointee refused", and the two would drift.
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
     if inner in POINTEE_FLOAT_NAMES:
-        # A float pointee's LOAD lowers (`dereference_lowering`'s `"float"`
-        # answer); its STORE does not, and the asymmetry is the kind check that
-        # the load has and the store does not.  What a store needs is the RHS's
-        # kind — `p.value() = 3.9` writes a double's bits, `p.value() = 5` writes
-        # an integer where the source means `5.0` — and no rule here reads it,
-        # so a store through a float pointer is refused rather than written at
-        # the load's width on the strength of the pointer's declaration alone.
-        return (None, f"the pointee is {inner}, and the LOAD of one lowers (the "
-                      f"word's kind is carried by `pointer_deref_kind`), but a "
-                      f"STORE through it is refused: a store needs the kind of "
-                      f"the value on the right, so `p.value() = 5` would write "
-                      f"an integer's word where the source means `5.0`, and "
-                      f"nothing on this path reads that kind yet. Store the "
-                      f"element through an integer-typed view, or build the "
-                      f"value where it lives")
+        # A BINARY64 pointee, and the STORE half of the load's enablement: a
+        # store through a `Pointer[Float64]` writes the 64 bits of the VALUE's
+        # word into a slot the program declared a DOUBLE.  That is exact when
+        # the value IS a double (`p.value() = 3.9` stores 3.9's pattern) and a
+        # silent wrong answer when it is not (`p.value() = 1` stores `0x1`,
+        # which is a denormal, not `1.0`), so the decision is the value's KIND,
+        # which the caller supplies as `value_kind` from the same reader the
+        # load's consumers ask (`_expr_str_kind`).  An established double is
+        # answered at the load's own width; anything else — an integer, or a
+        # value whose kind this path cannot establish — is refused rather than
+        # written at the pointer's declaration alone.
+        if value_kind != FLOAT_KIND:
+            return (None, f"the pointee is {inner}, and a store through a "
+                          f"double pointee writes the value's own BITS: "
+                          f"`p.value() = 1` would write 0x1, a denormal rather "
+                          f"than 1.0. So the store is refused unless the source "
+                          f"states the value is a double — `p.value() = 3.9` "
+                          f"is exact and is answered, and a value whose kind "
+                          f"this path cannot establish is not. The LOAD is "
+                          f"bit-exact and is answered whatever the context.")
+        width, signed = 8, False
+        scaled, scale_why = _offset_scale(fn, obj, width)
+        if not scaled:
+            return (None, scale_why)
+        return (("store", width, signed), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         scaled, scale_why = _offset_scale(fn, obj, width)

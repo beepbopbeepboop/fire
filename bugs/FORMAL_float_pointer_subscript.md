@@ -3,14 +3,52 @@
 **Area:** FORMAL (the pointer value model). **Found 2026-10-07** on
 `work/formal150-docs` while landing the `Pointer[Float64]` `.value()` load (the
 bug doc for that load was deleted with the fix, as a fully-fixed doc is).
-**NOT FIXED, and deliberate at this slice** — the rows exist so the gap is on
-the queue rather than rediscovered. **Update 2026-10-12 (`work/merge-qwen1`
-merge):** the branch's own slice answered the `.value()` STORE as well (a
-`value_kind` parameter on `model.pointer_store_lowering`, asked from
-`_expr_str_kind` in both emitters); the merge kept master's implementation,
-which is canonical and refuses the store (below), so on the merged tree the
-answered spelling is the LOAD alone and the two refusals are the store and the
-subscript.
+**PARTIALLY FIXED — step 1 (the `.value()` STORE) landed 2026-10-13
+(`work/formal409-docs`); steps 2 and 3 (the subscript) remain.** The rows exist
+so the gap is on the queue rather than rediscovered. **Update 2026-10-12
+(`work/merge-qwen1` merge):** the branch's own slice answered the `.value()`
+STORE as well (a `value_kind` parameter on `model.pointer_store_lowering`,
+asked from `_expr_str_kind` in both emitters); the merge kept master's
+implementation, which is canonical and refuses the store (below), so on the
+merged tree the answered spelling is the LOAD alone and the two refusals are
+the store and the subscript.
+
+## Status 2026-10-13 (`work/formal409-docs`): step 1 landed, steps 2-3 open
+
+**Step 1 — the `.value()` STORE — is now the branch's implementation, ported
+onto master's names and ordering.** `model.pointer_store_lowering` takes a
+`value_kind` and, for a `POINTEE_FLOAT_NAMES` pointee, answers `("store", 8,
+False)` when the value is a double (`FLOAT_KIND`) and refuses by name
+otherwise; both emitters pass `value_kind=self._expr_str_kind(value)`, the same
+reader the load's consumers ask. A value whose kind is unestablished is refused
+rather than written, because `p.value() = 1` stores `0x1`, a denormal, and the
+slot has no kind at run time. The store still goes through the 64-bit integer
+store — the double's bits ARE the value's word — so no new instruction is
+needed; the `_offset_scale` gate is unchanged (a parameter pointee answers; a
+local bound straight to `malloc(8)` is refused by that gate, as for every other
+pointee).
+
+Measured on both backends, a parameter pointee so the scale gate is not what is
+being exercised:
+
+    def store(p: Pointer[Float64]) -> Int: p.value() = 1.5 ...
+      -> builds, runs, prints 1.5
+    p.value() = 1
+      -> "a store through a double pointee writes the value's own BITS: ... a
+         denormal rather than 1.0 ... unless the source states the value is a
+         double"  (identical words on arm64 and x86-64)
+
+The two new rows are `test_formal_run.py`'s
+`deref_a_binary64_pointee_store_of_a_double_is_exact` (both architectures, the
+answer) and `deref_refuse_a_binary64_value_store_of_an_integer` (the refusal);
+the two SUBSCRIPT refusals below are unchanged and still pin steps 2-3.
+
+**What remains is the SUBSCRIPT, exactly as the next step below states: the
+subscript LOAD's kind (step 2, so `_expr_str_kind(p[i])` is `FLOAT_KIND` the
+way `p.value()` is) and then the subscript STORE with the same value-kind check
+(step 3), which is what retires `deref_refuse_a_float_pointee_subscript` and
+`deref_refuse_a_binary64_subscript_store`. The branch did not implement those,
+so step 1 is the whole of what ported.**
 
 ## What was run
 
