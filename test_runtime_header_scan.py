@@ -491,7 +491,7 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 581),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 584),   # --fix writes the live figure
     # 580 -> 581 (2026-10-10, 38d19a52): `mojo_str_register` — the registration
     # a codegen-emitted `_mojo_register_str_pool` startup constructor makes once
     # per `__rodata` literal, so `mojo_boxed_is_str` can answer a string's

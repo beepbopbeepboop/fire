@@ -882,6 +882,7 @@ class FuncState:
         self.fs_kw_key_src: dict = {}
         self.fs_int_word_vals: set = set()
         self.fs_struct_field_owners: dict = {}
+        self.fs_struct_slot_kinds: dict = {}
         self.fs_cstr_key_src_items: dict = {}
         self.fs_kw_key_src_items: dict = {}
         self.fs_int_word_vals_items: set = set()
@@ -890,6 +891,7 @@ class FuncState:
         self.fs_func_value_names_items: dict = {}
         self.fs_fresh_str_tmps_items: set = set()
         self.fs_struct_field_owners_items: dict = {}
+        self.fs_struct_slot_kinds_items: dict = {}
 
 
 def save_func_state(gen) -> FuncState:
@@ -986,6 +988,9 @@ def save_func_state(gen) -> FuncState:
     st.fs_struct_field_owners = gen._struct_field_owners
     for _k in gen._struct_field_owners:
         st.fs_struct_field_owners_items[_k] = gen._struct_field_owners[_k]
+    st.fs_struct_slot_kinds = gen._struct_slot_kinds
+    for _k in gen._struct_slot_kinds:
+        st.fs_struct_slot_kinds_items[_k] = gen._struct_slot_kinds[_k]
     return st
 
 
@@ -1090,6 +1095,10 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._struct_field_owners.clear()
     for _k in st.fs_struct_field_owners_items:
         gen._struct_field_owners[_k] = st.fs_struct_field_owners_items[_k]
+    gen._struct_slot_kinds = st.fs_struct_slot_kinds
+    gen._struct_slot_kinds.clear()
+    for _k in st.fs_struct_slot_kinds_items:
+        gen._struct_slot_kinds[_k] = st.fs_struct_slot_kinds_items[_k]
 
 
 def _record_sys_path_inserts(gen, source: str, base_dir: str = None) -> None:

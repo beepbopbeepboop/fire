@@ -128,8 +128,8 @@ def _is_selfhost_source_file(path: str) -> bool:
     # The same question asked of the FILE'S OWN TREE, which is the answer
     # that does not depend on where the running compiler lives. The compiled
     # binary has no source location of its own (`__file__` is `<bootstrap>`,
-    # so its `_SELFHOST_DIR` is the process CWD): `stage2/mojo --dump
-    # ../fire_main.py`, run from `stage2/`, answered False here where the
+    # so its `_SELFHOST_DIR` is the process CWD): the stage2 binary's
+    # `--dump ../fire_main.py`, run from `stage2/`, answered False here where the
     # python reference answered True, and every compiler-source dump it made
     # lacked the self-host struct layouts (`Scope`, `Token`, `Parser`,
     # `CallExpr`, ...) -- the stage1-vs-stage2 `.ci` divergence. A compiler

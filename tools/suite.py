@@ -421,8 +421,12 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-09, master ba586e44, per-job peaks from the '
-                'run log (--apply-peaks)')
+MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jobs, "
+                'one at a time (2026-10-09, arm64, python 3.14.7), merged from the '
+                'per-run logs .tmp/logs/*.log and applied with --apply-peaks; only '
+                'jobs that PASSED and ran >= 2 s are trusted, and the rows added '
+                'before this run keep the 2026-10-07 `gate` they were read from, as '
+                'their own comments say.')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -464,9 +468,9 @@ MEASURED_PEAK_GB = {
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
-    'bootstrap-stage2-transitive': (30, 'measured'),    # from stage1-transitive
+    'bootstrap-stage2-transitive': (30, 'measured'),    # the binary's whole-closure dump
     'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
-    'bootstrap-stage3-transitive': (1.4, 'derived'),    # from stage1-transitive
+    'bootstrap-stage3-transitive': (30, 'derived'),     # from stage2-transitive (same binary shape)
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
     # is memcap's own poll of the whole process tree (`procrun.tree_rss`, the
