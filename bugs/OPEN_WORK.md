@@ -49,7 +49,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_printf_s_of_a_container_prints_nothing_and_is_not_refused.md` | **unclaimed** | `printf("%s", <a list>)` builds, prints nothing and exits 0 — the THIRD cell of the container table |
 
 ### `formal/arm64` — 3 documents, 1 claimed
 
@@ -68,7 +67,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal389-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` | **unclaimed** | A container ELEMENT of a comprehension needs a per-iteration blob base, and that is a change to how a comprehension's RESULT is addressed |
-| `FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_elaborate.md` | **unclaimed** | An arm64 conditional whose immediate is on the LEFT never elaborates |
 | `FORMAL_arm64_step_lemmas_are_generated_for_data_words.md` | **unclaimed** | `_step_result_plan` reads the STRING DATA as instructions, and one of its words decodes to a `TBZ` whose discriminator fact is FALSE |
 | `FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_getrlimit_is_a_program_call.md` | **unclaimed** | the arm64 compiler-trap recording is LOST (merge `b578b915`) and the stack guard's `getrlimit` is not a trap either — so every arm64 universal theorem stops at `0x10000041c` |
 | `FORMAL_arm64_the_register_add_ignores_its_shift.md` | **unclaimed** | `arm64_step`'s `ADD` (shifted register) arm ignores `imm6`, so every `add Xd, Xn, Xm, lsl #3/#4` steps WRONG |
