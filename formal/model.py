@@ -3334,6 +3334,65 @@ def external_call_spec(e):
     return (symbol, kind, None)
 
 
+#: `external_call_value_kind`'s answer for a declared return this path models as
+#: a RAW POINTER: a word that is unambiguously NOT a number, so the value-model
+#: default must not call it one.  A distinct object rather than `None` because
+#: `None` is also "not an external_call" and "a void return", and those do NOT
+#: suppress the `INT_KIND` default (`_value_kind` keeps its existing answer for
+#: them); only a pointer does.
+_EXTERNAL_RAW_POINTER = object()
+
+
+def external_call_value_kind(e):
+    """The KIND a LOWERED `external_call["sym", RetType](…)` result holds.
+
+    `external_call_return_kind` already reads the declared return type for the
+    ABI conversion (`_emit_extern_return`); this is the same declaration asked
+    as a value-model KIND, and it is asked because without it the value model
+    never saw the declaration at all: a name bound to an `external_call` reached
+    `kind_of`'s generic CallExpr arm, `_flat_callee` found no callee NAME, and
+    the extern default returned `INT_KIND`.  So `ptr` — declared
+    `_CPointer[UInt8, …]`, a `char *` — classified as an INTEGER, and
+    `String(unsafe_from_utf8_ptr=ptr)` was refused by `string_conversion_refusal`
+    for "constructing a string from an integer" about a pointer (the measured
+    regression: `test_formal_external_call.py::env_round_trip`, a transcription
+    of `std/os/env.mojo`'s `getenv`).
+
+    Three answers, because the declaration is three things:
+
+      * an INTEGER return → `INT_KIND`, the same positive claim the extern
+        default made, now made from the declaration rather than from the
+        absence of one (the width is `_emit_extern_return`'s business);
+      * a STRING return → `STR_KIND` (a string is a `char *` here, so a
+        `String(x)` over it is the identity and must not be refused);
+      * a POINTER return → `_EXTERNAL_RAW_POINTER`, which `kind_of` answers as
+        `None` and `_value_kind` keeps as `None`.  A raw address is neither text
+        nor a number, and `None` — the permissive direction an unannotated
+        parameter and a `p.value()` load already take — is what lets
+        `String(unsafe_from_utf8_ptr=ptr)` be the identity it is.  `void` and a
+        malformed template also answer `None` (there is no value).
+
+    `e` is the whole CallExpr; `None` for anything that is not a call through
+    the `external_call` template.
+    """
+    if not (isinstance(e, F.CallExpr) and is_external_call_template(e.func)):
+        return None
+    _symbol, kind, why = external_call_spec(e.func)
+    if why is not None:
+        return None
+    if kind is None or kind == EXTERN_RETURN_VOID:
+        return None
+    if kind == EXTERN_RETURN_WORD:
+        items = (list(e.func.index.elements)
+                 if isinstance(e.func.index, F.TupleExpr) else [e.func.index])
+        text = type_expr_text(items[1]) if len(items) >= 2 else None
+        base = annotation_base_name(text) if text else None
+        if base in STRING_TYPE_CTORS:
+            return STR_KIND
+        return _EXTERNAL_RAW_POINTER
+    return INT_KIND
+
+
 def _non_literal_symbol_why(head) -> str:
     """The clause for an `external_call` bracket whose first element is not a
     string literal. Its own function so the one-element and the two-element
@@ -24108,10 +24167,17 @@ class ValueKinds:
         """`kind_of(value)`, or INT_KIND when it is unclassified and is not a
         container. A list/dict/set literal, or anything already known to be a
         blob, keeps its kind: printing one of those as a number would print a
-        frame address."""
+        frame address. So does a LOWERED `external_call` whose declared return
+        is a POINTER (`external_call_value_kind`): the declaration is positive
+        evidence that the word is an address and not a number, so the "a word
+        is an integer" default must not overwrite it — that overwrite is what
+        made `String(unsafe_from_utf8_ptr=ptr)` a refusal about an integer."""
         kind = self.kind_of(value)
-        if kind is None and not _is_container_literal(value):
-            return INT_KIND
+        if kind is None:
+            if external_call_value_kind(value) is _EXTERNAL_RAW_POINTER:
+                return None
+            if not _is_container_literal(value):
+                return INT_KIND
         return kind
 
     def _bind_target(self, target, kind, own=None) -> None:
@@ -25028,6 +25094,18 @@ class ValueKinds:
                 return list_kind(self.kind_of(e.element, scopes))
             return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
+            # A LOWERED `external_call["sym", RetType](…)`, asked FIRST and
+            # before the deref arm, because its declared return type is the only
+            # thing that says what the word in the return register holds and the
+            # generic arms below cannot see it: `_flat_callee` finds no callee
+            # NAME in a bracketed template and the extern default answers
+            # `INT_KIND`.  A pointer return must NOT be that — see
+            # `external_call_value_kind`, which carries the measurement.
+            xc = external_call_value_kind(e)
+            if xc is _EXTERNAL_RAW_POINTER:
+                return None
+            if xc is not None:
+                return xc
             # A POINTER DEREFERENCE, asked FIRST: `p.value()` is a call whose
             # callee is a member and whose receiver is a pointer, so the arms
             # below (which read a callee NAME) cannot classify it and would
