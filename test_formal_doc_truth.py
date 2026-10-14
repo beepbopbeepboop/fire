@@ -428,17 +428,17 @@ def group_closed():
     # `test_formal_runtime_link.py`, which reports the same triple on every run.
     import formal.model as M
     word = {n for n, e in M.runtime_abi().items() if e['word']}
-    # The figure is READ OUT OF §6, not restated here: this file's first rule
-    # is that the document is the single copy, and a literal `272` here was a
-    # second copy that went stale the moment a runtime entry point was added
-    # (`mojo_str_register`, `38d19a52`) while `FORMAL.md` still said 272.
-    mw = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+)',
-                   text)
-    check(mw is not None,
-          'FORMAL.md §6 phase 2 still publishes the word-shaped figure')
-    check(mw is not None and len(word) == int(mw.group(1)),
-          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 '
-          f'publishes {mw and mw.group(1)}')
+    # Compared against the figure §6 PUBLISHES rather than a literal copied from
+    # it: a literal here went stale (262) while the tree and the doc both moved
+    # to 272, and the check reported the tree as wrong for agreeing with the
+    # document. The document is the thing under test.
+    m_word = re.search(r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+) \|',
+                       text)
+    check(m_word is not None,
+          'FORMAL.md §6 publishes the word-shaped entry-point count')
+    check(m_word is not None and int(m_word.group(1)) == len(word),
+          f'{len(word)} word-shaped entry points, FORMAL.md §6 phase 2 publishes '
+          f'{m_word and m_word.group(1)}')
     m = re.search(r'\*\*(\d+) word-shaped calls are callable', text)
     check(m is not None,
           'FORMAL.md still publishes the callable-surface figure')
