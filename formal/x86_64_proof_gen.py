@@ -242,17 +242,8 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
         by_cases = " ".join(f"by_cases h{i} : {c} <;>"
                             for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        # `AP._eval_eq_conds_tactic`: decide the constant conditions with
-        # `have`/`native_decide` and split only the argument-dependent ones,
-        # falling back to the historical full-`by_cases` text when the
-        # conditions are all beyond its subset (see its docstring).
-        proof = (
-            AP._eval_eq_conds_tactic(
-                conds, hs, simp_lems,
-                extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
-            or f"{by_cases} simp_all +decide [{hs}, {simp_lems}, "
-               "u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-        )
+        proof = (f"{by_cases} simp_all +decide [{hs}, {simp_lems}, "
+                 "u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]")
     # `AP._call_func_lean` rather than a local spelling: this is the sixth copy
     # of this `fun name arg => ...` and it has to be the same function the arm64
     # generator builds, because `eval_eq_mojo` on both sides is the statement
@@ -1004,6 +995,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     if refines is not None:
         parts.append(SPECS.refines_section(
             func_name, f"{func_name}_prog", refines, machine_half=False,
+            go_defs=go_defs,
             missing_reason=(
                 "the end-to-end theorem above is a `sorry` on this backend, so "
                 "`main_refines_spec` would be a composition with an ADMITTED "

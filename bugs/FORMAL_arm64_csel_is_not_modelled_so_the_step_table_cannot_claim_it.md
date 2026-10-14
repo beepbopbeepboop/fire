@@ -27,8 +27,8 @@ Re-measured rather than quoted, on this tree:
   `test_formal.py` down before it generated a proof for any of its 49 examples.
   That is why nothing noticed the table drifting. Fixed, and the fix is
   de-duplication rather than a reworded comment: `audit_step_table` now calls the
-  same `_decoder_branch_conds` that `check_step_conds` uses (the fix of the
-  step-table audit's comment branch, commit `c18fe3a2`).
+  same `_decoder_branch_conds` that `check_step_conds` uses
+  (`bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`).
 * `test_formal_call_proof_gen.py::TestGeneratorSource`'s
   `test_the_step_table_and_the_model_are_the_same_set` now asserts both auditors
   pass, so "the table and the model move together" is a test rather than a

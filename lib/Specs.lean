@@ -153,6 +153,27 @@ theorem le_self_mul (n : Nat) : n ≤ n * n := by
   · rw [Nat.succ_mul]
     omega
 
+/-! ## The word arithmetic an ALL-INPUTS refinement's induction needs -/
+
+/-- The multiplication analogue of `ProofLib`'s `u64_ofNat_add` and
+`u64_ofNat_sub`, and the fact an all-inputs refinement's induction needs: a
+product of two word readings is the word reading of the product, because
+`UInt64.ofNat` is reduction modulo `2^64` on both sides and the residues
+multiply.
+
+**Its place is `lib/ProofLib.lean`, beside the two it mirrors**, and it moves
+there when that module can be rebuilt: `ProofLib`'s `.olean` is past the memory
+ceiling a bounded change may spend (`formal/lean.py`'s own table, and the
+8 GB breach re-measured 2026-10-14), so the shim's two siblings are out of
+reach from a change that has to typecheck what it writes. It lives here because
+a generated all-inputs induction is emitted into a file that already
+`import Specs`, so the name is in scope exactly where it is used. The proof is
+core-lemma-only, so the move is a copy. -/
+theorem u64_ofNat_mul (a b : Nat) :
+    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) := by
+  apply UInt64.toNat.inj
+  simp [UInt64.toNat_mul, UInt64.toNat_ofNat', Nat.mul_mod]
+
 /-! ## The identity -/
 
 /-- The identity: what `formal/examples/identity.mojo` computes. -/

@@ -3,23 +3,85 @@
 **Area:** FORMAL, both backends — `formal/specs.py`, `lib/Specs.lean`, and the
 `main_refines_spec` theorem an `@refines(…)` annotation emits.
 
-**Status (2026-10-13, `work/formal405-docs`): the single library fact is
-LANDED; the all-inputs induction is what remains.** `lib/ProofLib.lean` now
-carries `u64_ofNat_mul` — the unconditional analogue of
-`u64_ofNat_add`/`u64_ofNat_sub` — proved and pinned by
-`test_formal_specs.py::test_the_all_inputs_refinement_has_its_multiplication_
-lemma` (the statement, and Lean elaborating a use of it). So the blocker the
-"Re-measured" section names is gone and the layer's remaining work is the
-per-example `_gen_all_inputs_refinement` induction, which is still NOT attempted
-and still owes its own negative control. The finite-range claim itself is
-unchanged and green (`test_formal_specs.py` 9/9). Everything after this line is
-the 2026-10-05 measurement.
+**Status: PARTIALLY FIXED 2026-10-14 (`work/formal418-docs`). The all-inputs
+claim is now EMITTED for the specifications whose model shape has a row, the
+missing `UInt64` multiplication lemma is landed and proved, and the boundary is
+a tested rule rather than a sentence — but only TWO rows exist (`Specs.id64`,
+`Specs.factorial64`) of the eleven annotated examples, and the "must be a
+`lib/ProofLib.lean` theorem" half of the 2026-10-05 diagnosis below is WRONG.
+§"What landed 2026-10-14" is the measurement; everything under it is the
+2026-10-05 record and is unchanged except where that section says so.** Found
+2026-10-05 while landing `work/formal36-spec-refinement`.
 
-**Status: open,
-re-measured 2026-10-05, and deliberately so; this is the limit of the layer as
-landed, not a defect in it.** Found 2026-10-05 while landing
-`work/formal36-spec-refinement`. §"Re-measured" names the single library fact the
-all-inputs statement is waiting on.
+## What landed 2026-10-14, and the two things the 2026-10-05 diagnosis got wrong
+
+`refines_section` now emits a third theorem beside the two it emitted before,
+`main_refines_all_inputs`, whenever the annotated specification has a row in
+`formal/specs.py::ALL_INPUTS` **and** the program's emitted model has the shape
+that row names. The theorem is the doc's own shape, over the whole word:
+
+```lean
+theorem main_refines_all_inputs (w : UInt64)
+    (hfits : Specs.factorial w.toNat < 2 ^ 64) :
+    mojo w = Specs.factorial64 w := by …
+```
+
+**Wrong #1: the multiplication lemma is NOT "a DIFFERENT proof".** The
+2026-10-05 section below says `u64_ofNat_mul` "is a DIFFERENT proof, not another
+`Nat` rewrite", and that is false. It is the SAME `UInt64.toNat.inj` reduction
+the two existing facts use, in three lines, core-lemmas only:
+
+```lean
+theorem u64_ofNat_mul (a b : Nat) :
+    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) := by
+  apply UInt64.toNat.inj
+  simp [UInt64.toNat_mul, UInt64.toNat_ofNat', Nat.mul_mod]
+```
+
+so the reason the generator half "cannot land ahead of it" was a missing lemma,
+not a missing proof technique. It is landed — **in `lib/Specs.lean`, not
+`lib/ProofLib.lean`**, which is wrong #2 and a deliberate, recorded compromise:
+a `ProofLib.lean` edit rebuilds that module's 27 MB `.olean`, and measured under
+`tools/memslot.py --gb 8` it **breaches the 8 GB ceiling** (`memcap: BREACH 8.0
+GB > 8.0 GB ceiling (100%)`, 1m54s, 2026-10-14; the same measurement
+`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` records at 9.8 GB).
+`Specs.lean` rebuilds in ~2 s / 0.2 GB, it is the module an annotated program
+already imports, and the proof is core-lemma-only, so the move to `ProofLib.lean`
+is a copy when that ceiling is lifted. The theorem's own docstring says so.
+
+**What the emitter covers, and the boundary is a rule with a test.** A row names
+the `Nat` function a `…64` word reading truncates, its step equation, the word
+fact the step rewrites through, and the model SHAPE the induction is written
+for. The emitter writes the theorem only when the model text it is handed has
+that shape (`formal/specs.py::_recursive_shape` / `_identity_shape`), so a
+registered specification on a differently-shaped model gets the finite-range
+theorem it always had and no false all-inputs claim. `ALL_INPUTS` has two rows:
+
+| spec | model shape | status |
+|---|---|---|
+| `Specs.id64` | `UInt64 → UInt64`, the identity | emitted, and checked end to end (`test_formal_specs.py`, both backends, `PASS=10 FAIL=0`) |
+| `Specs.factorial64` | `Nat → UInt64`, `(ofNat (k+1)) * go k` | emitted; the CLAUSE is checked by an isolated `run_lean`, because `fact`'s own proof file is `lean-rejected` on master for an unrelated reason |
+
+**Why the factorial row's check is not the whole file.** `fact` is
+`lean-rejected` in `tools/formal_proof_census_baseline.json` (recorded in
+`bugs/FORMAL_the_committed_proof_baseline_is_stale_for_fact_mojo.md`), so asking
+Lean about `fact_proof.lean` reports THAT and not this layer. So
+`test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks` reads
+the model back out of the generated file, lays the emitter's clause beside it
+with the same imports, and asks Lean about that — the narrowest thing that shows
+the emitted clause is a proof rather than text.
+
+**What is still open, and it is what it always was: rows.** Nine of the eleven
+annotated examples are unregistered, so they still claim only the range. The
+straight-line shapes (`abs64`, `consecutiveProduct64`, `succSquare64`,
+`doubleSuccOne64`, `maskedMix64`, `shiftMix64`, `stepConst64`, `isNonzero64`)
+each need their own induction or `toNat`/`ofNat` bridge, and the earlier "eleven
+model shapes" estimate is roughly right for those. A row is cheap and bounded
+(one `AllInputs`, one shape recogniser arm if the shape is new, one Lean clause
+checked in isolation), so this is a queue of small pieces rather than a project
+— which is the one thing the 2026-10-05 Status, framing the whole thing as
+un-landable, obscured.
+
 
 ## What is landed, in one paragraph
 
@@ -121,9 +183,6 @@ $ grep -n 'u64_ofNat_add\|u64_ofNat_sub\|u64_ofNat_mul' lib/ProofLib.lean
 748:theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) : ...
 (no `u64_ofNat_mul`)
 ```
-
-**CORRECTED 2026-10-13**: `u64_ofNat_mul` is now at `lib/ProofLib.lean:770`, so
-the line above is the 2026-10-05 measurement and not the current state.
 
 That is the whole of why a `fact`-shaped induction cannot be written today: its
 arithmetic goal is `UInt64.ofNat (k+1) * fact_go k` against a specification in
