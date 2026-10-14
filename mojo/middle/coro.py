@@ -63,7 +63,7 @@ def _cm_as_str(x) -> str:
 # `_await_drive_stmts` needs anyway) fixes the collision at the root
 # instead of just renaming around it, per this project's own "consolidate
 # duplicates" convention.
-from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate
+from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 _ENV = 'MOJO_CORO'
@@ -1991,13 +1991,8 @@ def hoist_awaits_from_call_args(fn: N.FunctionDef) -> None:
     body ended up reading a temporary that was never declared -- the A3
     backend emitted `/* ct param or undeclared: await_tmp_1 */`, i.e. a
     constant 0, and the SUSPENSION POINT VANISHED with it. The program
-    compiled, linked, ran, and printed the wrong answer.
-
-    Also an in-place AST mutation, so it invalidates the shared `_walk_ast`
-    memo for `fn`: both backends call this from inside `gen_module`, long
-    after earlier passes walked the very node it is about to rewrite."""
+    compiled, linked, ran, and printed the wrong answer."""
     fn.body = _hoist_awaits_from_call_args(fn.body)
-    _walk_ast_invalidate(fn)
 
 
 def _async_awaits_ok(fn: N.FunctionDef) -> bool:

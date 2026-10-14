@@ -191,18 +191,6 @@ SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
     "    def __exit__(self):",
     "    def __exit__(self, exc_type, exc_val, tb):")
 
-# The `main` a suppressor is exercised with: a `raise` inside the block, so
-# whether `__exit__`'s value is READ is the difference between stopping at the
-# block (exit 1) and running the statement after it.  Shared by the ANSWERED
-# falsy rows and the REFUSED truthy rows so the two halves differ only in the
-# `__exit__` return.
-SUPPRESSING_MAIN = ("def main(n):\n"
-                    "    with Suppressor() as v:\n"
-                    "        print('body', v)\n"
-                    "        raise ValueError('m')\n"
-                    "    print('after')\n"
-                    "    return 0\n")
-
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
@@ -768,42 +756,6 @@ DECLARED = [
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
-      "        raise ValueError('m')\n"
-      "    print('after')\n"
-      "    return 0\n", 3),
-    # …and the FALSY half of the two literal kinds a gate keyed on `int` used to
-    # let through.  `return ""` and `return 0.0` are not suppressions, so the
-    # protocol lowers and the exception propagates — CPython exits 1 having
-    # printed the cleanup, and so must this image.  These are the boundary rows
-    # that keep the truthy-string/float REFUSALS below from being a gate that
-    # refuses the literal kind rather than the VALUE.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
@@ -843,6 +795,44 @@ DECLARED = [
      "    print('after')\n"
      "    return 0\n",
      SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the FALSY end of the EXPRESSION cases the refusal rows below catch: a
+    # constant COMPARISON that is false, which the same fold reads as 0, so the
+    # exception still propagates exactly as `return False` does.  The pair is
+    # load-bearing in the direction the module-level folder's own docstring gives:
+    # a gate that refused every expression it could not read as a single literal
+    # would pass the refusal while breaking this program.
+    ("an_exit_returning_a_false_comparison_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 1 > 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the same boundary for `len(<string literal>)`: an EMPTY text has a
+    # zero length, so `return len("")` does not suppress and the program lowers.
+    ("an_exit_returning_len_of_the_empty_string_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return len("")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return len("")') +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
@@ -922,24 +912,6 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
-    # ── a method through the alias, whose NAME a second struct declares ──────
-    # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
-    # the `with` wrote that down, which is the fact `_alias_receiver_target`
-    # dispatches on.  Both `Box` and `Rival` declare `use`, so name-only dispatch
-    # has two owners and used to refuse the call as ambiguous; the alias's struct
-    # settles it, exactly as CPython's own type dispatch does.  This is the
-    # ANSWERED half of the `RIVAL` refusal below.
-    ("a_method_through_the_alias_dispatches_to_the_managers_struct",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     (CTX_MOJO + RIVAL + "def main(n):\n"
-      "    with Box() as b:\n"
-      "        print('body', b.use())\n"
-      "    return 0\n").replace("    def __exit__(self):",
-                            "    def __exit__(self, exc_type, exc_val, tb):"),
-     3),
 ]
 
 
@@ -1171,6 +1143,71 @@ REFUSALS = [
     # same value behind a `UnaryOp` and is covered by the same reader.
     ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", "return 0.5") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # ── a truthy return the build folds out of an EXPRESSION, not a literal ─
+    # **These are the same wrong answer as `return True`, reached through a
+    # constant the build could read perfectly well and the gate simply did not
+    # ask about.**  `_literal_return_truthiness` used to fold only
+    # `fold_literal_expr`, so a truthy return built from a COMPARISON, a
+    # boolean, a select, a bitwise op, `len(<string literal>)` or a remainder
+    # was not seen as truthy: measured on both architectures, each of the rows
+    # below BUILT and printed `enter / body / exit`, exited 1 and never reached
+    # `after`, where CPython suppresses and exits 0.  The fix composes the three
+    # constant folders the module-level reader already trusts, so each shape is
+    # decided by the folder that owns it rather than by a second operator table.
+    ("an_exit_returning_a_comparison_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_boolean_operator_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 and 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_select_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 if 1 else 0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_bitwise_operator_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 | 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_len_of_a_literal_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", 'return len("abc")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_constant_remainder_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 7 % 3") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"

@@ -5,19 +5,6 @@
 `_build_cfg` (the loop-target definition), with the emitter half already
 landed.
 
-**Status 2026-10-12 (`work/formal318-docs`): the decidable set had a HOLE in the
-same class and it is closed — a dict DISPLAY is a literal container too.**
-`for q in {}: x = 1` then a read of `q` built, ran ZERO iterations (a counting
-body answered 0 on both backends) and printed the register the allocator handed
-`q`, where CPython raises `UnboundLocalError`; `_for_emptiness` asked about a
-list/tuple/set/string literal and not about a `DictExpr`.  It now answers
-`'never'` for `{}`, `'always'` for a display with an entry, and `'maybe'` for one
-with an UNPACKING entry (`{**d}`, whose size is a run-time fact) — so
-`FORMAL_a_keyword_construction_…`'s sibling and this doc are the same reader.
-`test_formal_read_before_store.py` is 174 checks (+5 rows: `empty_dict_target_…`,
-`nonempty_dict_target_…`, `unpacking_dict_target_…`, `empty_dict_body_store_…`,
-`nonempty_dict_body_store_…`).  **The residual below is unchanged.**
-
 **Status: PARTIAL — the emptiness as a PREDICATE is FIXED (2026-10-04,
 `formal/model.py`: `_for_emptiness` is the one reader, `_range_is_nonempty`
 reads the preheader's literals, and `_build_cfg` seeds the body's first block
@@ -126,15 +113,6 @@ pinned by `preheader_empty_list_target_is_not_a_definition`,
 something that is not a literal must not keep the sequence fact).
 `python3 test_formal_read_before_store.py` is 175 checks, 0 fail, and
 `test_formal_run.py` is 1187/0 with the change.
-
-**A `range` with an argument count outside 1-3 is `'maybe'`, not a crash
-(2026-10-08).** `_range_is_nonempty`'s guard was `len(args) > 3`, so a call with
-NO arguments fell through to the three-way unpack and `for i in range():` raised
-`ValueError: not enough values to unpack` OUT of the model and into the build —
-a backend crash rather than a refusal. The guard is `not in (1, 2, 3)` now, and
-the row `zero_arg_range_does_not_crash_the_reader` in
-`test_formal_read_before_store.py` pins it; the build now refuses the program
-with `range() takes 1-3 arguments, got 0`.
 
 ## What is wrong
 
