@@ -2954,6 +2954,90 @@ class TestLean(unittest.TestCase):
                                  f"{name}: the proof admits {n} `sorry`")
 
 
+class TestTheComposedStateIsUnfoldedNotReduced(unittest.TestCase):
+    """The run certificate's side conditions UNFOLD the block's own `def`s.
+
+    `formal/examples/mod_by_var.mojo` is the measured case and it carries an
+    `ADD sp, sp, #32, lsl #12`, i.e. `+ UInt64.ofNat 131072` in the composed
+    state's `sp`.  Discharging `({name}_b6_qS1 st).pc = …` by `rfl` asks Lean
+    to `whnf` that state, and the whnf re-reduces the `UInt64` numeral from
+    inside the record — through `Nat.mod_lt`'s own `Nat.decLe` evidence, whose
+    `Nat.ble` is a structural recursion — so its cost grows with the immediate.
+    Measured by lowering one word's immediate with everything else held fixed:
+    `#0 … #4095`, `#+4096` and `#+16384` all fit in `maxRecDepth 1000`,
+    `#+32768` needs between 20000 and 40000, and `#+131072` does not fit in
+    100000 at all (the whole file then takes 40 s at `10^7`, so the proof is
+    true at every one of them and this is a reduction the generated file should
+    not be asking for).  `simp only` over the block's own `def`s proves the same
+    thing textually, in milliseconds.
+
+    **The shape is what is pinned, and it is Lean-free**, because the shape is
+    the thing that decides the cost: a `rfl` here and a `simp only` there
+    elaborate to the same proof and take a hundred thousand times as long to
+    check.  The immediate assertion is the control — without the `lsl #12` step
+    in the image there is nothing here to be slow about, and the row would pass
+    by there being no large `UInt64.ofNat` to carry.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-unfold-")
+        src = os.path.join(HERE, "formal", "examples", "mod_by_var.mojo")
+        r = _generate_dir(cls.tmp, src, "unfoldcase",
+                          os.path.join(cls.tmp, "unfoldcase.aout"))
+        with open(r["proof_path"], encoding="utf-8") as f:
+            cls.text = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_fixture_carries_the_large_shifted_immediate(self):
+        self.assertIn("UInt64.ofNat 131072", self.text,
+                      "the measured case needs the image's `lsl #12` immediate; "
+                      "without it there is nothing here for the reduction this "
+                      "class is about to be slow on")
+
+    def test_no_pc_fact_is_proved_by_reducing_the_composed_state(self):
+        facts = re.findall(r"have (hpc\d+) : \((\w+ \w+)\)\.pc = (\d+) := (\S.*)$",
+                           self.text, re.M)
+        self.assertTrue(facts, "no `hpc{N}` facts at all: the row would pass "
+                               "by there being no side condition to get wrong")
+        for name, state, pc, proof in facts:
+            with self.subTest(fact=name):
+                self.assertNotEqual(
+                    proof, "rfl",
+                    f"`{name}` is `rfl` over the composed state `{state}` "
+                    f"(pc = {pc}), and `rfl` is what asks Lean to `whnf` it")
+
+    def test_the_side_conditions_name_the_defs_they_unfold(self):
+        """`simp only`, and over THIS block's `def`s and nothing else."""
+        seqs = re.findall(
+            r"runs_(?:cons_seq|cons_jump)\b.*?\((by simp only \[([^\]]*)\])\)",
+            self.text)
+        self.assertTrue(seqs, "no `runs_cons_seq`/`runs_cons_jump` rule carries "
+                              "an unfolding side condition")
+        for proof, names in seqs:
+            with self.subTest(names=names[:40]):
+                self.assertTrue(
+                    all(n.startswith("arm64_reg") or n.startswith("arm64_set_reg")
+                        or re.fullmatch(r"\w+_q[ST]\d+", n)
+                        for n in names.split(", ")),
+                    f"the unfolding set is `{names}`: it must be this block's "
+                    f"own composed-state `def`s and the two record helpers, "
+                    f"because unfolding anything else is either re-deriving "
+                    f"the fact or flattening a step's own effect")
+
+    def test_the_pc_facts_also_unfold_rather_than_reduce(self):
+        unfolded = re.findall(
+            r"have hpc(\d+) : \(\w+_qS(\d+) st\)\.pc = \d+ := by simp only \[",
+            self.text)
+        self.assertTrue(unfolded,
+                        "every `hpc{N}` past the first is proved by unfolding "
+                        "the block's `def`s, and none of them reduces the "
+                        "composed state")
+
+
 class TestSameImageCallLean(unittest.TestCase):
     """Lean accepts the proof for a call into the same image.  Skipped, loudly,
     without Lean or without `lib/ProofLib.olean` — like every other Lean
