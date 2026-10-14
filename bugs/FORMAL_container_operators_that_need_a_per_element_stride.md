@@ -32,13 +32,14 @@ length-changing slice store); the paragraphs below are the record of what led
 here and the historical statements about "x86-64 refuses" describe the tree
 before this change.
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. The set-algebra rows are answers on arm64 now (six of them — five
-moved, one added); x86-64 still refuses each by name.
+**Status (as it stood before 2026-10-13 — the x86-64 half is now landed, see
+the paragraph above): PARTIALLY FIXED — item 3 (set algebra) is LANDED on
+arm64; items 1 (container `==`/`!=`), 2 (ordering) and 4 (a length-changing
+slice store) are unchanged.** `test_formal_container_methods.py` measures the
+whole surface against CPython on both architectures and is green; this doc is
+about the rows in it that are green *as refusals*, which is a different thing
+from green as answers. On the pre-change tree the set-algebra rows were answers
+on arm64 and refusals on x86-64; the dated paragraphs below are that record.
 
 **2026-10-08 (`formal162-docs`), merged 2026-10-12: the x86-64 half of item 3
 was BUILT on the branch, and the merge kept the arm64-only mechanism.** The
