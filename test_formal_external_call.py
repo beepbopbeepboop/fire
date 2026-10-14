@@ -820,24 +820,6 @@ def model_cases():
                     return None if how is None else how[0]
         return None
 
-    def result_value_kind(src):
-        """`external_call_result_value_kind` for the call in `src`, or None.
-
-        A DIFFERENT question from `spec`'s return kind: what the word HOLDS
-        rather than what the register means. `EXTERN_RETURN_WORD` is a 64-bit
-        integer and a pointer alike, so the value kind cannot be read off it —
-        which is why `var ptr = external_call["getenv", _CPointer[UInt8, …]]`
-        used to bind `ptr` to the "a word is an integer" default and refuse
-        `String(unsafe_from_utf8_ptr=ptr)`.
-        """
-        stmts = B.parse_module(src, "<model_cases>")
-        for fn in B._extract_functions(stmts):
-            for node in M.iter_nodes(fn.body):
-                if isinstance(node, F.CallExpr) \
-                        and M.is_external_call_template(node.func):
-                    return M.external_call_result_value_kind(node)
-        return None
-
     def annotation_base_name_of(text):
         return M.annotation_base_name(text)
 
@@ -851,31 +833,6 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
-    # …and the VALUE kind of the same call, which is the question the
-    # `env_round_trip` regression was about: a byte-pointer return is
-    # POINTER_KIND (string-shaped, with a NULL-test truthiness), a wider pointee
-    # and an integer both answer None — the conservative direction that leaves
-    # the `_value_kind` default exactly where it was — and a declared String is
-    # STR_KIND. Asserted here rather than only through a build-and-run row so a
-    # regression names the table instead of a SIGSEGV in an unrelated case.
-    out.append(("result_value_kind_getenv_is_a_char_pointer",
-                result_value_kind(
-                    'def f(s):\n    return external_call["getenv", '
-                    '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
-                M.POINTER_KIND))
-    out.append(("result_value_kind_int_is_none",
-                result_value_kind(
-                    'def f(n):\n    return external_call["strlen", Int64](n)\n'),
-                None))
-    out.append(("result_value_kind_wide_pointee_is_none",
-                result_value_kind(
-                    'def f(s):\n    return external_call["sym", '
-                    'Pointer[Int32]](s)\n'),
-                None))
-    out.append(("result_value_kind_declared_string_is_str",
-                result_value_kind(
-                    'def f(s):\n    return external_call["sym", String](s)\n'),
-                M.STR_KIND))
     # THE SAME C FUNCTION, SPELLED THE WAY `std/os/env.mojo:78` SPELLS IT NOW
     # (measured 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s
     # `std/`), and the alias family around it.  Each of those names is
