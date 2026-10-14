@@ -5022,12 +5022,14 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
             if gen._elem_of(ov) in (None, 'int64_t'):
                 gen._elem_types[ov] = 'MojoBytes *'
             return gen._void_call('mojo_set_add_bytes', [('MojoSet *', ov), ('MojoBytes *', av)])
+        at, av = _set_str_elem_arg(gen, ov, at, av)
         if at == 'char *':
             return gen._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
         av64 = gen._to_int64(at, av)
         return gen._void_call('mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av64)])
     if method == 'discard' and args:
         at, av = gen.lower_expr(args[0])
+        at, av = _set_str_elem_arg(gen, ov, at, av)
         if at == 'char *':
             return gen._void_call('mojo_set_discard_str', [('MojoSet *', ov), (at, av)])
         av64 = gen._to_int64(at, av)
@@ -5038,6 +5040,21 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_set_clear ({ov});")
         return 'int', gen._new_val('int', '0')
     return 'int', gen._new_val('int', '0')
+
+
+def _set_str_elem_arg(gen, ov: str, at: str, av: str) -> tuple:
+    """`(at, av)` for an element handed to a set whose element type is
+    statically `str` (`self.names: set[str]`): a WORD argument (an
+    `int64_t` read out of a heterogeneous dict, `m['body_name']`) is the
+    string's own pointer, and it has to go in under the string tag -- an
+    int-tagged slot holding a pointer is a different element from the same
+    text added as a `char *`, so `name in s` missed it. The self-hosted
+    compiler's `_extra_no_mangle.add(m['body_name'])` (coro.register) lost
+    every generator body that way, and each one was then overload-mangled
+    under a name its trampoline does not call."""
+    if at == 'int64_t' and gen._elem_of(ov) == 'char *':
+        return 'char *', gen._new_val('char *', f'(char *){av}')
+    return at, av
 
 
 def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tuple:

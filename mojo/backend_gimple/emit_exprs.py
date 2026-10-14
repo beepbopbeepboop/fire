@@ -2015,6 +2015,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _nested_p = gen._field_dict_nested_val_types.get(_pst, {}).get(node.member)
             if _nested_p:
                 gen._dict_nested_val_types[t] = _nested_p
+        elif field_type == 'MojoSet *':
+            # A `set[str]` field read off a struct-typed PARAMETER: the same
+            # element record the generic branch below carries, or `s.add(w)`
+            # of a word (`gen._extra_no_mangle.add(m['body_name'])`) took the
+            # int-tagged slot and `name in s` never found the string.
+            stored = gen._field_elem_types.get(_pst, {}).get(node.member)
+            if stored:
+                gen._elem_types[t] = stored
         return field_type, t
 
     # If the object lowered to a C type name (class used as cls argument),
