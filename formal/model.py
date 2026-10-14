@@ -30905,6 +30905,47 @@ def _comprehension_result_is_flat(comp) -> bool:
     return not any(_expr_builds_a_container(p) for p in parts)
 
 
+def _container_ctor_base_name(call) -> str:
+    """The base name of a call's callee, or "" — `List[Int]()` → `List`.
+
+    The same two spellings `subscript_callee_names` recognises, reduced to the
+    base STRING because `blob_constructor_lowering` is keyed on the name: a bare
+    ident (`bytearray()`) and a subscript whose base is an ident (`List[Int]()`).
+    A member callee (`m.List[Int]()`) is not a container constructor this path
+    lowers, so it is left out rather than guessed at.
+    """
+    func = getattr(call, "func", None)
+    if isinstance(func, F.IdentExpr):
+        return func.name
+    if isinstance(func, F.SubscriptExpr) and isinstance(func.obj, F.IdentExpr):
+        return func.obj.name
+    return ""
+
+
+def _call_result_is_flat_container(element) -> bool:
+    """True when a CALL element produces a container a byte copy can make
+    per-iteration.
+
+    The shape is the EMPTY or SIZED container construction
+    `blob_constructor_lowering` lowers — `List[Int]()`, `List[Int](capacity=8)`,
+    `bytearray(3)` — and it is flat by construction: the result's elements are
+    zero-fill or the `count` zero bytes of a sized byte blob, never a container
+    built at the element site, so a byte copy of its blob carries no address of a
+    scratch blob and each iteration gets its own container. A construction that
+    has to HOLD elements (`List[Int](1, 2)`) is not this shape and
+    `blob_constructor_lowering` returns None for it — the same answer the
+    emitter's `_emit_type_constructor` reads, so a constructor this predicate
+    accepts is one the emitter lowered as a blob and left in X0/RAX.
+    """
+    if not isinstance(element, F.CallExpr):
+        return False
+    name = _container_ctor_base_name(element)
+    if not name:
+        return False
+    return blob_constructor_lowering(name, element.args,
+                                     element.kwargs) is not None
+
+
 def _slice_result_is_flat(element) -> bool:
     """True when a SLICE element's result blob holds no unstable reference.
 
@@ -30973,16 +31014,24 @@ def comprehension_element_is_flat_container(element) -> bool:
     element site's own scratch — the same question the literal case asks, one
     node type out.
 
+    An EMPTY or SIZED container CONSTRUCTION (`List[Int]()`, `bytearray(3)`) is
+    accepted, and `_call_result_is_flat_container` is the argument: its result is
+    zero-fill, so the copy carries no container address. A construction that has
+    to HOLD elements is not this shape and stays refused with the emitter that
+    would have to size it.
+
     The shapes that return False keep `comprehension_element_blob_refusal`:
     a comprehension whose produced values are containers, a list of lists, a
-    slice whose BASE builds a container, a constructor call, and every
-    non-container expression. Those are the cases whose per-iteration
+    slice whose BASE builds a container, a construction that holds elements, and
+    every non-container expression. Those are the cases whose per-iteration
     materialisation would alias a shared scratch blob.
     """
     if isinstance(element, F.Comprehension):
         return _comprehension_result_is_flat(element)
     if isinstance(element, F.SliceExpr):
         return _slice_result_is_flat(element)
+    if isinstance(element, F.CallExpr):
+        return _call_result_is_flat_container(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -31006,8 +31055,9 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     the element that a byte copy of would STILL alias or that this path cannot
     size, the same shapes the predicate's docstring names: a nested
     comprehension, a list of lists, a slice whose BASE builds a container, a
-    constructor call, and every non-literal expression — a call, a subscript or
-    a member read whose result this path cannot type among them.
+    construction that has to HOLD elements, and every non-literal expression — a
+    call, a subscript or a member read whose result this path cannot type among
+    them.
     `comprehension_element_is_flat_container` is the shared predicate and
     `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
     pins both sides.
