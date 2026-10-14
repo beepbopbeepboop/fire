@@ -56,12 +56,12 @@ the wrong thing, it is not getting a proof file to measure at all.
 
 This section's own diagnosis (§"Why it went blind") is the upstream half and it
 is right: `_unfollowable_calls` does not subtract `info["compiler_traps"]`. What
-is new, and what blocks the fix this doc wants, is that (a) on master arm64's
-`compiler_traps` list is EMPTY because the emitter recording was dropped by a
-merge (`8df5b273`; the EMITTER half is landed again on `work/formal115-docs`,
-see
-`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_getrlimit_is_a_program_call.md`),
-so on master there is nothing to subtract, and (b) subtracting it is measured NOT to reach
+is new, and what blocks the fix this doc wants, is that (a) at the time it was
+written arm64's `compiler_traps` list was EMPTY because the emitter recording
+had been dropped by a merge (`8df5b273`; the emitter half has since landed
+again, and the stack guard's `getrlimit` read has moved to the startup stub,
+below `func_offset`, where it is subtracted by address), so on that tree there
+was nothing to subtract, and (b) subtracting it is measured NOT to reach
 the div0 residual: with the recording restored and the traps filtered out of
 `_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion contract: the
 call in block 2 has to be below the source condition's negation`), not to the
