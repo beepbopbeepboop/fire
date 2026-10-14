@@ -347,8 +347,9 @@ row there reproduces.)
 the runtime base, and that belief is now measured false — the array fix DOES
 handle a nested comprehension whose own element does not open a container, and
 the reason is in "What landed 2026-10-08" above. What follows is the original
-reading, kept because the runtime base is still what a list of lists, a slice or
-a constructor call needs, and the three steps are still that work.**
+reading, kept because the runtime base is still what a list of lists needs (the
+slice and the empty/sized construction were closed by a predicate arm on
+2026-10-14 — see the top section), and the three steps are still that work.**
 
 The natural implementation — reserve `cap` slots of the element's own size and
 index them by the iteration counter — **works for a list-literal and a
