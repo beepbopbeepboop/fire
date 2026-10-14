@@ -191,18 +191,6 @@ SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
     "    def __exit__(self):",
     "    def __exit__(self, exc_type, exc_val, tb):")
 
-# The `main` a suppressor is exercised with: a `raise` inside the block, so
-# whether `__exit__`'s value is READ is the difference between stopping at the
-# block (exit 1) and running the statement after it.  Shared by the ANSWERED
-# falsy rows and the REFUSED truthy rows so the two halves differ only in the
-# `__exit__` return.
-SUPPRESSING_MAIN = ("def main(n):\n"
-                    "    with Suppressor() as v:\n"
-                    "        print('body', v)\n"
-                    "        raise ValueError('m')\n"
-                    "    print('after')\n"
-                    "    return 0\n")
-
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
@@ -768,42 +756,6 @@ DECLARED = [
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
-      "        raise ValueError('m')\n"
-      "    print('after')\n"
-      "    return 0\n", 3),
-    # …and the FALSY half of the two literal kinds a gate keyed on `int` used to
-    # let through.  `return ""` and `return 0.0` are not suppressions, so the
-    # protocol lowers and the exception propagates — CPython exits 1 having
-    # printed the cleanup, and so must this image.  These are the boundary rows
-    # that keep the truthy-string/float REFUSALS below from being a gate that
-    # refuses the literal kind rather than the VALUE.
-    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n", 3),
-    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
-     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
-     "def main(n):\n"
-     "    with Suppressor() as v:\n"
-     "        print('body', v)\n"
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
@@ -922,24 +874,6 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
-    # ── a method through the alias, whose NAME a second struct declares ──────
-    # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
-    # the `with` wrote that down, which is the fact `_alias_receiver_target`
-    # dispatches on.  Both `Box` and `Rival` declare `use`, so name-only dispatch
-    # has two owners and used to refuse the call as ambiguous; the alias's struct
-    # settles it, exactly as CPython's own type dispatch does.  This is the
-    # ANSWERED half of the `RIVAL` refusal below.
-    ("a_method_through_the_alias_dispatches_to_the_managers_struct",
-     CTX_MOJO + RIVAL + "def main(n):\n"
-     "    with Box() as b:\n"
-     "        print('body', b.use())\n"
-     "    return 0\n",
-     (CTX_MOJO + RIVAL + "def main(n):\n"
-      "    with Box() as b:\n"
-      "        print('body', b.use())\n"
-      "    return 0\n").replace("    def __exit__(self):",
-                            "    def __exit__(self, exc_type, exc_val, tb):"),
-     3),
 ]
 
 

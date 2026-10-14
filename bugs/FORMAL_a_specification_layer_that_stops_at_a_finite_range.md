@@ -1,21 +1,7 @@
 # the specification layer states a refinement over a FINITE range, and the all-inputs claim is not attempted
 
 **Area:** FORMAL, both backends — `formal/specs.py`, `lib/Specs.lean`, and the
-`main_refines_spec` theorem an `@refines(…)` annotation emits.
-
-**Status (2026-10-13, `work/formal405-docs`): the single library fact is
-LANDED; the all-inputs induction is what remains.** `lib/ProofLib.lean` now
-carries `u64_ofNat_mul` — the unconditional analogue of
-`u64_ofNat_add`/`u64_ofNat_sub` — proved and pinned by
-`test_formal_specs.py::test_the_all_inputs_refinement_has_its_multiplication_
-lemma` (the statement, and Lean elaborating a use of it). So the blocker the
-"Re-measured" section names is gone and the layer's remaining work is the
-per-example `_gen_all_inputs_refinement` induction, which is still NOT attempted
-and still owes its own negative control. The finite-range claim itself is
-unchanged and green (`test_formal_specs.py` 9/9). Everything after this line is
-the 2026-10-05 measurement.
-
-**Status: open,
+`main_refines_spec` theorem an `@refines(…)` annotation emits. **Status: open,
 re-measured 2026-10-05, and deliberately so; this is the limit of the layer as
 landed, not a defect in it.** Found 2026-10-05 while landing
 `work/formal36-spec-refinement`. §"Re-measured" names the single library fact the
@@ -121,9 +107,6 @@ $ grep -n 'u64_ofNat_add\|u64_ofNat_sub\|u64_ofNat_mul' lib/ProofLib.lean
 748:theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) : ...
 (no `u64_ofNat_mul`)
 ```
-
-**CORRECTED 2026-10-13**: `u64_ofNat_mul` is now at `lib/ProofLib.lean:770`, so
-the line above is the 2026-10-05 measurement and not the current state.
 
 That is the whole of why a `fact`-shaped induction cannot be written today: its
 arithmetic goal is `UInt64.ofNat (k+1) * fact_go k` against a specification in
