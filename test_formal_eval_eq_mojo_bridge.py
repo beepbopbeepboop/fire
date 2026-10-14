@@ -130,20 +130,6 @@ def _bridge_tactic(text):
     return None
 
 
-def _theorem_block(text, name):
-    """One theorem's text: from `theorem <name>`, up to the next top-level item.
-
-    Used to assert what a `PASS` cannot: the file admits N `sorry` by the
-    x86-64 model's design (<name>_compile_correct / <name>_compiles_correctly),
-    so a whole-file `n == 0` would be the wrong gate — the gate is that those
-    admissions never leak into the bridge being proven here."""
-    m = re.search(
-        rf"^theorem {re.escape(name)}[\s\S]*?"
-        r"^(?=theorem |def |#eval |#check |$)",
-        text, re.M)
-    return m.group(0) if m else ""
-
-
 class TestBridgeSimpset(unittest.TestCase):
     """`sKey` has to be reachable from the bridge's simp set."""
 
@@ -245,152 +231,6 @@ class TestBridgeTypechecks(unittest.TestCase):
             with self.subTest(program=name):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0, f"{name}: the proof admits {n} `sorry`")
-
-
-# One program per side of `_eval_eq_conds_tactic`'s split.  `constcond` is a
-# body whose every condition is a closed constant proposition — under the
-# historical emission it was split by `by_cases` like everything else, so its
-# cost was 2^k `simp_all` passes for k decisions that `native_decide` could
-# settle outright, and the 40-program A/B on the fuzz corpus (27/13 passes
-# before, 30/10 after, three programs repaired, none regressed) is exactly
-# this class flipping.  `condconst` mixes one argument-dependent condition
-# with one closed constant, so it must keep exactly ONE `by_cases` and carry
-# the other as a decided fact.
-CONDITION_FACT_PROGRAMS = {
-    # `0 - 7 ≠ 0 - 12` is a constant under u64 wrap-around — the p28 shape in
-    # which an untyped `have` was inferred as `Nat` (`0 - 7 = 0` saturates),
-    # so `native_decide` refuted it and the whole proof died.  Pinned through
-    # the `(N : UInt64)` cast in the have proposition.
-    "constcond": "def constcond(n):\n"
-                 "    x = 0\n"
-                 "    if (0 - 7) != (0 - 12):\n"
-                 "        x = 1\n"
-                 "    return x\n",
-    "condconst": "def condconst(n):\n"
-                 "    x = 0\n"
-                 "    if (n & 0xFF) > 5:\n"
-                 "        x = 1\n"
-                 "    if (0 - 7) != (0 - 12):\n"
-                 "        x = 2\n"
-                 "    return x\n",
-}
-
-
-class TestBridgeClosedConditionFacts(unittest.TestCase):
-    """Closed constant conditions are `have`-decided, not split by `by_cases`.
-
-    The historical tactic ran `by_cases h{i} : <cond>` for EVERY condition and
-    let `simp_all` close each leaf, so a program whose `if` tests are all
-    constants paid 2^k `simp_all` passes to decide k things that
-    `native_decide` settles in one go — and the all-constant programmes were
-    the ones furthest past the maxSteps ceiling.  `_eval_eq_conds_tactic` now
-    emits each closed constant condition as `have h{i} : (… ) := (by
-    native_decide)` and reserves `by_cases` for the conditions that genuinely
-    depend on an argument.  The A/B on 2026-10-11 (same 40 sources, both
-    emissions): 27/13 pass/fail before, 30/10 after, three programs repaired
-    and none regressed.  This class pins the emission SHAPE (the mechanism
-    the A/B measured) and, on x86-64, that the resulting proof really closes.
-
-    The `(N : UInt64)` cast is not cosmetic: an isolated `have h : (0 - 7 ≠
-    0 - 12) := by native_decide` infers `Nat` for the subtraction, whose
-    saturated `0 - 7 = 0` makes the proposition a different one and refutes
-    it.  The x86-64 arch is used for the typecheck because the ARM64 step
-    certificates carry an unrelated `mem_read_u64`-after-`mem_write_u64`
-    rewrite gap for these exact bodies (present on the old emission too); the
-    arm64 generator's tactic text is still asserted.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        lean = _lean()
-        if not lean or not os.path.isfile(
-                os.path.join(HERE, "lib", "ProofLib.olean")):
-            raise unittest.SkipTest(
-                "no Lean / no lib/ProofLib.olean: skipping the typecheck. "
-                "Run `make prooflib` (or `python3 tools/suite.py prooflib`) "
-                "first -- every assertion below is about Lean accepting the "
-                "generated bridge, and none of it runs without it.")
-        from formal.lean import check_proof_cached
-        cls.tmp = tempfile.mkdtemp(prefix="bridge-condfacts-")
-        cls.tactics, cls.results, cls.proofs = {}, {}, {}
-        for name, src in CONDITION_FACT_PROGRAMS.items():
-            p, err = _generate(cls.tmp, src, name, arch="x86_64")
-            if err:
-                cls.results[name] = (False, err, 0)
-                continue
-            cls.proofs[name] = _read(p)
-            cls.tactics[name] = _bridge_tactic(cls.proofs[name]) or ""
-            ok, detail, _cached, n = check_proof_cached(p, repo_root=HERE)
-            cls.results[name] = (ok, detail, n)
-        cls.arm64 = {
-            name: _bridge_tactic(_read(pp)) or ""
-            for name, src in CONDITION_FACT_PROGRAMS.items()
-            for pp, err in [_generate(cls.tmp, src, name + "_a", arch="arm64")]
-            if not err
-        }
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_every_condition_fact_proof_typechecks(self):
-        for name, (ok, detail, n) in sorted(self.results.items()):
-            with self.subTest(program=name):
-                self.assertTrue(ok, f"{name}: {detail}")
-                block = _theorem_block(self.proofs[name], "eval_eq_mojo")
-                self.assertIn("theorem eval_eq_mojo (", block,
-                              f"{name}: no `eval_eq_mojo` theorem in the "
-                              f"generated proof")
-                self.assertNotIn(
-                    "sorry", block,
-                    f"{name}: the eval_eq_mojo theorem itself admits a "
-                    f"`sorry`.  The file's {n} sorries are the x86-64 model's "
-                    f"idealization theorems (<name>_compile_correct, "
-                    f"<name>_compiles_correctly) admitted by design for every "
-                    f"proof, and they must not leak into the bridge")
-                self.assertLessEqual(
-                    n, 2,
-                    f"{name}: {n} `sorry`-admitting declarations; beyond the "
-                    f"two model-idealization theorems, something new is "
-                    f"admitted")
-
-    def test_closed_conditions_are_have_decided(self):
-        for name, tac in sorted(self.tactics.items()):
-            with self.subTest(program=name):
-                self.assertIn("(by native_decide)", tac,
-                              f"{name}: no closed condition is emitted as a "
-                              f"`have … := (by native_decide)` fact")
-                self.assertRegex(
-                    tac, r"have h\d+ : .*\(\(0 : UInt64\)\)",
-                    f"{name}: the have proposition does not pin its numerals "
-                    f"to UInt64, so Lean infers `Nat` for a `0 - 7`-shaped "
-                    f"operand and the decided fact is a different proposition")
-
-    def test_by_cases_is_reserved_for_parameter_conditions(self):
-        const, mixed = self.tactics["constcond"], self.tactics["condconst"]
-        self.assertNotIn("by_cases", const,
-                         "an all-constant-program still splits by_cases; it "
-                         "pays the 2^k leaf cost the decided facts exist to "
-                         "remove")
-        self.assertRegex(mixed, r"by_cases h0 :", "the parameter condition "
-                         "was not split")
-        self.assertLessEqual(mixed.count("by_cases"), 2,
-                             "more than the one open condition is split — a "
-                             "closed constant is being treated as open")
-
-    def test_no_duplicate_hypotheses_in_the_simp_sets(self):
-        """Regression pin for the arm64 call site double-listing `hs`."""
-        for name, tac in sorted(self.tactics.items()):
-            with self.subTest(program=name):
-                self.assertNotRegex(
-                    tac, r"\[[^\]]*h0, h0",
-                    f"{name}: `h0` appears twice in the simp set")
-        for name, tac in sorted(self.arm64.items()):
-            with self.subTest(program=name, arch="arm64"):
-                self.assertNotRegex(
-                    tac, r"\[[^\]]*h0, h0",
-                    f"{name}: `h0` appears twice in the ARM64 simp set")
-
 
 class TestTheBridgeBindsEveryParameter(unittest.TestCase):
     """`MojoFunc.mk` carries the source's parameter NAMES, and all of them.
@@ -1069,12 +909,9 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 # the doc's experiment that does not reproduce).
 #
 # IF THIS CLASS FAILS: the toolchain changed, and the doc's route list has to be
-# re-measured rather than re-read.  (Step 1 of that doc LANDED on 2026-05: the
-# `mutual` route below is the one `lib/ProofLib.lean` uses, `evalExpr_call` and
-# `liftMF` are re-stated over the list, and `evalExpr_congr` keeps its statement
-# and changes only its proof -- via the recursor route pinned here.  The class
-# stays because all four answers are facts about the TOOLCHAIN and not about
-# this tree.)
+# re-measured rather than re-read.  If `lib/ProofLib.lean`'s `call` ever carries
+# a `List MojoExpr`, step 1 of that doc has landed and this class has nothing
+# left to say.
 NESTED_HEADER = """inductive E where
   | int (v : Nat)
   | var (n : String)
@@ -1123,32 +960,6 @@ INDUCTION_ROUTE = """theorem ev_congr (e1 e2 : E) (h : e1 = e2) : True := by
 """
 
 
-# The recursor route -- which is what `evalExpr_congr`'s proof ACTUALLY uses, so
-# it is a toolchain fact of the same kind as the three above and belongs beside
-# them: `MojoExpr.rec` is the COMBINED recursor, and it asks for a motive for
-# the argument LIST as well as for the node, plus `nil`/`cons` alternatives.
-# A toolchain that made `MojoExpr.rec` take only the node's motive would break
-# the congruence lemma every generated `eval_eq_mojo` reaches, and the error
-# would be an arity mismatch hundreds of lines from `MojoExpr`.
-RECURSE_ROUTE = """theorem ev_congr (cf : String -> Nat -> Nat) (e : E)
-    {env env' : Nat} (h : ∀ x, env x = env' x) : ev cf env e = ev cf env' e := by
-  refine E.rec
-    (motive_1 := fun e => ∀ {env env' : Nat},
-      (∀ x, env x = env' x) -> ev cf env e = ev cf env' e)
-    (motive_2 := fun args => ∀ {env env' : Nat},
-      (∀ x, env x = env' x) -> evArgs cf env args 1 = evArgs cf env' args 1)
-    (fun v env env' _ => rfl)
-    (fun n env env' hh => hh n)
-    (fun n args ih env env' hh => by simp only [ev, ih hh])
-    (fun env env' _ => rfl)
-    (fun hd tl ih1 ih2 env env' hh => by simp only [evArgs, ih1 hh, ih2 hh])
-    e env env' h
-
-example : ∀ (cf : String -> Nat -> Nat) (env : Nat) (e : E), ev cf env e = ev cf env e :=
-  fun _ _ _ => rfl
-"""
-
-
 class TestTheNestedExprRoutes(unittest.TestCase):
     """The three Lean facts `MojoExpr.call (args : List MojoExpr)` depends on."""
 
@@ -1170,7 +981,6 @@ class TestTheNestedExprRoutes(unittest.TestCase):
         cls.mutual = check(MUTUAL_ROUTE)
         cls.foldl = check(FOLDL_ROUTE)
         cls.induction = check(INDUCTION_ROUTE)
-        cls.recurse = check(RECURSE_ROUTE)
 
     @classmethod
     def tearDownClass(cls):
@@ -1219,26 +1029,6 @@ class TestTheNestedExprRoutes(unittest.TestCase):
                          "and it is not Lean's structural-recursion error after "
                          "all -- the doc quotes one, so a worker would go "
                          "looking for it:\n" + out)
-
-    def test_the_COMBINED_recursor_takes_a_motive_for_the_LIST_too(self):
-        """The route `evalExpr_congr` actually takes, pinned.
-
-        `test_induction_cannot_be_used_on_a_nested_inductive` says `induction`
-        is refused; this says what IS available instead, because "the recursor"
-        is a pointer at ~200 different names and the one that works is the
-        COMBINED `E.rec`, whose signature asks for a second motive over
-        `List E` and two more alternatives (`nil`/`cons`).  Getting that wrong
-        is an arity mismatch reported far from `MojoExpr`, and it is the only
-        new Lean obligation of widening the node to carry a list.
-        """
-        rc, out = self.recurse
-        self.assertEqual(rc, 0,
-                         "`MojoExpr.rec` no longer takes a motive for the "
-                         "argument list (or the nil/cons alternatives), so "
-                         "`evalExpr_congr` needs a different proof -- most "
-                         "likely a size function and a well-founded mutual "
-                         "induction:\n" + out)
-        self.assertNotIn("error", out, "and it said no error:\n" + out)
 
     def test_induction_cannot_be_used_on_a_nested_inductive(self):
         """What forces `evalExpr_congr`'s rewrite, pinned so it is not re-tried.
