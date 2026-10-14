@@ -249,3 +249,59 @@ refused at the DYLIB stage instead (`libcp.mojo: make returns a frame address,
 so it cannot be compiled into a dylib`); the merged tree stops earlier, at the
 binding, so the dylib-stage sentence is a branch-tree fact and the binding
 refusal is the merged-tree one.
+
+## Status 2026-10-13 (`work/formal411-docs`): option 1's BINDING blocker is FIXED, and it is general (not `subprocess`-specific)
+
+**The merged note above is right that option 1 needs the cross-module binding,
+and that blocker is now closed.** `_call_returns_one_word_struct` read a callee's
+declared `-> T` only out of this image's own `functions_by_name`, so a local
+bound from an IMPORTED function returning a one-field struct claimed nothing:
+
+```mojo
+# wmod.mojo
+struct CP:
+    var v: Int
+def make(n: Int) -> CP:
+    var c = CP()
+    c.v = n
+    return c
+```
+
+```mojo
+from wmod import make            # and, separately, `import wmod`
+def main(n: Int) -> Int:
+    var r = make(7)              # `var r = wmod.make(7)`
+    return r.v * 10 + r.v
+```
+
+was refused, on both architectures, with `'r.v' is a field access through 'r',
+and this path has no way to say what 'r' holds` — the same refusal the 2026-10-08
+same-image fix removed for a callee in THIS module. The build pass computes an
+`_imported_function_defs` table now (the imported module's own source, read
+through the same `_import_aliases` the emitters resolve a cross-module callee
+with, for both spellings a call has: the bare name `from m import f` binds, and
+the `m.f` chain `import m` binds) and `_one_word_field_map` /
+`_call_returns_one_word_struct` read the callee's `-> T` out of it. `r.v` is the
+one-field identity `r` again, so both programs answer `77`/`99` on arm64 and
+x86-64 where CPython does.
+
+**Measured, on both backends, with two new `test_formal_run.py` CROSS_MODULE_CASES
+rows** (`cross_module_returned_one_field_struct_reads_through_its_field` and
+`cross_module_dotted_returned_one_field_struct_reads_through_its_field`); the
+whole `test_formal_run.py` is PASS=1237 FAIL=0, and `test_formal_dylib.py`
+(24/2, the two pre-existing proof obligations), `test_formal_imports.py` (92/0),
+`test_formal_monomorph.py` (45/0), `test_formal_link_accounting.py` (314/0) and
+the rest are unchanged. The one-field guard is unchanged and is what keeps this
+sound: a MULTI-field struct returned across the boundary still refuses (at the
+dylib stage, `make returns a frame address, so it cannot be compiled into a
+dylib`), a type-constructor name still refuses, and a one-field struct whose sole
+field is itself a frame still defers to the holder tables.
+
+**What this does NOT do, and it is the part option 1 still owes:** `run` still
+returns the STATUS WORD, so `r.returncode` is still a field access on an integer.
+This fix removes the BINDING blocker for the general capability (a one-field
+struct returned from an imported function); making `subprocess.run` return a
+`CompletedProcess` struct is still the model change the 2026-10-09 Status prices
+— the admitted contract `UInt64 → UInt64` and the `@admitted` Lean obligation.
+The decision between option 1 and option 2 is therefore still this doc's, now
+with one fewer blocker behind option 1.

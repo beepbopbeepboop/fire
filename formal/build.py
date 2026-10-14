@@ -1631,6 +1631,61 @@ def _import_aliases(stmts: list) -> dict:
     return imported_bindings(stmts)
 
 
+def _imported_function_defs(source_path: str, stmts: list) -> dict:
+    """`{"bare": {local: FunctionDef}, "modules": {mod: {name: FunctionDef}}}`.
+
+    The FUNCTION half of what `_imported_struct_defs` does for types: a binding
+    whose right-hand side is a call to an imported function needs that callee's
+    declared `-> T`, and this unit has no copy of the declaration — the callee is
+    a symbol in another image. `_call_returns_one_word_struct` reads a *local*
+    function's `-> T` out of `functions_by_name`; without this table a call
+    across the module boundary claimed nothing, so
+
+        var r = make(7)          # `from byref_xmod import make`, `-> CP`
+        return r.v               # CP is one field
+
+    was refused as "'r.v' is a field access through 'r' … nothing … establishes
+    [what r holds]", on both architectures — the same refusal the same-image fix
+    removed for a callee in THIS module. The one-field identity is a local
+    question (`struct_is_framed` is False for it) and it does not stop being one
+    at a boundary; what stopped was the build's ability to read the declaration.
+
+    Two tables because the two import spellings bind differently and a call site
+    spells what `_import_aliases` records: `from m import f [as g]` binds a BARE
+    name (`g`), while `import m` binds the MODULE and the call is `m.f`, whose
+    callee is a MemberExpr. `_imported_function_defs` reads both out of
+    `_import_aliases` — the same table the emitters resolve a cross-module callee
+    through, so the binding and the call cannot disagree about which name means
+    which export.
+
+    Resolved from the imported module's OWN source (`module_statements`, the
+    cached parse the module's dylib was compiled from), so the declaration here
+    and the image on the link line cannot disagree. A module whose source has
+    gone contributes nothing, which is the honest answer: there is no declaration
+    to read, so the binding keeps the refusal it has today rather than being given
+    a fabricated type."""
+    from formal.imports import module_statements, resolve_module_path
+    bare, modules = {}, {}
+    for local, (mod, orig) in _import_aliases(stmts).items():
+        path = resolve_module_path(mod, relative_to=source_path,
+                                   project_root=source_path)
+        if path is None:
+            continue
+        if orig == mod:
+            # `import m` — the whole module, and a call is `m.f(...)`.
+            table = modules.setdefault(mod, {})
+            for st in module_statements(path):
+                if isinstance(st, F.FunctionDef) and st.name:
+                    table.setdefault(st.name, st)
+        else:
+            # `from m import orig [as local]` — the name is bound bare here.
+            for st in module_statements(path):
+                if isinstance(st, F.FunctionDef) and st.name == orig:
+                    bare.setdefault(local, st)
+                    break
+    return {"bare": bare, "modules": modules}
+
+
 def _external_declarations(linked: list) -> dict:
     """`{export symbol: FunctionDef}` for the linked libraries' function exports.
 
@@ -1968,10 +2023,17 @@ def compile_formal(source_path: str, output: str = None,
     # imports resolve is refused exactly as before, and one whose imports do not
     # is refused for the import, which is the more fundamental fact.
     parked_prepare_refusal = None
+    # The IMPORTED functions' declarations, read from their own sources, so a
+    # local bound from a cross-module call whose `-> T` names a one-field struct
+    # is that struct's word — the boundary arm of the same identity a callee in
+    # THIS module already got.  `stmts` here is the list the pipeline is about to
+    # read, so the imported names and the local ones cannot come from two
+    # different parses of the importer.
+    imported_fns = _imported_function_defs(source_path, stmts)
     try:
         functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs,
-            source_path=source_path)
+            source_path=source_path, imported_fns=imported_fns)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
@@ -11191,8 +11253,32 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
     return tuple(chain)
 
 
+def _callee_declaration(value, functions_by_name: dict,
+                        imported_fns: dict = None):
+    """The FunctionDef `value` calls, from this image or from an import, or None.
+
+    The ONE resolution of a call's callee to its DECLARATION, so the readers that
+    need a callee's `-> T` (`_call_returns_one_word_struct` here, and
+    `_one_word_constructor_bindings` through it) cannot disagree about which
+    function a spelling names.  A local function wins over an import of the same
+    name — the precedence `imported_bindings` states — and the two imported
+    spellings are exactly the two `_imported_function_defs` records: a BARE name
+    (`from m import f as g`) and a `MODULE.member` chain (`import m`)."""
+    func = getattr(value, "func", None)
+    if isinstance(func, F.IdentExpr):
+        fn = (functions_by_name or {}).get(func.name)
+        if fn is not None:
+            return fn
+        return ((imported_fns or {}).get("bare") or {}).get(func.name)
+    if isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr):
+        return (((imported_fns or {}).get("modules") or {})
+                .get(func.obj.name, {}) or {}).get(func.member)
+    return None
+
+
 def _call_returns_one_word_struct(value, structs_by_name: dict,
-                                  functions_by_name: dict, one_field=None):
+                                  functions_by_name: dict, one_field=None,
+                                  imported_fns: dict = None):
     """The ONE-WORD struct a CALL's declared `-> T` names, or None.
 
     The third source of one-word evidence beside a construction and a declared
@@ -11208,6 +11294,13 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
     with several definitions claims nothing here — the same agree-or-refuse
     rule every other by-name reader in this file applies.
 
+    `imported_fns` extends that table across the module boundary: a call to a
+    name this file imports (`from m import f`, `import m; m.f(...)`) is as much a
+    declaration as a local one, and a one-field identity does not stop being one
+    at a boundary.  The table is `_imported_function_defs`, read from the imported
+    module's own source, so the callee here and the image on the link line cannot
+    disagree.  A callee found in neither table still claims nothing.
+
     Three refusals, and each is the direction that cannot produce a wrong
     number:
 
@@ -11220,10 +11313,9 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
         plain one-word value would read through the wrong lowering.  Left to
         the holder path rather than answered here, which is the safe direction.
     """
-    if not isinstance(value, F.CallExpr) \
-            or not isinstance(value.func, F.IdentExpr):
+    if not isinstance(value, F.CallExpr):
         return None
-    callee = (functions_by_name or {}).get(value.func.name)
+    callee = _callee_declaration(value, functions_by_name, imported_fns)
     if callee is None:
         return None
     base = M.annotation_base_name(getattr(callee, "return_type", None))
@@ -11238,7 +11330,8 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
 
 
 def _one_word_field_map(fn, structs_by_name: dict, owner=None,
-                        one_field=None, functions_by_name=None) -> dict:
+                        one_field=None, functions_by_name=None,
+                        imported_fns: dict = None) -> dict:
     """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
@@ -11276,12 +11369,13 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
             target, value = node.target.name, node.value
         if not target or not isinstance(value, F.CallExpr):
             continue
-        if not isinstance(value.func, F.IdentExpr):
-            continue
-        st = structs_by_name.get(value.func.name)
+        st = None
+        if isinstance(value.func, F.IdentExpr):
+            st = structs_by_name.get(value.func.name)
         if st is None:
             st = _call_returns_one_word_struct(
-                value, structs_by_name, functions_by_name, one_field)
+                value, structs_by_name, functions_by_name, one_field,
+                imported_fns)
         if st is not None and M.one_field_answer(st, one_field):
             mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
@@ -17753,7 +17847,8 @@ def _publish_imported_raisers(source_path, stmts) -> None:
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
                        as_dylib: bool = False,
-                       source_path: str = None) -> tuple:
+                       source_path: str = None,
+                       imported_fns: dict = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
 
     ONE pipeline for both entry points, and it is one pipeline for the module
@@ -18514,7 +18609,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # either way.  One recognition of "this name is a one-word word", read
         # once.
         one_word = _one_word_field_map(fn, structs_by_name, st, one_field,
-                                       _functions_by_name)
+                                       _functions_by_name, imported_fns)
         if st is not None and M.one_field_answer(st, one_field):
             one_word["self"] = st
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,

@@ -4824,6 +4824,48 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A ONE-FIELD STRUCT RETURNED BY AN IMPORTED FUNCTION, and the identity the
+    # same-image fix already applied to a callee in THIS module.
+    # `_call_returns_one_word_struct` read a local function's `-> T` out of
+    # `functions_by_name` and claimed nothing across the boundary, so `r.v` was
+    # refused with "… nothing … establishes [what r holds]" on both
+    # architectures even though `CP` is one field and its value IS `r`. The
+    # declaration is now read from the imported module's own source
+    # (`_imported_function_defs`), for both spellings a call has: the bare name
+    # `from byref_xmod import make` binds, and the `byref_xmod.make(...)` chain
+    # `import byref_xmod` binds. `both: True` because the identity is a shared
+    # build-pass decision and a boundary is exactly where a divergence would be
+    # invisible — the two sides are separate compilations. Each reads the field
+    # TWICE in one expression (`v*10 + v`), so a backend that read the wrong
+    # word answers a different number rather than merely failing.
+    ("cross_module_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "from byref_xmod import make\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = make(7)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 77, None),
+    ("cross_module_dotted_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "import byref_xmod\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = byref_xmod.make(9)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 99, None),
     # A ONE-FIELD MUTATOR across the boundary, and the third of the three
     # measured shapes that used to drop the receiver write-back: the old
     # statement-shaped rewrite was built from `one_field_mutating_methods`, a
