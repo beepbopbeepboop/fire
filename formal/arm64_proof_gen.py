@@ -12467,8 +12467,9 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     is false, or admitting it, are both worse than emitting the part that IS
     true, which is the part this backend is actually about:
 
-      * the per-instruction decode and step lemmas, which cover the WHOLE image
-        including the methods' `LDR`/`STR` and are unconditional;
+      * the per-instruction decode and step lemmas, which cover the image's
+        executable region — every function body, including the methods'
+        `LDR`/`STR` — and are unconditional;
       * one frame contract per method, quantified over the receiver word, which
         is the by-reference receiver proved end to end;
       * one concrete `native_decide` run test per method, entered at the
@@ -12506,7 +12507,7 @@ set_option linter.unusedVariables false
    address is not a source-level value and the entry function's result is not
    stated here.  What is proved is the receiver -- one contract per method,
    quantified over the receiver word -- plus the per-instruction step lemmas
-   for the whole image and a concrete run test per method. -/
+   for the image's executable region and a concrete run test per method. -/
 
 /- Code memory: maps absolute addresses to instruction bytes
    (a RET sentinel is appended after the emitted code). -/
