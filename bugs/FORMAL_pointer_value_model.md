@@ -104,13 +104,22 @@ case is a candidate list of two. **The copy edge did not MERGE, and that was
   rather than a half-answer: its value is its own field, so there is nothing at
   the address and the identity would be wrong rather than right
   (`deref_refuse_one_field_struct_pointee`). A struct of ANOTHER module is
-  refused too — no layout here to read its fields through. And
-  `p.value().b += 5` is still refused on both architectures: the augmented arm
-  works from a NAME, so a base that is an expression has none to key on, and the
-  two backends refuse it with different words, which is a pre-existing
-  divergence in that diagnostic and is pinned as such
-  (`deref_refuse_augmented_through_a_pointer_frame`, `refuse_either:` with both
-  needles) rather than papered over.
+  refused too — no layout here to read its fields through. **`p.value().b += 5`
+  was refused and is ANSWERED as of 2026-10-13 (`work/formal410-docs`).** The
+  augmented arm keyed on a NAME, so a base that is an expression had none — but
+  the plain store `p.value().b = 41` already resolves that same base
+  (`model.pointer_frame_expression`), so the augmented form DESUGARS onto the
+  read and that store (`p.value().b = p.value().b + 5`) in
+  `arm64_codegen.py::_try_member_frame_aug` and its x86-64 twin, rather than
+  growing a third read-modify-write. It is offered only when the dereference's
+  receiver is a NAME, because the desugaring emits the base once for the read
+  and once for the store and a receiver that is a CALL would run twice. Pinned
+  by `deref_struct_pointee_augmented_directly_is_one_slot_read_modify_write`
+  (5 on both architectures, and the caller's `t.b` sees it), which replaced the
+  `deref_refuse_augmented_through_a_pointer_frame` refusal row — the row whose
+  `refuse_either:` had already been collapsed to one sentence when arm64 caught
+  up, so the paragraph's "the two backends refuse it with different words" was
+  stale as well as the refusal itself.
 
 **What it was worth in this corpus's units: nothing measurable, and that is the
 same answer §3 gives for the 54-file group.** There is not one `.value().` in

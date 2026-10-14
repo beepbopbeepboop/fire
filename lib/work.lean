@@ -35,32 +35,6 @@ theorem work_cset_lt_zero_iff (a b : UInt64) :
                       fun hq p => hq ((arm64_flag_lt a b).mp p)⟩
     _ ↔ b ≤ a := @UInt64.not_lt a b
 
-/-! ## The sign-bit xor cancellation (a word pinned to the sign bit is `0`)
-
-  `sKey x` is `x ^^^ 0x8000000000000000`, the sign flip every signed comparison
-  `formal/contracts.py` renders.  `Lean.UInt64` is `Fin (2^64)`, whose `^^^` is
-  a BIT operation while its `<`/`≤` are the order on `toNat`, so a context that
-  pins a word to the sign bit from both sides (`s ≤ n ^^^ s` AND
-  `n ^^^ s ≤ s`) says the word is `0` — and that is the fact an equality-shaped
-  postcondition needs (`abspos.mojo`'s `-n = n`), which the ladder's order
-  bridges cannot state because every one of them is about `<`/`≤`.
-
-  `UInt64.xor_left_inj` (core) is the cancellation, but it is oriented
-  `a ^^^ c = b ^^^ c ↔ a = b`, and the hypothesis arrives as two `≤`s rather
-  than as an equality, so `simp_all` has nothing to orient it against.  This is
-  the shape `simp_all` CAN discharge from a context holding the two bounds, and
-  it is why `formal/contracts.py::_SIGN_BRIDGE` names this lemma rather than
-  the core fact directly. -/
-
-theorem work_u64_sign_zero_of_le (n : UInt64)
-    (h1 : 0x8000000000000000 ≤ n ^^^ 0x8000000000000000)
-    (h2 : n ^^^ 0x8000000000000000 ≤ 0x8000000000000000) : n = 0 := by
-  have he : n ^^^ 0x8000000000000000 = 0x8000000000000000 :=
-    UInt64.le_antisymm h2 h1
-  have h' : n ^^^ 0x8000000000000000 = (0 : UInt64) ^^^ 0x8000000000000000 := by
-    simpa using he
-  exact (UInt64.xor_left_inj 0x8000000000000000).mp h'
-
 /-! ## Unsigned division/remainder identity (UDIV+MSUB)
 
   Bridges the machine's UDIV/MSUB remainder sequence to the model's `%`. -/
