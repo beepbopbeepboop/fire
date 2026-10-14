@@ -182,9 +182,9 @@ DISCHARGED rather than refused, and the trap block also has to be excluded from
 the source-condition mapping (the mis-attribution `_cfg_blocks`' own
 `either`/`both` comment warns about). Only after that is step 3 — flipping
 `M.int_overflow_traps` from `refuse-if-foldable` to `emit` — a real fix rather
-than a better diagnostic. The `VARIABLE_ROWS` table in
-`test_formal_int_semantics.py` still asserts the current (wrong) answer, and it
-is still the table that has to change.
+than a better diagnostic. The `test_variable_operands_are_still_untrapped` row
+in `test_formal_int_semantics.py` still asserts the current (wrong) answer, and
+it is still the row that has to change.
 
 ## The next step, in order
 
@@ -231,14 +231,9 @@ candidate for it.
 
 ## Commands that reproduce
 
-    python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_int_semantics.py \
-        -k bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md
+    python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_int_semantics.py
 
-The pin is the **`VARIABLE_ROWS` table** in `test_formal_int_semantics.py`, and
-`-k` on this doc's own path selects exactly those rows (`main` reads
-`STILL_UNTRAPPED_DOC`). Each row asserts the CURRENT (wrong) answer for a
-variable operand, with the CPython answer in its own comment and this doc named
-as the reason; the `VARIABLE_ROWS` table is the one that must change when the
-run-time trap lands. (It carried a per-row `test_variable_operands_are_still_
-untrapped` function when this doc was written; the driver is now the table, and
-the table's `STILL_UNTRAPPED_DOC` constant is what points back here.)
+`test_formal_int_semantics.py::test_variable_operands_are_still_untrapped` is
+the row that pins this doc: it asserts the CURRENT (wrong) answer for a variable
+operand, with a comment pointing here, and it is the row that must change when
+this is fixed.

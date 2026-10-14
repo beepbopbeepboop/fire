@@ -5,7 +5,7 @@ Tested with `git merge-tree --write-tree HEAD master` against master at `e2b87f8
 **Every CODE file auto-merges.** Three conflicts, all doc bookkeeping, all with an
 obvious resolution:
 
-1. **`FORMAL a module level store of a conditional expression is zero`** —
+1. **`FORMAL_a_module_level_store_of_a_conditional_expression_is_zero.md`** —
    modify/delete. This branch DELETES it (the defect was a false measurement);
    master modified it (3 lines, and its `Status: NOT FIXED` is still the stale
    one). **Resolution: take the deletion.** Master's edit predates this branch's
