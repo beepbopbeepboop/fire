@@ -2,22 +2,6 @@
 
 ## Status
 
-**2026-10-12 (`work/formal320-docs`): the two `WRONG` arms below are FIXED at the
-root, VERIFIED, and their documents are DELETED.** `lib/ProofLib.lean`'s
-`0xab000000` arm reads and writes `Rd` (`arm64_set_reg rd { s with nzcv := … }`)
-and all five `imm12` arms call `arm64_ext_imm12`, which decodes bits 21:10 AND the
-`sh` field at 23:22 — commit `0ad2ef33`, whose tree the CAS now serves a
-`ProofLib.olean` for. Both are pinned by
-`test_formal_call_proof_gen.py`'s
-`TestGeneratorSource::test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift`
-(the step table: `_regs_written` and `_step_rhs`) and
-`TestUnsignedOffsetAccess` (the CPU vs `arm64_step`), and both were re-run green
-on this tree before the deletions. So the two documents
-`FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` and
-`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` no longer exist,
-and the rows below were the only citation of them. The paragraphs that follow are
-kept as the record of how the defects were found.
-
 **RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
 claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
 produced a state the machine never reached — `WRONG`, not `NOSTEP` — and both are
@@ -25,8 +9,8 @@ now FIXED (2026-10-08, `work/formal231-docs`):**
 
 | defect | status |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — the arm reads and writes `Rd` (the identity at `Rd = 31` covers the CMN spelling); the `CMN` and `adds` spellings are pinned together by `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms, with an UNSHIFTED anti-rot row in the same test |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — `arm64_step`'s arm now writes `Rd` (the identity at `Rd = 31` covers the CMN spelling) |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms |
 
 The fixes landed as a single `lib/ProofLib.lean` change (past a bounded worker's
 8 GB ceiling then, which is why these were written down rather than attempted
@@ -39,8 +23,8 @@ could see. Re-read §6 before using this file's tooling as a coverage claim.
 **merged 2026-10-13 (merging `work/formal250-docs`): the two sibling docs are
 DELETED, and this file keeps their surviving records.** The branch landed the
 same two fixes (its `0f62e449`/`5044b5f7`) and `git rm`'d
-`FORMAL arm64 the cmn arm writes no destination register` and
-`FORMAL arm64 the extended immediate arms ignore their shift`; on the merged
+`FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` and
+`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`; on the merged
 tree both fixes are the master-side parallel forms (the `ADDS/CMN` `Rd` write
 and the shared `arm64_ext_imm12` reader, pinned in
 `test_formal_call_proof_gen.py`'s `TestGeneratorSource` and the
@@ -58,15 +42,11 @@ same call; the `_I12` distinction (the RAW 12-bit field stays for the
 unsigned-offset `LDR`/`STR` rows idx 18/19/31, a class with no `sh` field, and
 the five `#imm12` arms call `arm64_ext_imm12 w`); and the helper's `sh ∈ {0, 1}`
 decision (the arm's mask keeps bit 23, so `sh ≥ 2` is reserved in this class
-and never reaches the helper — the merged form masks `0x1`). The `lib/ProofLib.olean`
-rebuild and the `TestUnsignedOffsetAccess` CPU-vs-model run that were owed on a
-bounded machine were done on the `work/formal290-docs` machine (2026-10-12):
-the rebuilt library is served from the CAS, and
-`TestUnsignedOffsetAccess::test_the_model_agrees_with_the_cpu` passes (rc=0,
-one Lean run) with the adds/cmn and the three imm12 rows in it — which is what
-let the two sibling docs be deleted. On a machine without Lean the class skips
-rather than reports: a red `prooflib` or a disagreement row is what would say a
-fix is wrong.
+and never reaches the helper — the merged form masks `0x1`). What remains OWED
+is the `lib/ProofLib.olean` rebuild and the `TestUnsignedOffsetAccess`
+CPU-vs-model run, both past a bounded worker's ceiling (here there is no Lean
+on PATH, so the class skips): a red `prooflib` or a disagreement row is what
+would say a fix is wrong.
 
 **The CMN one is this file's own doing**, and that is worth stating rather than
 burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so
@@ -107,15 +87,6 @@ document and its own blocker
 (`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
 whose Status says the certificate is the expensive part and that the certificate
 belongs to another claim), so the reachable set this file names is now empty.
-
-**`WRONG 0` above is a row about the mixes as they were on 2026-10-05, and the
-`flagged` mix landed after it.** `gen_flagged_alu` draws the scaled register adds
-`encode_add_xd_xn_xm_lsl3/lsl4` emits, and re-measuring the same seed on this
-tree gives `--cases 200 --seed ledgerA --mix flagged` = `AGREE 133 WRONG 67`;
-the model's shifted-register `ADD` drops the shift. That is the third LOUD-WRONG
-defect, filed 2026-10-13 as
-`bugs/FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md`, and it is not
-a `NOSTEP` row in the table below for the reason this file's §5 gives.
 
 What landed, in the order §4 gives:
 
@@ -245,14 +216,13 @@ minute. **So the dividing line is per-module, and it is worth knowing which
 side of it a piece of work is on before anyone prices it:** a hypothesis or a
 peel in `lib/Refine.lean` is affordable to a bounded worker and something in
 `lib/ProofLib.lean` is not — every arm in this file, and every row of
-`FORMAL arm64 smulh has no model arm`, `FORMAL_arm64_ieee754_has_no_step_
+`FORMAL_arm64_smulh_has_no_model_arm.md`, `FORMAL_arm64_ieee754_has_no_step_
 arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
 and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
-`ProofLib`.  `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` is on the
-cheap side of the line and is gated on a design decision rather than on memory.
-The CBZ-leaf admission that used to sit beside it is fixed: the SP trackers
-dropped the `sh` bit of the 128 KiB frame, in `formal/arm64_proof_gen.py`'s
-`_addsub_imm_bytes`.
+`ProofLib`.  `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_
+false_claim.md` and `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` are
+on the cheap side of the line and are gated on a design decision rather than on
+memory.
 
 The probe is verified to be a real elaboration and not a cache replay: the same
 script with `this_is_not_a_definition : Nonexistent.Nope := 1` added to the
@@ -351,8 +321,9 @@ $ python3 -c "import importlib.util as u; s=u.spec_from_file_location('a',
   list blob past 32760 bytes needs
   (`encode_ldr_xt_xn_xm`'s own docstring), so the reachability is not
   theoretical.
-* **`BLR`** — the call through a function value, which the
-  `work/formal18-tile-specialization` lowering emits. It needs the `Callee` table machinery
+* **`BLR`** — the call through a function value, which
+  `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+  says a lowering emits. It needs the `Callee` table machinery
   (`arm64_step_call`), not just a decode arm, so it is the one row here that is
   not "three lines".
 
@@ -503,8 +474,8 @@ in:**
    than a path), so they are shared work rather than this doc's alone.
 3. The eight memory arms, one encoding at a time, each with its `_STEP_CONDS`
    row, its `work_step_*` lemma and its `_step_rhs` row in the SAME commit.
-4. `CSEL` and `BLR` last, behind their own blockers
+4. `CSEL` and `BLR` last, behind their own docs' blockers
    (`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it`,
-   `FORMAL_arm64_instruction_coverage`).
+   `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value`).
 5. Drop `CMN` and `TST` from the list, or wire them and then add the arms — the
    honest state today is "no image contains them".
