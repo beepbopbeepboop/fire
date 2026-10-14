@@ -3350,8 +3350,10 @@ def _step_rhs(w: int, idx: int):
     # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
     # table used to check the branch's source text, which the decoder cannot
     # reach.
-    if idx == 2:  # ADD register
-        return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s + arm64_reg {rm} s))"
+    if idx == 2:  # ADD register: `Xn + (Xm << imm6)`, NOT `Xn + Xm`
+        sh = (w >> 10) & 0x3f
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s "
+                f"+ (arm64_reg {rm} s <<< UInt64.ofNat {sh})))")
     if idx == 4:  # MUL
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s * arm64_reg {rm} s))"
     if idx == 68:  # SMULH: the HIGH half of the signed 128-bit product
@@ -3366,7 +3368,9 @@ def _step_rhs(w: int, idx: int):
         return (f"some (arm64_set_reg {rd} s (smulh64 (arm64_reg {rn} s) "
                 f"(arm64_reg {rm} s)))")
     if idx == 3:  # SUB register (also covers NEG when rn = XZR)
-        return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s))"
+        sh = (w >> 10) & 0x3f
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s "
+                f"- (arm64_reg {rm} s <<< UInt64.ofNat {sh})))")
     if idx == 7:  # AND register
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s &&& arm64_reg {rm} s))"
     if idx == 8:  # EOR register
@@ -3735,9 +3739,11 @@ def _step_rhs_generic(idx: int):
     if idx == 1:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s))"
     if idx == 2:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s + arm64_reg {_RM} s))"
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s "
+                f"+ arm64_shifted_reg w s {_RM}))")
     if idx == 3:
-        return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s - arm64_reg {_RM} s))"
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s "
+                f"- arm64_shifted_reg w s {_RM}))")
     if idx == 4:
         return f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s * arm64_reg {_RM} s))"
     if idx == 68:
