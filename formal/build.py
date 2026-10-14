@@ -1663,7 +1663,17 @@ def _imported_function_defs(source_path: str, stmts: list) -> dict:
     and the image on the link line cannot disagree. A module whose source has
     gone contributes nothing, which is the honest answer: there is no declaration
     to read, so the binding keeps the refusal it has today rather than being given
-    a fabricated type."""
+    a fabricated type.
+
+    **What this does NOT follow: a RE-EXPORT.**  `imported_struct_defs` reaches a
+    struct through a package's re-export (`module_struct_defs` walks the chain);
+    there is no function analogue, so `from pkg import f` where `pkg/__init__.mojo`
+    only re-exports `f` from a sibling finds no FunctionDef and the binding keeps
+    its refusal.  That is the safe direction — the program is refused rather than
+    given a fabricated type — and it is a smaller hole than the one this closes,
+    which is the sibling-module case every `--link-dylib` and `formal/hostmods`
+    module has.  A function-return-type reader that needs a re-exported callee
+    should route through the same walk `module_struct_defs` uses."""
     from formal.imports import module_statements, resolve_module_path
     bare, modules = {}, {}
     for local, (mod, orig) in _import_aliases(stmts).items():
@@ -11254,7 +11264,8 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
 
 
 def _callee_declaration(value, functions_by_name: dict,
-                        imported_fns: dict = None):
+                        imported_fns: dict = None,
+                        structs_by_name: dict = None):
     """The FunctionDef `value` calls, from this image or from an import, or None.
 
     The ONE resolution of a call's callee to its DECLARATION, so the readers that
@@ -11263,7 +11274,17 @@ def _callee_declaration(value, functions_by_name: dict,
     function a spelling names.  A local function wins over an import of the same
     name — the precedence `imported_bindings` states — and the two imported
     spellings are exactly the two `_imported_function_defs` records: a BARE name
-    (`from m import f as g`) and a `MODULE.member` chain (`import m`)."""
+    (`from m import f as g`) and a `MODULE.member` chain (`import m`).
+
+    **A `MODULE.member` chain is claimed only when no struct of this image
+    declares `member`.**  `_import_aliases` excludes a name this file DEFINES at
+    top level, but not a local variable that happens to share a module's name,
+    and `m.f()` for a local `m` is a METHOD call the lift owns — resolving it to
+    an imported module's free function `f` would record a binding the program
+    does not have.  When `member` is declared by any struct the answer is
+    therefore None (the binding keeps its refusal), which is the direction that
+    cannot produce a wrong number: the method lift, which runs after this table
+    is built, still gets its own chance at the call."""
     func = getattr(value, "func", None)
     if isinstance(func, F.IdentExpr):
         fn = (functions_by_name or {}).get(func.name)
@@ -11271,8 +11292,14 @@ def _callee_declaration(value, functions_by_name: dict,
             return fn
         return ((imported_fns or {}).get("bare") or {}).get(func.name)
     if isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr):
-        return (((imported_fns or {}).get("modules") or {})
-                .get(func.obj.name, {}) or {}).get(func.member)
+        module_fns = ((imported_fns or {}).get("modules") or {})
+        table = module_fns.get(func.obj.name)
+        if not table:
+            return None
+        if any(m.name == func.member for st in (structs_by_name or {}).values()
+               for m in M.struct_methods(st)):
+            return None
+        return table.get(func.member)
     return None
 
 
@@ -11315,7 +11342,8 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
     """
     if not isinstance(value, F.CallExpr):
         return None
-    callee = _callee_declaration(value, functions_by_name, imported_fns)
+    callee = _callee_declaration(value, functions_by_name, imported_fns,
+                                 structs_by_name)
     if callee is None:
         return None
     base = M.annotation_base_name(getattr(callee, "return_type", None))
