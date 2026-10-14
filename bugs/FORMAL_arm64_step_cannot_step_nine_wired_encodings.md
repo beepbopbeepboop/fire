@@ -9,8 +9,8 @@ now FIXED (2026-10-08, `work/formal231-docs`):**
 
 | defect | status |
 |---|---|
-| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — `arm64_step`'s arm now writes `Rd` (the identity at `Rd = 31` covers the CMN spelling) |
-| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms |
+| the `CMN` arm takes the whole `0xab000000` class, so `ADDS Xd, Xn, Xm` with `Rd ≠ 31` writes NO register | **FIXED** — the arm reads and writes `Rd` (the identity at `Rd = 31` covers the CMN spelling); the `CMN` and `adds` spellings are pinned together by `test_formal_call_proof_gen.py::TestUnsignedOffsetAccess` |
+| the `ADD`/`SUB`/`CMP` `#imm12` arms read `imm12` and drop its `lsl #12` | **FIXED** — one shared reader, `arm64_ext_imm12`, scaled by the `sh` field, called by all five arms, with an UNSHIFTED anti-rot row in the same test |
 
 The fixes landed as a single `lib/ProofLib.lean` change (past a bounded worker's
 8 GB ceiling then, which is why these were written down rather than attempted
@@ -42,11 +42,15 @@ same call; the `_I12` distinction (the RAW 12-bit field stays for the
 unsigned-offset `LDR`/`STR` rows idx 18/19/31, a class with no `sh` field, and
 the five `#imm12` arms call `arm64_ext_imm12 w`); and the helper's `sh ∈ {0, 1}`
 decision (the arm's mask keeps bit 23, so `sh ≥ 2` is reserved in this class
-and never reaches the helper — the merged form masks `0x1`). What remains OWED
-is the `lib/ProofLib.olean` rebuild and the `TestUnsignedOffsetAccess`
-CPU-vs-model run, both past a bounded worker's ceiling (here there is no Lean
-on PATH, so the class skips): a red `prooflib` or a disagreement row is what
-would say a fix is wrong.
+and never reaches the helper — the merged form masks `0x1`). The `lib/ProofLib.olean`
+rebuild and the `TestUnsignedOffsetAccess` CPU-vs-model run that were owed on a
+bounded machine were done on the `work/formal290-docs` machine (2026-10-12):
+the rebuilt library is served from the CAS, and
+`TestUnsignedOffsetAccess::test_the_model_agrees_with_the_cpu` passes (rc=0,
+one Lean run) with the adds/cmn and the three imm12 rows in it — which is what
+let the two sibling docs be deleted. On a machine without Lean the class skips
+rather than reports: a red `prooflib` or a disagreement row is what would say a
+fix is wrong.
 
 **The CMN one is this file's own doing**, and that is worth stating rather than
 burying: §3 below says *"`CMP` is `CMN` with the operands the other way round, so
