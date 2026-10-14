@@ -2524,9 +2524,25 @@ HOST_MODULE_ADVICE = {
         "chosen at run time, over a graph whose shape the build cannot see, has "
         "no answer here — the same missing thing as a type built at run time",
     "functools":
-        "the higher-order functions are a callable this path has no "
-        "representation for; the arithmetic they wrap is ordinary code and can "
-        "be written out",
+        # The first clause was "the higher-order functions are a callable this "
+        # path has no representation for", and it was FALSE the day it was
+        # written: a function value is a CODE ADDRESS on this path now (both
+        # backends' `_load_var` materializes it and `_emit_call` branches
+        # through it), and `reduce`'s own shape BUILDS and answers CPython on
+        # both architectures — it is `test_formal_specialization.py`'s
+        # `functools.reduce's own shape runs, on both`. So the sentence sent a
+        # reader to add a capability that exists. What actually stops a
+        # `formal/hostmods/functools.mojo` is the DECORATOR half, which is a
+        # different missing capability with a doc of its own
+        # (`bugs/COMPILE_FAIL_decorator_application_dropped.md`).
+        "the arithmetic `reduce`/`partial` wrap can be written OUT — a loop, or "
+        "an ordinary leading argument — and that is the whole of what these "
+        "files want. The module's decorator spellings (`@lru_cache`, `@wraps`) "
+        "are the real gate and not a callable: this path parses a decorator and "
+        "never APPLIES it, so a decorator from this module cannot be honoured "
+        "(`bugs/COMPILE_FAIL_decorator_application_dropped.md`). Its other "
+        "names build types or objects at run time (`itemgetter`, "
+        "`MappingProxyType`, `RLock`), which this path has no word for",
 }
 
 # Three entries, and three is the right size for a mechanism that must not become
