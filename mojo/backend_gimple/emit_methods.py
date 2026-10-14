@@ -3904,6 +3904,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._dyn_word_vals.add(_cf_res)
         return 'int64_t', _cf_res
 
+    # A str-only method on a word of unknown kind (a key from the dict arm
+    # of an untyped `for`, an untyped attribute read): the word is a string,
+    # so ask the runtime for the `char *` view and take the string dispatch.
+    # The scalar-receiver stub below answered the receiver instead.
+    if (ot in ('int', 'int64_t') and gimple_ctypes.is_string_only_method(method)
+            and isinstance(node.func, gimple_ctypes.MemberExpr)
+            and gen._is_dyn_word(node.func.obj, ov)):
+        _sw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                             [('int64_t', gen._to_int64(ot, ov))])
+        return gen._lower_str_method(_sw, method, node.args, node.kwargs)
+
     # File handle operations (int64_t handles from mojo_open_file)
     if ot in ('int', 'int64_t'):
         if method == 'read' and not node.args:

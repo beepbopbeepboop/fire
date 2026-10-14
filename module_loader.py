@@ -25,6 +25,28 @@ _C_KEYWORDS = frozenset({
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def compiler_source_dir(module_file: str) -> str:
+    """The directory holding this compiler's own source, for the module whose
+    `__file__` is `module_file`.
+
+    Under CPython that is simply the module's directory. The self-hosted
+    binary has no source location of its own -- `__file__` is the
+    `<bootstrap>` placeholder in every compiled module, so `dirname(abspath(
+    __file__))` answers the process CWD, and every "is this the compiler's
+    own source?" decision then depended on where the binary was run (the
+    bootstrap stages run it from `stage2/`/`stage3/`). `MOJO_HOME` is the
+    project root every runner of the binary names; it is honoured there and
+    only there, and the CWD answer stands when it is unset. ONE function, so
+    `gimple_codegen._SELFHOST_DIR` and this module's own gate cannot
+    disagree."""
+    _d = os.path.dirname(os.path.abspath(module_file))
+    if module_file == '<bootstrap>':
+        _mh = os.environ.get('MOJO_HOME', '')
+        if _mh:
+            _d = os.path.abspath(_mh)
+    return _d
+
+
 def _ml_parse_var_global(text: str) -> list:
     """`[name, annotation, rhs]` for a top-level `var NAME[: ANN][= RHS]` line
     (already stripped), or `[]` when the line is not that shape.
@@ -658,7 +680,7 @@ class ModuleLoader:
             # int64_t extern here would CONFLICT with, so they are left out
             # (they weren't the crash and their undeclared->0 fallback, while
             # imprecise, is not a hard failure).
-            _selfhost_dir = os.path.dirname(os.path.abspath(__file__))
+            _selfhost_dir = compiler_source_dir(__file__)
             # STILL OPEN (see bugs/CODEGEN_selfhost_actual_types_identifier_
             # field_key.md's "module_loader.py" section for the full trail):
             # the original `os.path.dirname(os.path.abspath(path)) ==

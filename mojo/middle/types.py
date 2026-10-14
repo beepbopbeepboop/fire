@@ -2135,3 +2135,20 @@ def _declared_vars_body(stmts) -> set[str]:
     return result
 _CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
 _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+
+
+# Methods that exist ONLY on Python str (never on list/dict/set): a call to
+# one is unambiguous evidence its receiver is a string. Read by the parameter
+# inference (`infra_infer._infer_param_types`) and by the method dispatch for a
+# receiver of unknown kind (emit_methods), so the two cannot disagree.
+_STRING_ONLY_METHODS = frozenset({
+    'find', 'rfind', 'startswith', 'endswith', 'strip', 'lstrip',
+    'rstrip', 'split', 'rsplit', 'splitlines', 'replace', 'lower',
+    'upper', 'format', 'isalnum', 'isdigit', 'isspace', 'isupper',
+    'islower', 'isalpha', 'zfill', 'capitalize', 'title', 'join',
+    'partition', 'rpartition', 'swapcase', 'expandtabs', 'casefold',
+})
+
+
+def is_string_only_method(name: str) -> bool:
+    return name in _STRING_ONLY_METHODS

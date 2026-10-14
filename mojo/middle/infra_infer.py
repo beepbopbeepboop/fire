@@ -318,13 +318,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # `py_tokenize_replace_multiline_strings`, with the faulting address
     # literally spelling out the first bytes of the source file's text —
     # proof `src`'s raw string bytes were being read as a pointer.
-    STRING_ONLY_METHODS = {
-        'find', 'rfind', 'startswith', 'endswith', 'strip', 'lstrip',
-        'rstrip', 'split', 'rsplit', 'splitlines', 'replace', 'lower',
-        'upper', 'format', 'isalnum', 'isdigit', 'isspace', 'isupper',
-        'islower', 'isalpha', 'zfill', 'capitalize', 'title', 'join',
-        'partition', 'rpartition', 'swapcase', 'expandtabs', 'casefold',
-    }
+    # The set itself is `mojo.middle.types.is_string_only_method`'s, shared
+    # with the codegen's method dispatch on an unknown-kind receiver.
 
     # Methods that exist ONLY on Python dict (never on list/set), so a
     # `param.method(...)` call using one of these unambiguously identifies
@@ -840,7 +835,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # comment above: unambiguous evidence param is a string,
                     # even if it's also subscripted elsewhere.
                     if (_efunc_obj_name == param_name
-                            and _efunc.member in STRING_ONLY_METHODS):
+                            and gimple_ctypes.is_string_only_method(_efunc.member)):
                         _F['is_string_method'] = True
                     # param.<bytes-only-method>(...) — unambiguous "param is
                     # bytes" (see BYTES_ONLY_METHODS).
@@ -855,7 +850,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     if (_meth_recv is not _efunc_obj
                             and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
                             and _as_ident_node(_meth_recv).name == param_name
-                            and _efunc.member in STRING_ONLY_METHODS):
+                            and gimple_ctypes.is_string_only_method(_efunc.member)):
                         _F['is_string_method'] = True
                     # param.<dict-only-method>(...) — same unambiguous
                     # "param is a dict" evidence (see DICT_ONLY_METHODS).

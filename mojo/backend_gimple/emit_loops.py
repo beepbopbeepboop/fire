@@ -1106,6 +1106,18 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
                     and not for_target_is_tuple(var))
+                # Both arms share ONE C variable, declared by the dict arm
+                # (lowered first) as the `char *` its keys need -- so in the
+                # list arm an ELEMENT is read through a `char *`, and every
+                # `isinstance(st, <Struct>)` there folded to a static False
+                # (the self-hosted compiler's re-export resolver,
+                # `_find_symbol_home_module`, never saw an import). The name is
+                # recorded as an unknown-kind word, which `_isinstance_one_type`
+                # answers at run time whatever its C type. (Declaring the
+                # shared variable `int64_t` instead was tried and corrupted
+                # loops whose bodies rely on the `char *` key.)
+                if not for_target_is_tuple(var) and not _it_is_items:
+                    gen._dyn_word_locals.add(_as_str(var))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:

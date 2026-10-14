@@ -2811,6 +2811,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     value name. Factored out of _lower_builtin_isinstance so `isinstance(x,
     (A, B, ...))` (a tuple of types) can OR together one of these per
     alternative instead of the previous always-False stub."""
+    # A `char *`-declared variable that is really a word of unknown kind (the
+    # shared loop variable of an untyped `for`'s dict/list dispatch): its C
+    # type says nothing, so the question goes to the runtime, as for any
+    # boxed handle.
+    if obj_type == 'char *' and _as_str(obj_val) in gen._dyn_word_locals:
+        obj_val = gen._new_val('int64_t', f'(int64_t){obj_val}')
+        obj_type = 'int64_t'
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
     if type_name == 'tuple':
@@ -3478,6 +3485,15 @@ def _carry_elem_types(gen, src: str, dst: str) -> None:
         gen._elem_types[dst] = gen._elem_types[src]
     if src in gen._nested_elem_types:
         gen._nested_elem_types[dst] = gen._nested_elem_types[src]
+
+
+def _is_dyn_word_operand(gen, node, val: str) -> bool:
+    """Is this operand a word whose kind only the runtime knows (see
+    `_dyn_word_vals` / `_dyn_word_locals`)?"""
+    if val in gen._dyn_word_vals:
+        return True
+    return (isinstance(node, gimple_ctypes.IdentExpr)
+            and _as_str(node.name) in gen._dyn_word_locals)
 
 
 def _resolve_container_kind(gen, at: str, av: str) -> tuple[str, str]:

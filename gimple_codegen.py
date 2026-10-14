@@ -30,7 +30,7 @@ from fire_compiler import (
     py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
     desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
-from module_loader import load_module, get_symbol_type
+from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
 import mlir
@@ -414,22 +414,17 @@ from mojo.middle.exprtypes import (
 )
 
 
+# `compiler_source_dir` (module_loader), not `dirname(abspath(__file__))`:
+# the self-hosted binary's `__file__` is `<bootstrap>`, and the bare form
+# answered the process CWD, so every compiler-source decision keyed on this
+# directory (the self-host struct layouts, the GimpleGen function index) said
+# "not compiler source" when `stage2/mojo` ran from `stage2/`. See there.
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
-# The self-hosted binary has no source location of its own: `__file__` is
-# the `<bootstrap>` placeholder in every compiled module, so the line above
-# answers the process CWD. That made every compiler-source decision that
-# keys on this directory (the self-host struct layouts, the GimpleGen
-# function index built from `_selfhost_impl_py_files`) depend on WHERE the
-# binary was run: `stage2/mojo --dump ../fire_main.py` from `stage2/` saw no
-# compiler sources at all, while the python reference compiling the same file
-# from `stage1/` saw them, and the stage trees diverged on that alone.
-# `MOJO_HOME` is the project root every runner of the binary already names
-# (the bootstrap stages, `test_ab_native`); honouring it is what makes the
-# binary's answer the reference's. Unset, the CWD answer stands as before.
 if __file__ == '<bootstrap>':
-    _mojo_home_dir = os.environ.get('MOJO_HOME', '')
-    if _mojo_home_dir:
-        _SELFHOST_DIR = os.path.abspath(_mojo_home_dir)
+    # The `os.path` spelling above is what the self-host global tables
+    # recognise as a path-string global (module_shared's
+    # `_selfhost_modglobal_is_pathcall`); the correction is a reassignment.
+    _SELFHOST_DIR = compiler_source_dir(__file__)
 
 
 def _selfhost_impl_py_files(sd: str) -> list[str]:
@@ -4264,6 +4259,10 @@ class GimpleGen:
 
     def _lower_builtin_dir(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dir(self, node)
+
+    def _is_dyn_word(self, node, val: str) -> bool:
+        # A delegate for the same import-cycle reason as the one below.
+        return ggc._is_dyn_word_operand(self, node, val)
 
     def _resolve_container_kind(self, at: str, av: str) -> tuple[str, str]:
         # A delegate, not a `ggc.` call from emit_exprs: emit_exprs and
