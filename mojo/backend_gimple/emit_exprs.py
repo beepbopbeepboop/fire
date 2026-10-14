@@ -6141,7 +6141,16 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is
     # useless for a (char*, pointer) pair like `(name, func)`.
-    if per_element:
+    # ...and for a HOMOGENEOUS tuple with no `*spread` too: the slot list is
+    # also the tuple's ARITY, which a `f(*t)` spread at a call site needs to
+    # expand into positional arguments (`lower_call_args`). Same types as the
+    # joined element, so no reader that already consulted this table reads a
+    # slot differently.
+    _has_spread = False
+    for _slt0 in lowered:
+        if _is_star_spread(_slt0[0]):
+            _has_spread = True
+    if per_element or (not _has_spread and len(lowered) > 0):
         _slot_ts = []
         for _slt in lowered:
             if _is_star_spread(_slt[0]):

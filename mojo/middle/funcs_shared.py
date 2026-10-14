@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node, conv_is_read_only, conv_is_exclusive, conv_is_transfer
+from fire_compiler import split_top_level_commas
 import ast_rewriter
 import regex_compile
 import mlir
@@ -657,6 +658,38 @@ def _resolved_export_entry(gen, module: str, name: str, info):
     # measurement -- see its own comment and the bug doc named there.
     _out['c_return_type_is_default'] = not _fn.return_type
     return _out
+
+def record_annotated_tuple_slots(gen, key: str, ann) -> None:
+    """Record the per-slot C types a `-> tuple[A, B, ...]` annotation states,
+    under the callee key a call site can name (`f`, `Struct_method`).
+
+    `_return_slot_types` is filled from a body's own `return a, b` literal,
+    which is both too late (a caller emitted before the callee sees nothing)
+    and absent for a body that returns another call's tuple (`return
+    ginf.lower_expr(self, node)` -- which is exactly how `GimpleGen.lower_expr`
+    returns). The ANNOTATION is the declaration of the same fact and is
+    known at signature time. Only the ARITY and per-slot types are taken;
+    a bare `tuple`, a variadic `tuple[X, ...]` or an unparseable annotation
+    records nothing. Kept in its own table rather than merged into
+    `_return_slot_types` so the body-derived record, which every tuple
+    unpack already reads, keeps meaning exactly what it meant."""
+    a = _as_str(ann).strip() if ann is not None else ''
+    lb = a.find('[')
+    if lb <= 0 or not a.endswith(']'):
+        return
+    head = a[:lb].strip()
+    if head not in ('tuple', 'Tuple'):
+        return
+    parts = split_top_level_commas(a[lb + 1:-1])
+    slots: list = []
+    for p in parts:
+        ps = _as_str(p).strip()
+        if ps == '' or ps == '...':
+            return
+        slots.append(gen._resolve_type(ps))
+    if len(slots) > 0:
+        gen._return_ann_slot_types[key] = slots
+
 
 def register_imported_symbol(gen, name: str, info: dict,
                              original_name: str = None,

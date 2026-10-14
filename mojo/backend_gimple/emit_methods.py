@@ -6306,9 +6306,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         # Explicit accumulation loop, NOT `[gen.lower_expr(a) for a in
         # _cnode.args]` — a list comprehension is the established
         # self-hosted trap (result erased to the garbage non-list 1).
-        arg_pairs = []
-        for _a2 in _cnode.args:
-            arg_pairs.append(gen.lower_expr(_a2))
+        arg_pairs = gen._lower_call_args(_cnode.args)
         arg_pairs = _repack_method_call_spread_args(
             gen, mangled, struct_name, method, _cnode.args, arg_pairs)
     full_param_list = gen.func_param_types.get(mangled,

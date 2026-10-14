@@ -6051,6 +6051,65 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     return ret_type, t
 
 
+def _annotated_call_slots(gen, operand):
+    """The `-> tuple[...]` per-slot types of the callee `operand` calls (a
+    free function `f(...)` or a method `obj.m(...)` on a struct-typed
+    receiver), or None. See funcs_shared.record_annotated_tuple_slots."""
+    if not isinstance(operand, gimple_ctypes.CallExpr):
+        return None
+    fn = operand.func
+    if isinstance(fn, gimple_ctypes.IdentExpr):
+        return gen._return_ann_slot_types.get(_as_str(fn.name))
+    if isinstance(fn, gimple_ctypes.MemberExpr):
+        rt = _as_str(gen._quick_type(fn.obj))
+        if rt.endswith(' *'):
+            sname = rt[:-2].strip()
+            return gen._return_ann_slot_types.get(sname + '_' + _as_str(fn.member))
+    return None
+
+
+def lower_call_args(gen, args: list) -> list:
+    """Lower a call's positional arguments, expanding `*x` when `x` is a
+    tuple of statically known ARITY into that many positional pairs.
+
+    `f(g, *h())` with `h` returning a 2-tuple is two arguments, not one: the
+    spread used to pass through as a single `MojoList *` pair, so the callee
+    got the whole tuple in its second slot and its own second argument
+    shifted out -- the compiled compiler's `_dict_key_probe(gen,
+    *gen.lower_expr(k))` probed with the key TUPLE as the key type and an
+    empty key value, emitting `(char *);`. The arity comes from the value's
+    own per-slot record (`_tuple_slot_types`: a tuple literal, or a
+    multi-value return re-keyed onto its call result), and each slot is read
+    with its own type (`_tuple_elem_value`). A spread of unknown arity keeps
+    the old single-pair shape, which `_expand_sole_spread_into_fixed_slots`
+    and the vararg packing still handle."""
+    out: list = []
+    for a in args:
+        if isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) == '*':
+            # A Mojo pointer DEREFERENCE (`f(*p)`) is `_lower_UnaryOp`'s, not a
+            # spread.
+            _qt = _as_str(gen._quick_type(a.operand) or '')
+            if (_qt.endswith(' *') and _qt not in (
+                    'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')):
+                out.append(gen.lower_expr(a))
+                continue
+            _st, _sv = gen.lower_expr(a.operand)
+            _slots = gen._tuple_slot_types.get(_sv)
+            if _slots is None:
+                _slots = _annotated_call_slots(gen, a.operand)
+            if _slots is not None and len(_slots) > 0:
+                for _i in range(len(_slots)):
+                    out.append(gen._tuple_elem_value(_st, _sv, _i))
+                continue
+            # Unknown arity: the single pass-through pair `_lower_UnaryOp`
+            # gives a spread, built from the operand already lowered rather
+            # than lowering it a second time.
+            out.append((_st, _sv))
+            continue
+        out.append(gen.lower_expr(a))
+    return out
+
+
 def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
                                           arg_pairs, expected_params):
     """`f(*iterable)` against a callee with KNOWN, FIXED positional params
@@ -6511,7 +6570,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and 'object' not in gen.func_return_types):
         return 'int64_t', gen._new_val('int64_t', '0')
 
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs = lower_call_args(gen, node.args)
     kwargs    = getattr(node, 'kwargs', []) or []
     # `_as_str(kname)`: the dict-comprehension's tuple-unpack reads
     # `kwargs[i][0]` (the kwarg NAME, a str) via `mojo_list_get_int`, so

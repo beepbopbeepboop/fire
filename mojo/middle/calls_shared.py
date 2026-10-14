@@ -650,7 +650,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(('MojoDict *', gen._pack_kwargs_dict(
                 {_kn: gen.lower_expr(_kv) for _kn, _kv in kw.items()})))
         return out
-    out = [gen.lower_expr(a) for a in args]
+    out = gen._lower_call_args(args)
     # A `**kwargs` parameter is a concrete `MojoDict *` (see
     # _gen_struct_method's param loop), so literal keyword arguments at
     # the call site must be PACKED into a real dict. Otherwise the

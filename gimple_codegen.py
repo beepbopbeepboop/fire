@@ -1615,6 +1615,10 @@ class GimpleGen:
         # slot types to a call site EMITTED LATER, which a per-function
         # reset would erase between the two.
         self._return_slot_types: dict[str, list] = {}
+        # Callee key -> per-slot C types its `-> tuple[...]` ANNOTATION
+        # states; see funcs_shared.record_annotated_tuple_slots. Module scope
+        # for the same reason as `_return_slot_types`.
+        self._return_ann_slot_types: dict[str, list] = {}
         # Device kernels this module offloaded, and their MSL. Filled by
         # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
         # the very end of the module; module scope because the MSL is only
@@ -4259,6 +4263,13 @@ class GimpleGen:
 
     def _lower_builtin_dir(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dir(self, node)
+
+    def _lower_call_args(self, args: list) -> list:
+        # A delegate so the struct-method and overload-candidate argument
+        # builders (emit_methods, mojo/middle/calls_shared) expand `*t` the
+        # same way `_lower_named_call` does, without a module-qualified call
+        # across the emit_* import cycle.
+        return ggc.lower_call_args(self, args)
 
     def _is_dyn_word(self, node, val: str) -> bool:
         # A delegate for the same import-cycle reason as the one below.

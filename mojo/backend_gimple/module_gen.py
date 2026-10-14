@@ -6285,6 +6285,7 @@ def gen_module_impl(self, stmts):
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
             self.func_return_types[s.name] = self._resolve_type(s.return_type)
+            funcs_shared.record_annotated_tuple_slots(self, s.name, s.return_type)
             _ggf_dup._record_home_def_return_type(
                 self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
@@ -6505,6 +6506,7 @@ def gen_module_impl(self, stmts):
                 mangled = f"{s.name}_{m.name}"
                 if m.return_type is not None:
                     self.func_return_types[mangled] = self._resolve_type(m.return_type)
+                    funcs_shared.record_annotated_tuple_slots(self, mangled, m.return_type)
                 if hasattr(m, 'decorators') and 'staticmethod' in (m.decorators or []):
                     self._static_methods.add(mangled)
                 if ((hasattr(m, 'decorators') and 'classmethod' in (m.decorators or []))
