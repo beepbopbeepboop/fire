@@ -1219,7 +1219,10 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 #
 # Every field this module reads is read ONE BYTE AT A TIME through
 # `le16`/`le32`/`le64` below, so each load has the width the field declares.
-# That is the difference from the state
+# The SIGN is the field's too: `st_dev` and `st_rdev` are `int32` (`dev_t`) and
+# CPython sign-extends them, while `st_uid`/`st_gid` are `uint32` — which is why
+# there is a `le32s` beside `le32` rather than one reader for every 32-bit
+# field. That is the difference from the state
 # `FORMAL_stat_out_parameter_is_unreadable` describes: it was not the
 # offsets that made the struct unreadable, it was that a read of it was a
 # COUNT-WALK — a bounds check against whatever word was at offset 0. A byte
@@ -1616,7 +1619,9 @@ def fs_stat_field32(p, follow, at) -> int:
 
     `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
     and reading it as 64 would take the four bytes of padding after it, so the
-    width is the field's and not the alignment's.
+    width is the field's and not the alignment's. ZERO-extended: `uid_t` and
+    `gid_t` are unsigned, so this is the right reader for them; `st_dev` is a
+    signed `dev_t` and has `fs_stat_field32_signed` beside this one.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:

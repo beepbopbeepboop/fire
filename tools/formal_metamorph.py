@@ -1721,6 +1721,18 @@ def _inv(node, an, fn, index):
 
 # -- 8. reorder adjacent statements -----------------------------------------
 
+#: The CONTENTS of a container or object, as a name no source can spell (no
+#: Python identifier contains a NUL).  A subscript or attribute access reads or
+#: writes this cell, because the base it is reached through is not the thing it
+#: names: `A32 = h31.b23` makes `A32[0]` and `h31.b23[0]` two spellings of ONE
+#: element.  The independence test below compares NAMES, so without this cell it
+#: read `h31.b23[0] = 62` and `w34 = A32[0]` as disjoint (`h31` vs `A32`),
+#: exchanged them, and the printed value moved 46 -> 62 on the `refs` mix.
+#: Collapsing every container to one cell over-approximates (any two bases may
+#: alias), and an over-approximation here can only REFUSE a swap.
+CONTAINER_CONTENTS = "\x00contents"
+
+
 class _Info:
     """Reads, writes, closure-visible names, control transfer and OBSERVABILITY
     of a statement — everything `t_reorder`'s independence test reads."""

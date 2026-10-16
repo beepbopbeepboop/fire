@@ -285,11 +285,23 @@ every backend and requires the same answer (`NORMALISES-DIFFERLY-<arch>`), and a
 verbatim spelling that will not build is `NORMALISES-UNCOMPARABLE` rather than a
 skip, because nothing then established that the removal preserved anything.
 
-Measured: 7 of the 51 examples are measured in a dialect this tool rewrote
-(`count`, `fact`, `fib`, `sum` — proof decorators; `vardecl`, `vardecl_typed`,
-`vardecl_unused` — `var`), and **all 7 were re-run on both backends as written and
-answered the same**. It costs no build when no rule fired, which is the whole
-generated corpus and 45 of the 52 examples.
+Measured: 16 of the 90 driven examples are measured in a dialect this tool
+rewrote (`absval`, `bigconst`, `bitops`, `chain`, `count`, `fact`, `fib`,
+`identity`, `localmul`, `nonzero`, `pair`, `shiftlr`, `sum` — proof decorators;
+`var_typed_loop`, `vardecl`, `vardecl_typed`, `vardecl_unused` — `var`), and
+**every one was re-run on both backends as written and answered the same**. It
+costs no build when no rule fired, which is the whole generated corpus and 74 of
+the 90.
+
+**`@refines` was the fourteenth rule gap and it was the largest single one.** The
+proof-decorator rule named `@spec`/`@require`/`@ensure` and not `@refines`, which
+the corpus grew when the refinement files landed — so the eleven `@refines`
+examples (`absval`, `bigconst`, `bitops`, `chain`, `fact`, `identity`,
+`localmul`, `nonzero`, `pair`, `shiftlr`, `sum`) were reported as "CPython still
+declines it: invalid syntax (line 11)" and dropped. The rule now names all four,
+and the three examples still unmeasured are the ones that declare a `struct`,
+which is a DECISION and not a rule (`test_the_examples_corpus_is_mostly_measured`
+asserts exactly that set now rather than a bare floor).
 
 **2026-10-07 (`formal126-docs`): the number to the left is 7 of 51 because that
 was the tree it was taken on; the tree now has a THIRD decorator.** Eleven
