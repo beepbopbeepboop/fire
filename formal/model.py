@@ -14747,7 +14747,9 @@ def blob_growth_overflow_message(what: str, capacity: int) -> str:
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
-                          untyped_callee=None) -> str | None:
+                          untyped_callee=None,
+                          left_is_set: bool = False,
+                          right_is_set: bool = False) -> str | None:
     """The ONE place a binary operator with a string operand is decided not to
     be lowered, so both backends ask the same question in the same order.
 
@@ -14785,7 +14787,9 @@ def string_binary_refusal(op: str, left_kind, right_kind,
         if word is not None:
             return word
     blob = container_operator_refusal(op, left_kind, right_kind,
-                                     spelled_op)
+                                     spelled_op,
+                                     left_is_set=left_is_set,
+                                     right_is_set=right_is_set)
     if blob is not None:
         return blob
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
@@ -14870,8 +14874,76 @@ CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
 SET_ALGEBRA_OPS = ("-", "&", "^")
 
 
+#: The three operators that are SET ALGEBRA when both operands are sets:
+#: `&` INTERSECTION, `^` SYMMETRIC DIFFERENCE, `-` SET DIFFERENCE.  They are
+#: in `CONTAINER_GATED_OPS` for every other blob shape, and
+#: `container_operator_refusal` exempts the set-against-set shape so the
+#: backends can lower it — arm64 has the emitters, x86-64 refuses it by name
+#: through `set_algebra_refusal` below.
+SET_ALGEBRA_OPS = ("&", "^", "-")
+
+
+def set_algebra_refusal(op: str, left: str, right: str) -> str:
+    """Why `left op right` between two SETS is not lowered on the backend asking.
+
+    `container_operator_refusal` no longer refuses a set-against-set `&`, `^` or
+    `-`, because arm64 lowers all three (`_emit_set_op`).  A backend without
+    those emitters must still refuse them LOUDLY rather than fall through to the
+    integer ALU, which is the SIGSEGV-and-wrong-number transcript that function's
+    docstring records.  This is the same second question `set_union_refusal`
+    answers for `|`, and it names the backend that DOES lower it, because
+    "unsupported" sends a reader looking for a spec when the answer is an
+    emitter.
+    """
+    meaning = {"&": "INTERSECTION", "^": "SYMMETRIC DIFFERENCE",
+               "-": "SET DIFFERENCE"}[op]
+    return (
+        f"{left} {op} {right} is {meaning} between two SETS, and this backend "
+        f"lowers `&`, `^` and `-` on two containers as integer arithmetic on "
+        f"the two blobs' ADDRESSES, which never looks at an element and is not "
+        f"a set. arm64 lowers set `&`, `^` and `-` correctly; this backend "
+        f"refuses them. Build the result with a loop over membership tests "
+        f"instead.")
+
+
+def set_operator_operand_refusal(shown: str, op: str, left_kind,
+                                 right_kind) -> str:
+    """Why `&`/`^`/`-` is refused when an operand is a blob but NOT both sets.
+
+    `shown` is the operator AS THE SOURCE SPELLED IT (`-=` for the augmented
+    form), so the diagnostic names the operator the reader is looking at; `op`
+    is the bare operator the meaning table is keyed on.
+
+    CPython defines these three operators for exactly two shapes: two SETS
+    (set algebra) and two INTEGERS (bitwise AND, XOR and subtraction).  A pair
+    with a container on one side and anything other than a set on the other is
+    a `TypeError` there, so there is no correct program to lower — and the
+    refusal says that rather than reusing `container_operator_refusal`'s
+    per-element-STRIDE sentence, which was written when the two-SET shape had
+    no lowering either and is now false about it.
+    """
+    meaning = {"&": "INTERSECTION (every element both sides hold)",
+               "^": "SYMMETRIC DIFFERENCE (every element exactly one side holds)",
+               "-": "SET DIFFERENCE (every element of the left the right does "
+                    "not hold)"}[op]
+    which = ("the left operand" if container_operand_is_blob(left_kind)
+             else "the right operand")
+    other = ("the right operand" if container_operand_is_blob(left_kind)
+             else "the left operand")
+    return (
+        f"`{shown}` is refused because Python defines it as {meaning} between "
+        f"two SETS, or as the integer operation between two integers, and this "
+        f"pair is neither: {which} is a container blob (a list, tuple, set or "
+        f"dict) and {other} is not a set. CPython raises `TypeError` for this "
+        f"source, so there is no correct program to lower. A set here is a list "
+        f"blob and the two-SET shape IS lowered (arm64); write both operands as "
+        f"sets, or compare the element you mean")
+
+
 def container_operator_refusal(op: str, left_kind, right_kind,
-                               spelled_op: str | None = None) -> str | None:
+                               spelled_op: str | None = None,
+                               left_is_set: bool = False,
+                               right_is_set: bool = False) -> str | None:
     """Why `a {op} b` must not be lowered when an operand is a BLOB, or None.
 
     **The wrong answers are measured, and they are WORSE than the ordering ones
@@ -14911,6 +14983,17 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     refusal is doubly right: the program is already broken and the diagnostic
     says what it meant to write.
 
+    **The one per-element STRIDE that IS now written is SET ALGEBRA, and it is
+    exempted rather than refused.**  `&`, `^` and `-` between two SETS have a
+    lowering on arm64 (`_emit_set_op`), so when `left_is_set` and
+    `right_is_set` this function returns `None` and lets the backend lower it;
+    a backend without the emitters asks `set_algebra_refusal`.  Every OTHER
+    blob shape of those three operators is still refused here, by
+    `set_operator_operand_refusal` — a LIST `&` list is a CPython `TypeError`,
+    not a set.  So the message below reaches only the shapes with no lowering
+    and no correct program, which is what keeps its "no lowering to reach for"
+    clause true of every program it answers.
+
     A blob on ONE side is enough: CPython raises `TypeError` for `xs > 0` and for
     `xs == 0` too, so there is no correct program on the far side of this gate.
 
@@ -14924,8 +15007,9 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     bare = _bare_operator(op, spelled_op)
     if bare not in CONTAINER_GATED_OPS:
         return None
-    if not (container_operand_is_blob(left_kind)
-            or container_operand_is_blob(right_kind)):
+    left_is_blob = container_operand_is_blob(left_kind)
+    right_is_blob = container_operand_is_blob(right_kind)
+    if not (left_is_blob or right_is_blob):
         return None
     if (bare in SET_ALGEBRA_OPS
             and container_operand_is_blob(left_kind)
@@ -14948,13 +15032,11 @@ def container_operator_refusal(op: str, left_kind, right_kind,
         # (element-by-element and then a length check), not one.  The ordering
         # operators keep the one-blob rule: `[] < 0` is a `TypeError` in
         # CPython, so there is no correct program on the far side.
-        if not (container_operand_is_blob(left_kind)
-                and container_operand_is_blob(right_kind)):
+        if not (left_is_blob and right_is_blob):
             return None
-    shown = spelled_op or bare
-    on_left = container_operand_is_blob(left_kind)
+    on_left = left_is_blob
     which = ("the left operand" if on_left else
-             "the right operand" if container_operand_is_blob(right_kind)
+             "the right operand" if right_is_blob
              else "an operand")
     return (
         f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "

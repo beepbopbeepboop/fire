@@ -3078,7 +3078,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # drift.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
-            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op,
+            left_is_set=self._expr_is_set_like(stmt.target),
+            right_is_set=self._expr_is_set_like(stmt.value))
         if reason is not None:
             raise CodegenError(reason)
         # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
@@ -7803,9 +7805,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
-            untyped_callee=self._untyped_callee)
+            untyped_callee=self._untyped_callee,
+            left_is_set=self._expr_is_set_like(e.left),
+            right_is_set=self._expr_is_set_like(e.right))
         if reason is not None:
             raise CodegenError(reason)
+        # `&`, `^` and `-` between two SETS are set algebra.  The shared gate
+        # above no longer refuses them — arm64 lowers them — so this backend,
+        # which has no set-algebra emitter, must refuse them BY NAME here
+        # instead of falling through to the integer ALU on two blob addresses.
+        if (op in M.SET_ALGEBRA_OPS
+                and M.container_operand_is_blob(self._expr_str_kind(e.left))
+                and M.container_operand_is_blob(self._expr_str_kind(e.right))
+                and self._expr_is_set_like(e.left)
+                and self._expr_is_set_like(e.right)):
+            raise CodegenError(M.set_algebra_refusal(
+                op, M.spelled(e.left), M.spelled(e.right)))
         # `|` on a container is a SET UNION only between two SETS, and it has
         # to be asked HERE rather than at the concat branch below: that branch
         # recognises a container by `_is_container_expr`, which on this backend
@@ -10749,11 +10764,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         if isinstance(e, F.IdentExpr):
             return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "&", "^", "-"):
+            # `+` is a concatenation, `|` a union and `&`/`^`/`-` set algebra;
+            # all leave a SET a set where a side is one, and a set combined
+            # with a non-set is a CPython `TypeError` this path refuses
+            # downstream (so the predicate is only ever consulted on programs
+            # that build).  The three set-algebra operators are here because
+            # `c = a & b` must make `c` a set for `c - d` to be recognised —
+            # this backend then refuses that pair by name.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
         if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:

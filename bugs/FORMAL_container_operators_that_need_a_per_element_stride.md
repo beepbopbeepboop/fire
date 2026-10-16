@@ -217,12 +217,9 @@ with the element's own width known only at run time
    docstring.
 3. **Set algebra** — `&`, `^`, `-` between two sets: a per-element membership
    scan per element of the right-hand side. arm64's `_emit_set_union` ALREADY
-   does exactly that shape for `|` (copy the left, then for each right-hand
-   element scan the result and append it if it is absent), so the ALGORITHM is
-   written and three emitters are not: `_emit_set_intersection`,
-   `_emit_set_difference`, `_emit_set_symmetric_difference`, each as the same
-   two nested loops with a different keep/drop predicate. This is the cheapest
-   of the four by a wide margin and it is the one to do next.
+   did exactly that shape for `|`, so the ALGORITHM was written and three
+   emitters were not. **LANDED on arm64 2026-10-08 as `_emit_set_op`, one
+   generic implementation of all four; x86-64 remains (see §"What to do").**
 4. **A length-changing slice store** — `xs[a:b] = v` where `len(v) != b - a`:
    a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
    primitives are both already here: `_emit_del_list_range` memmoves a tail and
@@ -268,12 +265,18 @@ the second reason this is a project rather than a rewrite.
 
 `test_formal_container_methods.py` asserts a refusal by matching a phrase from a
 shared table, so removing a row when its lowering lands would hide the change
-rather than record it. **The landing order for each is: drop the operator from
-`model.CONTAINER_GATED_OPS`, move the case from `probe=None` to a probe, and
-delete nothing.** The docstring of the gate is where the measurement lives, and
-it has to be re-measured when the answer is right: "measured answering 0 where
-CPython answers 1" is a claim about the pre-fix tree and becomes a false
-statement about this one the moment it stops being true.
+rather than record it. **The landing order for each is: narrow the gate, move
+the case from `probe=None` to a probe, and delete nothing.** Item 3 did exactly
+that: the five `s_*_r` rows became `s_intersection`/`s_difference`/`s_symdiff`/
+`s_sub`/`s_andassign` (answers, `arm64`-only via `BACKEND_ONLY`), a new
+`s_difference_str` row covers the `char *` case, and the `operator` group's
+`o_and`/`o_xor` were re-pointed at LIST operands so they still pin the
+non-set-blob refusal on BOTH backends. The docstring of the gate is where the
+measurement lives, and it has to be re-measured when the answer is right:
+"measured answering 0 where CPython answers 1" is a claim about the pre-fix tree
+and becomes a false statement about this one the moment it stops being true —
+which is why `container_operator_refusal`'s set examples were moved out into
+`set_operator_operand_refusal`.
 
 Three rows in that table are claims about what this path is NOT, and each has a
 document saying so: `bugs/FORMAL_set_value_model.md` (a set lowers as a list, so
