@@ -277,7 +277,7 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 | `[1, 2] \| [3]` | `3` | `TypeError` | answering a program CPython rejects |
 | `[1] in [[1], [2]]` | `1` on arm64, `0` on x86-64 | `1` | the two architectures disagreeing |
 | `b = [1]; b in [[1], [2]]` | `0` on both | `1` | wrong number |
-| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop |
+| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop — **FIXED on arm64 2026-10-13** (item 4) |
 | `t = (1,2,3); t[0] = 9` | `t0=9 len=3` | `TypeError` | wrong *mutation* |
 | `for k in d: del d[k]` | `1` | `RuntimeError` | wrong number |
 | `for k in d: d["z"] = 5` | `2` | `RuntimeError` | wrong number |
