@@ -168,6 +168,14 @@ gate-resident pin is `test_formal_link_accounting.py::test_raise_flushes_stdout`
 and the class `test_formal_x86_64_parity.py`'s `FAILING_CASES` carries the same
 shape (`printed_output_survives_a_raise`).
 
+**STALE 2026-10-08: this program no longer builds at all.**  A `try` whose
+`except` arm has a body is refused by name on both backends (the arm's effects
+would be silently absent from the image that runs), so (a) and (c) below are
+historical readings and not the current answers.  The flush half of the reading
+is separately fixed — the control (b) and the bare raise (d) both print the line
+now — and the live subject for the `try` half is
+`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`.
+
 **(b) the control — the same program with `return 1`, no raise:**
 
 ```
@@ -229,7 +237,10 @@ $ echo $?
 
 Identical control flow — terminate with status 1, no unwinder — and the two
 backends differ in whether the buffered output survives, which is the flush
-document's bug and not this one.
+document's bug and not this one.  **Both backends now print `before@@` (measured
+2026-10-08): `_emit_exit` flushes before the raw `svc`, so the divergence this
+paragraph records is closed and the output above is the historical reading.**
+The arm64 line printed nothing when this was written; it prints the line now.
 
 ## The rule, stated once
 
