@@ -1624,6 +1624,9 @@ class GimpleGen:
         # states; see funcs_shared.record_annotated_tuple_slots. Module scope
         # for the same reason as `_return_slot_types`.
         self._return_ann_slot_types: dict[str, list] = {}
+        # The protected regions (`try` / `with` bodies) whose exits rewrite
+        # emitted lines; see emit_infra.EmitFrame.
+        self._emit_frames: list = []
         # Device kernels this module offloaded, and their MSL. Filled by
         # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
         # the very end of the module; module scope because the MSL is only
@@ -4911,6 +4914,11 @@ class GimpleGen:
         return gst._handler_bind_name(self, h)
     def _emit_except_handler(self, handler, node, bb_after: str):
         return gst._emit_except_handler(self, handler, node, bb_after)
+    def _with_emit_exits(self, ex_ts: list, ex_vs: list, ex_sns: list,
+                         ex_gbases: list, ex_gvs: list) -> None:
+        # A delegate: emit_infra's frame emitter runs a `with` frame's
+        # teardown, and emit_infra/emit_stmts import each other.
+        return gst._with_emit_exits(self, ex_ts, ex_vs, ex_sns, ex_gbases, ex_gvs)
     def _loop_continue_bb(self) -> str:
         return gst._loop_continue_bb(self)
     def _loop_break_bb(self) -> str:

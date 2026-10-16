@@ -1819,7 +1819,100 @@ def _new_bb(gen) -> str:
     return f"bb_{gen.bb_counter}"
 
 
+class EmitFrame:
+    """One protected region whose exits rewrite the lines emitted inside it.
+
+    `kind` is 'try' (an early `return` in the try body pops the exception
+    stack and, with a `finally`, jumps to it instead of returning -- the
+    value is kept for the deferred return) or 'with' (a `break`/`continue`
+    out of the body pops the stack and runs the items' teardown first).
+
+    These used to be nested closures installed over `gen._emit`
+    (`gen._emit = intercepted_emit`). The self-hosted compiler calls
+    `gen._emit` as the GimpleGen METHOD it is, so the override never ran
+    there: every `return` inside a `try` lost its `mojo_exc_pop()` in the
+    stage2 binary (`ModuleLoader.load_module_from_path`,
+    `method_receiver_kind`), and every `finally` was skipped on an early
+    return. A frame stack that `_emit` itself consults is the same
+    behaviour in both compilers."""
+    def __init__(self, kind: str):
+        self.kind: str = kind
+        self.bb_finally: str = ''
+        self.return_value: str = ''
+        self.has_return_value: bool = False
+        self.saw_return: bool = False
+        self.ctx_ts: list = []
+        self.ctx_vs: list = []
+        self.ctx_sns: list = []
+        self.gctx_bases: list = []
+        self.gctx_vs: list = []
+        self.teardown_done: bool = False
+
+
+def new_emit_frame(kind: str) -> EmitFrame:
+    return EmitFrame(kind)
+
+
+def push_emit_frame(gen, frame: EmitFrame) -> None:
+    gen._emit_frames.append(frame)
+
+
+def pop_emit_frame(gen) -> None:
+    gen._emit_frames.pop()
+
+
+def _emit_through(gen, line: str, level: int) -> None:
+    """Emit `line` as seen by frame `level` and every frame outside it (the
+    innermost frame is the last one); level -1 is the plain emitter."""
+    if level < 0:
+        _emit_raw(gen, line)
+        return
+    fr = gen._emit_frames[level]
+    stripped = line.strip()
+    if fr.kind == 'try':
+        if stripped.startswith('return ') or stripped == 'return;':
+            if stripped.startswith('return ') and stripped != 'return;':
+                fr.return_value = stripped[7:].rstrip(';').strip()
+                fr.has_return_value = True
+            else:
+                fr.return_value = ''
+                fr.has_return_value = False
+            fr.saw_return = True
+            # An early return leaves the try block's protected region just as
+            # much as falling off the end of it does: it must pop the
+            # exception stack (_mojo_exc_top) like the normal-exit path, or a
+            # whole compiler run creeps `_mojo_exc_top` past the end of
+            # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
+            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
+            if fr.bb_finally != '':
+                _emit_through(gen, f"  goto {fr.bb_finally};", level - 1)
+            else:
+                _emit_through(gen, line, level - 1)
+            gen._last_was_terminal = True
+            return
+        _emit_through(gen, line, level - 1)
+        return
+    if fr.kind == 'with':
+        if len(gen.loop_stack) > 0 and (
+                stripped == f"goto {gen._loop_continue_bb()};"
+                or stripped == f"goto {gen._loop_break_bb()};"):
+            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
+            gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
+                                 fr.gctx_bases, fr.gctx_vs)
+            fr.teardown_done = True
+            _emit_through(gen, line, level - 1)
+            return
+    _emit_through(gen, line, level - 1)
+
+
 def _emit(gen, line: str):
+    if len(gen._emit_frames) > 0:
+        _emit_through(gen, line, len(gen._emit_frames) - 1)
+        return
+    _emit_raw(gen, line)
+
+
+def _emit_raw(gen, line: str):
     gen.body_lines.append(line)
     # Track values produced by a runtime call that always returns a brand-new
     # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives

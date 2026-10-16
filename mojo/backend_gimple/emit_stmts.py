@@ -4266,9 +4266,6 @@ def _gen_stmt_TryStmt(gen, node):
 
     gen._emit_label(bb_try)
     _had_terminal = False
-    _return_value = None
-    _return_type = None
-    _saw_return = [False]   # list so the nested intercepted_emit can set it
     # Save/restore the protected-region list around this body rather than a
     # bare append/pop: a nested function or nested try compiled from this
     # body can leave the list in a different state (a stray pop) before
@@ -4278,55 +4275,25 @@ def _gen_stmt_TryStmt(gen, node):
     _saved_tfb = list(gen._try_finally_bodies)
     gen._try_loop_protect.append(_entry_loop_depth)
     gen._try_finally_bodies.append(node.finally_body if node.finally_body else None)
+    # Every line the body emits passes through this region's frame: an early
+    # `return` becomes `mojo_exc_pop (); goto {bb_finally};` (or the return
+    # itself, after the pop, when there is no `finally`), and the value is
+    # kept for the deferred return below. break/continue out of the region
+    # are `_emit_try_loop_exit_exc_pops`' job (they read `_try_loop_protect`).
+    # See emit_infra.EmitFrame for why this is a frame and not an emitter
+    # override.
+    _frame = ginf.new_emit_frame('try')
+    if bb_finally:
+        _frame.bb_finally = bb_finally
+    ginf.push_emit_frame(gen, _frame)
     for s in node.body:
-        # Temporarily override _emit to intercept return statements
-        original_emit = gen._emit
-        def intercepted_emit(line, rv=None, rt=None):
-            nonlocal _return_value, _return_type
-            stripped = line.strip()
-            if stripped.startswith('return ') or stripped == 'return;':
-                # Extract return value if any
-                if stripped.startswith('return ') and stripped != 'return;':
-                    _return_value = stripped[7:].rstrip(';').strip()
-                    _return_type = 'int64_t'  # Simplified
-                else:
-                    _return_value = None
-                _saw_return[0] = True
-                # An early return leaves the try block's protected region
-                # just as much as falling off the end of it does — it
-                # must pop the exception stack (_mojo_exc_top) the same
-                # way the normal-exit path below does. Omitting this
-                # leaked one _mojo_exc_top level per early return with no
-                # matching pop: harmless for a single try, but a whole
-                # self-hosted compiler run has many `try: ... return ...`
-                # sites, so _mojo_exc_top crept up across the run and
-                # eventually walked off the end of the fixed-size
-                # _mojo_exc_stack[MOJO_EXC_STACK_MAX] array — silent OOB
-                # writes that corrupted nearby memory, surfacing much
-                # later as a longjmp into a garbage jmp_buf.
-                original_emit("  mojo_exc_pop ();")
-                # Emit goto to finally instead of return
-                if node.finally_body:
-                    original_emit(f"  goto {bb_finally};")
-                else:
-                    original_emit(line)
-                gen._last_was_terminal = True
-                return
-            # break/continue jumping out of this try's protected region is
-            # handled in _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt via
-            # `_emit_try_loop_exit_exc_pops` (which reads
-            # `gen._try_loop_protect`), NOT here — the former interception
-            # of the `goto <loop label>;` line was a nested-closure
-            # `gen._emit` override the self-hosted backend did not run.
-            original_emit(line)
-
-        gen._emit = intercepted_emit
         gen.gen_stmt(s)
-        gen._emit = original_emit  # Restore
-
         if gen._last_was_terminal:
             _had_terminal = True
             break
+    ginf.pop_emit_frame(gen)
+    _return_value = _frame.return_value if _frame.has_return_value else None
+    _saw_return = [_frame.saw_return]
 
     gen._try_loop_protect = _saved_tlp
     gen._try_finally_bodies = _saved_tfb
@@ -4873,23 +4840,21 @@ def _gen_stmt_WithStmt(gen, node):
                 _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
                                  _gctx_bases, _gctx_vs)
                 _teardown_done[0] = True
-            original_emit = gen._emit
-            def intercepted_emit(line, rv=None, rt=None):
-                stripped = line.strip()
-                if gen.loop_stack and stripped in (
-                    f"goto {gen._loop_continue_bb()};",
-                    f"goto {gen._loop_break_bb()};",
-                ):
-                    original_emit("  mojo_exc_pop ();")
-                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
-                                     _gctx_bases, _gctx_vs)
-                    _teardown_done[0] = True
-                    original_emit(line)
-                    return
-                original_emit(line)
-            gen._emit = intercepted_emit
+            # A break/continue out of the body pops the region and runs the
+            # teardown first: this region's frame does it (emit_infra.
+            # EmitFrame -- a frame, not an emitter override, for the reason
+            # recorded there).
+            _wframe = ginf.new_emit_frame('with')
+            _wframe.ctx_ts = _ctx_ts
+            _wframe.ctx_vs = _ctx_vs
+            _wframe.ctx_sns = _ctx_sns
+            _wframe.gctx_bases = _gctx_bases
+            _wframe.gctx_vs = _gctx_vs
+            ginf.push_emit_frame(gen, _wframe)
             gen.gen_stmt(s)
-            gen._emit = original_emit
+            ginf.pop_emit_frame(gen)
+            if _wframe.teardown_done:
+                _teardown_done[0] = True
         # Only emit cleanup and goto if the with body didn't end with a
         # return — but an early return still leaves the protected region
         # and must pop the exception stack (_mojo_exc_top) exactly like
