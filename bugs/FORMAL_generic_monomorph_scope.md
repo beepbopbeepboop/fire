@@ -240,6 +240,36 @@ the two were in.
 
 ## 2. A DOTTED application — `mod.Pair[Int]()`
 
+**Status 2026-10-13 (`work/formal377-docs`): the ALIASED IMPORT half is FIXED,
+and §2a's paragraph saying that spelling does not work is now STALE. What is
+left is the module-alias DOTTED spelling this section is named for.**
+
+Two spellings were called "the aliased form" and only one of them was the
+module alias. `from pairlib import Pair as P` then `P[Int]()` was REFUSED
+because the demand walk read `P` where the template is `Pair`; it now builds,
+runs and answers CPython on both architectures, because the call site's own
+spelling is resolved to the DEFINING module's name through the same import
+table both backends already resolve a call site through
+(`formal/imports.py::imported_bindings`): `formal/monomorph.py`'s
+`local_defining_names` is asked by the demand walk (`all_instantiation_calls`)
+and by the rewrite (`rewrite_instantiation_calls`), so the name the library is
+asked to instantiate and the name the call site is rewritten to cannot
+disagree. The dotted refusal's message and its docstring are corrected with it.
+
+What is still refused is the DOTTED base: `import pairlib as L` then
+`L.Pair[Int]()`. That is not a name resolution — the recogniser itself
+(`mojo/middle/comptime.specialization_name`) answers `None` for a dotted base,
+and it cannot simply answer `Pair`, because the demand would then be attributed
+to whichever imported module declares a `Pair` rather than to the module `L`
+names. So the recorded next step is unchanged: a `specialization_name` that
+answers the TEMPLATE for a dotted base and leaves the module to its caller, a
+`demands` that attributes it to the module the chain names, and §1a's ABI
+decision for the library's own signature. Pinned by
+`test_formal_monomorph.py`'s `an aliased import of a template is instantiated`
+(both spellings of a struct AND a function template, both architectures,
+against CPython) whose subject is the half that landed, and by
+`a dotted application says which word is the module` for the half that did not.
+
 **Status 2026-10-04 (`work/formal19-3`): STILL REFUSED, and the refusal was
 FALSE about correct code in three separate ways until this round. That is what
 landed; the recogniser is unchanged and the item stays.** *(2026-10-12: the
@@ -314,17 +344,18 @@ gained its missing FAMILY row; it had a CAUSE row and classified as
 `other refusal` — the bucket `tools/formal_sweep.py`'s own docstring calls
 "nobody has looked" — for one of the corpus's larger single rows.
 
-**The ALIASED IMPORT form is NOT unaffected, and the paragraph above was wrong
-about it.** Measured on this tree: `from pairlib import Pair as P` then
-`P[Int]()` is REFUSED with `specialization_call_refusal` naming `P`, because the
-demand walk reads `P` where the template is `Pair` and a struct template's
-instantiation is emitted under the mangled name.
-`formal/imports.py::import_bindings` maps an alias back for a name the walk
-resolves, and a STRUCT template's bracket is not such a name. So the gap is the
-`module.Name[…]` spelling AND the aliased one, and the new message recommends
-the module's own name (`from pairlib import Pair`, which builds and answers
-CPython on both architectures) and says the aliased form was measured and does
-not work rather than implying it does.
+**The ALIASED IMPORT form was NOT unaffected, and the paragraph above was wrong
+about it.** Measured on this tree (2026-10-04): `from pairlib import Pair as P`
+then `P[Int]()` was REFUSED with `specialization_call_refusal` naming `P`,
+because the demand walk read `P` where the template is `Pair` and a struct
+template's instantiation is emitted under the mangled name.
+`formal/imports.py::imported_bindings` maps an alias back to its defining name,
+and the demand walk was not consulting it for a bracket argument; the demand
+half and the rewrite half are both fixed as of 2026-10-13 (see the Status at the
+head of this section), so this paragraph describes the gap as it was measured
+rather than the tree. It is kept because the measurement is what identified the
+table that fixes it: the alias mapping already existed for the emitters, and the
+missing caller was the demand walk.
 
 **Measured:**
 
@@ -505,7 +536,7 @@ anything.
 | what was tried | what happened |
 |---|---|
 | `from std.collections.binary_heap import BinaryHeap` + `BinaryHeap[Int]()` | `binary_heap.mojo: BinaryHeap.pop() both changes its receiver and returns a value` — `mutating_receiver_return_refusal`, a PREP-time refusal that pre-empts everything else in the file. **This is the FIRST wall and it is not this mechanism's.** It is `formal13-5`'s `receiver_writeback_name` area and `formal15-mutator-return-abi`'s row |
-| `from std.collections import Deque` / `from std.collections.deque import Deque` + `Deque[Int]()` | the same refusal, reached through `deque.mojo:20`'s `from std.collections import Deque`. **Every module in `std/collections` imports the package `__init__`, which re-exports `BinaryHeap`** — which is `FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1's "162 of the 165 name nothing `binary_heap.mojo` declares", restated as an import |
+| `from std.collections import Deque` / `from std.collections.deque import Deque` + `Deque[Int]()` | the same refusal, reached through `deque.mojo:20`'s `from std.collections import Deque`. **Every module in `std/collections` imports the package `__init__`, which re-exports `BinaryHeap`** — which is the `b8` round's "162 of the 165 name nothing `binary_heap.mojo` declares" (`bugs/FORMAL_sweep_work_map.md` §3, the round index that replaced the per-round maps), restated as an import |
 | `from stat import S_ISREG` + `S_ISREG[Int](1)` | `S_ISREG[…](…) calls a name this unit does not compile`. **Not a gap in this module**: `resolve_module_path` prefers Mojo source over the stdlib loader, so `stat` resolved to `formal/hostmods/stat.mojo`, which declares no templates. The stdlib's `std/stat/stat.mojo` was never reached |
 | `std/complex/complex.mojo`'s `ComplexSIMD[dtype: DType, length: SIMDLength]` | its arguments are written `.float32` — a `F.DottedLiteral` — and `type_arg_text` has no arm for one. Same class as §3: a parameter whose identity is a VALUE, not a type. `std/utils/static_tuple.mojo`'s `StaticTuple[element_type, size]` is worse for a different reason (`__mlir_type[…]` in a `comptime` field) |
 
