@@ -81,7 +81,7 @@ about** — it was 11 before rows #4–#6 closed.
 
 | # | example | status | the site it stops at | declared? | whose |
 |---:|---|---|---|---|---|
-| 1 | `fact` | `lean-rejected` | `fact_proof.lean:2880:16: Tactic 'rfl' failed` — the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
+| 1 | `fact` | `too-large` | **re-measured 2026-10-08** after `ffe27e1a` changed the contract: the proof now exceeds `formal/lean.py`'s `LEAN_MEMORY_MB = 6144` (249.4 s CPU / 6.90 GB peak), so it is "the checker ran out" and not a verdict — see the Status below. Its old site was `fact_proof.lean:2880:16: Tactic 'rfl' failed`, the return-frame read `mem_read_u64 (mem_write_u64 … (st.sp - …)) (st.sp - 8)` | **no** | the family of #2, #3, #6, #7 |
 | 2 | `sqsum` | `lean-rejected` | `sqsum_proof.lean:3250:16`, the same goal | **no** | as #1 |
 | 3 | `sum` | `lean-rejected` | `sum_proof.lean:2880:16`, the same goal | **no** | as #1 |
 | 4 | `sgt8` | **PASS (2026-10-05)** | was `lean-rejected` on `sgt8_proof.lean:2332:41: unsolved goals n : UInt64 …` — a narrow typed parameter's truncation with no range hypothesis on the theorem, so Lean refused the file with no `sorry` in it. The universal theorem now carries `nw : n < 128` and the truncation discharges against it; 0 admitted `sorry`. Pinned by `test_formal_call_proof_gen.py::TestANarrowTypedParameterGetsItsRange`. Note the obligation is now spelled `t32s (t32u (t8s n))` — the extra `t32u` is the 32-bit intermediate of `SXTB`-then-`SXTW` — so the `t32s (t8s n)` this row used to quote no longer matches the generator's text | **n/a — fixed** | — |
@@ -267,3 +267,37 @@ run had produced, since corrected with `--remeasure` (below).
 are `disabled=`,** so the four re-measurements above were taken by running it
 directly rather than by a gate, and the integration run over the whole corpus
 belongs to whoever re-enables that job.
+
+## Status, 2026-10-08 (`formal221-docs`): row #1 (`fact`) is re-banked, and it is
+## `too-large` rather than `lean-rejected`
+
+`ffe27e1a` changed `formal/examples/fact.mojo`'s precondition to the range
+`@refines` already claimed (`n <= 20`), but did not re-seed the census row, so
+`test_formal_proof_census.py::test_each_row_is_tied_to_the_example_it_measured`
+was red: the committed `source_sha256` was the PRE-`ffe27e1a` source. Re-measured
+with the document's own command, and the row moved classes:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label fact -- \
+      python3 tools/formal_proof_census.py --only fact --write-baseline
+  [1/1] fact: too-large 202.5s
+   1 examples: 0 of them reach a proof Lean accepted, 1 measured by this run
+   and 0 replayed from the verdict cache, largest Lean peak 6.90 GB
+   too-large         1   <- not a verdict on the proof
+```
+
+So `fact` is **not** `lean-rejected` any more and the test is green. But the
+movement is a COST change and not a proof: the same run measures **249.4 s Lean
+CPU and 6.90 GB peak**, against the previous row's 227.7 s / 2.91 GB. It now
+exceeds `formal/lean.py`'s `LEAN_MEMORY_MB = 6144` and is classified `too-large`,
+which is the honest "the checker ran out" rather than a verdict — the same class
+`both`/`either` (#7/#8) are in, and item 4 above decided. `fact` was the ONLY row
+whose `source_sha256` had drifted (checked against all 93), so the run above
+touched only it and the other 92 rows are unchanged. The table's `lean-rejected`
+cells for rows #2/#3 and the `rfl` family describe their proofs and are not
+claims about the ledger's freshness.
+
+**What is still NOT done is items 1-3** (the `fact`/`sqsum`/`sum` `rfl` family,
+the `floordiv`/`udivmod` universal-theorem refusals, and `sum_range`), which the
+Next-step list already assigns to their own documents. The re-bank closes the
+stale-ledger defect and nothing else.
