@@ -256,9 +256,13 @@ built with `fire.py build --formal --no-prove` and RUN where they build:
 Row 1 is `formal/monomorph.py`'s demand walk working: an explicit type argument
 on a constructor produces the instantiation and the mangled boundary symbol.
 Row 4 differs from row 1 by exactly one thing — the second element of the
-bracket is `0`, a **value**, and there is no parameter of a kind this path can
+bracket is `0`, a **value**, and there was no parameter of a kind this path could
 substitute. `formal/monomorph.py::type_arg_text` answers `""` for an argument
-that is not a type, by design, and the mangler then has nothing to mangle from.
+that is not a type, by design, and the mangler then had nothing to mangle from.
+**That is fixed for a struct template on both routes** (see the Status): the
+literal is read by `_bracket_arg_text`'s value fallback, scoped to a STRUCT
+template, and `instantiate_all`'s gate substitutes it only where the declaration
+annotates the parameter as a comptime VALUE.
 
 **That is why the two docs' "the same monomorphisation wall" was the right
 instinct and the wrong shape**: it is not the bare-call inference row
