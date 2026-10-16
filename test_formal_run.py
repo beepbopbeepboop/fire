@@ -20935,6 +20935,112 @@ WAVE7_G2_CASES = [
      "    var h = H()\n"
      "    h.xs = [11, 22, 33]\n"
      "    return h.at(1) + h.size()\n", 88, None),
+    # ── the container family's FIFTH member, and the two shapes it had no arm
+    # for.  The four rows above are `base[i]`, `base[a:b]`, `x in base` and
+    # `for x in base`, and each already asks whether its operand is a frame
+    # address.  A tuple assignment (`a, b = rhs`) reads its operand exactly the
+    # same way — offset 0 as an ARITY, `base + 8 + 8k` per target — and asked
+    # nothing, and so did the CONSTRUCTION spelling of all five.
+    #
+    # Measured on BOTH architectures from green builds, on a two-field struct
+    # holding `x = 2, y = 99`:
+    #
+    #     p = P(2, 99)
+    #     a, b = p
+    #     printf("a=%d b=%d", a, b)
+    #
+    # | build | arm64 | x86-64 | CPython |
+    # |---|---|---|---|
+    # | arity matches (`x` is 2) | `a=99 b=0` | `a=99 b=171778048` | `a=2 b=99` |
+    # | arity does not (`x` is 1) | exit 1, nothing printed | exit 1 | `a=1 b=2` |
+    #
+    # Two things make this worse than the four rows above rather than a fifth
+    # of the same kind.  **Whether the program runs at all is decided by a
+    # FIELD'S VALUE** — the arity check compares the target count against a
+    # field — so the same program exits 0 or exits 1 depending on a value
+    # nobody connected to the unpack.  And **the two architectures disagree on
+    # the answer**, so it could not have been fixed by making the load agree.
+    #
+    # `frame_unpack_operand_refusal` (the tuple-assignment arm, which is a
+    # refusal of its own because the ARITY framing is the honest one) and
+    # `framed_construction_structs` (the construction arm the container family
+    # shares with it) hold the measurements and the reasoning.
+    ("frame_address_tuple_unpack",
+     "struct P:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "def main(k: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.x = 2\n"
+     "    p.y = 99\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    a, b = p\n"
+     "    return a\n",
+     "refuse:the right-hand side of a tuple assignment is p, which is a P "
+     "FRAME ADDRESS", None),
+    # The ARITY half of the same defect, and the row that is not a fifth of the
+    # kind: with `x = 1` this program exits 1 printing NOTHING where CPython
+    # prints `a=1 b=2`.  A refusal is the improvement here — the previous
+    # state was a program that failed with no message and no wrong number for
+    # a reader to notice — so this row pins that the refusal is reached for the
+    # construction spelling too, not only through a name.
+    ("framed_construction_unpack",
+     "struct P:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    a, b = P()\n"
+     "    return a\n",
+     "refuse:the right-hand side of a tuple assignment is P(...), which is a "
+     "P FRAME ADDRESS", None),
+    # The construction spelling of the OTHER four members, which is the shape
+    # the bare-name rule could not reach: `for v in P(1, 2)` printed `v=2`
+    # where CPython prints `v=1` then `v=2`, and `P(1, 2)[0]` printed `2` where
+    # CPython prints `1` — the count read at offset 0 of the frame being the
+    # struct's FIRST FIELD.  Same both architectures.
+    ("framed_construction_for_in_iteration",
+     "struct P:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "def main(k: Int) -> Int:\n"
+     "    var s = 0\n"
+     "    for v in P():\n"
+     "        s = s + v\n"
+     "    return s\n",
+     "refuse:is a CONTAINER operation on a P FRAME ADDRESS", None),
+    ("framed_construction_subscript",
+     "struct P:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "def main(k: Int) -> Int:\n"
+     "    return P()[0]\n",
+     "refuse:is a CONTAINER operation on a P FRAME ADDRESS", None),
+    # GUARD for the construction arm, and the row that says the new recognition
+    # is `struct_is_framed` and not "a call".  A ONE-field struct's receiver
+    # IS its field, so `P()` is the field's VALUE, there is no frame, and the
+    # container reading of it is the only reading there is — exactly the
+    # exception `_refuse_frame_container_operand`'s bare-name rule gives for
+    # `h.x`, and the reason the construction arm had to exclude it too.
+    ("guard_one_field_construction_is_not_a_frame",
+     "struct P:\n"
+     "    var x: Int\n"
+     "def main(k: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.x = 7\n"
+     "    return p.x\n", 7, None),
+    # GUARD for the whole family, on a real blob reached through a
+    # CONSTRUCTION-shaped call that is not a struct construction: a function
+    # returning a list.  `xs = build()` then `xs[1]` must still be the second
+    # element, or the new arm has swallowed every call.
+    ("guard_a_call_returning_a_blob_is_still_a_blob",
+     "def build() -> List[Int]:\n"
+     "    return [11, 22, 33]\n"
+     "def main(k: Int) -> Int:\n"
+     "    var xs = build()\n"
+     "    return xs[1]\n", 22, None),
 ]
 
 

@@ -3326,6 +3326,14 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         # Blob unpack: X0 = [count][e0..] after evaluating the RHS once.
+        #
+        # The container family's refusal, asked BEFORE the RHS is emitted so a
+        # frame address cannot reach the arity check that reads a field's value
+        # as an element count. Measured on both architectures: without it,
+        # `p = P(2, 99); a, b = p` printed `a=99 b=0` on arm64 and
+        # `a=99 b=171778048` on x86-64, and with `x = 1` the same program exited
+        # 1 printing nothing — where CPython prints `a=2 b=99` and `a=1 b=2`.
+        self._refuse_frame_unpack_operand(value)
         self._emit_expr(value)
         self.asm.emit(encode_mov_zr_xn(9, 0))          # X9 = blob base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))   # X1 = count
@@ -5605,12 +5613,53 @@ ctor_field_value=self._ctor_field_value_for(name),
         frame-holder analysis's own, published per function by
         `formal/build.py`, so this asks the same question the hand-off checks
         ask rather than re-deriving what a name holds.
+
+        **A CONSTRUCTION is the one non-name this extends to**, and it is not
+        the exception above: `h.x` is a FIELD and a construction is not — it is
+        the address, and `struct_is_framed(P)` decides that from `P`'s own field
+        list with no fixpoint involved. Measured before it was asked,
+        `for v in P(1, 2)` printed `v=2` on BOTH architectures where CPython
+        prints `v=1` then `v=2`, and `P(1, 2)[0]` printed `2` where CPython
+        prints `1` — the container walk reading offset 0 of the frame as a
+        count. `M.frame_value_expr_structs` is the shared recognition, so the
+        name arm stays the holder table this method already consulted.
         """
-        if not isinstance(obj, F.IdentExpr) or obj.name not in self._frame_holders:
+        if isinstance(obj, F.IdentExpr) and obj.name in self._frame_holders:
+            cands = self._frame_candidates.get(obj.name) or ()
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name for st in cands]))
+        for st in M.framed_construction_structs(obj, self._structs):
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name]))
+
+    def _refuse_frame_unpack_operand(self, obj) -> None:
+        """Raise if `obj` is a BARE NAME holding a frame address.
+
+        The container family's fourth member, and it asks the SAME question as
+        `_refuse_frame_container_operand` through the SAME table, so it is a
+        second caller of that recognition rather than a second recognition of
+        it. What is new is that the blob unpack reads its operand the way the
+        other four do — offset 0 as an arity, `base + 8 + 8k` per target — so
+        `a, b = p` was the one container operation that reached the frame walk
+        unchecked.
+
+        The bare-name half is the rule `_refuse_frame_container_operand`
+        documents and inherits; the CONSTRUCTION half is
+        `M.frame_value_expr_structs`, which the other four do not ask because
+        they are all sites whose operand is written as a name. Without it
+        `a, b = P(1, 2)` answered `a=2` where CPython answers `a=1`.
+
+        `model.frame_unpack_operand_refusal` holds the measurement, which is the
+        reason this is not merely tidiness: whether the program runs at all is
+        decided by a FIELD'S VALUE, and the two architectures disagree on the
+        answer (see there).
+        """
+        structs = M.frame_value_expr_structs(obj, self._frame_candidates,
+                                             self._structs)
+        if not structs:
             return
-        cands = self._frame_candidates.get(obj.name) or ()
-        raise CodegenError(M.frame_container_operand_refusal(
-            op, M.spelled(obj), [st.name for st in cands]))
+        raise CodegenError(M.frame_unpack_operand_refusal(
+            M.spelled(obj), [st.name for st in structs]))
 
     def _refuse_frame_order_operand(self, op: str, operand) -> None:
         """Raise if `operand` is a bare name this function holds as a FRAME.

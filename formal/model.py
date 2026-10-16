@@ -9064,6 +9064,135 @@ def frame_container_operand_refusal(op: str, spelled: str, struct_names):
         f"it is the only reading there is")
 
 
+def framed_construction_structs(expr, decls: dict) -> list:
+    """`[StructDef]` when `expr` is a CONSTRUCTION of a FRAMED struct, else [].
+
+    The half of `frame_value_expr_structs` that needs no analysis at all:
+    `P(1, 2)` names a struct this module declares, and `struct_is_framed(P)` is
+    a property of `P`'s own field list, so the answer is known at compile time
+    with no holder fixpoint and no interprocedural edge. Kept as its own
+    function because the container family wants THIS arm alone — every one of
+    its four sites already handles the bare-name arm through the holder table,
+    and the construction arm is the only thing missing.
+
+    **Why it is a refusal rather than a lowering.** `P(1, 2)` on this path is
+    the ADDRESS of a frame of 8-byte slots, and every container lowering starts
+    by reading eight bytes at offset 0 of its operand and calling them a count.
+    Offset 0 of a frame is the struct's FIRST FIELD, so the count is a field's
+    value and each element is read one slot later than the field it names.
+    Measured on BOTH architectures, from green builds: `for v in P(1, 2)`
+    printed `v=2` (CPython: `v=1` then `v=2`), `P(1, 2)[0]` printed `2`
+    (CPython: `1`), and `a, b = P(1, 2)` printed `a=2` (CPython: `a=1`) or, with
+    `x = 2`, two numbers on arm64 and a different pair on x86-64.
+
+    A ONE-field struct is excluded for the reason every other refusal in this
+    family excludes it: its receiver IS its field, so there is no frame.
+    """
+    if not (decls and isinstance(expr, F.CallExpr)
+            and isinstance(expr.func, F.IdentExpr)):
+        return []
+    st = decls.get(expr.func.name)
+    return [st] if st is not None and struct_is_framed(st) else []
+
+
+def frame_value_expr_structs(expr, candidates: dict, decls: dict) -> list:
+    """`[StructDef]` when `expr` is statically a FRAMED struct's value, else [].
+
+    **The ONE recognition of "this expression holds a frame address" that is not
+    the holder table.** The holder table (`formal/build.py`'s `by_name`) answers
+    it for a BARE NAME, which is the shape every one of its consumers has been
+    asked about, and that is why this function exists rather than a wider
+    `candidates`: a CONSTRUCTION of a struct this module declares is equally
+    decidable, at compile time, with no fixpoint and no interprocedural edge —
+    `struct_is_framed(P)` is a property of `P`'s own field list.
+
+    Two shapes, and the second is the one this was written for:
+
+      * a bare name in `candidates` — the holder analysis's answer, passed
+        through unchanged so there is still exactly one table behind it;
+      * a call to a bare name that is a struct in `decls` with more than one
+        field — `P(1, 2)`, which on this path is the ADDRESS of a frame of
+        8-byte slots, not a value. `framed_construction_structs` is that arm
+        on its own, because the container family wants it without the name arm
+        it already has.
+
+    **Why the construction arm was missing is a measured wrong answer.**
+    `a, b = P(1, 2)` on a two-field struct reached the blob unpack, which reads
+    offset 0 as the arity and `base + 8 + 8k` per target, so it answered
+    `a=2` where CPython answers `a=1` (and with `x = 2` it printed two numbers
+    on arm64 and a DIFFERENT pair on x86-64, both exit 0). The holder table
+    could not catch it because the expression has no name in it, and the four
+    container lowerings that already ask the question are all bare-name-only by
+    the deliberate rule their own docstrings give (`_refuse_frame_container_
+    operand`: `h.x` is a field and reading that as a blob is what a declared
+    `List` field is FOR, so only the ADDRESS is refused). A construction is not
+    that exception — it is not a field, and it is unambiguously the address.
+
+    A ONE-field struct is excluded for the reason every other refusal in this
+    family excludes it: its receiver IS its field, so there is no frame and the
+    container reading of it is the only reading there is.
+    """
+    if isinstance(expr, str):
+        return list(candidates.get(expr) or ())
+    if isinstance(expr, F.IdentExpr):
+        return list(candidates.get(expr.name) or ())
+    return framed_construction_structs(expr, decls)
+
+
+def frame_unpack_operand_refusal(spelled: str, struct_names) -> str:
+    """Why `a, b = <a struct's value>` is wrong. Always a refusal.
+
+    The container family's FOURTH member, and the one it was missing: the
+    others are `base[i]`, `base[a:b]`, `x in base` and `for x in base`, and all
+    four already ask `_refuse_frame_container_operand` whether their operand is
+    a frame address. A tuple assignment reads its operand the same way — the
+    blob header word at offset 0 is the arity check, and each target is loaded
+    from `base + 8 + 8k` — and asked nobody.
+
+    Measured on BOTH architectures, from green builds, on a two-field struct
+    holding `x = 2, y = 99`:
+
+        p = P(2, 99)
+        a, b = p
+        printf("a=%d b=%d", a, b)
+
+    | build | arm64 | x86-64 | CPython |
+    |---|---|---|---|
+    | arity happens to match (`x` is 2) | `a=99 b=0` | `a=99 b=171778048` | `a=2 b=99` |
+    | arity does not match (`x` is 1) | exit 1, nothing printed | exit 1 | `a=1 b=2` |
+
+    Four wrong answers in one construct, and the second row is the worse half:
+    **the exit is decided by a FIELD'S VALUE**, so `p = P(1, 2); a, b = p`
+    exits 1 with no message where CPython prints `a=1 b=2`, while
+    `p = P(2, 99)` prints two numbers neither of which the source wrote. The
+    two architectures disagree on the second target, so the same source is a
+    different wrong answer per architecture — which is why this cannot be fixed
+    by making the load agree.
+
+    `spelled` names the RHS as the reader wrote it and `struct_names` is the
+    holder table's own answer, the same argument list
+    `frame_container_operand_refusal` takes, because the diagnosis is the same
+    one and a second wording for it would be a second thing to keep true.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"the right-hand side of a tuple assignment is {spelled}, which is a "
+        f"{who} FRAME ADDRESS. This is the container family's fourth member and "
+        f"the one that used to ask nothing: the blob unpack reads eight bytes at "
+        f"offset 0 of its operand and calls them an ARITY, then loads each "
+        f"target from `base + 8 + 8k`. A frame has no header — offset 0 is the "
+        f"struct's first FIELD — so the arity check compares your target count "
+        f"against a field's value and each target is loaded from one slot later "
+        f"than the field it names. Measured on BOTH architectures on a "
+        f"two-field struct holding `x = 2, y = 99`: `p = P(2, 99); a, b = p` "
+        f"printed `a=99 b=0` on arm64 and `a=99 b=171778048` on x86-64 where "
+        f"CPython prints `a=2 b=99`, and with `x = 1` the same program exits 1 "
+        f"printing nothing where CPython prints `a=1 b=2` — so whether the "
+        f"program runs at all is decided by a field's value. Unpack the fields "
+        f"you mean, one per target (`a = p.x; b = p.y`), or unpack a list you "
+        f"built")
+
+
 # The relational operators, and the reason they are named here rather than
 # spelled at the call sites: `==` and `!=` have a CORRECT answer on a frame
 # address (it is CPython's inherited `object.__eq__`, and two live objects of

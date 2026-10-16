@@ -5836,12 +5836,48 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         frame-holder analysis's own, published per function by
         `formal/build.py`, so this asks the same question the hand-off checks
         ask rather than re-deriving what a name holds.
+
+        **A CONSTRUCTION is the one non-name this extends to**, and it is not
+        the exception above: `h.x` is a FIELD and a construction is not — it is
+        the address, decided by `struct_is_framed(P)` from `P`'s own field list.
+        Measured before it was asked: `for v in P(1, 2)` printed `v=2` on BOTH
+        architectures where CPython prints `v=1` then `v=2`. The shared
+        recognition is `M.framed_construction_structs`, so the name arm stays the
+        holder table this method already consulted.
         """
-        if not isinstance(obj, F.IdentExpr) or obj.name not in self._frame_holders:
+        if isinstance(obj, F.IdentExpr) and obj.name in self._frame_holders:
+            cands = self._frame_candidates.get(obj.name) or ()
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name for st in cands]))
+        for st in M.framed_construction_structs(obj, self._structs):
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name]))
+
+    def _refuse_frame_unpack_operand(self, obj) -> None:
+        """Raise if `obj` is a BARE NAME holding a frame address.
+
+        The container family's fourth member, asked through the SAME holder
+        table as `_refuse_frame_container_operand` — one recognition with two
+        callers, not two recognitions. What is new is that `_emit_for_unpack`
+        reads its operand exactly as the other four container lowerings do:
+        offset 0 as the arity, `base + 8 + 8k` per target.
+
+        `M.frame_value_expr_structs` answers it for a bare name and for a
+        CONSTRUCTION of a framed struct, which is the shape that got through:
+        `a, b = P(1, 2)` has no name in it for the holder table to speak about.
+
+        `model.frame_unpack_operand_refusal` holds the measurement, and the
+        x86-64 column of it is why this could not be left to arm64's fix:
+        `p = P(2, 99); a, b = p` answered `a=99 b=171778048` here and
+        `a=99 b=0` on arm64 — two different wrong answers to one source, both
+        exit 0.
+        """
+        structs = M.frame_value_expr_structs(obj, self._frame_candidates,
+                                             self._structs)
+        if not structs:
             return
-        cands = self._frame_candidates.get(obj.name) or ()
-        raise CodegenError(M.frame_container_operand_refusal(
-            op, M.spelled(obj), [st.name for st in cands]))
+        raise CodegenError(M.frame_unpack_operand_refusal(
+            M.spelled(obj), [st.name for st in structs]))
 
     def _refuse_non_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a plain WORD this function bound to an integer.
@@ -9102,6 +9138,15 @@ preference.
             keys.append(self._tuple_target_key(el))
         if not keys:
             raise CodegenError("tuple assignment needs at least one target")
+        # The container family's refusal, asked before the RHS is emitted so a
+        # frame address cannot reach `_emit_for_unpack`'s arity check — which
+        # reads offset 0 of the operand and calls it a count, so on a frame it
+        # compares the target arity against a FIELD's value. Measured here and
+        # on arm64: `p = P(2, 99); a, b = p` printed `a=99 b=171778048` on
+        # x86-64 and `a=99 b=0` on arm64, and with `x = 1` the same program
+        # exited 1 printing nothing, where CPython prints `a=2 b=99` and
+        # `a=1 b=2`.
+        self._refuse_frame_unpack_operand(stmt.value)
         self._emit_expr(stmt.value)
         # The stride is the DICT question, asked at the one call site with a
         # container on the right. arm64's `_emit_tuple_assign` reads the same

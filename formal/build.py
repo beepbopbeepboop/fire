@@ -5224,7 +5224,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # prints), so it is a desugaring and not a new lowering. See
         # formal/dataclass_transform.py.
         if dc_classes:
-            DC.rewrite_equality(fn, hs, by_name, dc_classes)
+            DC.rewrite_equality(fn, hs, by_name, dc_classes, structs_by_name)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.MemberExpr):
                 continue
@@ -7693,6 +7693,104 @@ def _hoist_eq_chain_middle_calls(functions, structs_by_name: dict) -> int:
             # which children the walk still has to visit.
             for chain, i, tmp in edits:
                 chain.operands[i] = F.IdentExpr(tmp)
+            count[0] += len(bindings)
+            return bindings + [stmt]
+
+        body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
+        if body is not None:
+            fn.body = body
+    return count[0]
+
+
+def _hoist_value_type_construction_operands(functions, structs_by_name: dict,
+                                            value_types: dict) -> int:
+    """`p == P(1, 2)` → `<tmp> = P(1, 2)` then `p == <tmp>`. Count.
+
+    **The statement-level half of the value-type comparison rewrite**, and it is
+    separate from `formal/dataclass_transform.py`'s chain for the reason
+    `_hoist_eq_chain_middle_calls`'s docstring gives: the chain is an
+    EXPRESSION, and a field read is `base + 8·slot` where `base` is a NAME this
+    function holds — so the construction has to become a name before the chain
+    can be built over it. There is no in-expression place to put one.
+
+    What it removes is a silently wrong `==`. With the construction left in
+    place, `formal/dataclass_transform._typed_dataclass` cannot type it (a
+    construction is not a holder name), so no chain is built, so the comparison
+    reaches the codegen as a compare of two FRAME ADDRESSES. Measured on BOTH
+    architectures, exit 0, where CPython says 1:
+
+        p = P(1, 2);  printf("%d", 1 if p == P(1, 2) else 0)      ->  0
+
+    **It binds the construction ONCE, which is also what the language says.**
+    `p == P(1, 2)` evaluates `P(1, 2)` once; a chain that read it twice would
+    build two objects, and `p == _tmp` where `_tmp` holds the first is the
+    single evaluation CPython specifies. `M.iter_nodes` yields no parent, so
+    every operand node is replaced in one pass AFTER the walk (the same ordering
+    `_hoist_eq_chain_middle_calls` uses and for the same reason).
+
+    **Only the operand position, and only a value-type class.** It declines a
+    construction in the middle of a chain only if `_typed_named_value` cannot
+    name its class, and it declines a class that is not in `value_types` — a
+    construction of some other struct is not a comparison between two values of
+    one type, and binding it would introduce a store that enables no rewrite.
+
+    Runs BEFORE `_frame_receivers`, which is what makes the temporary a holder:
+    the holder fixpoint has to have SEEN the binding before the chain is built,
+    and the chain is built inside that same pass. So this is one of the
+    statement rewrites `_prepare_functions` runs ahead of it, and its return
+    value is the count for the same fixpoint-progress accounting the eq-chain
+    hoister uses.
+    """
+    if not value_types:
+        return 0
+    structs_by_name = structs_by_name or {}
+    value_names = set(value_types)
+    count = [0]
+    for fn in functions:
+        used = _fn_spelled_names(fn)
+        counter = [0]
+
+        def fresh_name():
+            while True:
+                counter[0] += 1
+                name = f"_vt_operand{counter[0]}"
+                if name not in used:
+                    used.add(name)
+                    return name
+
+        def is_value_construction(expr):
+            return (isinstance(expr, F.CallExpr)
+                    and isinstance(expr.func, F.IdentExpr)
+                    and expr.func.name in value_names
+                    and expr.func.name in structs_by_name)
+
+        def visit(stmt):
+            bindings = []
+
+            # `a == P(1, 2)` / `P(1, 2) == a` — the `==`/`!=` and the four
+            # ordering operators, both operands, because either side may be the
+            # construction and CPython evaluates both exactly once.
+            #
+            # Replacing the operand INSIDE the walk is safe here in a way it is
+            # not for the `CompareChain` hoister beside it: the replacement is
+            # an `IdentExpr`, so whichever way the iterator decides it (having
+            # snapshotted the old children, or descending into the new one)
+            # every node it can reach is a name, and there is no subtree left
+            # whose children the decision skipped.
+            for node in M.iter_nodes(stmt):
+                if not isinstance(node, F.BinaryOp) or node.op not in (
+                        "==", "!=", "<", "<=", ">", ">="):
+                    continue
+                for side in ("left", "right"):
+                    expr = getattr(node, side)
+                    if not is_value_construction(expr):
+                        continue
+                    tmp = fresh_name()
+                    setattr(node, side, F.IdentExpr(tmp))
+                    bindings.append(F.VarDecl(tmp, None, expr))
+
+            if not bindings:
+                return stmt
             count[0] += len(bindings)
             return bindings + [stmt]
 
@@ -18236,6 +18334,35 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # from the declaration's target either way), so the wrapper is harmless.
     dc_equality = (DC.dataclass_classes(stmts, structs) if structs
                    else dc_classes)
+    # The OTHER value type, merged into the SAME table rather than passed beside
+    # it. `rewrite_equality` already takes `{name: {"struct", "own_eq", …}}` and
+    # its rewrite is a chain over a class's OWN fields in declaration order,
+    # which is what a `typing.NamedTuple`'s `==`/`<` are; a second table and a
+    # second rewrite would be two implementations of one question with the same
+    # answer. It is read from `structs` — which includes IMPORTED declarations —
+    # for the same reason `dc_equality` above is: a comparison between two
+    # values of an imported namedtuple is this module's problem too.
+    nt_equality = DC.namedtuple_classes(structs)
+    for _nt_name, _nt_info in nt_equality.items():
+        dc_equality.setdefault(_nt_name, _nt_info)
+    # …and the CONSTRUCTION operands of those comparisons bound to locals.
+    #
+    # **Here, before `_frame_receivers` and NOT inside its fixpoint**, and the
+    # placement is the whole reason this works: a name's frame-holder status is
+    # SEEDED once, from the module's own constructor bindings, before the
+    # fixpoint starts — so a `VarDecl` introduced inside the fixpoint is never
+    # re-read and `_vt_operand1` stays a plain word, which left `p <= P(1, 2)`
+    # reaching the emitter as a compare of two frame ADDRESSES (measured: arm64
+    # and x86-64 both refuse it with `<` ordering a frame, where CPython answers
+    # 1). Ahead of the pass, the binding is in the body when the seeding walks
+    # it, so the temporary is a holder and the chain
+    # `formal/dataclass_transform.rewrite_equality` builds over it is a chain
+    # over fields.
+    #
+    # The measured defect it removes is a silently wrong `==`: `p == P(1, 2)`
+    # answered 0 on both architectures where CPython answers 1.
+    _hoist_value_type_construction_operands(
+        functions, structs_by_name, dc_equality)
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
     # THE REPRESENTATION TABLE, derived ONCE for the module.
