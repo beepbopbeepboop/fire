@@ -12,10 +12,12 @@ answers the other four, for every instruction form the code generators CAN emit:
 
 The unit is the EMITTED FORM, and "emitted" means a call site: an `encode_*`
 that some emitter (a backend's `codegen.py`, or the Mach-O linker's stub)
-references. That is the same distinction the survey's 2026-10-03 method change
-made and it is the reason this tool exists at all — an encoder nothing calls is
-byte-exact, has a Lean arm, and cannot occur in an image, so counting it in any
-of the four columns would over-report all of them at once.
+references, read by an AST walk of the emitter so a DOCSTRING that names an
+encoder is not one (see `_emitter_refs`). That is the same distinction the
+survey's 2026-10-03 method change made and it is the reason this tool exists at
+all — an encoder nothing calls is byte-exact, has a Lean arm, and cannot occur
+in an image, so counting it in any of the four columns would over-report all of
+them at once.
 
 **Each column names the thing it reads, because a column that cannot say where
 its answer came from is not a measurement.**
@@ -284,6 +286,16 @@ def call_sites(arch):
                 hits.append((os.path.basename(rel), n))
         out[name] = hits
     return out
+
+
+def call_sites(arch):
+    """{encoder: [(file, count)]} over the emitter files only, by AST."""
+    sites = {}
+    for rel in LEVER_ROOTS[arch]:
+        blob = _emitter_refs(os.path.join(ROOT, rel))
+        for name, n in blob.items():
+            sites.setdefault(name, []).append((os.path.basename(rel), n))
+    return {name: sites.get(name, []) for name in encoder_names(arch)}
 
 
 #: The names whose VALUES are the encoder test's byte-differential table.

@@ -146,6 +146,30 @@ guard's call is off the walked path, re-run this class and read §3's two
 outcomes; if the residual then reappears, §3/§5 stand as written, and if the
 proof still refuses, the refusal is a third state and this doc should say so.
 
+**Status update 2026-10-08 (`work/formal238-docs`): the three assertion
+failures are NO LONGER the state of this class — it cannot BUILD the proof at
+all, and the blocker is not the terminal value flow.** `bfeec991` put a
+`call getrlimit` in arm64's stack-floor guard prologue, and
+`formal/arm64_proof_gen.py` refuses a run test over any extern call, so proof
+GENERATION for the symbolic-divisor program raises before Lean is reached:
+
+    $ python3 - <<'PY'
+    import test_formal_call_proof_gen as T; T._symbolic_divisor_proof('.tmp')
+    PY
+    FormalBuildError: no proof was generated: … universal theorem: 2 calls this
+    walk cannot follow (… -> … (opaque), … -> … (opaque)), every one of them OUT
+    OF THE IMAGE …
+
+Measured here, no Lean: the same `FormalBuildError` the arm64 half of
+`test_formal_call_proof_gen.py` reports for every bounded-stop program, and the
+same one `bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`
+describes (the `getrlimit` call belongs in the startup stub, which needs the
+`__TEXT,__stubs` region sized for it). **So the next step for THIS doc is
+blocked on that fix**, not on the terminal value flow: re-measure the div0
+residual once arm64 proof generation can walk a guarded prologue again. The
+measurement below stays valid as the state of the class on a tree without the
+`getrlimit` prologue call.
+
 ## 1. What I ran, and why `master` is green
 
 ```console
