@@ -8949,6 +8949,30 @@ BOTH_ARCH_CASES = [
      "    return 0\n",
      "refuse:comprehension target must be a plain name or tuple of plain names",
      None),
+    # ── A generic struct whose type parameter is UNUSED, constructed without a
+    #    bracket, on BOTH machines ────────────────────────────────────────────
+    #
+    # `One` and `Two` each declare `T: AnyType` and never mention it, so every
+    # instantiation is the identical declaration text: the template is
+    # extensionally a concrete struct, and `One(3)` / `Two(4, 9)` (no bracket)
+    # must bind exactly as `One[Int](3)` does. Both machines read one shared
+    # rule (`formal/monomorph.py::concrete_struct_templates`, kept by
+    # `without_template_bodies` on the executable path), which is why the row
+    # is here rather than in the host-arch group. 3*100 + 4*10 + 9 = 349, and a
+    # one-field struct is a WORD while a two-field one is a FRAME ADDRESS — so
+    # a lowering that classified only one of the two shapes cannot land on 349.
+    # `bugs/FORMAL_generic_local_binding_has_no_home.md` is the measurement.
+    ("both_arch_an_unused_type_parameter_construction_needs_no_bracket",
+     "struct One[T: AnyType]:\n"
+     "    var v: Int\n"
+     "struct Two[T: AnyType]:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = One(3)\n"
+     "    var q = Two(4, 9)\n"
+     "    printf(\"%d\", p.v * 100 + q.a * 10 + q.b)\n"
+     "    return 0\n", 0, "349"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before

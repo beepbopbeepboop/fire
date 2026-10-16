@@ -68,6 +68,14 @@ filter and the predicate, with a USED-parameter control), and end to end by
 `origin_of_in_a_local_type_annotation_is_still_a_type` row, which was
 re-pointed at the refusal while this was open and is an answer row again.
 
+Merged 2026-10-13 (`work/formal252-docs`): a parallel bare-construction
+recogniser for this same class was dropped in favour of the keep above (its
+keep condition did not carry the bracketed-application exclusion whose
+regression the narrowing above measured), and its one unique row landed in
+`test_formal_run.py`: `both_arch_an_unused_type_parameter_construction_needs_
+no_bracket` (a one-field WORD and a two-field FRAME in one program, 349,
+both architectures).
+
 ## Status 2026-10-08 (`work/formal168-docs`): the ANNOTATED half of a USED type
 ## parameter is FIXED; the INFERRED half of it is not
 
