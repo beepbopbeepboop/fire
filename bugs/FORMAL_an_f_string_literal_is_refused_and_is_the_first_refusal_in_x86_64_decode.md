@@ -14,6 +14,32 @@ BUILT (it was refused before), pinned by five CPython-pair rows in
 `test_formal_run.py`; a literal with a field, and therefore every literal this
 doc's file holds, is unchanged.**
 
+**Update 2026-10-12 (`work/formal292-docs`): the CONSTANT half of composition
+LANDED, and the refusal is now narrowed to the run-time half it is actually
+about.** `formal/model.py` has `fold_constant_string_literals`, run by
+`formal/build.py::_prepare_functions` BEFORE `refuse_interpolated_literals`, and
+it realises the shape this doc's "What it would take" names — *"a compile-time
+composition for the case where every hole is a literal"* — together with the
+constant `+`/`*` over strings that sentence calls the prerequisite (*"landing
+composition means landing concatenation first"*). An f-string every field of
+which is a literal, and a `str + str` / `str * int` whose operands are all
+literals, now BUILD and answer CPython: each folds to an ordinary interned
+literal, which is the same `char *` every other string literal on this path is
+and so needs no buffer. A field that is a NAME, a CALL or an operator, a format
+spec, a conversion and a t-string still get the sentence above, unchanged — the
+field counts and the wording are the same, because the pass answers only what it
+can. Measured both architectures: `"ab" + "cd"` prints `abcd` (was a refusal),
+`"=" * 3` prints `===`, `f"n={5}"` prints `n=5`, `f"{'a'}b{None}"` prints
+`abNone`, `rf"a\n{5}"` keeps the literal backslash, and `f"n={k}"` is still
+refused by name. Pinned by `test_formal_run.py`'s four
+`fstring_...folds`/`raw_fstring_...` rows and its three
+`str_concat...`/`str_repeat...` rows; the old `str_concat_refused` row asserted
+the refusal of `"ab" + "cd"`, which is a CONSTANT, so it is now
+`str_concat_of_two_variables_refused` (two VARIABLES, the run-time half) beside
+the answered `str_concat_of_two_literals_folds`. **What is still missing is
+unchanged and is §2's project**: the buffer that answers a run-time value, so
+this doc stays open with only the constant half closed.
+
 Found 2026-10-04 while re-measuring
 `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose
 file used to be refused at the `**kw` spread and is now refused here instead.
