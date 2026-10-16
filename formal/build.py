@@ -1631,6 +1631,52 @@ def _import_aliases(stmts: list) -> dict:
     return imported_bindings(stmts)
 
 
+def _has_try_with_arms(functions: list) -> bool:
+    """Does any function in this unit hold a `try` with at least one arm?
+
+    The gate on `_module_raises_resolver`, and it is `uncatchable_raise`'s own
+    precondition: that walk returns early for a `TryStmt` with no handlers, and
+    a unit with no such `try` cannot be refused by the cross-module answer. So
+    building the resolver for one is a walk of every imported module's call
+    graph spent on a question nobody asks.
+
+    A walk over THIS unit's own functions, which the pipeline has already parsed
+    and rewritten, rather than a flag threaded down from the parser — because the
+    flag would be a second statement of the same fact and the two could disagree
+    about a `try` a rewrite introduced.
+    """
+    for fn in functions or ():
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if isinstance(node, F.TryStmt) and getattr(node, "handlers", None):
+                return True
+    return False
+
+
+def _module_raises_resolver(stmts: list, source_path: str):
+    """`formal/imports.py`'s `CrossModuleRaises` for this unit, or None.
+
+    None is the answer for a unit whose imports are all host modules or
+    unresolvable, and it is what keeps every such build's behaviour and bytes
+    exactly as they were: with no resolver the method question reads this
+    image's own table only, and the function question reads the published
+    per-module table, which a host module publishes as the empty set — the same
+    `False` as before.
+
+    A HOST module — `import os`, where no Mojo source exists for this backend to
+    compile — resolves to no source file and so contributes nothing, which is the
+    correct answer rather than a gap: a hostmod is either a real module of this
+    target (and then it resolves) or it is CPython's stdlib, which is not in the
+    image at all and cannot end this process from a frame of its own. Measured
+    over all 36 `formal/hostmods/` modules: none holds a `raise`, so the table is
+    empty for every one of them and no `try` in this repository changes verdict
+    because of a hostmod.
+    """
+    from formal.imports import CrossModuleRaises
+    cross = CrossModuleRaises.from_module(source_path)
+    return cross if cross._modules else None
+
+
+
 def _external_declarations(linked: list) -> dict:
     """`{export symbol: FunctionDef}` for the linked libraries' function exports.
 
@@ -17686,10 +17732,13 @@ def _publish_imported_raisers(source_path, stmts) -> None:
     **It parses, and does not compile, and that is the deliberate cost.** The
     alternative — compiling the imports here — is what `_resolve_imports` does a
     few lines later and would do it twice. A parse is the whole of what the
-    question needs: `RaiseGraph` reads statements, and `build_module_dylib`'s
-    own compile of the same file is unaffected by having been parsed once
-    already. What is NOT shared is any derived state, which is why this
-    publishes only the raise set.
+    question needs, and the answer is `formal/imports.py`'s
+    `module_raising_names` — the same computation the cross-module resolver
+    asks, so the entry a `try` reads and the entry a linked struct's method is
+    answered from are one implementation rather than two. It is recursive
+    through the import's own imports, with the cycle guard `module_raising_names`
+    states, because a function that calls a third module's raising function
+    raises as surely as one that writes the `raise` itself.
 
     **A module that cannot be resolved or parsed contributes NOTHING**, and
     nothing is raised: a callee in it stays unresolved and the pre-existing
@@ -17701,7 +17750,7 @@ def _publish_imported_raisers(source_path, stmts) -> None:
     if not source_path:
         return
     try:
-        from formal.imports import (imported_modules, module_source_text,
+        from formal.imports import (imported_modules, module_raising_names,
                                     resolve_module_path)
         mods = imported_modules(stmts)
     except Exception:                            # noqa: BLE001
@@ -17711,17 +17760,10 @@ def _publish_imported_raisers(source_path, stmts) -> None:
             path = resolve_module_path(mod, relative_to=source_path)
             if not path:
                 continue
-            parsed = parse_module(module_source_text(path),
-                                  filename=path)
-            fns = [n for n in M.iter_nodes(parsed)
-                   if isinstance(n, F.FunctionDef)]
             identity = _own_module_identity(path)
             if identity:
                 M.publish_module_raisers(
-                    identity,
-                    M.RaiseGraph(fns, externs=M.BARE_C_RETURN_KINDS,
-                                 bound_modules=M.imported_module_bindings(
-                                     parsed)).raising)
+                    identity, module_raising_names(path).exports)
         except Exception:                        # noqa: BLE001
             continue
 
@@ -17886,23 +17928,33 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # about this unit's own statements. The dotted half (`mod.f(…)`) needs no
     # binding: the qualifier is in the AST.
     bound_modules = M.imported_module_bindings(stmts)
-    raise_graph = M.RaiseGraph(functions, externs=M.BARE_C_RETURN_KINDS,
-                               bound_modules=bound_modules)
-    # …and PUBLISHED, because this unit's answer is the only place the units it
-    # imports get theirs, and because the check below reads the table for a
-    # callee in ANOTHER module. Keyed by the dotted identity an importer spells
-    # (`own_module_identity`), and published even when the set is EMPTY — an
-    # empty set is the fact "this module raises nothing", and without it every
-    # call into a module this image knows would still be a possibility.
-    if source_path:
-        _own = _own_module_identity(source_path)
-        if _own:
-            M.publish_module_raisers(_own, raise_graph.raising)
     #
-    # The imported modules' OWN raisers, published HERE and read by the loop
-    # below, and that placement is the whole design. `uncatchable_raise` has to
-    # stay in `_prepare_functions` because its ORDER against the codegen-time
-    # refusals is deliberate and pinned — `test_formal_run.py`'s
+    # `cross` is `formal/imports.py`'s `CrossModuleRaises` for this unit — the
+    # cross-module reader the published table does not give: a method of a
+    # LINKED struct, which dispatch reaches by NAME alone, and the hop through
+    # an import's own imports, which the resolver walks with a cycle guard.
+    # Measured on both architectures before it existed: a `try` around another
+    # module's raiser built, printed nothing and exited 1 where CPython prints
+    # its answer and exits 0. `None` (a unit with no `try` in it) leaves every
+    # in-file answer byte for byte what it was: the function question then
+    # reads the published table, and a host module publishes an empty set
+    # rather than a possibility.
+    #
+    # The `_has_try_with_arms` gate is the cost half of that sentence and it is
+    # not an optimisation. `cross` makes `RaiseGraph` walk every imported
+    # module's whole call graph, and a unit with no `try` in it cannot be
+    # refused by the answer. Measured: 300 raise-set builds over 100 files of
+    # this repository cost 12 s, which is a per-file cost on every build of
+    # every file for a question most files never ask.
+    _cross = (_module_raises_resolver(stmts, source_path)
+              if _has_try_with_arms(functions) else None)
+    #
+    # The imported modules' OWN raisers, published HERE — before the graph is
+    # built, because the graph's cross-module marking reads them at
+    # construction — and read again by the loop below, and that placement is
+    # the whole design. `uncatchable_raise` has to stay in `_prepare_functions`
+    # because its ORDER against the codegen-time refusals is deliberate and
+    # pinned — `test_formal_run.py`'s
     # `constr_the_arm_refusal_precedes_the_base_clause` requires the arm
     # sentence to arrive before a construct-time one, and moving it later (which
     # is the obvious place, since `_resolve_imports` runs after this) breaks
@@ -17916,6 +17968,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # whose parse fails contributes nothing and leaves its calls unresolved,
     # which is the pre-existing behaviour rather than a new failure.
     _publish_imported_raisers(source_path, stmts)
+    raise_graph = M.RaiseGraph(functions, externs=M.BARE_C_RETURN_KINDS,
+                               bound_modules=bound_modules, cross=_cross)
+    # …and PUBLISHED, because this unit's answer is the only place the units it
+    # imports get theirs, and because the check below reads the table for a
+    # callee in ANOTHER module. Keyed by the dotted identity an importer spells
+    # (`own_module_identity`), and published even when the set is EMPTY — an
+    # empty set is the fact "this module raises nothing", and without it every
+    # call into a module this image knows would still be a possibility.
+    if source_path:
+        _own = _own_module_identity(source_path)
+        if _own:
+            M.publish_module_raisers(_own, raise_graph.raising)
     for fn in functions:
         found = M.unemitted_handler_arm(fn)
         if found is not None:

@@ -1735,6 +1735,7 @@ def module_statements(path: str) -> list:
         return []
     digest = cas.hash_parts(raw)
     key = (os.path.abspath(path), digest)
+    _PARSED_DIGEST[key[0]] = digest
     hit = _PARSED.get(key)
     if hit is not None:
         return hit
@@ -1744,7 +1745,300 @@ def module_statements(path: str) -> list:
     except Exception:
         stmts = []
     _PARSED[key] = stmts
+    _PARSED_DIGEST[key[0]] = digest
     return stmts
+
+
+def _own_functions(stmts: list):
+    """`(exports, methods)` of a module: its top-level functions under their own
+    names, and its structs' methods under the LIFTED name each is exported by.
+
+    Two lists rather than one because the two are asked two DIFFERENT questions
+    cross-module, and merging them is what made the method question wrong the
+    first time: `mod.f(…)` is an exact lookup against `exports`, while `b.get(…)`
+    carries no receiver type and so must be answered by NAME — but only against
+    names that really are METHODS. Answered against the merged list, a plain
+    exported function called `read_file` made every `x.read(…)` in the corpus
+    look like a call into something that can end the process, which is 60-odd
+    files refused for a method name that appears in half of them.
+
+    A module's exports are its top-level functions and its structs' methods
+    (`reflect.collect_exports_src` is the rule that decides which, and a name it
+    does not export cannot be a cross-module callee); the lifted spelling is
+    `formal/model.py`'s `method_function_name`, which is what an export of a
+    method is keyed by.
+
+    Nested `def`s are reached through the function that contains them, because
+    `_call_keys` walks the whole body and a `raise` inside a closure is a
+    `raise` in the function that runs it.
+    """
+    exports, methods = [], []
+    for st in stmts or []:
+        if isinstance(st, F.FunctionDef) and getattr(st, "name", None):
+            exports.append(st)
+        elif isinstance(st, F.StructDef):
+            for meth in _struct_methods_of(st):
+                methods.append(_LiftedMethod(meth, st.name))
+    return exports, methods
+
+
+class _LiftedMethod:
+    """One struct method under the name it is exported and called by.
+
+    A stand-in rather than a mutated AST node because `module_statements` CACHES
+    the parse: setting `meth.name = "Bag_get"` on the cached node would rename
+    the method for every later reader of the same file — the export table and
+    the declaration table both — and this question is asked from a walk that has
+    no business changing what the module declares. Only `name` and `body` are
+    read (`RaiseGraph` reads those two and nothing else), so those are the two
+    this carries.
+    """
+
+    __slots__ = ("name", "bare", "body")
+
+    def __init__(self, meth, struct_name: str):
+        self.name = _model.method_function_name(struct_name, meth.name)
+        self.bare = meth.name
+        self.body = getattr(meth, "body", None)
+
+
+class ModuleRaises:
+    """What of one module's own surface can end the process, in two sets.
+
+    **`exports` and `methods` are separate because they answer separate
+    questions.** A module-qualified `mod.f(…)` names one export, so `exports` is
+    an exact lookup. A `b.get(…)` carries no receiver type at all — dispatch on
+    this path is by NAME — so `methods` is a set of BARE method names, and the
+    answer is whether any of them raises. Merging them (which is what a single
+    frozenset of lifted names does) makes an exported function called
+    `read_file` raise the question for every `x.read(…)` in the corpus, which is
+    a refusal bought against a coincidence in a name.
+
+    `methods` holds the BARE name rather than the lifted `<Struct>_<method>`
+    spelling because that is the question being asked: a call site writes
+    `b.get(…)` and nothing at the call site says which struct it meant.
+    """
+
+    __slots__ = ("exports", "methods")
+
+    def __init__(self, exports=frozenset(), methods=frozenset()):
+        self.exports = frozenset(exports)
+        self.methods = frozenset(methods)
+
+
+_EMPTY_RAISES = ModuleRaises()
+
+
+def module_raising_names(path: str, _seen=None) -> ModuleRaises:
+    """What of `path`'s own surface can end the process — `ModuleRaises`.
+
+    Cached per (path, content digest), like the parse it reads.
+
+    **The cross-module half of `formal/model.py`'s `RaiseGraph`, and it is asked
+    of a module this build did not compile.** A `raise` is `exit(1)` from
+    whatever frame holds it, so a function of a LINKED library ends the caller's
+    process exactly as one of the caller's own does — and the caller's own graph
+    cannot see it, which is how
+
+        from lib import boom
+        def main(n):
+            try:
+                boom()
+            except:
+                pass
+            print("caught")
+
+    built, exited 1 and printed nothing on both architectures where CPython
+    prints `caught` and exits 0. The refusal that closes that shape needs to
+    know which of `lib`'s functions raise, and `lib` has been parsed and thrown
+    away by the time the caller's `try` is examined.
+
+    So it is computed HERE, from `lib`'s own source, by asking `RaiseGraph` the
+    question it already answers for an in-file function — one implementation of
+    "can this function end the process", not two. The graph is built over
+    `lib`'s own exports with `lib`'s OWN import table, so `lib`'s functions that
+    call a third module's raising function are in the answer too, and it
+    recurses through that table with `_seen` so an import cycle terminates.
+
+    **The cache, and it is keyed on the CONTENT DIGEST for the reason
+    `module_statements` is.** This is a fixed point over the module's own call
+    graph — a walk of every function body in the file — and `RaiseGraph` is
+    asked about it once per `mod.f(…)` and once per method name in every
+    `try`-bearing unit in the tree. Uncached that is minutes of walking for a
+    question whose answer does not change, measured: the parse-only census over
+    this repository's 570 files went from seconds to not finishing inside 40
+    minutes when the method question added one graph build per call site. So the
+    answer is memoised per (absolute path, digest), which means an edited module
+    is re-read rather than served stale, exactly as the parse is.
+
+    `_seen` is deliberately NOT part of the key: it is a cycle guard, and a
+    module's answer does not depend on which module asked. The entry written for
+    a module reached inside a cycle is therefore the answer computed with the
+    cycle broken at that module — the same conservative direction as the guard
+    itself, since membership only grows and a `raise` is reached through the
+    chain that was cut.
+
+    **A module this cannot resolve contributes nothing rather than everything.**
+    That direction is the class's measured decision and it is unchanged here: the
+    certain tier is what refuses, and an unresolvable name is not certain. What
+    is left of the unplaceable tier is written down, with the measurement that
+    says which of its five shapes is a hazard and which four are not, in
+    `bugs/FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md`.
+    """
+    try:
+        stmts = module_statements(path)
+        # The digest AFTER the parse, so the key names the version this answer
+        # was computed from rather than whatever the file holds by the time the
+        # key is formed.
+        key = (os.path.abspath(path), module_statements_digest(path))
+    except (TypeError, ValueError):
+        return _EMPTY_RAISES
+    hit = _RAISING.get(key)
+    if hit is not None:
+        return hit
+    if key[0] in (_seen or ()):
+        return _EMPTY_RAISES
+    _seen = set(_seen or ()) | {key[0]}
+    if not stmts:
+        _RAISING[key] = _EMPTY_RAISES
+        return _EMPTY_RAISES
+    exports, methods = _own_functions(stmts)
+    graph = _model.RaiseGraph(
+        exports + methods, externs=_model.BARE_C_RETURN_KINDS,
+        bound_modules=_model.imported_module_bindings(stmts),
+        cross=CrossModuleRaises.from_module(path, _seen=_seen))
+    # The graph raises LIFTED names for methods, so the split back into the two
+    # sets is by membership in this module's own method list rather than by
+    # spelling: a `Struct_method` whose struct name contains `_` would be
+    # misfiled by a `partition("_")` and then asked about under the wrong name.
+    bare = {m.name: m.bare for m in methods}
+    out = ModuleRaises(
+        exports=frozenset(n for n in graph.raising if n not in bare),
+        methods=frozenset(bare[n] for n in graph.raising if n in bare))
+    _RAISING[key] = out
+    return out
+
+
+#: `module_raising_names`'s memo, on the same (absolute path, content digest)
+#: key as `_PARSED` above. Separate because the VALUES are different questions —
+#: one is the AST and one is a fixed point over it — and a shared dict would let
+#: one evict the other.
+_RAISING: dict = {}
+
+#: The digest each `(abspath, digest)` in `_PARSED` was parsed under, so a reader
+#: that needs to key ITS OWN cache on the same version reads it off the parse
+#: rather than re-hashing the file. A second read is a second version: the file
+#: can change between them, and a digest taken after the parse would key a stale
+#: answer under a fresh version and serve it to the next build.
+_PARSED_DIGEST: dict = {}
+
+
+def module_statements_digest(path: str) -> str:
+    """The content digest `module_statements` keyed its parse on, or "".
+
+    "" when the file has never been parsed, which is the answer for a missing or
+    unreadable file too — the same empty parse `module_statements` returns for
+    both, and so the same empty result.
+    """
+    try:
+        return _PARSED_DIGEST.get(os.path.abspath(path), "")
+    except (TypeError, ValueError):
+        return ""
+
+
+class CrossModuleRaises:
+    """The two questions `RaiseGraph` asks about a callee in ANOTHER image.
+
+    **One object rather than a pair of callables, because the two are one fact
+    read two ways and a caller that supplied only one of them would get an
+    answer that is right about `mod.f(…)` and silent about `b.f(…)` for the same
+    imported module — which is the bug this whole mechanism exists to close, in a
+    narrower dress.** Constructed by `from_module` for the module that OWNS the
+    imports, so one build's answers cannot be read by another's.
+
+    `function(module, name)` is exact: `lib`'s export `boom`. `method(name)` is
+    by NAME across every module this one imports, because that is the
+    over-approximation dispatch on this path already makes inside one image — a
+    call site carries no receiver type, so `b.get(…)` is answered by every
+    `get` — and extending it across the boundary is the SAME rule rather than a
+    second, looser one. The lifted spelling is `<Struct>_<method>`
+    (`formal/model.py`'s `method_function_name`), which is what an export of a
+    method is keyed by.
+    """
+
+    __slots__ = ("_base", "_modules", "_seen", "_cache")
+
+    def __init__(self, base: str, modules, _seen=frozenset(), _cache=None):
+        self._base = base
+        self._modules = tuple(modules)
+        self._seen = _seen
+        self._cache = {} if _cache is None else _cache
+
+    @classmethod
+    def from_module(cls, source_path: str, _seen=frozenset()):
+        """The resolver for the module at `source_path`'s own imports.
+
+        Resolving against `source_path` is what makes `.._syscalls` mean the
+        same module here as it does to the build: one `resolve_module_path`, so
+        the module this asks about is the module the linker will bind. The base
+        is carried on the object rather than passed to each question, because a
+        caller that resolved against a different file would be asking about a
+        different module under the same name — and the answer would still be a
+        boolean, so nothing downstream could see the substitution.
+        """
+        stmts = module_statements(source_path)
+        mods = []
+        for name in imported_modules(stmts):
+            if cls._resolve(name, source_path):
+                mods.append(name)
+        return cls(source_path, mods, _seen=_seen)
+
+    @staticmethod
+    def _resolve(module: str, base: str):
+        return resolve_module_path(module, relative_to=base,
+                                   project_root=base)
+
+    def function(self, module: str, name: str) -> bool:
+        """Can `module`'s export `name` end the process?"""
+        if not module or not name or module == name:
+            return False
+        path = self._resolve(module, self._base)
+        if path is None:
+            return False
+        return name in self._raises(path).exports
+
+    def method(self, name: str) -> bool:
+        """Can any imported module's METHOD called `name` end the process?
+
+        By BARE name across every module this one imports, because that is the
+        over-approximation dispatch on this path already makes inside one image
+        — a call site carries no receiver type, so `b.get(…)` is answered by
+        every `get` — and extending that one rule across the boundary is not a
+        second, looser one.
+
+        Bare and not `<Struct>_<method>` for the same reason `ModuleRaises`
+        keeps the two sets apart: an EXPORTED FUNCTION called `read_file` shares
+        its tail with a method called `read`, and answering the method question
+        from a merged list of names refuses every `x.read(…)` in the corpus
+        because of a coincidence in a name.
+        """
+        if not name:
+            return False
+        for mod in self._modules:
+            path = self._resolve(mod, self._base)
+            if path is None:
+                continue
+            if name in self._raises(path).methods:
+                return True
+        return False
+
+    def _raises(self, path: str) -> ModuleRaises:
+        key = os.path.abspath(path)
+        hit = self._cache.get(key)
+        if hit is None:
+            hit = module_raising_names(path, _seen=set(self._seen))
+            self._cache[key] = hit
+        return hit
 
 
 # Source TEXT, cached beside `_PARSED` on the same (path, content-digest) key and

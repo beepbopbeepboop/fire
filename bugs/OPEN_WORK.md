@@ -108,6 +108,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
+<<<<<<< HEAD
 | `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | `formal391-docs` | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal389-docs` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `formal392-docs` | the row was unowned, and the refusal in it is CORRECT |
@@ -121,6 +122,59 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | **unclaimed** | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
 | `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | **unclaimed** | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
 | `FORMAL_string_value_model.md` | **unclaimed** | what a string IS on the formal path, and the two things that want to be one |
+||||||| cd2a1678
+| `FORMAL_a_corpus_contract_is_false.md` | `formal40-1` | `formal/examples/fact.mojo`'s `@ensure(result >= 0)` is FALSE, and nothing reported it for as long as the decorator existed |
+| `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal40-2` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
+| `FORMAL_a_nested_def_capturing_a_for_target_is_not_a_capture.md` | `formal40-2` | a nested `def` capturing a `for` loop variable is refused, because the closure scope never learns the loop target |
+| `FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md` | `formal40-2` | A `try` around a callee this pass cannot RESOLVE is not asked whether that callee raises |
+| `FORMAL_build_cost_2026-10-03.md` | `formal40-4` | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
+| `FORMAL_env_family_next_terminal.md` | `formal37-2` | where the 55-file family stands, and what the next reader needs |
+| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | `formal37-2` | what `==` still does not reach |
+| `FORMAL_module_state_no_storage.md` | `formal40-5` | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
+| `FORMAL_optional_needs_a_niche.md` | `formal40-5` | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
+| `FORMAL_pointer_value_model.md` | `formal37-2` | what a pointer IS on the formal path, and why the 54-file group was never about that |
+| `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | `formal40-6` | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
+| `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal40-6` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
+| `FORMAL_string_value_model.md` | `formal40-6` | what a string IS on the formal path, and the two things that want to be one |
+| `FORMAL_target_query_evaluator.md` | `formal40-6` | what is left after the target-query evaluator landed |
+| `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
+| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_the_runtime_dylib_leaves_its_staging_directory.md` | **unclaimed** | 520 kB per cold CAS, never removed |
+| `PERF_struct_field_names_is_still_asked_once_per_function.md` | **unclaimed** | `struct_field_names` is still asked once per FUNCTION, by the one-word chain walk |
+| `TEST_the_formal_doc_truth_census_is_in_no_bucket.md` | **unclaimed** | `FORMAL.md`'s numbers are 8 rows stale and the file that measures them runs in no gate |
+
+### `formal/contracts` — 1 document, 1 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
+| `FORMAL_contract_ladder_reach.md` | `formal40-4` | The contract ladder cannot do arithmetic on `UInt64`, because `UInt64` is a `Fin` and `omega` has none for it |
+=======
+| `FORMAL_a_corpus_contract_is_false.md` | `formal40-1` | `formal/examples/fact.mojo`'s `@ensure(result >= 0)` is FALSE, and nothing reported it for as long as the decorator existed |
+| `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `formal40-2` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
+| `FORMAL_a_nested_def_capturing_a_for_target_is_not_a_capture.md` | `formal40-2` | a nested `def` capturing a `for` loop variable is refused, because the closure scope never learns the loop target |
+| `FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md` | `formal59` | the LAST of the unplaceable callees, and the only one whose callee is not known to be outside the image |
+| `FORMAL_build_cost_2026-10-03.md` | `formal40-4` | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
+| `FORMAL_env_family_next_terminal.md` | `formal37-2` | where the 55-file family stands, and what the next reader needs |
+| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | `formal37-2` | what `==` still does not reach |
+| `FORMAL_module_state_no_storage.md` | `formal40-5` | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
+| `FORMAL_optional_needs_a_niche.md` | `formal40-5` | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
+| `FORMAL_pointer_value_model.md` | `formal37-2` | what a pointer IS on the formal path, and why the 54-file group was never about that |
+| `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` | `formal40-6` | std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu} is 46 files, 3 build, and all 43 of the rest are TWO features neither of which is in this scope |
+| `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md` | `formal40-6` | the `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope is 46 files, 3 of which build, and every link of the chain that blocks the other 43 is in someone else's claim |
+| `FORMAL_string_value_model.md` | `formal40-6` | what a string IS on the formal path, and the two things that want to be one |
+| `FORMAL_target_query_evaluator.md` | `formal40-6` | what is left after the target-query evaluator landed |
+| `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
+| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_the_runtime_dylib_leaves_its_staging_directory.md` | **unclaimed** | 520 kB per cold CAS, never removed |
+| `PERF_struct_field_names_is_still_asked_once_per_function.md` | **unclaimed** | `struct_field_names` is still asked once per FUNCTION, by the one-word chain walk |
+| `TEST_the_formal_doc_truth_census_is_in_no_bucket.md` | **unclaimed** | `FORMAL.md`'s numbers are 8 rows stale and the file that measures them runs in no gate |
+
+### `formal/contracts` — 1 document, 1 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
+| `FORMAL_contract_ladder_reach.md` | `formal40-4` | The contract ladder cannot do arithmetic on `UInt64`, because `UInt64` is a `Fin` and `omega` has none for it |
+>>>>>>> work/formal59-docs
 
 ### `formal/dataclass_transform` — 1 document, 1 claimed
 

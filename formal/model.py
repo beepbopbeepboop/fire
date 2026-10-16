@@ -43674,12 +43674,44 @@ class RaiseGraph:
     exactly what it says it is: a host module, a `--link-dylib` library, or a
     builtin method — none of which this pass can read the body of.
 
+    **What the residual is NOT is a call into another image.** That was the
+    largest part of it, and it is now answered: a module this build links is
+    source on disk and `module_statements` already parses it, so the FUNCTION
+    question is the published per-module table and the METHOD question — the
+    one dispatch reaches by NAME alone — is `formal/imports.py`'s
+    `CrossModuleRaises` over the separated sets `module_raising_names` keeps.
+    Three spellings of "a function of another module" were being read as
+    something local — `mod.f(…)` as a method call, a from-imported name as a
+    bare name, and a linked struct's method as a method declared here — and each
+    was therefore decided by whatever THIS image happened to declare. The corpus
+    cost of answering them is measured at zero files (every file whose answer
+    moved is already refused for an unresolvable import, which outranks this
+    check), and the residual is the rest.
+
     The rule the pair of them obeys is unchanged and is what the second half of
     the 82 still rests on: **refuse on a FACT, and say so where the fact is
     missing.**
     """
 
-    def __init__(self, functions, externs=(), bound_modules=None):
+    def __init__(self, functions, externs=(), bound_modules=None,
+                 cross=None):
+        """`bound_modules` is this unit's import table (see `_call_keys`), and
+        `cross` is `formal/imports.py`'s `CrossModuleRaises` — the two
+        cross-module readers, or None/empty when this build has no cross-module
+        table to ask.
+
+        They answer the two questions about a callee in ANOTHER image that this
+        class used to answer `False` for without being able to place it: a
+        FUNCTION of another module — `mod.f(…)` and `from lib import f`, which
+        before were read as a METHOD call and a bare name of this image and so
+        decided by whatever THIS unit happened to declare — is answered by the
+        published per-module table (`publish_module_raisers`), and a METHOD of a
+        linked struct is answered by `cross.method(…)`, out of the separated
+        method sets that keep an exported function called `read_file` from
+        raising the question for every `x.read(…)`. `None` for both keeps every
+        in-file answer byte for byte what it was.
+        """
+        self._cross = cross
         by_name = {}
         for fn in functions or ():
             name = getattr(fn, "name", None)
@@ -43693,8 +43725,13 @@ class RaiseGraph:
         # and without this it is indistinguishable from a free name.
         self.bound_modules = dict(bound_modules or {})
         # Method dispatch on this path is BY NAME — a call site carries no
-        # receiver type — so `x.f(…)` is answered by every method of that name,
-        # which is the same over-approximation the dispatch itself makes.
+        # receiver type — so `x.f(…)` is answered by every method of that name
+        # in THIS image, which is the same over-approximation the dispatch itself
+        # makes. `cross.method(…)` extends that one rule across the boundary
+        # rather than adding a second, looser one, and it is asked per call site
+        # by `_callee_raises` rather than folded into `raising_methods`: this
+        # image's table is a fixed point over functions, and a cross-module
+        # method is not a function of this image that can be marked.
         self.methods = frozenset(
             name.partition("_")[2] for name in by_name
             if name.partition("_")[2])
@@ -43719,15 +43756,29 @@ class RaiseGraph:
                 else:
                     other = True
             # A method name resolves to every lifted name `<Struct>_<method>`,
-            # and a dotted/module call (`mod.f`) is as unresolved here as it is
-            # in the emitter until the link resolves it — so `other` seeds the
-            # unknown set for this function, not just for the region.
+            # and a callee that is an EXPRESSION rather than a name is as
+            # unresolved here as it is in the emitter until the link resolves it
+            # — so `other` seeds the unknown set for this function, not just for
+            # the region. A `mod.f(…)` is NOT `other`: it is answered by the
+            # published table and `_calls_raising_export` below, which is a
+            # fact rather than a shrug.
             edges[name] = plain | {n for n in by_name
                                    if n.partition("_")[2] in method}
             if other:
                 edges[name] |= {_UNRESOLVED}
             if any(isinstance(n, F.RaiseStmt)
                    for n in _emitted_nodes(getattr(fn, "body", None))):
+                lexical.add(name)
+        # A function that calls INTO another image's raising function ends the
+        # process just as surely as one that calls a raising function of its own,
+        # so the cross-module answer enters the same fixed point rather than
+        # being consulted only at the `try`. These are definite answers — the
+        # callee's own module published them — so they belong here, and
+        # `_UNRESOLVED` is deliberately not how they arrive: that sentinel is
+        # excluded from propagation on purpose (an unplaceable callee is not
+        # evidence), and a published answer IS evidence.
+        for name, fn in by_name.items():
+            if self._calls_raising_export(fn):
                 lexical.add(name)
         self.raising = set(lexical)
         changed = True
@@ -43749,6 +43800,34 @@ class RaiseGraph:
             if any(other.partition("_")[2] == attr and other in self.raising
                    for other in by_name))
         self.any_raising = bool(self.raising)
+
+    def _calls_raising_export(self, fn) -> bool:
+        """Does `fn` call a function or method of ANOTHER image that raises?
+
+        The FUNCTION half asks the cross-module table for a module-qualified
+        key: `cross` when this graph has one (it recurses through the
+        imports' own imports, with a cycle guard), else the published
+        per-module table (populated for this unit's direct imports before the
+        graph is built). The METHOD half is `cross` for a key with no module,
+        because a call on a VALUE carries no receiver type and the receiver
+        may be a struct of a module this image links. Both are facts about
+        another image rather than this one, which is what separates them from
+        the edge set.
+        """
+        for kind, callee, module in _call_keys(getattr(fn, "body", None),
+                                               self.bound_modules):
+            if module:
+                if self._cross is not None:
+                    if self._cross.function(module, callee):
+                        return True
+                else:
+                    raisers = module_raisers(module)
+                    if raisers is not None and callee in raisers:
+                        return True
+            elif kind == "method" and self._cross is not None:
+                if self._cross.method(callee):
+                    return True
+        return False
 
     def _callee_raises(self, kind, name, module="") -> bool:
         """Can this callee end the process? `False` for everything unresolved.
@@ -43788,7 +43867,12 @@ class RaiseGraph:
         if kind == "method":
             if name in self.raising_methods:
                 return True
-            return False
+            # An imported struct's method of this name. Dispatch is by name, so
+            # `b.get(…)` is the same question whichever image declared `get`,
+            # and answering it from this image's table alone is what let a `try`
+            # around a raising method of a LINKED struct build, print nothing
+            # and exit 1 where CPython catches and continues.
+            return bool(self._cross is not None and self._cross.method(name))
         return False
 
     def may_reach_raise(self, node) -> tuple:
@@ -43899,7 +43983,9 @@ def uncatchable_raise(fn, graph=None) -> tuple:
     `unemitted_handler_arm` returns the handler beside the statement. The
     statement is `None` and the `callee` key is set when the raise is reached
     THROUGH a call rather than written inside the `try`, which is the shape
-    almost every instance of this has.
+    almost every instance of this has. That key is `RaiseGraph.may_reach_raise`'s
+    own: `(kind, name, module)`, where a non-empty `module` is a call into
+    ANOTHER image.
 
     **This is the other half of `unemitted_handler_arm`, and it is about
     CONTROL FLOW rather than about an arm's body.** That check asks whether an
