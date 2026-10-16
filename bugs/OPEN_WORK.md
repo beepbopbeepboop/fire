@@ -228,12 +228,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_declared_parameter_against_its_call_sites.md` | `formal414-docs` | the 13-file row, split by what each call site actually hands over |
 
-### `formal/x86_64_codegen` — 1 document, 0 claimed
-
-| doc | claim | what it is (its own title) |
-|---|---|---|
-| `FORMAL_x86_64_instruction_coverage_backlog.md` | **unclaimed** | the x86-64 half of the ISA census, form by form |
-
 ### `formal/x86_64_decode` — 2 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
@@ -255,6 +249,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_x86_64_the_successor_table_is_compared_against_the_model_on_six_forms.md` | **unclaimed** | `formal/x86_64_model_coverage_test.py` compares the emitter's SUCCESSOR against the model on 6 of the 43 forms (8 since the pass that filed this added two more), and every row that was stale was among the other 35 |
+
+### `formal/x86_64_model_fuzz` — 1 document, 0 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
+| `FORMAL_isa_census_ex_column_matches_by_mnemonic.md` | **unclaimed** | the ISA census's EX column matches a form to an image by disassembly MNEMONIC, so two encodings of one instruction are indistinguishable |
 
 ### `formal/x86_64_model_test` — 1 document, 0 claimed
 

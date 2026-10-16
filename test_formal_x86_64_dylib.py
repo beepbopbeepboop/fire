@@ -710,6 +710,61 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
           f"{got.returncode}, expected 0")
 
 
+def test_an_imported_hostmod_dylib_answers_on_x86_64(tmpdir, shared):
+    """A program importing `os.path.getsize` runs and returns the real size.
+
+    The cross-dylib host-module call path, which is a different image shape from
+    the `x86ext` module the other rows use: `os.path` is one Mojo dylib that
+    calls a second (`os._syscalls`), and the call that failed here was an
+    outbound libc call made from inside the imported library, not from the
+    executable.
+
+    `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib` blamed Rosetta;
+    the cause was this tree's Mach-O linker mapping `__LINKEDIT` below the fixed
+    `__DATA` segment, so Rosetta slid the image wrongly and a rip-relative
+    pointer formed inside the imported dylib landed out-of-mapping — a jump to
+    address 0, reported by the shell as `Segmentation fault: 11`. The fix is
+    `3ac56981` (`_linkedit_vm` places `__LINKEDIT` above the last fixed
+    segment).
+
+    The assertion is the one that separates a working image from a
+    well-formed-but-wrong one: the exit status must be CPython's own
+    `os.path.getsize` reduced modulo 256, which is an answer a jump to 0 cannot
+    produce. A signal death is checked separately so the message names the
+    original symptom rather than a bare mismatch.
+    """
+    import os.path as cpython_path
+    payload = os.path.join(tmpdir, "sized.bin")
+    with open(payload, "wb") as f:
+        f.write(b"x" * 342)
+    want = cpython_path.getsize(payload)
+
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                f"    return getsize({payload!r})\n")
+    out = os.path.join(tmpdir, "getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"an x86-64 program importing os.path.getsize did not build: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 getsize image died on signal {-got.returncode} "
+          f"(stderr {got.stderr!r}); before the linker fix it executed at "
+          f"address 0, which arrives here as -11")
+    check(got.returncode == want % 256,
+          f"the x86-64 image exited {got.returncode}, but CPython's "
+          f"os.path.getsize({payload!r}) is {want} => {want % 256}; a wrong "
+          f"answer and a jump to 0 must not be confusable")
+
+
 def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
     """The export trie carries the module's prefixed API and nothing else.
 
@@ -1027,6 +1082,8 @@ TESTS = [
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",
      test_a_receiver_bound_to_a_frame_is_refused_on_both_machines),
+    ("an imported hostmod dylib answers on x86-64",
+     test_an_imported_hostmod_dylib_answers_on_x86_64),
 ]
 
 
