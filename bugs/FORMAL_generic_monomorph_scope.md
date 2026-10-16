@@ -4,6 +4,50 @@
 2026-10-03 on `work/formal15-generic-monomorph` and these are its measured
 remainders, not a proposal · **Layer:** 1/5 of the formal work
 
+**Status 2026-10-12 (`work/formal296-docs`): §2's ALIASED half is FIXED, and it
+is places 1 and 2 in ONE table rather than the three the `formal19-3-r2`
+measurement named — place 3 never has to be decided.**
+
+`from pairlib import Pair as P` then `P[Int]()` now builds and RUNS on both
+architectures (measured: a `Pair[Int]` + `Pair[Bool]` program through the alias
+prints 7 / 1 / 3, CPython's own answers). What landed is one reader,
+`formal/monomorph.py::_import_aliases` — a `from … import … as …` local spelling
+to the DEFINING name, read off `model.import_bindings`, `FromImportStmt` only
+because `import m as n` binds a MODULE and a module is not a template spelling —
+asked by BOTH readers the two spellings have to agree on:
+`all_instantiation_calls` keys the demand on the defining name, and
+`rewrite_instantiation_calls` resolves the call site's base the same way before
+its `demap` lookup. The guard is the shadow rule both readers already had: a
+name the reading scope binds by VALUE is not an alias (`_shadowed_here` at the
+module level, `_names_bound_in` inside a function), so `var P = 5` beside
+`P[Int]()` keeps its brackets and is not rewritten into a struct constructor.
+
+**Why place 3 is not needed, which is where `formal19-3-r2` stopped.** That
+round's place 2 rewrote the call's BASE (`P` → `Pair`) in the AST, so the call
+arrived at the bracketed-callee scan as `Pair[Int]()` and the scan then asked
+the module symbol table for a name the source never bound a value to. This fix
+never produces that intermediate: the alias mapping is internal to the two
+monomorph readers, and `rewrite_instantiation_calls` rewrites the aliased call
+STRAIGHT to the mangled boundary symbol (`Pair_1_T_3_Int`) — the same rewrite
+the unaliased spelling takes. The call the scan finally sees is a bare call to a
+struct this image has a declaration for, so the scan has nothing to refuse; and
+`collect_module_symbols` is untouched, which is exactly what keeps a bare read
+of the defining name (a name the source never bound) refused rather than
+resolving through the import's other spelling.
+
+Pinned by `test_formal_monomorph.py`'s `an aliased import of a template is
+instantiated` (both architectures, two instantiations through the alias, a
+CPython differential) and `an aliased bracket is attributed to the template`
+(the decision without a build: the demand, the rewrite, the shadow guard, and
+that `import m as n` is not an alias). Measured after: `test_formal_monomorph.py`
+40/40, `test_formal_run.py` 1209/1209, `test_formal_imports.py` 91/91,
+`test_formal_specialization.py` 23/23, `test_refusal_taxonomy.py` 362/362;
+`test_formal_dylib.py`'s two failures are pre-existing and measured identical
+with this change reverse-applied.
+
+**What is still open in §2 is the DOTTED half (`L.Pair[Int]()`), and §1a, §3,
+§4 and §8 below are unchanged.**
+
 **§9 and §9a are DONE (2026-10-03 `formal25-3`, 2026-10-04 `formal18-4`), so
 read §9a before §1**: §1a says §1's construct was unmeasurable until §9 was
 fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall,
@@ -124,7 +168,9 @@ the two were in.
 
 **Status 2026-10-04 (`work/formal19-3`): STILL REFUSED, and the refusal was
 FALSE about correct code in three separate ways until this round. That is what
-landed; the recogniser is unchanged and the item stays.**
+landed; the recogniser is unchanged and the item stays.** *(2026-10-12: the
+ALIASED half of this item is fixed — see the Status at the head of the file; the
+DOTTED half this paragraph is about is unchanged.)*
 
 **The construct.** `import std.collections.binary_heap as bh`, then
 `bh.BinaryHeap[Int]()`.
@@ -686,3 +732,13 @@ unchanged and remains the recogniser question §2 opens with. It is:
    necessary and sufficient for everything except that table;
 3. §2's dotted half (`L.Pair[Int]()`) is a SEPARATE piece and is untouched by all
    of the above — a dotted base's recogniser question, not an alias one.
+
+**2026-10-12 (`work/formal296-docs`): items 1 and 2 above are DONE, and item 3
+is the only one still open — and item 1 was not needed after all.** Places 1 and
+2 landed as one reader (`formal/monomorph.py::_import_aliases`) asked by the
+demand walk and the call-site rewrite, and the rewrite targets the MANGLED name
+rather than producing the `Pair[Int]()` intermediate this section was built
+around, so `collect_module_symbols` is untouched and the bare-read question this
+section declined never arises. §2's aliased half builds and runs on both
+architectures; the Status at the head of the file has the mechanism, the tests
+and the numbers. §2's DOTTED half (item 3) is unchanged.
