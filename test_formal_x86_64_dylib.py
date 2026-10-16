@@ -509,6 +509,46 @@ def test_an_elf_image_with_a_macho_module_is_refused(tmpdir, shared):
           f"link line and not about elf as a container")
 
 
+def test_a_hostmod_getsize_call_answers_under_rosetta(tmpdir, shared):
+    """`os.path.getsize` through an imported hostmod dylib returns the size.
+
+    The reduced reproduction of the x86-64 `getsize` crash: the image's
+    `os_path___syscalls` dylib calls `lstat` and then reads the out-parameter
+    struct through a pointer formed rip-relative INSIDE the dylib. The Mach-O
+    linker mapped `__LINKEDIT` below the fixed `__DATA` segment, so Rosetta 2
+    slid the image wrongly and that pointer landed out-of-mapping: the program
+    executed at address 0 and died with `EXC_BAD_ACCESS` while arm64 answered
+    correctly. `formal/macho_linker.py::_linkedit_vm` places `__LINKEDIT` above
+    the last fixed segment now.
+
+    The assertion is CPython's own `os.path.getsize` modulo 256, so a
+    jump-to-0, a signal and a wrong size are each distinguishable from the
+    right answer — and `/etc/hosts` is a file this host has.
+    """
+    prog = os.path.join(tmpdir, "x86getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                "    return getsize(\"/etc/hosts\")\n")
+    out = os.path.join(tmpdir, "x86getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"the getsize program did not build for x86-64: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 getsize image died on a signal ({got.returncode}): "
+          f"{(got.stderr or got.stdout).strip()[:200]}")
+    want = os.path.getsize("/etc/hosts") % 256
+    check(got.returncode == want,
+          f"the x86-64 getsize image exited {got.returncode}, expected {want} "
+          f"(CPython's os.path.getsize('/etc/hosts') mod 256)")
+
+
 def test_the_link_line_containers_must_agree(tmpdir, shared):
     """A library in the wrong container is refused, and the matching one is not.
 
@@ -1070,6 +1110,8 @@ TESTS = [
      test_an_elf_image_with_a_macho_module_is_refused),
     ("the link line containers must agree",
      test_the_link_line_containers_must_agree),
+    ("a hostmod getsize call answers under Rosetta",
+     test_a_hostmod_getsize_call_answers_under_rosetta),
     ("every byte of the x86-64 dylib is claimed by a segment",
      test_every_byte_of_the_dylib_is_claimed),
     ("a program importing an extern module matches CPython",

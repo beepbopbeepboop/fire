@@ -1,5 +1,12 @@
 # FORMAL_time_struct_shaped_answers: five `time` names are absent because their answer is a struct
 
+**Status 2026-10-08 (`work/formal255-docs`): the limit below is unchanged and the
+five names still stay absent; this pass only removed the two citations of
+DELETED docs — the store capability landed in `bc3e5638` and the caller-owned
+returned frame for one image in `9ca853c7`, and both are named by their fix now
+rather than by a `bugs/` path that no longer exists. `test_formal_time.py` is
+5/5 groups on arm64 (`PASS limits`, `PASS structroute read yes / store yes`).**
+
 **Status: UPDATED 2026-10-03 (`work/formal16-8`). Item 1 is CLOSED and item 2 is
 RESOLVED AS A LIMIT, so what is left here is a FACT rather than work: the five
 names are absent because their answer is a STRUCT, a struct cannot cross a module

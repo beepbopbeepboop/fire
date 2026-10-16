@@ -120,6 +120,55 @@ class TestEmittedFormCoverage(unittest.TestCase):
                              "sample: %s" % (arch, broken))
 
 
+class TestTheInstrument(unittest.TestCase):
+    """The columns whose input is a fact about the emitter, not a text match.
+
+    Each of these pins a place where the census could read the repository's
+    PROSE as a fact about the code, which is worse than a wrong count: it makes
+    a form nothing emits look like a row with three missing columns.
+    """
+
+    def test_a_docstring_mention_is_not_a_call_site(self):
+        """EMITTED is a call site, not a spelling.
+
+        `encode_cmov_r64_r64` is named exactly once, in
+        `formal/x86_64_codegen.py`'s prose explaining why this emitter does NOT
+        use it (`lib/X86.lean` has no `cmov` arm, so the clamp is two
+        branches). A regex over the file's TEXT counted that sentence as
+        emission, so the census carried a row for an instruction no image can
+        contain, reported `NO NO NO`, and named an unexplained gap that was
+        really a mention. The column now reads AST `Name`/`Attribute` nodes, the
+        same rule the FUZZ and AS columns already use.
+        """
+        names = C.encoder_names("x86_64")
+        self.assertIn("encode_cmov_r64_r64", names,
+                      "encode_cmov_r64_r64 is no longer even in the encoder "
+                      "table, so this pin no longer has a subject")
+        self.assertEqual(
+            [], C.call_sites("x86_64").get("encode_cmov_r64_r64"),
+            "encode_cmov_r64_r64 reads as EMITTED, but it is named only in a "
+            "docstring in formal/x86_64_codegen.py; a sentence about an "
+            "instruction is not a call site")
+
+    def test_no_x86_64_form_is_left_on_the_backlog(self):
+        """The x86-64 backlog is empty: every form is covered or a limit.
+
+        The last three rows were the call-through-a-register (now a
+        `HARNESS_LIMITS` entry: the target is outside the harness's one
+        `MAP_FIXED` region) and the byte-wise `and`/`or` (removed: the
+        REX-prefix omission that kept them red was this tree's own encoder bug,
+        fixed by `_byte_rex_required`). This is the anti-rot direction of
+        `test_every_backlog_entry_still_describes_a_gap`: it stops a NEW x86-64
+        row from landing on the backlog as a way to make the coverage test
+        pass.
+        """
+        x86 = {r.encoder for r in _ROWS["x86_64"]}
+        still = sorted(x86 & set(C.BACKLOG))
+        self.assertEqual([], still,
+                         "these x86-64 forms are still on the BACKLOG: %s"
+                         % still)
+
+
 class TestExemptions(unittest.TestCase):
     """Every exemption is honest, and an exemption cannot outlive its reason."""
 

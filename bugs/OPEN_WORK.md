@@ -109,7 +109,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot.md` | **unclaimed** | FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot |
 | `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
-| `FORMAL_three_examples_fail_their_proofs_on_master.md` | **unclaimed** | `count` and `pow2` fail their generated proofs on master, and neither is in `EXPECTED_FAILURES` |
+| `FORMAL_three_examples_fail_their_proofs_on_master.md` | **unclaimed** | `count` and `pow2` fail their generated proofs on master, and both are now DECLARED |
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 
