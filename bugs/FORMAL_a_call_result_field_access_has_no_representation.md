@@ -238,9 +238,11 @@ Twenty-two rows. Against them:
 
 **Nothing is left in the "write a `.mojo` module" column.** The task's "next
 4-6 modules by files blocked" does not exist as stated, and this is the second
-wave to measure that
-(`bugs/FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`
-§2 said it and had no column to say it with; §0 is the column).
+wave to measure that (the first measured it too and had no column to say it
+with; §0 is the column). The first wave's ranking document is deleted now that
+its whole queue has closed — `glob`, `shlex.quote` and `random` all landed — and
+its conclusion is folded into
+`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`'s Status.
 
 ### 4.1 Nine of those files want CPython ON PURPOSE, and that is a third answer
 
