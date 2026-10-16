@@ -1888,6 +1888,16 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         ov = gen._new_val(_ret, f'{_c_fn} ()')
     else:
         ot, ov = gen.lower_expr(node.obj)
+        # A `char *`-declared local that is really a word of unknown kind
+        # (the shared loop variable of an untyped `for`'s dict/list dispatch,
+        # see `_dyn_word_locals`): its C type says "string", which would send
+        # `st.value` down the StringLiteral-identity shortcut below and hand
+        # the caller the statement itself. It is read as the word it is.
+        if (ot == 'char *' and isinstance(node.obj, IdentExpr)
+                and _as_str(node.obj.name) in gen._dyn_word_locals):
+            _dl = gen._ensure_local('char *', ov)
+            ov = gen._new_val('int64_t', f'(int64_t){_dl}')
+            ot = 'int64_t'
         # `self.prop.attr` where `prop` is a 0-arg property/method
         # accessed without call syntax (`self.prop`, no `()`) lowers to
         # a deferred, uncalled `MojoBoundMethod *` value (see
