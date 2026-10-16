@@ -12377,7 +12377,7 @@ def fold_constant_interpolated_literals(stmts) -> int:
 
 
 def refuse_interpolated_literals(stmts) -> None:
-    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+    """Fold a field-less f-string, and raise `CodegenError` on the first one WITH a field.
 
     Asked over the MODULE's statement list, once, by the one pipeline both
     front ends go through (`formal/build.py:_prepare_functions`) — the same
@@ -12396,7 +12396,7 @@ def refuse_interpolated_literals(stmts) -> None:
     is one of them.
     """
     for node in iter_nodes(stmts):
-        if is_interpolated_literal(node):
+        if is_interpolated_literal(node) and not fold_interpolated_literal(node):
             raise CodegenError(interpolated_literal_refusal(
                 node, getattr(node, "line", "")))
 
@@ -52881,6 +52881,41 @@ def context_exit_returns_truthy(method) -> bool:
         # this gate is deliberately one-sided in.
         if _literal_return_truthiness(getattr(node, "value", None)):
             return True
+    return False
+
+
+def _exit_return_folds_truthy(value_node) -> bool:
+    """True when `__exit__`'s `return <value_node>` folds to a value CPython reads as TRUE.
+
+    **CPython's test is truthiness, and truthiness is not "a non-zero `int`".**
+    `__exit__` suppresses the exception in flight when it returns something
+    true, and a non-empty string (`return "x"`) and a non-zero float
+    (`return 1.5`) suppress exactly as `return 1` does. Both fold here —
+    `fold_literal_expr` answers a string literal, and both emitters read a
+    `FloatLiteral` as `int(expr.value)`, so the build knows the word — which
+    means a gate keyed on `int` alone let them through, and the program built
+    and then dropped the suppression on the floor: the same wrong answer as
+    `return True`, in a spelling the earlier gate missed.
+
+    A `None` fold — anything computed — is NOT counted. That is the remaining
+    limit `context_exit_returns_truthy` states: cross-field flow (`nullcontext`
+    returns `self.exit_result`), which is deliberately still answered rather
+    than refused.
+    """
+    if isinstance(value_node, F.FloatLiteral):
+        try:
+            return float(value_node.value) != 0.0
+        except (TypeError, ValueError):
+            return False
+    value = fold_literal_expr(value_node)
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value != ""
     return False
 
 

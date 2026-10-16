@@ -2808,6 +2808,30 @@ CASES = [
      "    b = \"t'x'\"\n"
      "    printf(\"[%s][%s]\\n\", a, b)\n"
      "    return 0\n", 0, "[f\"n\"][t'x']"),
+    # ── a field-LESS f-string is not composed, it IS a plain literal ───────
+    #
+    # `f"hello"` has no `{…}`, so CPython reads it exactly as `"hello"` and the
+    # `f` prefix changes nothing. On this path there is no buffer, so a FIELD
+    # is refused — but a field-less literal needs no buffer: it is the same
+    # interned `__TEXT` bytes, through the same `_intern_string`. The refusal
+    # used to fire on the prefix alone and told the reader to rewrite a literal
+    # that was already a plain one. The escapes and the `{{`/`}}` escapes are
+    # the two things the rewording has to get right, so both are in the case.
+    ("fstring_with_no_field_is_the_plain_literal_it_already_is",
+     "def main(n):\n"
+     "    a = f\"hello\"\n"
+     "    b = f\"a\\tb\"\n"
+     "    c = f\"brace {{x}}\"\n"
+     "    printf(\"[%s][%s][%s]\\n\", a, b, c)\n"
+     "    return 0\n", 0, "[hello][a\tb][brace {x}]\n"),
+    # …and the RAW half, which the plain-literal fold has to carry across: the
+    # body of a field-less `rf"c\\nd"` is four characters (a backslash and an
+    # `n`), exactly as `r"c\\nd"` is, because the `r` is a spelling flag and not
+    # text. A fold that dropped it would decode the raw literal's backslash.
+    ("raw_fstring_with_no_field_keeps_its_backslash",
+     "def main(n):\n"
+     "    printf(\"[%s]\\n\", rf\"c\\nd\")\n"
+     "    return 0\n", 0, "[c\\nd]\n"),
 
     # ── the refusal now says WHAT the literal is made of ──────────────────
     #

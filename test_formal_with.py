@@ -191,6 +191,18 @@ SUPPRESSING_EXIT_PY = SUPPRESSING_EXIT.replace(
     "    def __exit__(self):",
     "    def __exit__(self, exc_type, exc_val, tb):")
 
+# The `main` a suppressor is exercised with: a `raise` inside the block, so
+# whether `__exit__`'s value is READ is the difference between stopping at the
+# block (exit 1) and running the statement after it.  Shared by the ANSWERED
+# falsy rows and the REFUSED truthy rows so the two halves differ only in the
+# `__exit__` return.
+SUPPRESSING_MAIN = ("def main(n):\n"
+                    "    with Suppressor() as v:\n"
+                    "        print('body', v)\n"
+                    "        raise ValueError('m')\n"
+                    "    print('after')\n"
+                    "    return 0\n")
+
 RIVAL = """class Rival:
     def __init__(self):
         self.tag = 3
