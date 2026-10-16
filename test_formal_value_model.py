@@ -2644,6 +2644,27 @@ def run_model_rule(name, source, fn_name, want, verbose):
     return True, ""
 
 
+def run_returnless_chain(name, source, want, verbose):
+    """Ask `model.returnless_function_names` about a whole source, no build.
+
+    The transitive reader both emitters' `_callee_returns_value` now asks, and
+    the cycle row it carries is one no image can show: a cycle BUILDS (the
+    functions are read as returning a value), so the least-fixed-point direction
+    is only observable as this set.
+    """
+    import formal.model as M
+    from formal.build import parse_module
+    stmts = parse_module(source, filename=name + ".mojo")
+    fns = [st for st in stmts if isinstance(st, F.FunctionDef)]
+    got = M.returnless_function_names(fns)
+    if got != set(want):
+        return False, (f"returnless_function_names answered {sorted(got)} "
+                       f"where the row says {sorted(set(want))}")
+    if verbose:
+        print(f"      returnless: {sorted(got)}")
+    return True, ""
+
+
 def run_refusal(name, source, needle, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -2748,6 +2769,7 @@ def main():
 + [(c, True) for c in REFUSALS]
                   + [(c, True) for c in BUILTIN_REFUSALS]
                   + [(c, "model") for c in MODEL_RULES]
+                  + [(c, "chain") for c in RETURNLESS_CHAINS]
                   + [(c, "layout") for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
@@ -2763,6 +2785,9 @@ def main():
                 if kind == "model":
                     ok, detail = run_model_rule(entry[0], entry[1], entry[2],
                                                 entry[3], args.verbose)
+                elif kind == "chain":
+                    ok, detail = run_returnless_chain(entry[0], entry[1],
+                                                      entry[2], args.verbose)
                 elif kind == "layout":
                     ok, detail = run_layout(entry[0], entry[1], entry[2],
                                             entry[3], args.verbose)

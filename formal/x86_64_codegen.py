@@ -711,6 +711,10 @@ class X86_64Codegen:
         self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
+        # Lazily filled by `_callee_returns_value` from `self._functions`: the
+        # names whose calls produce no value, transitively over `return <call>`
+        # chains (`model.returnless_function_names`). None means "not computed".
+        self._returnless = None
         # Filled by `compile()`: a callable NAME -> the label a call to it
         # lands on, and the per-definition labels it points at, which are not
         # published in `info["labels"]`. arm64's `_entry_labels` is the same
@@ -10526,11 +10530,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         arm64's `_callee_returns_value` over the same shared reader, and for the
         same reason the dict-ness hook above is duplicated in that shape and not
         in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.function_returns_a_
-        value` decides it — a `return` with a value at any depth of the body, a
-        declared return type, or a `yield` — and NO STACK, because walking one
-        body for its first value-returning `return` cannot recurse where
-        `_callee_kind`'s kind question does.
+        construct is printed here and refused there. `model.returnless_function_
+        names` decides it — the names whose calls produce no value, closed over
+        bare-name `return <call>` chains, so `def f(a): return g(a)` with `g`
+        return-less is not read as a value one hop out. Its least fixed point is
+        what keeps a cycle reading as a value rather than as an unwritten word.
 
         True for a name that is not a function of this unit, which leaves every
         caller with the answer it had: a linked module's export has no body here
@@ -10538,7 +10542,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         function this backend never saw.
         """
         fn = self._functions.get(name)
-        return True if fn is None else M.function_returns_a_value(fn)
+        if fn is None:
+            return True
+        if self._returnless is None:
+            self._returnless = M.returnless_function_names(
+                self._functions.values())
+        return name not in self._returnless
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""

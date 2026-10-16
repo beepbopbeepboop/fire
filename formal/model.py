@@ -25996,35 +25996,121 @@ def _kind_of_simple(e) -> str | None:
 # out of scope here and the corpus measurement in the doc counts it apart.
 
 
-def fn_returns_a_value(fn) -> bool:
-    """Whether `fn`'s own body has a `return` WITH a value, at any depth.
+def _value_return_exprs(fn) -> list:
+    """The `value` of every `return` WITH a value in `fn`'s own body, at any
+    depth.
 
     A nested definition is a different frame with its own returns, so the walk
     stops at one — the same rule "Read before store" uses for the same reason.
-    Depth, not control flow: `if c: return 1` with a fall-through END answers
-    True, and it should, because CPython returns `None` on the other path and
-    `None` is still not a word. A function that returns a value on ONE path is
-    a function whose result this path cannot represent either; what the refusal
-    below is about is the function that has no value at all, because that is the
-    case where the source never suggests one is coming.
+    Depth, not control flow: `if c: return 1` with a fall-through END is
+    included, and it should be, because CPython returns `None` on the other path
+    and `None` is still not a word.
     """
-    def scan(stmts) -> bool:
+    out: list = []
+
+    def scan(stmts) -> None:
         for st in stmts or []:
             kind = type(st).__name__
             if kind == "ReturnStmt":
-                if getattr(st, "value", None) is not None:
-                    return True
+                value = getattr(st, "value", None)
+                if value is not None:
+                    out.append(value)
                 continue
             if kind in ("FunctionDef", "StructDef", "TraitDef",
                         "LambdaExpr"):
                 continue
             for name in getattr(st, "__dataclass_fields__", ()) or ():
                 child = getattr(st, name, None)
-                if isinstance(child, list) and scan(child):
-                    return True
-        return False
+                if isinstance(child, list):
+                    scan(child)
 
-    return scan(getattr(fn, "body", None) or [])
+    scan(getattr(fn, "body", None) or [])
+    return out
+
+
+def fn_returns_a_value(fn) -> bool:
+    """Whether `fn`'s own body has a `return` WITH a value, at any depth.
+
+    Depth, not control flow: `if c: return 1` with a fall-through END answers
+    True, and it should, because CPython returns `None` on the other path and
+    `None` is still not a word. A function that returns a value on ONE path is
+    a function whose result this path cannot represent either; what the refusal
+    below is about is the function that has no value at all, because that is the
+    case where the source never suggests one is coming.
+
+    This is the PER-FUNCTION half and it is deliberately blind to the CALL GRAPH
+    — a `return g()` counts as a value here because `g` might return one, and the
+    reader that can see `g`'s body is `returnless_function_names`.
+    """
+    return bool(_value_return_exprs(fn))
+
+
+def _return_expr_produces_no_value(expr, returnless: set) -> bool:
+    """Whether a `return <expr>` produces the "no value" this path cannot carry.
+
+    The DIRECT shape only: `return g(…)` where `g` is a bare-name call to a
+    function already known to return nothing. An `expr` of any other shape — a
+    call through a receiver, a dotted callee, a literal, an arithmetic term —
+    produces a value, which is the conservative direction: an unrecognised shape
+    leaves the function reading exactly as it did before.
+
+    A `return v` through a LOCAL bound to such a call is deliberately NOT here.
+    It needs the function's own binding table, which is a different walk, and it
+    is the rarer of the two spellings; `return _err(msg)` is the one that occurs.
+    """
+    return (isinstance(expr, F.CallExpr)
+            and isinstance(expr.func, F.IdentExpr)
+            and expr.func.name in returnless)
+
+
+def returnless_function_names(functions) -> set:
+    """The names of the functions in `functions` whose CALLS produce no value,
+    closing `fn_returns_a_value` over bare-name `return <call>` chains.
+
+    `fn_returns_a_value` reads ONE body and answers for the returns it can see
+    there; this is the same question one hop further out, and the hop is a real
+    divergence rather than a refinement. `def f(a): return g(a)` where `g`
+    returns nothing is a function whose result CPython evaluates to `None`, while
+    this path leaves whatever the callee's last instruction wrote in the return
+    register — so `print(f(1))` is the SAME silent wrong answer the direct
+    `print(g(1))` is, reached through one `return` statement, and a reader that
+    stops at the first hop builds the wrong program.
+
+    **A LEAST fixed point, and that is what makes a cycle safe.** A pair that
+    returns each other has no function that is PROVABLY value-less, so neither
+    name enters the set and both read as returning a value — the direction that
+    leaves an existing build unchanged. The predicate is monotone (a name known
+    value-less only makes more returns value-less), so starting from the empty
+    set and adding a name when every value-returning `return` is a call to a name
+    already in it terminates at the smallest such set.
+
+    A generator or coroutine is excluded, and so is a function that DECLARES a
+    return type, both for the reason `function_returns_a_value` gives: the
+    "value" is the object, and a declaration is the source saying a value is
+    coming.
+    """
+    by_name: dict = {}
+    for fn in functions:
+        name = getattr(fn, "name", None)
+        if isinstance(name, str):
+            by_name[name] = fn
+    returnless: set = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, fn in by_name.items():
+            if name in returnless:
+                continue
+            if (getattr(fn, "is_generator", False)
+                    or getattr(fn, "is_async", False)
+                    or fn_declares_a_return(fn)):
+                continue
+            exprs = _value_return_exprs(fn)
+            if all(_return_expr_produces_no_value(e, returnless)
+                   for e in exprs):
+                returnless.add(name)
+                changed = True
+    return returnless
 
 
 def fn_declares_a_return(fn) -> bool:

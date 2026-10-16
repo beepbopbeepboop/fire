@@ -668,6 +668,10 @@ dylib_exports: list = None, globals_base: int = None,
         self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
+        # Lazily filled by `_callee_returns_value` from `self._functions`: the
+        # names whose calls produce no value, transitively over `return <call>`
+        # chains (`model.returnless_function_names`). None means "not computed".
+        self._returnless = None
         self._structs: dict = {}
         # Filled by `compile()`: a callable NAME -> the label a call to it lands
         # on, and the per-definition labels it points at, which are not
@@ -4864,21 +4868,30 @@ ctor_field_value=self._ctor_field_value_for(name),
         whose answer is not about a KIND: a function with no `return` produces
         nothing, CPython calls that `None`, and a value here is one 64-bit word,
         so the honest answer for such a call is "not a value this path can carry"
-        rather than a kind. `model.function_returns_a_value` is the ONE reader
-        of the declaration and the body, because the x86-64 backend answers the
-        same question and two readings of "does this function return" is how the
-        two machines come to disagree about a construct.
+        rather than a kind.
 
-        NO STACK, unlike `_callee_kind` above, and the difference is the point:
-        this walks one body and stops at the first value-returning `return`, so
-        it cannot recurse into the callee — a cycle is not a thing here. The
-        default for a name that is not a function of this unit is True, which is
-        the safe direction: it leaves the caller with the answer it had, so a
+        **The answer is the TRANSITIVE one.** `model.returnless_function_names`
+        is the ONE reader, and it closes the question over bare-name
+        `return <call>` chains, because `def f(a): return g(a)` with `g`
+        return-less is the same `None` one hop out: reading the chain as a value
+        is what let `print(f(1))` print a word nothing wrote. Its least fixed
+        point is what keeps a cycle (two functions returning each other) reading
+        as a value rather than as an unwritten word. The x86-64 backend asks the
+        same reader, because two readings of "does this function return" is how
+        the two machines come to disagree about a construct.
+
+        The default for a name that is not a function of this unit is True, which
+        is the safe direction: it leaves the caller with the answer it had, so a
         linked module's export (whose sources are not here to be read) changes
         nothing.
         """
         fn = self._functions.get(name)
-        return True if fn is None else M.function_returns_a_value(fn)
+        if fn is None:
+            return True
+        if self._returnless is None:
+            self._returnless = M.returnless_function_names(
+                self._functions.values())
+        return name not in self._returnless
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
