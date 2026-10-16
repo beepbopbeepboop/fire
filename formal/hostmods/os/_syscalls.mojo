@@ -1621,13 +1621,14 @@ def fs_stat_field32(p, follow, at, signed) -> int:
     and reading it as 64 would take the four bytes of padding after it, so the
     width is the field's and not the alignment's. ZERO-extended: `uid_t` and
     `gid_t` are unsigned, so this is the right reader for them; `st_dev` is a
-    signed `dev_t` and has `fs_stat_field32_signed` beside this one.
+    signed `dev_t`: pass `signed = 1` (or use `fs_stat_field32s`) to read it
+    sign-extended with `le32s`.
     """
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
     if signed == 1:
-        return le32_signed(buf, at)
+        return le32s(buf, at)
     return le32(buf, at)
 
 
