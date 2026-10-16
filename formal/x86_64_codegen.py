@@ -4360,7 +4360,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 None if name.name in self._frame_holders else
                 M.one_word_value_text_evidence(
                     self._one_word_candidates.get(name.name),
-                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)),
+            container_of=lambda e: self._vkinds.kind_of(e))
 
     def _printf_arg_text(self, arg):
         """The DECODED TEXT of a `printf` vararg, or None when unseen.

@@ -19489,6 +19489,97 @@ def check_printf_number_conversion_agreement(verbose=False):
     return passed, failures
 
 
+# ── a CONTAINER handed to a `printf` conversion ─────────────────────────────
+#
+# The third direction of the table `PRINTF_TEXT_CASES` and `FLOAT_REFUSALS`
+# read: `%s` is the text arm (a `char *`), `%d`/`%f` are the value arms (an
+# integer or a double), and a CONTAINER is a fourth kind that is neither. On
+# this path a list/tuple/set/dict is a heap BLOB — a pointer to a block with its
+# element count at offset 0 — so a conversion that renders the word prints the
+# blob's ADDRESS.
+#
+# Measured on BOTH architectures before `printf_container_conversion_refusal`,
+# from GREEN builds, exit 0, nothing on stderr:
+#
+#     printf("v=%d", xs)   arm64 1809329920   x86-64 1870638832   (address)
+#     printf("v=%f", xs)   arm64 0.000000     x86-64 0.000000
+#     printf("v=%s", xs)   arm64 ""           x86-64 ""           (blob bytes)
+#
+# where CPython raises `TypeError: %d format: a real number is required, not
+# list`. It is the same class as `%s` of an integer — a conversion reading a
+# word whose own kind says it is not the thing the conversion wants — and it is
+# fixed the same way: one positive kind test, asked by both emitters through
+# `model.printf_format_refusal`, so arm64 and x86-64 cannot come to disagree
+# about what a `printf` means.
+PRINTF_CONTAINER_REFUSALS = [
+    # THE reproducer, and it is the address that makes the class: the two
+    # machines print DIFFERENT numbers for the same source because the blob's
+    # heap address is not a property of the program. The needle names the
+    # conversion, the operand and its kind, so a reword that stops naming the
+    # kind fails here.
+    ("printf_d_of_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n",
+     "refuse:reads `xs` as a NUMBER, and `xs` is `list:int`", None),
+    # The `%s` arm, which is the one that DEREFERENCES: the blob's count bytes
+    # are not text, so this printed `[]` (the walk stopped at whichever zero byte
+    # the heap block starts with) rather than faulting. Same kind test, different
+    # conversion, and it is the text refusal's message that carries it.
+    ("printf_s_of_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%s\", xs)\n"
+     "    return 0\n",
+     "refuse:reads `xs` as text, and `xs` is `list:int`", None),
+    # The KIND and not the constructor's name, which is the doc's second
+    # decision: `printf("%d", d)` for a `Dict` is the same shape and the same
+    # answer, and the needle names the operand (`d`) rather than a list.
+    ("printf_d_of_a_dict_is_refused",
+     "def main() -> Int:\n"
+     "    var d = {1: 10, 2: 20}\n"
+     "    printf(\"v=%d\", d)\n"
+     "    return 0\n",
+     "refuse:reads `d` as a NUMBER", None),
+    # A list PARAMETER, through an annotation rather than a local, so the
+    # evidence is the DECLARATION and not a body statement: the kind is the bare
+    # `list` an annotation gives, and the row pins that the test is the kind
+    # (`is_list_kind`) rather than the value's element kind.
+    ("printf_d_of_an_annotated_list_parameter_is_refused",
+     "def show(xs: List[Int]) -> Int:\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n"
+     "def main() -> Int:\n"
+     "    return show([1, 2, 3])\n",
+     "refuse:reads `xs` as a NUMBER, and `xs` is `list` — a CONTAINER", None),
+    # ── THE CONTROLS, and both are the over-refusal direction ───────────────
+    #
+    # The element and the length are what a reader means to print, and both
+    # classify as integers — so a rule that treated "a list is in this function"
+    # as "refuse this list's operations" would fail here. These two rows are why
+    # the refusal is about the operand's own kind rather than about a container
+    # being somewhere in the function.
+    ("printf_d_of_a_container_element_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"[%d]\", xs[0])\n"
+     "    return 0\n", 0, "[1]"),
+    ("printf_d_of_a_container_length_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"[%d]\", len(xs))\n"
+     "    return 0\n", 0, "[3]"),
+    # …and a STRING still reaches `%s`: the container test is asked after the
+    # two text checks, so a name bound to text is text and not a blob.
+    ("printf_s_of_a_bound_string_still_prints",
+     "def main() -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[abc]"),
+]
+
+
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
 

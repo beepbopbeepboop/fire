@@ -10803,7 +10803,8 @@ def identity_conversion_operand(expr):
     return args[0]
 
 
-def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
+def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None,
+                            container_of=None):
     """`True` / an evidence string / `None`: does this `printf` vararg hold text.
 
     THE decision, in one function, asked with the three facts only an emitter
@@ -10851,6 +10852,17 @@ def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
          default, so `kind_of`'s `INT_KIND` here is the expression's own shape
          and `printf("[%s]", 42)` — which walks bytes at address 42 looking for
          a NUL — is the same defect the two tables above exist for.
+
+    **A CONTAINER is refused here too, and it is the one shape where `%s` is
+    worse than a number rather than merely as bad.** `%s` is the conversion that
+    DEREFERENCES, so a container is a pointer it walks: measured on BOTH
+    architectures from a GREEN build, `printf("[%s]", xs)` for `xs = [1, 2, 3]`
+    printed `[]` and exited 0 where CPython raises `TypeError` — the blob's count
+    bytes are not text and the walk stops at whichever zero byte it finds first,
+    which is output that depends on a heap layout. `printf_arg_container_evidence`
+    is the kind test (a `list`, `tuple`, `set` or `dict` all answer), and it is
+    asked AFTER the two text checks so a name bound to a real string is text and
+    not refused.
     """
     arg = expr
     for _ in range(4):
@@ -11578,6 +11590,8 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of,
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of,
                                              text_of_arg)
+            or printf_container_conversion_refusal(callee, fmt_text, args,
+                                                   container_of)
             or printf_kind_conversion_refusal(callee, fmt_text, args,
                                               class_of)
             or printf_container_conversion_refusal(callee, fmt_text, args,
