@@ -23,6 +23,18 @@ benchmark shape (a synthetic struct chain — a `class` with class attrs,
 2026-10-02 entry's, because the benchmark's shape has drifted since; the ratio
 column is the claim, and the ratio is the claim that moved.
 
+**The bug this doc is named for is fixed. The doc STAYS, and the reason is not
+the headline.** Its "Remaining work" list from 2026-08-25 tracks three
+consumers besides `_walk_ast`, and one of them is still open on its own Phase-9
+measurement: `_collect_self_assigns`/`_collect_self_reads`, 26,080 calls and
+1.75s of a 23.3s profiled run (7.5%), "still untouchable for the reason Phase 3
+gives — it mutates struct ASTs directly (`s.fields.append(...)`), so memoizing
+it means caching raw syntactic shape and re-deriving the type from three live
+pieces of state on every call". This pass gives it the invalidation hook the
+mutating half of that argument needs, and does nothing about the cost. Deleting
+the doc would delete that item from the queue, and this doc has already carried
+a CLOSED banner it did not earn once (2026-09-26, withdrawn).
+
 ### What is in the code
 
 Three pieces, all in `mojo/middle/exprtypes.py`:
