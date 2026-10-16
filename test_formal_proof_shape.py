@@ -307,6 +307,102 @@ class TestGoalReading(unittest.TestCase):
         self.assertEqual(S.goal_size(""), (0, 1, 0))
 
 
+class TestObjectiveVersusContext(unittest.TestCase):
+    """`goal_and_context`: the proposition, not the state around it.
+
+    `--mode goal`'s `goal_chars` is the size of the whole printed STATE, and on
+    `formal/examples/bitops.mojo` that is 23 856 characters over 307 lines of
+    which the objective is **three lines and 110 characters** — the rest is 40
+    hypotheses, four groups of which embed a fully-expanded 33-field
+    `Arm64State`. `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    §Status records a whole memory-window argument built on the 23 856 and then
+    records that the number is 99.5 % context, which is exactly the failure this
+    reader removes: the measurement was of the printed state, not of the thing
+    the flow is `simp`-ing.
+
+    Both orders Lean prints are in the fixture, and both are asserted, because a
+    reader that handled only one would silently report the whole state as the
+    objective on the other:
+
+      * `goals[0]` — the terminal flow: the `⊢` group FIRST (`⊢ match
+        arm64_go_exit … with` and its two `|` arms), then the walk's own
+        context — a `case pos` label and `hpc_0 : st.pc = 4294967968`;
+      * `goals[1]` — the walk's intermediate goal, which `residual_goals` cut at
+        the next `⊢`, so it is the objective and nothing else.
+
+    **The shape that matters is the one `residual_goals` cannot cut:**
+    `formal/examples/bitops.mojo`'s terminal flow prints its `⊢` group and then
+    304 more hypothesis lines, which is the 23 856-character state the doc's
+    Status block measured and the reason the split exists.
+    """
+
+    def test_the_objective_is_the_turnstile_group_and_not_the_state(self):
+        goals = S.residual_goals(TRACE)
+        for i, state in enumerate(goals):
+            objective, context = S.goal_and_context(state)
+            self.assertTrue(objective.startswith("⊢"),
+                            f"goal {i}: the objective must start at the "
+                            f"`⊢` line, got {objective[:40]!r}")
+            self.assertLessEqual(len(objective), len(state),
+                                 f"goal {i}: the objective is larger than the "
+                                 f"state it was split out of")
+            self.assertNotIn("⊢", context,
+                             f"goal {i}: context still carries a `⊢`, so the "
+                             f"split put the proposition on both sides")
+        # …and the one with context is strictly smaller, which is the property
+        # the split buys and the only one of the two that can fail silently.
+        objective, context = S.goal_and_context(goals[0])
+        self.assertTrue(context, "goals[0] must have context, or this row is "
+                                 "asserting nothing")
+        self.assertLess(len(objective), len(goals[0]))
+
+    def test_both_of_the_printers_orders_are_answered(self):
+        goals = S.residual_goals(TRACE)
+        first_objective, _c = S.goal_and_context(goals[0])
+        second_objective, _c = S.goal_and_context(goals[1])
+        self.assertTrue(goals[0].startswith("⊢"),
+                        "fixture changed: goals[0] is no longer objective-first")
+        self.assertTrue(first_objective.startswith("⊢ match arm64_go_exit"))
+        self.assertTrue(second_objective.startswith("⊢ match"))
+        # A state whose context comes FIRST — `h : T` above the `⊢` — is the
+        # other order, and it is what `residual_goals` hands over whenever the
+        # printer puts a hypothesis between two `⊢` groups.  It is spelled here
+        # rather than taken from the fixture because this fixture cannot contain
+        # it: every extracted goal starts at a `⊢` by construction.
+        objective, context = S.goal_and_context("hpc_0 : st.pc = 8\n⊢ True")
+        self.assertEqual(objective, "⊢ True")
+        self.assertEqual(context, "hpc_0 : st.pc = 8")
+
+    def test_the_context_is_the_hypotheses_and_the_case_labels(self):
+        goals = S.residual_goals(TRACE)
+        _objective, context = S.goal_and_context(goals[0])
+        self.assertIn("hpc_0 : st.pc = 4294967988", context)
+        self.assertIn("case pos", context)
+        self.assertEqual(S.context_hypotheses(context), 1,
+                         "a `case pos` label is not a hypothesis and must not "
+                         "be counted as one")
+        # …and the state literal lives in the OBJECTIVE of the intermediate
+        # goal, which is the shape the doc measured.  `goal_size` counts it
+        # either way; the split says WHERE it is, which is what a reader sizing
+        # a memory window needs.
+        objective, _c = S.goal_and_context(goals[1])
+        self.assertIn("bitops_b4_qT29", objective)
+        self.assertEqual(S.goal_and_context(goals[1])[1], "")
+
+    def test_a_state_with_no_turnstile_reports_no_objective(self):
+        """A reader that cannot find a `⊢` must not quote the whole state back.
+
+        The failure this guards is a caller printing 23 856 characters as though
+        they were a proposition, which is the mistake the split exists to make
+        impossible — so the empty answer is `('', state)`, and the CONTEXT keeps
+        everything so a diagnostic can still show what was printed.
+        """
+        self.assertEqual(S.goal_and_context("h : T"),
+                         ("", "h : T"))
+        self.assertEqual(S.goal_and_context(""), ("", ""))
+        self.assertEqual(S.context_hypotheses(""), 0)
+
+
 class TestPrefixReading(unittest.TestCase):
     """`--mode prefix`: the file truncated at each top-level group.
 

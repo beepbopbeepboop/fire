@@ -22,7 +22,13 @@ This one answers the two questions a proof-cost bug needs and breadth cannot:
     `trace_state` and admitting the leaf, so Lean prints the residual goal and
     the file still elaborates. A cost with no goal in front of it is a number
     nobody can act on; the goal is what says whether the cost is TERM SIZE or
-    TACTIC COUNT, and those need different fixes.
+    TACTIC COUNT, and those need different fixes. **It reports the printed
+    STATE and the OBJECTIVE separately** (`goal_chars` against
+    `objective_chars`), and that split is not a refinement: on
+    `formal/examples/bitops.mojo` the state is 23 856 characters and the
+    proposition is 110, the other 23 746 being 40 hypotheses — a memory-window
+    argument read off the state is an argument about 0.5 % of it (see
+    `goal_and_context`).
 
   * `--mode flows` — **what the terminal value flows COST**, by checking one
     group twice: as generated, and with every flow's line replaced by
@@ -262,6 +268,81 @@ def residual_goals(stdout, stderr=""):
         end = starts[k + 1] if k + 1 < len(starts) else len(text)
         out.append(text[at:end].strip())
     return out
+
+
+def goal_and_context(state):
+    """`(goal, context)` — the `⊢` group alone, and the hypotheses around it.
+
+    **The split exists because the doc's next step was measured on the wrong
+    number, and this is the correction.** `--mode goal`'s
+    `goal_chars`/`goal_lines` are the size of the whole printed STATE, and on
+    `formal/examples/bitops.mojo` that is 23 856 characters over 307 lines — of
+    which the objective is **three lines and 110 characters** and the other
+    23 746 are 40 hypotheses. A memory-window argument was built on the
+    23 856, which is 99.5 % context (`bugs/
+    FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`'s Status
+    block records this, and records that the number is not wrong — it is a
+    measurement of the printed state, which is a different thing from the
+    objective the flow is `simp`-ing).
+
+    **The rule is the printer's own shape, and both of its orders are measured.**
+    Lean prints the `⊢` line together with every line immediately below it that
+    begins with a space or a tab — a `match` arm, an indented `some` — and every
+    other line at column 0 is a hypothesis or a `case` label. The objective can
+    come FIRST (the bitops terminal flow: `⊢ match arm64_go_exit … with` on line
+    1 and 304 hypothesis lines after it) or LAST (the walk's own intermediate
+    goals: a `case pos` label, a hypothesis, then `⊢ …`), and this reader answers
+    both by asking where the indented group is rather than by assuming an order.
+    The `⊢` LINE is always the anchor, so a hypothesis whose own text contains a
+    `⊢` cannot move the boundary.
+
+    `''` in, `('', '')` out — a reader that cannot find a `⊢` reports no
+    objective rather than reporting the whole state as one, which is the
+    direction that keeps a caller from quoting 23 856 characters as though they
+    were a proposition.
+    """
+    lines = (state or "").split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("⊢"):
+            start = i
+            break
+    if start is None:
+        return ("", state or "")
+    end = start + 1
+    while end < len(lines) and lines[end][:1] in (" ", "\t"):
+        end += 1
+    goal = "\n".join(lines[start:end])
+    context = "\n".join(lines[:start] + lines[end:])
+    return (goal, context)
+
+
+def context_hypotheses(context):
+    """How many lines of a context are a named hypothesis.
+
+    A SPELLING count, and it says so: a column-0 line that reads `name : type`
+    (or `name:` with the type on the next line), which on the measured states is
+    `hpc_0 : st.pc = 4294967968` and `h8 : 8 = UInt64.ofNat 8` and NOT `case
+    pos` — a `case` label is the alternative Lean prints for the same line, so a
+    predicate that counted tokens rather than the `name :` shape would count
+    both. A hypothesis whose type is itself multi-line prints as several lines
+    and counts once, which is the direction that UNDER-counts; the number is here
+    so a reader can see how much of the context is names rather than bytes, not
+    as an exact tally.
+    """
+    n = 0
+    for line in (context or "").split("\n"):
+        if not line or line[:1] in (" ", "\t"):
+            continue
+        head = line.split(" ", 1)[0]
+        if head.endswith(":") and head[:-1].isidentifier():
+            n += 1
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isidentifier() \
+                and parts[1].lstrip().startswith(":"):
+            n += 1
+    return n
 
 
 def goal_size(goal):
@@ -616,6 +697,7 @@ def main(argv=None):
             goals = residual_goals(res.stdout, res.stderr)
             biggest = max(goals, key=len) if goals else ""
             chars, lines, literals = goal_size(biggest)
+            objective, context = goal_and_context(biggest)
             report["goal"] = {
                 "which": args.which,
                 "flows_present": len(flow_lines(text)),
@@ -627,6 +709,17 @@ def main(argv=None):
                 "goal_chars": chars,
                 "goal_lines": lines,
                 "state_literals": literals,
+                # The SAME state, split — see `goal_and_context`.  `goal_chars`
+                # above is the printed state and is kept as it was, because it
+                # is what earlier readings of this tool recorded; the
+                # `objective_*` numbers are the proposition the flow is
+                # actually `simp`-ing, and on bitops they are 110 characters
+                # against the state's 23 856.
+                "objective_chars": len(objective),
+                "objective_lines": objective.count("\n") + 1 if objective else 0,
+                "context_chars": len(context),
+                "context_lines": context.count("\n") + 1 if context else 0,
+                "hypotheses": context_hypotheses(context),
                 "goals": [{"chars": len(g), "lines": g.count(chr(10)) + 1}
                           for g in goals],
             }
@@ -679,6 +772,12 @@ def main(argv=None):
         print(f"           {g['goals_printed']} goal(s) printed; the largest is "
               f"{g['goal_chars']} chars, {g['goal_lines']} lines, "
               f"{g['state_literals']} fully-expanded state literal(s)")
+        if g["objective_chars"]:
+            print(f"           …of which the OBJECTIVE is {g['objective_chars']} "
+                  f"chars, {g['objective_lines']} line(s); the other "
+                  f"{g['context_chars']} chars are {g['hypotheses']} "
+                  f"hypotheses (a memory-window argument is about the "
+                  f"objective, and the state is 99.5% context on bitops)")
         if g["exceeded"]:
             print(f"           EXCEEDED: {g['exceeded']}")
     if "flows_ab" in report:

@@ -24835,6 +24835,257 @@ def check_interpolated_segments_against_cpython(verbose=False):
     return passed, failures
 
 
+def check_interpolated_literal_bound_census(verbose=False):
+    """HOW MANY of the corpus's interpolated literals have a COMPILE-TIME-KNOWN
+    bound, and which single field stops each one that does not.
+
+    Returns `(passed, failures)`. This is the measurement
+    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.1 asks for and does not
+    have. Its step 1 says: *"A buffer with a compile-time-known bound, in the
+    frame scratch … The bound is computable at compile time (chunk lengths are
+    known; a field's width is its declared type's)"* — and the half in
+    parentheses is **true of an integer field and false of a string one**, which
+    is the half that decides how much of the feature is buildable at all. A
+    frame buffer is reserved at compile time (`formal/arm64_codegen.py`'s blob
+    cursor, `formal/model.py`'s `frame_blob_refusal`), so a field whose width is
+    a `strlen` over the VALUE cannot be sized for.
+
+    **The scope is read with the tree's OWN readers, so a number here and a
+    decision in an emitter cannot come apart**: `formal/model.py::
+    interpolated_literal_segments` for the fields, `interpolated_literal_bound`
+    for the verdict, and `ValueKinds` — the same class both backends ask "what
+    does this name in this function hold" — for a bare name's DECLARED type,
+    per function, from `formal/types.py`'s own vocabularies.
+
+    **Three rows are asserted as DIRECTIONS (floors) and one as an equality
+    that has to be `>= 1`, and none of them is a threshold.** What a reader is
+    owed is the shape of the corpus, re-measurable, plus the one fact that
+    cannot go back to zero without the feature becoming worth something: **at
+    least one literal in the corpus is bounded by the declared type alone**,
+    with no spec, no conversion and no runtime width in it. That is the shape
+    §7.1's step 1 is written for (`f"--backend={backend}"`), and a corpus where
+    it stopped existing would make step 1 worth nothing — so it is a fact about
+    the corpus rather than a drifting proportion, and it is asserted exactly.
+    """
+    import collections as _collections
+    import os as _os
+    import formal.types as _types
+    build = __import__("formal.build", fromlist=["build"])
+    M = _TYPE_VALUE_MODEL
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    roots = [here]
+    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
+    if _os.path.isdir(stdlib):
+        roots.append(stdlib)
+
+    def declared_widths(fn):
+        """`{name: ('int', n) | ('str', None) | ('none', None)}` per declared name.
+
+        **And NOT `ValueKinds.locals`, which is the trap this row exists to
+        avoid.** `ValueKinds` seeds an UNANNOTATED parameter to `INT_KIND` —
+        "a word is an integer here", which is the right default for every
+        question that asks "what does this operand hold" and the wrong reading
+        for this one, because "the source never said" and "the source said
+        `Int`" are opposite facts and only the second bounds a buffer. The first
+        version of this census read `ValueKinds.locals` and counted
+        `f"Compiling {input_file} to {output_so}..."` in `build_module.py` as a
+        58-byte composition, because both parameters are unannotated and so
+        arrived as integers — which would have sized a buffer for two 20-digit
+        numbers around what are `str` paths. **A bound arithmetic that reads a
+        default as a declaration is how a buffer gets sized for the wrong
+        language**, so the map here is built from annotations only: each
+        parameter's own annotation (`model._param_list`) and each `VarDecl` /
+        `AssignStmt` `type_ann`, through `declared_type_kind`.
+        """
+        out = {}
+
+        def note(name, ann):
+            if not name:
+                return
+            kind = M.declared_type_kind(
+                ann, _types.TYPE_NAMES, _types.STRING_TYPE_NAMES, None,
+                float_names=_types.FLOAT_TYPE_NAMES) if ann else None
+            if kind == M.INT_KIND:
+                out[name] = ("int", M.integer_text_width(64))
+            elif kind == M.STR_KIND:
+                out[name] = ("str", None)
+            elif ann:
+                out[name] = ("none", None)
+
+        for pname, pann in M._param_list(fn):
+            note(pname, pann)
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            note(getattr(node, "name", None), getattr(node, "type_ann", None))
+        return out
+
+    def width_of(expr, widths):
+        """The widest text for one field, or None when nothing states one.
+
+        The two shapes that carry their own width are the literals; a name is
+        bounded only by its declared type, and only an integer's width is
+        arithmetic. A STRING-typed name is the case the measurement is about:
+        its width is a `strlen` over the value, and a frame buffer is reserved
+        at compile time, so no such buffer can be sized for it.
+        """
+        shape = M.interpolated_field_shape(expr)
+        if shape == "int-literal":
+            return len(str(int(expr.strip(), 0)))
+        if shape == "str-literal":
+            return len(expr.strip()[1:-1].encode("utf-8"))
+        if shape == "name":
+            got = (widths or {}).get(expr.strip())
+            return got[1] if got else None
+        return None
+
+    scanned = 0
+    shapes = _collections.Counter()
+    total_fields = 0
+    total_literals = 0
+    bounded = []                     # (path, spelled, bound)
+    one_obstacle = _collections.Counter()
+    for root in roots:
+        for dirpath, dirnames, filenames in _os.walk(root):
+            dirnames[:] = [d for d in sorted(dirnames)
+                           if d not in (".git", "build", "__pycache__",
+                                        ".tmp", "output")]
+            for fname in sorted(filenames):
+                if not fname.endswith((".py", ".mojo")):
+                    continue
+                path = _os.path.join(dirpath, fname)
+                try:
+                    src = open(path, encoding="utf-8").read()
+                    stmts = build.parse_module(src, path)
+                except Exception:
+                    continue
+                scanned += 1
+                # The SCOPE of each node, from ONE pass of the shared walker:
+                # `iter_nodes_with_parent` yields every node AFTER its parent
+                # (it is pre-order and `parent` is the node it was reached
+                # from), so the innermost enclosing `FunctionDef` is a forward
+                # propagation over `id(parent)` rather than a second traversal
+                # with its own idea of what a scope is. One `ValueKinds` per
+                # function — the same class both backends ask "what does this
+                # name in this function hold" — and a module-level literal,
+                # whose fields are in no function at all, gets `None`, which
+                # answers nothing rather than guessing.
+                fdef = getattr(build.F, "FunctionDef")
+                scope = {}
+                for node, parent in M.iter_nodes_with_parent(stmts):
+                    if isinstance(node, fdef):
+                        try:
+                            scope[id(node)] = declared_widths(node)
+                        except Exception:
+                            scope[id(node)] = {}
+                    else:
+                        scope[id(node)] = (scope.get(id(parent))
+                                           if parent is not None else None)
+                for node in M.iter_nodes(stmts):
+                    if not M.is_interpolated_literal(node):
+                        continue
+                    spelled = getattr(node, "value", "")
+                    try:
+                        segs = M.interpolated_literal_segments(spelled)
+                    except M.CodegenError:
+                        continue
+                    fields = [s for s in segs if s[0] == "field"]
+                    total_literals += 1
+                    vk = scope.get(id(node))
+                    total_fields += len(fields)
+                    for seg in fields:
+                        shapes[M.interpolated_field_shape(seg[1])] += 1
+                    bound, _why = M.interpolated_literal_bound(
+                        spelled, lambda e, _vk=vk: width_of(e, _vk))
+                    if bound is not None:
+                        bounded.append((path, spelled, bound))
+                    # …and the DECISIVE count: how many literals are one field
+                    # away from a bound, i.e. every field is integer-typed or a
+                    # literal and the only thing missing is a width for a
+                    # STRING-typed field. That is the number that says whether
+                    # step 1 is a frame-buffer feature or a storage decision.
+                    if bound is None and fields and not spelled[:1] in ("t", "T") \
+                            and not any(f[2] or f[3] for f in fields):
+                        verdicts = [(M.interpolated_field_shape(f[1]),
+                                     (vk or {}).get(f[1].strip()))
+                                    for f in fields]
+                        shapes_ = [v[0] for v in verdicts]
+                        strays = [v for v in verdicts
+                                  if v[0] == "name" and v[1] and v[1][0] == "str"]
+                        if shapes_ != ["name"] * len(fields):
+                            one_obstacle["a-field-no-declaration-reaches"] += 1
+                        elif len(strays) == len(fields):
+                            one_obstacle["every-field-is-a-string"] += 1
+                        elif strays:
+                            one_obstacle["one-string-among-integers"] += 1
+                        else:
+                            one_obstacle["no-field-is-declared-at-all"] += 1
+    n = len(bounded)
+    scope_free = sum(1 for _p, s, _b in bounded
+                     if all(M.interpolated_field_shape(f[1]) in
+                            ("int-literal", "str-literal")
+                            for f in M.interpolated_literal_segments(s)
+                            if f[0] == "field"))
+    passed, failures = 0, []
+    if scanned > 100:
+        passed += 1
+    else:
+        failures.append(f"only {scanned} file(s) scanned, so this row is not "
+                        f"covering the corpus it claims to cover")
+    if n >= 1:
+        passed += 1
+    else:
+        failures.append(
+            "no interpolated literal in the corpus has a compile-time-known "
+            "bound from its declared types alone. §7.1's step 1 is written for "
+            "exactly that shape (`f\"--backend={backend}\"`), and a corpus "
+            "without one makes the feature worth nothing — so this is a fact "
+            "about the corpus rather than a direction, and it has to be "
+            "re-derivable")
+    for label, got, floor, why in (
+            ("literals in the corpus", total_literals, 1000,
+             "the denominator every row below is a share of, and the one that "
+             "decides whether a bound is worth anything: §7.1's buffer is "
+             "reserved per LITERAL, so a shape that is 3% of them moves 3% of "
+             "the corpus"),
+            ("literals with a compile-time-known bound", n, 1,
+             "the shape §7.1's step 1 reserves bytes for"),
+            ("…of those, bounded with NO scope at all", scope_free, 0,
+             "a field that is an integer or string LITERAL carries its own "
+             "width, so this row is what a resolver with no type information "
+             "can answer"),
+            ("literals whose every field is a STRING-typed name",
+             one_obstacle["every-field-is-a-string"], 1,
+             "THE decisive count: these are decidable the moment a string field "
+             "has a width, and §7.1's \"a field's width is its declared type's\" "
+             "is false of every one of them — the width is a `strlen` over the "
+             "VALUE and a frame buffer is reserved before the program runs"),
+            ("literals with a string field among integer ones",
+             one_obstacle["one-string-among-integers"], 0,
+             "the mixed shape, which is where a partial bound would be worst"),
+            ("literals with a field no declaration reaches",
+             one_obstacle["a-field-no-declaration-reaches"], 1,
+             "a call, a subscript, an attribute or an undeclared name: nothing "
+             "in the source fixes a width, so no bound arithmetic reaches it "
+             "and the reading is per name"),
+            ("literals with every field undeclared",
+             one_obstacle["no-field-is-declared-at-all"], 1,
+             "the same shape with nothing at all stated — the value model doc "
+             "(`FORMAL_string_value_model`) holds the next step for these")):
+        if got >= floor:
+            passed += 1
+        else:
+            failures.append(f"{label}: {got}, expected at least {floor} — {why}")
+    if verbose:
+        for p, s, b in bounded[:10]:
+            print(f"      bounded: {b:>4} byte(s)  {s}   ({p})")
+    print(f"      interpolated-bound census: {scanned} file(s), "
+          f"{total_literals} literal(s), {total_fields} field(s), "
+          f"{n} bounded literal(s) "
+          f"({scope_free} with no scope); "
+          f"one-obstacle: {dict(one_obstacle)}; "
+          f"field shapes: {dict(shapes)}")
+    return passed, failures
+
+
 def check_interpolated_literal_census(verbose=False):
     """What the corpus's interpolated literals are MADE OF, over every file here.
 
@@ -26281,6 +26532,14 @@ def main():
           f"FAIL={len(seg_failures)}")
     passed += seg_passed
     failed += len(seg_failures)
+    bnd_passed, bnd_failures = check_interpolated_literal_bound_census(
+        args.verbose)
+    for detail in bnd_failures:
+        print(f"  FAIL  interpolated-bound: {detail}")
+    print(f"formal run: interpolated-bound PASS={bnd_passed} "
+          f"FAIL={len(bnd_failures)}")
+    passed += bnd_passed
+    failed += len(bnd_failures)
     at_passed, at_failures = check_assigned_type_evidence(args.verbose)
     for detail in at_failures:
         print(f"  FAIL  assigned-type: {detail}")

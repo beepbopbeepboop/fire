@@ -1112,6 +1112,123 @@ def is_frontend_provided(name: str) -> bool:
         or name.split(".")[0] in FRONTEND_PROVIDED_MODULES
 
 
+def _hand_kept_tier(name: str) -> str:
+    """The tier a name is IN, by table membership alone. `''` for no tier.
+
+    This is `host_module_tier` minus the one derived rule
+    (`capability_sibling_tier`), split out so the rule can ask the question
+    without asking itself: a derived answer must never be able to feed the
+    next derivation, or `_foo` → `foo` → … would be a cycle rather than a
+    derivation.
+    """
+    if not name:
+        return ""
+    top = name.split(".")[0]
+    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
+        return "unreachable"
+    if top in HOST_ADMITTED or name in HOST_ADMITTED:
+        return "admitted"
+    if top in HOST_MODELLED or name in HOST_MODELLED:
+        return "modelled"
+    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
+        return "not-a-module"
+    return ""
+
+
+# The two CLAIM tiers — the ones that assert something about the target rather
+# than about this tree's sources. They are what a derived answer is allowed to
+# pass on, and the pair is named rather than spelled twice so that a fifth tier
+# cannot be added without this rule having to say what it does with it.
+CLAIM_TIERS = ("modelled", "unreachable")
+
+
+def capability_sibling_tier(name: str) -> str:
+    """A private module's tier, DERIVED from the public module it accelerates.
+
+    **This is the one piece of the 216-name queue that is decidable without a
+    judgement about the target, and it is decidable from THIS repository.**
+    CPython splits a capability across a public module and a private C
+    accelerator for it — `hashlib` and `_hashlib`, `decimal` and `_decimal`,
+    `json` and `_json`, `struct` and `_struct`, `socket` and `_socket`,
+    `threading` and `_thread`. Implementing the private one is implementing the
+    public one's capability, so the tier that answers for the public name
+    answers for the private one, and there is nothing left to decide:
+
+    | the private name | the public one | why that is the whole argument |
+    |---|---|---|
+    | `_socket` | `socket` → `unreachable` | the socket is missing from the target, so the accelerator for it is too |
+    | `_locale` | `locale` → `unreachable` | ditto, and `locale` is already in the table for it |
+    | `_warnings` | `warnings` → `unreachable` | ditto |
+    | `_ctypes` | `ctypes` → `admitted` | a foreign-code loader this tree answers under declared contracts, so the capability is REACHABLE even though `ctypes` cannot be computed |
+    | `_hashlib` | `hashlib` → `written` | `formal/hostmods/hashlib.mojo` answers it here, so the capability needs no object at all |
+    | `_decimal` | `decimal` → `modelled` | arithmetic over a fixed decimal representation |
+
+    **The two rows at the bottom of that table are why this rule outranks the
+    EXTERNAL oracle, and they are measured rather than argued.** Read the dylib
+    a CPython extension happens to link and the answer flips:
+    `formal/stdlib`'s own measurement (`tools/formal_stdlib_reach.py`) says
+    `_hashlib` links `libcrypto.3.dylib` and `_decimal` links `libmpdec.4.dylib`,
+    neither of which is in libSystem — so a rule that read the dynamic
+    dependencies would call both `unreachable`, which contradicts what THIS TREE
+    already says (`hashlib` is answered by a source, `decimal` is
+    `HOST_MODELLED`) and what the tier means ("a Mojo-side implementation could
+    in principle provide this"). **A library outside libSystem is a fact about
+    CPython's packaging; an object the target does not have is a fact about the
+    target, and the tables already carry the second.** That is the whole reason
+    the rule reads the tables and not the interpreter, and the reason the
+    accelerator question is never asked.
+
+    Two deliberate restrictions, each because the obvious extension is wrong:
+
+    * **`'admitted'` and `'written'` become `'modelled'`, never themselves.**
+      `HOST_ADMITTED`'s own membership rule is "there is a `formal/hostmods/`
+      source" (`_admitted_tier_conflicts` asserts it in both directions against
+      the filesystem), and `_thread` has no source. Returning `admitted` for it
+      would claim a file that is not there; returning `written` would be worse,
+      because a consumer reading the verdict's detail would be handed `None` as
+      the path that answers the name. `modelled` is the honest reading of both:
+      the capability is reachable in principle, and nothing here implements it.
+    * **A public name derives nothing.** `host_module_tier` asks this only for a
+      name that is not in a tier, and the rule only fires on a leading-underscore
+      name, so `socket` never reaches it and can never answer with
+      `socket`'s own answer to something else.
+
+    `''` — nothing derived — is the answer for every other name, which is where
+    the rest of
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue lives. The
+    derivation is deliberately NOT applied to a name with a Mojo source: a name
+    this tree has written is answered by `host_module_verdict`'s own source arm,
+    and `host_module_tier`'s rule that "a name LEAVES a tier by being WRITTEN"
+    is about the hand-kept tables, which this does not touch.
+
+    **The resolver is asked with its DEFAULT search roots, deliberately, and
+    that is what keeps `host_module_tier` a function of the name.** Every caller
+    of this accessor — `tools/formal_sweep.py`, `tools/formal_sweep_causes.py`,
+    `tools/formal_host_import_wall.py`, `host_module_verdict` itself — calls it
+    without a base, and the rule has to give the same answer to all of them. The
+    question it asks the resolver is "does THIS TREE have a source for the
+    public name", which is the repository-root question, and asking it that way
+    is also the right one: a `hashlib.mojo` sitting beside one particular
+    importer is that importer's module and not a statement about the tree. If
+    that ever has to change it changes HERE, once, and not in four callers.
+    """
+    if not name or not name.startswith("_"):
+        return ""
+    public = name.lstrip("_")
+    if not public or public == name:
+        return ""
+    tier = _hand_kept_tier(public)
+    if tier in CLAIM_TIERS:
+        return tier
+    # `'admitted'`/`''` from the tables, and then the SOURCE — because a public
+    # module answered by a `formal/hostmods/` file has had its capability
+    # demonstrated, which is the strongest statement available here and is what
+    # `_hashlib` (via `hashlib`) is an instance of.
+    if tier == "admitted" or resolve_module_path(public):
+        return "modelled"
+    return ""
+
+
 def host_module_tier(name: str) -> str:
     """`'modelled'`, `'admitted'`, `'unreachable'`, `'not-a-module'`, or `''`.
 
@@ -1133,10 +1250,20 @@ def host_module_tier(name: str) -> str:
     all (`this`, `antigravity`, `turtledemo` — see `HOST_NOT_A_MODULE`). It is
     tested LAST and deliberately so: it is the weakest claim of the four (it
     asserts nothing about reachability), so a name that is in two tiers should
-    answer with the one that says something. `''` — no tier at all — remains the
-    answer for the CPython standard-library names nobody has judged, which is the
-    queue `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is, and the
-    tripwire that keeps it honest is
+    answer with the one that says something.
+
+    **A name in NO tier can still answer, and that is the fifth path: the
+    DERIVED one.** `capability_sibling_tier` above is asked last, after all four
+    tables, and it fires only on a private name whose public sibling this
+    repository has already classified — `_hashlib` answers `modelled` because
+    `hashlib` is answered here, `_socket` answers `unreachable` because `socket`
+    is in the table. It is a table of nothing and a rule, so a name it settles
+    is settled by the rule rather than remembered, and the 216-name queue in
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is 30 names shorter
+    for a reason no reader has to take on trust. What it deliberately does NOT
+    do is guess for the rest: `''` still means "CPython ships it and nothing
+    here says which of the two claim tiers it is", and the tripwire that keeps
+    that honest is
     `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
 
     `unreachable` is tested first, so a name in both tiers would resolve to the
@@ -1145,18 +1272,10 @@ def host_module_tier(name: str) -> str:
     `_admitted_tier_conflicts` doing the same for the admitted half plus its
     "has a source" rule.
     """
-    if not name:
-        return ""
-    top = name.split(".")[0]
-    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
-        return "unreachable"
-    if top in HOST_ADMITTED or name in HOST_ADMITTED:
-        return "admitted"
-    if top in HOST_MODELLED or name in HOST_MODELLED:
-        return "modelled"
-    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
-        return "not-a-module"
-    return ""
+    tier = _hand_kept_tier(name)
+    if tier:
+        return tier
+    return capability_sibling_tier(name)
 
 
 def _host_tier_conflicts() -> list:
@@ -1321,12 +1440,30 @@ def _is_host_module(name: str) -> bool:
     `is_cpython_stdlib`, and the two are different questions with different
     consumers. This one is `resolve_module_path`'s pass 2 and the tier tables'
     own membership test, so it answers "is this one of the names we have
-    CLASSIFIED", and a classified name includes every module with a
-    `formal/hostmods/` source, which is why `math`, `stat`, `shutil`, `fcntl`
-    and `platform` all answer False here and are pinned False by their own
-    suites: they are built here, so nothing refuses them.
+    CLASSIFIED", which includes every module with a `formal/hostmods/` source —
+    `math`, `stat`, `shutil`, `fcntl`, `platform` all answer False here and are
+    pinned False by their own suites: they are built here, so nothing refuses
+    them.
+
+    **A DERIVED tier counts as classified, and that is the only reason this
+    consults `host_module_tier` rather than the union.** `capability_sibling_tier`
+    settles 30 private names from the tables (see its docstring), and none of
+    them is in `HOST_MODULES`, so a predicate reading the union would report them
+    unclassified — and `unresolvable_import_error`'s arm for an unclassified name
+    says "no tier in `formal/imports.py` saying whether implementing it would
+    need an object this target does not have", which is then **false of a name
+    the tier accessor answers**. So the predicate asks the accessor, and
+    `_hashlib` gets the host-module sentence, which is true of it, instead of a
+    sentence about a tier it has.
+
+    **The OUTCOME does not change either way, and that is the property the tier
+    split rests on**: both arms of `unresolvable_import_error` REFUSE the
+    import, so what a derived name moves is the wording and the reach accounting
+    — the same two things the eleven names of 2026-10-05 moved, for the same
+    reason.
     """
-    return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+    return bool(host_module_tier(name)) or name in HOST_MODULES \
+        or name.split(".")[0] in HOST_MODULES
 
 
 def is_cpython_stdlib(name: str) -> bool:

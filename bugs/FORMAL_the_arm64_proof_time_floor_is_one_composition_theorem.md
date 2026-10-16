@@ -12,8 +12,15 @@ the attribution HOLDS and is re-derivable with a committed instrument, and ALL
 THREE of the doc's remaining next steps are now REFUTED or RE-AIMED — item 1's
 by a measurement that is the shape it proposes, item 2's already was, and the
 `lib/ProofLib.lean` memory window this Status proposed last by a measurement
-that splits the flow's cost in half and puts the window on the wrong half.**
-Below, in the order a reader needs them:
+that splits the flow's cost in half and puts the window on the wrong half.
+What landed 2026-10-05 (`work/formal73-docs`) is the last of those: `--mode
+goal` now prints the OBJECTIVE (128 chars, 3 lines) beside the printed STATE
+(23 856 chars, 307 lines, 40 hypotheses), so the number this Status block had to
+take apart by hand is a number the tool reports — see the sixth bullet. The
+memory window itself is still a `lib/ProofLib.lean` addition and is not
+attempted: it invalidates every worker's `.olean` cache and §"Do NOT start from
+raise the ceiling" is right that it has to be made deliberately.
+Below, in the order a reader needs them:**
 
 **Status 2026-10-05 (`work/formal54-docs`): the reader the per-block
 decomposition needs is FIXED and TESTED, and the decomposition's own premise is
@@ -274,21 +281,56 @@ the order a reader needs them:
   until a run says how much of the +3.76 s it removes.**
 
 * **AND THE GOAL THE DOC HAS BEEN MEASURING IS 0.3 % OF WHAT `--mode goal`
-  PRINTS.** `--mode goal --which 1` reports "the largest is 23 856 chars, 307
-  lines, 33 fully-expanded state literal(s)", and the memory-window argument
-  below is built on those numbers. **Split that print and the goal is its FIRST
-  LINE and 83 characters; the other 23 773 are CONTEXT** — 40 hypotheses, of
-  which the `hbnd`/`hpc_0`/`hrun_0`/`hcert_0` group each embed a 33-field
-  `Arm64State` literal. Those 33 "literals" are the ELABORATOR's pretty-print
-  expansion of `{ Arm64State.init n 4294967968 with pc := ..., x30 := ... }`,
-  which the emitter already writes in the compact `with` form (18 occurrences of
-  `x30 :=` in the 255 KB file, every one inside a `with`). **So the term handed
-  to the flow contains no `mem_read_u64` and no `mem_write_u64` at all** — the
-  memory enters when `simp` rewrites `s_2` through `hsid_2`, which is why
-  "unfold one block and count the writes" measures an INTERMEDIATE state rather
-  than the flow's input. **The measurement is not wrong; it is a measurement of
-  something one step downstream of the cost**, and the number to hold is the
-  marginal above.
+  PRINTS — AND THE INSTRUMENT NOW SAYS SO ITSELF, so the number cannot be
+  misread a second time.** `--mode goal --which 1` reports "the largest is 23
+  856 chars, 307 lines, 33 fully-expanded state literal(s)", and the
+  memory-window argument below is built on those numbers. **Split that print and
+  the goal is its FIRST LINE and 83 characters; the other 23 773 are CONTEXT** —
+  40 hypotheses, of which the `hbnd`/`hpc_0`/`hrun_0`/`hcert_0` group each
+  embed a 33-field `Arm64State` literal. Those 33 "literals" are the
+  ELABORATOR's pretty-print expansion of `{ Arm64State.init n 4294967968 with
+  pc := ..., x30 := ... }`, which the emitter already writes in the compact
+  `with` form (18 occurrences of `x30 :=` in the 255 KB file, every one inside a
+  `with`). **So the term handed to the flow contains no `mem_read_u64` and no
+  `mem_write_u64` at all** — the memory enters when `simp` rewrites `s_2`
+  through `hsid_2`, which is why "unfold one block and count the writes" measures
+  an INTERMEDIATE state rather than the flow's input. **The measurement is not
+  wrong; it is a measurement of something one step downstream of the cost**, and
+  the number to hold is the marginal above.
+
+  **LANDED 2026-10-05 (`work/formal73-docs`): `tools/formal_proof_shape.py`'s
+  `--mode goal` reports the OBJECTIVE and the CONTEXT separately, so the split
+  above is a number the tool prints rather than a paragraph a reader has to
+  reconstruct.** `goal_and_context` takes the `⊢` line together with every line
+  immediately below it that begins with a space or a tab — a `match` arm, an
+  indented `some` — and calls everything else context, which answers both orders
+  Lean prints (objective-first on the terminal flow, context-first wherever a
+  hypothesis falls between two `⊢` groups). On this file, same run, same
+  instrument:
+
+  ```
+  2 goal(s) printed; the largest is 23856 chars, 307 lines, 33 fully-expanded state literal(s)
+  …of which the OBJECTIVE is 128 chars, 3 line(s); the other 23727 chars are 40 hypotheses
+  ```
+
+  **40 hypotheses, which is the number this document measured BY HAND** from the
+  printed state — so the instrument and the prose now agree, and the 23 856 is
+  labelled as what it is (the printed state) rather than being the only number
+  on the screen. The objective is **three lines and 128 characters**, of which
+  the first is the 83 the paragraph above quotes: a refinement, not a
+  correction. `goal_chars`/`goal_lines` are unchanged, because they are what
+  every earlier reading of this tool recorded; the new `objective_chars`,
+  `objective_lines`, `context_chars`, `context_lines` and `hypotheses` are
+  additive. Four Lean-free cases in `test_formal_proof_shape.py::
+  TestObjectiveVersusContext` pin the split, including that a `case pos` label
+  is not counted as a hypothesis and that a state with no `⊢` reports NO
+  objective rather than quoting the whole state back as one.
+
+  **What this does not do:** it does not make the cost smaller, and it does not
+  make the memory window cheaper. It removes the ability to quote a 23 856-
+  character number as though it were a proposition, which is the mistake this
+  Status block had already caught by hand and which the next reader would
+  otherwise repeat from the same screen line.
 
 * **ITEM 1's NEXT STEP IS NOT WORTH DOING, and the measurement is the shape it
   proposes.** §"What is actually left" item 1 says to state the terminal value
