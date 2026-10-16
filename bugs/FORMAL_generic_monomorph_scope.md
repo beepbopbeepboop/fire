@@ -495,15 +495,46 @@ sufficient.
 
 ## 8. What is NOT here, deliberately
 
-* **A generic with a trait bound.** `formal/monomorph.py::instantiate`
-  substitutes without checking conformance, where
-  `elaborate.check_bounds` does. `std/collections/binary_heap.mojo`'s
-  `BinaryHeap[T: Copyable & Comparable & Deinitable]` is the shape, and the
-  substituted body is checked by the ordinary build for whatever it can check —
-  but a conformance VIOLATION is currently a field type that does not exist,
-  which is §5's failure mode. **The first time this feature meets a bounded
-  template in the stdlib, this is the hole it will fall through**, and the repair
-  is `elaborate.check_conformance` reached from here.
+* **A generic with a trait bound — FIXED 2026-10-13 (`work/formal343-docs`).**
+  `formal/monomorph.py::instantiate` used to substitute without checking
+  conformance, where `elaborate.check_bounds` does. `std/collections/
+  binary_heap.mojo`'s `BinaryHeap[T: Copyable & Comparable & Deinitable]` is the
+  shape, and the substituted body is checked by the ordinary build for whatever
+  it can check — but a conformance VIOLATION was a field type the build does not
+  read, which is §5's failure mode. **Measured, and it was a WRONG ANSWER, not a
+  latent one:** a single file declaring `trait Greet`, a `Cat` with no `hello`,
+  and `struct Box[T: Greet]` applied as `Box[Cat]()` **built and ran on both
+  architectures**, a program the language rejects accepted by the formal path.
+
+  **What landed.** `instantiate` asks `elaborate.check_bounds(src,
+  template_src, targs)` before anything is substituted — the ONE conformance
+  reader the compiled path already asks (slice 6), so this is the same rule on
+  the one path that was not asking it, not a second implementation. The
+  direction is what makes it safe: `check_conformance` ACCEPTS an unknown trait
+  or a type with no source in the defining module, so wiring it here can only
+  turn a build into a refusal, and only where the trait, the concrete type and
+  the template are all in the module's own source. A dependency's bounded
+  template whose argument is the CONSUMER's type stays accepted, which is §4's
+  question and not this one's.
+
+  **The reason has to reach the reader, and that is the second half.** A failed
+  demand leaves the call site carrying its brackets, and the bracketed-callee
+  scan (`formal/build.py::check_module_symbols`) is what refuses it — with
+  `specialization_call_refusal`, whose "a call arriving here asked for none" is
+  FALSE of a call whose bracket named a type argument and whose demand failed
+  for a stated reason. So `instantiate_all(record=True)` publishes the failure
+  (`monomorph._FAILED_DEMANDS`, one entry per template, cleared per unit beside
+  `model._MODULE_SYMBOLS`) and the scan asks it first, which is why the reader
+  now sees `type 'Cat' does not conform to trait 'Greet' (required by parameter
+  'T'): missing method 'hello'`.
+
+  **Tests.** `test_formal_monomorph.py`'s
+  `a trait bound violation is refused by name` (both architectures, asserts the
+  refusal names the trait AND the missing method AND does not fall through to
+  "asked for none") and its control
+  `a conforming type argument is still instantiated` — a CPython differential,
+  because a check that refused every bounded template would pass the violation
+  row and remove the feature.
 * **Instantiating a template from inside the template.** `Pair[T]` whose body
   says `Pair[T]()` is not a recursion here — `instantiate` substitutes text and
   does not descend — and the result is correct, because `Pair_1_T_3_Int` is a
