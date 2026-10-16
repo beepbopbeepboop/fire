@@ -1416,22 +1416,26 @@ AXIOM_CLOSURE = {
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
     "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
-    # the same way on the same run.  Twelve askable declarations, of which EIGHT
+    # the same way on the same run.  Fourteen askable declarations, of which TEN
     # are kernel-checked and ONE reaches a decide axiom; the three
     # `closure_only` are theorems that reach no axiom themselves but rest on one
     # through another declaration in the module, which is the only module in
-    # `lib/` besides `ProofLib` where that column is non-zero.
+    # `lib/` besides `ProofLib` where that column is non-zero.  The 12→14/8→10
+    # move on 2026-10-05 is the x86-64 rule's two theorems
+    # (`x86_set_reg_self`, `peephole_x86_mov_self`), both proved with
+    # `omega`/`rw` and neither adding an axiom site — so the site count in
+    # `LIBRARY_TRUST` is unchanged and only the declaration census moved.
     #
     # **The one `reaches` is the finding, not a rounding error**, and it is the
     # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
-    # module: nine sites spread over twelve declarations, so most declarations
+    # module: nine sites spread over fourteen declarations, so most declarations
     # carry none, one carries the site's axiom and three inherit it.  The site
     # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
     # sites versus declarations — and the module's value is that the rewrites it
-    # licenses are proved about `Arm64State` with `omega`, so 8 of 12 are checked
-    # by the kernel and the pass's soundness does not rest on a single decision
-    # procedure call.
-    "Peephole": (12, 1, 8, 0, 3, 0),
+    # licenses are proved about `Arm64State` with `omega`, so 10 of 14 are
+    # checked by the kernel and the pass's soundness does not rest on a single
+    # decision procedure call.
+    "Peephole": (14, 1, 10, 0, 3, 0),
 }
 
 

@@ -113,6 +113,35 @@ def _i(word):
     return struct.unpack("<I", word)[0]
 
 
+class _XAsm:
+    """The bytes-level stand-in for `formal/x86_64.py`'s assembler.
+
+    `_Asm` packs integer words, which is arm64's shape and not x86's: an x86
+    instruction is a byte string of arbitrary length, and the decoder reads
+    bytes. The two assemblers disagree about sections the same way, so this
+    exists and the arm64 `_Asm` cannot serve. Same contract — exactly the
+    attributes `_Remap` and `_decode_region` touch.
+    """
+
+    def __init__(self, data, org=0x1000, labels=None, relocs=None,
+                 externs=None):
+        self.sections = {"text": bytearray(data)}
+        self._org = org
+        self.labels = dict(labels or {})
+        self.relocs = list(relocs or [])
+        self.extern_refs = list(externs or [])
+
+    def text(self):
+        return bytes(self.sections["text"])
+
+
+def _xrun(data, labels=None, relocs=None, externs=None):
+    """Run the pass over raw x86-64 bytes inside a `_XAsm`; returns removed."""
+    asm = _XAsm(data, labels=labels, relocs=relocs, externs=externs)
+    removed = P._run(asm, "x86_64", P.X86_RULES)
+    return asm, removed
+
+
 class TestRulesAreLicensed(unittest.TestCase):
     """The registry and the Lean source have to agree, in both directions."""
 
@@ -133,6 +162,8 @@ class TestRulesAreLicensed(unittest.TestCase):
         for name in ("peephole_arm64_mov_self",
                      "peephole_arm64_add_imm_fuse",
                      "peephole_arm64_copy_chain",
+                     "peephole_x86_mov_self",
+                     "x86_set_reg_self",
                      "arm64_step_add_imm64",
                      "arm64_steps_one_seq", "arm64_steps_two_seq"):
             self.assertIn(name, declared,
@@ -776,6 +807,102 @@ class TestRemap(unittest.TestCase):
         self.assertIsNotNone(insn, "the fused word must still decode")
         self.assertEqual((6, 9, 12), (insn.rd, insn.rn, insn.imm))
         self.assertEqual(0, (only >> 22) & 1, "sh must stay clear")
+
+
+class TestX86Rules(unittest.TestCase):
+    """The x86-64 rule, on the bytes it matches and on each it must decline.
+
+    The x86 half has its own window contract: a rule returns `(b"", 1)` to
+    DELETE its one instruction, which is what `_x_mov_self` does. The arm64
+    rules run over 4-byte words; an x86 instruction is 1-9 bytes, which is why
+    these tests state raw bytes rather than `encode_*` results.
+    """
+
+    def test_mov_self_removes_one_instruction_and_no_other(self):
+        # `mov rax, rax` (REX.W 89 /r, mod=3, reg == r/m) followed by an
+        # ordinary `xor eax, eax` that must SURVIVE.
+        asm, removed = _xrun(b"\x48\x89\xc0\x31\xc0\xc3")
+        self.assertEqual(1, removed)
+        self.assertEqual(b"\x31\xc0\xc3", asm.text())
+
+    def test_mov_self_removes_two_adjacent_self_copies(self):
+        # The fixed point: after the first deletion the second 3-byte copy is
+        # the window's first instruction again, so it goes too.
+        asm, removed = _xrun(b"\x48\x89\xc0\x48\x89\xc0\x31\xc0\xc3")
+        self.assertEqual(2, removed)
+        self.assertEqual(b"\x31\xc0\xc3", asm.text())
+
+    def test_mov_self_declines_the_reverse_spelling(self):
+        # `mov rax, rax` written as `48 8b c0` (the LOAD direction, form
+        # `mov_r64_rm64`). The theorem `peephole_x86_mov_self` is for the
+        # 0x89 store direction, which is the only one the emitters produce;
+        # a match on this would be a rewrite with no proof.
+        asm, removed = _xrun(b"\x48\x8b\xc0\x31\xc0\xc3")
+        self.assertEqual(0, removed)
+        self.assertEqual(b"\x48\x8b\xc0\x31\xc0\xc3", asm.text())
+
+    def test_mov_self_declines_a_copy_between_different_registers(self):
+        # `48 89 c1` is `mov rcx, rax` (modrm 0xc1: reg=0/rax is the SOURCE,
+        # r/m=1/rcx the destination). The reg == r/m side condition is what
+        # the Lean theorem's `h_same` discharges; deleting it is a rewrite of
+        # a different instruction.
+        asm, removed = _xrun(b"\x48\x89\xc1\x31\xc0\xc3")
+        self.assertEqual(0, removed)
+        self.assertEqual(b"\x48\x89\xc1\x31\xc0\xc3", asm.text())
+
+    def test_mov_self_declines_a_memory_operand(self):
+        # `48 89 38` is `mov [rax], rdi` — modrm 0x38, mod=0, an addressing
+        # write with a memory side effect. The `d.mod == 3` guard is the
+        # theorem's `h_mod`, and a memory-form 0x89 must not be deleted: the
+        # machine state reads and writes memory there.
+        asm, removed = _xrun(b"\x48\x89\x38\x31\xc0\xc3")
+        self.assertEqual(0, removed)
+        self.assertEqual(b"\x48\x89\x38\x31\xc0\xc3", asm.text())
+
+
+class TestX86Repatch(unittest.TestCase):
+    """A deletion in x86-64 moves the branch displacement with its target.
+
+    The relative-reference forms the emitters produce store their displacement
+    in the TRAILING bytes (direct, unlike arm64's encoded-in-the-word 26-bit
+    immediates), so a deletion that shifts a target must rewrite those bytes
+    or the reference reaches the wrong address. `_x86_relative_slot` names the
+    two encodings — the 4-byte absolute references a 32-bit REL displacing
+    from the fetch address, and the 4/1-byte conditional references — and
+    these tests pin the rewrite for both a branch and a rip-relative data-pool
+    address.
+    """
+
+    def test_a_deleted_instruction_between_a_jump_and_its_target(self):
+        # `e9 05 00 00 00` jumps PAST a self-copy to a `ret`: the displacement
+        # says target-at-10, which is the old `ret`. Removing the 3-byte copy
+        # in between must bring the target back to the same INSTRUCTION, so the
+        # displacement becomes 2 (10 - 5 -> 7 - 5) and not 0.
+        data = (b"\xe9\x05\x00\x00\x00"       # 0: jmp 5+5 -> 10 (the ret)
+                b"\x48\x89\xc0"               # 5: mov rax, rax   (deleted)
+                b"\x31\xc0"                   # 8: xor eax, eax
+                b"\xc3")                      # 10: ret
+        asm, removed = _xrun(data)
+        self.assertEqual(1, removed)
+        self.assertEqual(b"\xe9\x02\x00\x00\x00\x31\xc0\xc3", asm.text(),
+                         "the jump still has to reach the ret at new offset 7")
+
+    def test_a_deletion_below_a_rip_relative_lea_moves_the_pool_with_it(self):
+        # `lea rax, [rip + 0x0a]` names a string `str_s` that lives in the
+        # data pool after `ret`, and a self-copy sits BETWEEN the lea and the
+        # pool. Deleting it shifts both the lea's fetch address and the string;
+        # the displacement is rewritten so the lea still names the string, and
+        # the `str_` label remaps to the pool's new home.
+        data = (b"\x48\x8d\x05\x0a\x00\x00\x00"   # 0: lea rax, [rip+10] -> 17
+                b"\x48\x89\xc0"                   # 7: mov rax, rax   (deleted)
+                b"\xc3"                           # 10: ret
+                b"xxxxxxA")                       # 11..16 pad, 17 = str_s
+        asm, removed = _xrun(data, labels={"str_s": 0x1000 + 17})
+        self.assertEqual(1, removed)
+        self.assertEqual(b"\x48\x8d\x05\x07\x00\x00\x00\xc3xxxxxxA",
+                         asm.text(),
+                         "the lea still names 'A', whose old offset 17 is now 14")
+        self.assertEqual(0x1000 + 14, asm.labels["str_s"])
 
 
 class TestTheCorpus(unittest.TestCase):
