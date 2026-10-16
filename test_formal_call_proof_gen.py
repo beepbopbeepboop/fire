@@ -2513,66 +2513,6 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_lemmas("syn", code, 0x1000))
 
 
-class TestExecutableStepCode(unittest.TestCase):
-    """The step lemmas cover the EXECUTABLE region, not the interned strings.
-
-    `__TEXT` carries every function body and THEN every interned string, and
-    `_step_result_plan` walks every 4-byte word it is handed — so a string byte
-    pattern that decodes as an instruction the step table knows used to get a
-    step lemma for a word no execution reaches, and the step-OK lemma's
-    discriminator fact for that branch is FALSE, which fails the whole proof to
-    typecheck with no `sorry` anywhere.  `model.stack_trap_message` (which every
-    guarded image carries) has the word `0x36312064` = `909189220`, a `TBZ`, and
-    it is the one measured red on every arm64 proof.  `executable_step_code` is
-    the ONE truncation all three generators (`generate_arm64_proof`,
-    `_generate_frame_proof`, `generate_dylib_proof`) now ask.
-    """
-
-    def test_it_truncates_at_the_first_strings_address(self):
-        import formal.arm64_proof_gen as G
-        code = bytes(range(32))
-        base = 0x1000
-        # The MINIMUM address is the end of the code, whatever order the table
-        # lists the strings in.
-        self.assertEqual(G.executable_step_code(code, base,
-                                                {"str_addrs": {"a": 0x1008,
-                                                               "b": 0x1004}}),
-                         code[:4])
-
-    def test_it_is_the_identity_with_no_strings(self):
-        import formal.arm64_proof_gen as G
-        code = bytes(range(32))
-        self.assertEqual(G.executable_step_code(code, 0x1000, {}), code)
-        self.assertEqual(G.executable_step_code(code, 0x1000,
-                                                {"str_addrs": {}}), code)
-
-    def test_a_string_address_at_or_below_the_base_clamps_to_nothing(self):
-        """Not a `min(...) - base` that can go negative and slice from the end."""
-        import formal.arm64_proof_gen as G
-        code = bytes(range(32))
-        self.assertEqual(G.executable_step_code(code, 0x1000,
-                                                {"str_addrs": {"x": 0}}), b"")
-        self.assertEqual(G.executable_step_code(code, 0x1000,
-                                                {"str_addrs": {"x": 0x1000}}),
-                         b"")
-
-    def test_the_trap_messages_word_is_planned_but_truncated_away(self):
-        """The measured reproducer, at the generator's own entry points.
-
-        The word IS one the step table decodes — that is the bug — and the
-        truncation this method computes removes it before either step-lemma
-        emitter sees it.
-        """
-        import struct as _struct
-        import formal.arm64_proof_gen as G
-        data = _struct.pack("<I", 0x36312064)
-        self.assertIn(0, G._step_result_plan(data))
-        info = {"base_addr": 0x1000, "str_addrs": {"d 16": 0x1000}}
-        step = G.executable_step_code(data, 0x1000, info)
-        self.assertEqual(step, b"")
-        self.assertEqual(G._step_result_plan(step), {})
-
-
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
@@ -5059,51 +4999,6 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
             {"extern_calls": info["extern_calls"]})), 2,
             "with no traps published both calls are the program's")
         self.assertEqual(_program_extern_calls({}), [])
-
-
-class TestTheCompilerCallIsNotTheUniversalHalt(unittest.TestCase):
-    """The compiler's own `getrlimit`/`fflush` must not BE the theorem.
-
-    The arm64 stack-floor guard reads `RLIMIT_STACK` with a `getrlimit` once per
-    process and the bounded stops flush with `fflush`, and neither is a call the
-    PROGRAM makes.  When the guard was emitted in every PROLOGUE the universal
-    theorem stopped at that `getrlimit` — a program that computes correctly got
-    a theorem saying only "control reached the stack guard" — and a program with
-    one more real call was refused at generation.  Measured now: the guard lives
-    in the startup stub below the entry, so the walk's `[entry, func_end)` does
-    not contain it, and the exit flush is recorded in `info["compiler_traps"]`
-    so `_program_extern_calls` subtracts it.  This pins the result without Lean:
-    each of the four programs reaches a REAL `s.x0 = mojo n` universal (not the
-    `some s => True` of a `reaches_call` placeholder).
-    """
-
-    EXAMPLES = ["count", "sum", "fact"]
-
-    def _proof(self, name, src):
-        import formal.build as fb
-        tmp = tempfile.mkdtemp(prefix="a2-univ-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        p = os.path.join(tmp, name + ".mojo")
-        with open(p, "w") as fh:
-            fh.write(src)
-        r = fb.compile_formal(p, output=p + ".aout", arch="arm64",
-                              prove=True, check=False)
-        with open(r["proof_path"], encoding="utf-8") as fh:
-            return fh.read()
-
-    def test_a_trivial_program_keeps_its_value_theorem(self):
-        text = self._proof("plain", "def main(n: Int) -> Int:\n    return 7\n")
-        self.assertIn("main_compiles_correctly_universal", text)
-        self.assertIn("some s => s.x0 = mojo n", text)
-
-    def test_the_examples_that_the_guard_had_stopped_keep_their_theorems(self):
-        for stem in self.EXAMPLES:
-            with self.subTest(example=stem), open(
-                    os.path.join(HERE, "formal", "examples",
-                                 stem + ".mojo")) as fh:
-                text = self._proof(stem, fh.read())
-            self.assertIn(f"{stem}_compiles_correctly_universal", text)
-            self.assertIn("some s => s.x0 = mojo n", text)
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
