@@ -96,7 +96,7 @@ not just `fire_runtime.h`:
 | **word in, word out** | **273** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **411** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **273 of 684 (39.8%)** is the reachable-surface ceiling. The previous
+So **273 of 684 (39.9%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -567,6 +567,7 @@ same 11 and not three different numbers:
 | `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 | `mojo_str_rfind_from` | `int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_startswith_from` | `int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop)` | ″ |
+| `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 
 **The `40` and `56` gaps did not move, and that is a fact rather than a
 coincidence**: the eleven added no `void *` parameter, so none of them joined
