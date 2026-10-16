@@ -457,13 +457,16 @@ DONE (§2a and §0z respectively); these are the three that remain:
    ledger's; the honest reading is that **these two transforms are measured on the
    examples corpus and barely measured on the generated one**, which is the
    opposite of what §2's twenty-mix sweep implied by its tally.
-4. **`Analysis.int_only` is still a lower bound, and where it now stops is not
-   written down.** §2a raised `swap_add` reach from 133 to 275 of 440 programs, so
-   the four questions it lacked were worth 142 programs — and the remaining 165 are
-   spread over `environ` (6/20), `unpack` (4/20), `strfmt` (3/20), `limits` (2/20)
-   and `slicing` (7/20), which are now the mixes to look at. A future session
-   should MEASURE the remaining decline reasons as §2a did rather than guess at
-   them; that is the one piece of advice here this file has to earn twice.
+4. **`Analysis.int_only` is still a lower bound, and §0a has now MEASURED where
+   it stops (2026-10-13).** §2a raised `swap_add` reach from 133 to 275 of 440
+   programs; on this tree it reached 351 of 540, and 376 once the operand
+   predicate stopped requiring a bare name or a literal (`int_only` itself did
+   not move — see §0a for the census and the 12 mixes that gained). The
+   remaining decline reasons, measured rather than guessed, are §0a's list: a
+   `BinOp`/name/subscript/attribute operand that is not provably an int, a call
+   refused on purity, and 83 programs with no `+` at all. **The advice this item
+   carried — "MEASURE the remaining decline reasons as §2a did rather than guess
+   at them" — is what §0a did, so read it there rather than here.**
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 
