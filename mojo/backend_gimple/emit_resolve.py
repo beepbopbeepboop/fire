@@ -819,6 +819,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     temp_gen._selfhost_gimplegen_sigs = gen._selfhost_gimplegen_sigs
                 if hasattr(gen, '_selfhost_gimplegen_dict_vts'):
                     temp_gen._selfhost_gimplegen_dict_vts = gen._selfhost_gimplegen_dict_vts
+                if hasattr(gen, '_selfhost_gimplegen_elem_anns'):
+                    temp_gen._selfhost_gimplegen_elem_anns = gen._selfhost_gimplegen_elem_anns
                 # share: `self._compiled_modules`-based dedup (line above,
                 # `_compiled_modules`) means a module can be Pass1b-scanned
                 # exactly ONCE, in whichever temp_gen happens to compile it

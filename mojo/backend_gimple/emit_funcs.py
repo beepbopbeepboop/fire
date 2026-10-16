@@ -1367,6 +1367,55 @@ def _dvt_consider(_out, _tgt, _ann):
 
 
 
+def _elem_ann_consider(out: dict, tgt, ann) -> None:
+    """One `set[X]` / `list[X]` field annotation into `out` (field -> `X`)."""
+    fname = None
+    if (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
+            and tgt.obj.name == 'self'):
+        fname = _as_str(tgt.member)
+    elif isinstance(tgt, IdentExpr):
+        fname = _as_str(tgt.name)
+    if fname is None or fname in out or ann is None:
+        return
+    a = _as_str(str(ann)).strip()
+    lb = a.find('[')
+    if lb <= 0 or not a.endswith(']'):
+        return
+    head = a[:lb].strip()
+    if head not in ('set', 'Set', 'frozenset', 'list', 'List'):
+        return
+    inner = a[lb + 1:-1].strip()
+    if inner == '' or ',' in inner:
+        return
+    out[fname] = inner
+
+
+def _selfhost_gimplegen_elem_anns(gg_cls) -> dict:
+    """`{field_name: element_annotation}` for every `class GimpleGen` field
+    annotated `set[X]` / `list[X]` -- the element-type half of what
+    `_selfhost_gimplegen_dict_val_types` recovers for dicts, for the same
+    reason: a nested temp_gen compiling a backend module never sees `class
+    GimpleGen`'s StructDef, so `gen.<field>` read there carried no element
+    type, and `gen._extra_no_mangle.add(m['body_name'])` put a string word
+    under the INT tag where `name in gen._extra_no_mangle` (a `char *`
+    probe) could never find it -- every generator body the self-hosted
+    compiler emitted was then overload-mangled under a name its trampoline
+    does not call."""
+    out: dict = {}
+    if gg_cls is None:
+        return out
+    for _fld in getattr(gg_cls, 'fields', []):
+        if isinstance(_fld, AssignStmt):
+            _elem_ann_consider(out, _fld.target, getattr(_fld, 'type_ann', None))
+        elif isinstance(_fld, VarDecl) and _fld.name:
+            _elem_ann_consider(out, IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
+    for _m in getattr(gg_cls, 'methods', []):
+        for _n in gimple_exprtypes._walk_ast(_m.body):
+            if isinstance(_n, AssignStmt) and getattr(_n, 'type_ann', None):
+                _elem_ann_consider(out, _n.target, str(_n.type_ann))
+    return out
+
+
 def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     """`{field_name: (outer_val_ctype, nested_val_ctype_or_None, raw_ann)}` for every
     `class GimpleGen` instance/class field annotated `dict[K, V]` (or

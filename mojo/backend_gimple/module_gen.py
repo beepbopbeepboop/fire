@@ -4597,6 +4597,14 @@ def gen_module_impl(self, stmts):
                 self._field_dict_nested_val_types.setdefault('GimpleGen', {}).setdefault(_f, _nested_vt)
             if _raw_ann:
                 self._field_annotations.setdefault('GimpleGen.' + _f, _raw_ann)
+        # The same recovery for `set[X]` / `list[X]` element types (see
+        # emit_funcs._selfhost_gimplegen_elem_anns).
+        _gg_eas = self._selfhost_gimplegen_elem_anns
+        for _ea_pair in _gg_eas.items():
+            _ef = _as_str(_ea_pair[0])
+            _ect = self._resolve_type(_as_str(_ea_pair[1]))
+            if _ect and _ect != 'int64_t':
+                self._field_elem_types.setdefault('GimpleGen', {}).setdefault(_ef, _ect)
 
     # The synthetic `class GimpleGen` rides `_imported_typedef_structs`, which
     # only wires method externs + typedef layout — it never reaches the

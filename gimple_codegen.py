@@ -895,7 +895,11 @@ class GimpleGen:
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
-        self._extra_no_mangle: set = set(no_mangle)
+        # `set[str]`, not a bare `set`: the self-hosted compiler adds words
+        # read out of heterogeneous dicts (`m['body_name']` in coro.register)
+        # and asks `name in` with a `char *`; only a typed field puts both
+        # under the string tag.
+        self._extra_no_mangle: set[str] = set(no_mangle)
         # (struct name, method name) pairs that are OVERLOADED in this compile —
         # declared more than once on one struct. The UNSUFFIXED C symbol for
         # such a pair is defined by NEITHER overload (each carries a hash of its
@@ -2805,6 +2809,9 @@ class GimpleGen:
         self._selfhost_gimplegen_extra_fields: dict[str, str] = {}
         self._selfhost_gimplegen_sigs = None
         self._selfhost_gimplegen_dict_vts: dict = {}
+        # field -> the ELEMENT annotation of a `set[X]` / `list[X]` field
+        # (see emit_funcs._selfhost_gimplegen_elem_anns).
+        self._selfhost_gimplegen_elem_anns: dict[str, str] = {}
         self._selfhost_gimplegen_registered = False
         self._selfhost_src_dir = ""
         # Imported struct local name -> its home module's C-symbol qualifier
@@ -5516,6 +5523,7 @@ def _selfhost_register_gimplegen(gen):
         gfn._selfhost_gimplegen_field_types(_cls, gen._selfhost_src_dir or None)
     gen._selfhost_gimplegen_sigs = gfn._selfhost_gimplegen_frozen_sigs(gen, _cls)
     gen._selfhost_gimplegen_dict_vts = gfn._selfhost_gimplegen_dict_val_types(_cls)
+    gen._selfhost_gimplegen_elem_anns = gfn._selfhost_gimplegen_elem_anns(_cls)
     # Seed `struct_field_types['GimpleGen']` from the extracted-helper field
     # scan HERE, unconditionally, exactly once (this function itself only
     # runs once per top-level compile) — NOT inside `gen_module_impl`'s
