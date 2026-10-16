@@ -159,10 +159,11 @@ receiver's frame or a folded constant — none of which is "a count of words".
 4. **The 7 files, re-measured** the way `…_b10.md` §5.2 measures a fix:
    `python3 tools/formal_sweep.py --min 3` over exactly those 7 paths, and the row's ceiling.
    **Expect the 5 `tile.mojo` files to land on `tile.mojo`'s own next row, not on a pass** — the
-   row behind this one is `std/algorithm`'s bracketed specialization
-   (`FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`, claimed), which is
-   `FILES BLOCKED IS AN UPPER BOUND` doing what §2.4 of the b10 map measured it doing to the
-   43-file Optional row.
+   row behind this one is the `Optional` representation in
+   `FORMAL_stdlib_optional_needs_a_representation.md`. The bracketed specialization this row
+   used to sit behind is **LOWERED** (`work/formal18-tile-specialization`), so it is no longer
+   in the chain, which is `FILES BLOCKED IS AN UPPER BOUND` doing what §2.4 of the b10 map
+   measured it doing to the 43-file Optional row.
 5. ~~**Add a `*args` DEFINITION and READ to `tools/formal_fuzz.py`'s pools —
    measured absent.**~~ **DONE 2026-10-04 (`formal21-2`).** `variadic_define`
    and `variadic_call` are in the `limits` mix. Three properties, each of which

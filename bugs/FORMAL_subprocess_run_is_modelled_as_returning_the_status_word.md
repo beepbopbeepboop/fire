@@ -107,10 +107,11 @@ makes unilaterally.
 
 ## Status
 
-**OPEN, with the refusal reproduced and the three options costed.** No code
-changed for this: the `functools` commit that found it (`version.py`) leaves
-`r.returncode` exactly as it was, and `version.py` was already refused before
-that commit — on `functools`, which is the module this tree does not need.
+**OPEN, with the refusal reproduced, the three options costed, and the DECISION
+taken (option 3 — see below).** No code changed for the refusal itself: the
+`functools` commit that found it (`version.py`) leaves `r.returncode` exactly as
+it was, and `version.py` was already refused before that commit — on
+`functools`, which is the module this tree does not need.
 
 **Not closed by rewriting `version.py`.** `formal/hostmods/subprocess.mojo` is
 claimed work; the caller-side substitution is deliberately NOT made, because the
