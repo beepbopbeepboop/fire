@@ -642,6 +642,9 @@ class Analysis:
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
         self.all_names = _all_names(module)
         self.module_bindings = set(self.scopes[id(module)].bindings)
+        #: `{id(fn): {name: frozenset(aliases)}}`, filled lazily by
+        #: `alias_closure`.  `t_reorder` is the only reader.
+        self._alias_cache: dict = {}
         self._int_params: set = set()
         self._int_returns: set = set()
         self._int_sequences: set = set()
@@ -1076,6 +1079,24 @@ class Analysis:
                 if isinstance(n, ast.Name) and n.id == name
                 and isinstance(n.ctx, ast.Store)]
 
+    def alias_closure(self, fn, names):
+        """`names` plus every name in `fn` that may refer to the same object.
+
+        `t_reorder`'s independence test is a name-disjointness test, and two
+        names can be one object (`A32 = h31.b23`) — see `_reference_aliases`.
+        The closure is cached per function because `t_reorder` asks it once per
+        adjacent pair and the relation is a property of the function, not of
+        the pair.
+        """
+        groups = self._alias_cache.get(id(fn))
+        if groups is None:
+            groups = _reference_aliases(fn)
+            self._alias_cache[id(fn)] = groups
+        out = set(names)
+        for name in names:
+            out |= groups.get(name, frozenset())
+        return out
+
     def in_nested_scope(self, fn, node):
         """Whether `node` sits inside a scope nested in `fn`."""
         cur = node
@@ -1126,6 +1147,81 @@ def _all_names(module):
         elif isinstance(n, ast.Attribute):
             out.add(n.attr)
     return out
+
+
+def _function_scope_nodes(fn):
+    """Every node in `fn`'s OWN scope, nested scopes excluded.
+
+    The alias relation below is about names that can refer to the same OBJECT
+    within one function, so a nested `def`'s body must not contribute: its
+    names are a different scope's, and an `x = y` inside it says nothing about
+    the `x` in `fn`.  Walking and skipping the nested-scope subtrees is the
+    whole of it.
+    """
+    stack = [fn]
+    while stack:
+        node = stack.pop()
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            stack.append(child)
+
+
+def _reference_aliases(fn):
+    """`{name: frozenset(names)}` — names a plain assignment can make the same
+    OBJECT, transitively.
+
+    `A32 = h31.b23` makes `A32` and `h31.b23` one list, so a store through
+    `h31` (`h31.b23[0] = 62`) and a read through `A32` (`A32[0]`) are the same
+    memory even though the two statements mention no name in common.  This is
+    the hazard that made `refs:0`'s `reorder` swap `h31.b23[0] = 62` past
+    `w34 = A32[0]` and change the printed value from 62 to 46.
+
+    The relation is built from assignments whose RIGHT-hand side is a
+    reference — a `Name`, an `Attribute` or a `Subscript` — because those are
+    the shapes that can hand the target an object another name also holds.  A
+    literal or an arithmetic result cannot alias anything.  A `Subscript` RHS
+    is included even though it usually yields an int: it can yield a nested
+    container, and leaving it out is the unsound direction (the
+    over-approximation can only refuse a swap).  Function PARAMETERS are not
+    aliased, which is a deliberate narrowing: the corpus's aliasing comes from
+    assignments, and aliasing every parameter to every other would refuse
+    nearly every pair.
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    def consider(target, value):
+        if isinstance(target, ast.Name) and isinstance(
+                value, (ast.Name, ast.Attribute, ast.Subscript)):
+            for other in _names_in(value):
+                union(target.id, other)
+
+    for node in _function_scope_nodes(fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            consider(node.targets[0], node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            consider(node.target, node.value)
+    groups = {}
+    for name in list(parent):
+        groups.setdefault(find(name), set()).add(name)
+    return {name: frozenset(group)
+            for group in groups.values() for name in group}
 
 
 def _replace_child(parent, old, new):
@@ -1966,7 +2062,9 @@ def t_reorder(module, an, rng):
     SOUNDNESS.  Two statements may be exchanged iff
 
       * neither reads a name the other writes, and neither writes a name the
-        other reads or writes;
+        other reads or writes — and the test is over ALIASES, not names, so
+        `A32 = h31.b23` makes a write through one name and a read through the
+        other a conflict (`alias_closure`);
       * neither escapes through a nested function over the other's writes or
         reads;
       * neither can leave the block (`return`, `yield`, `raise`, `await`, or a
@@ -2042,7 +2140,7 @@ def t_reorder(module, an, rng):
             # a same-field or same-read pair (`self.a = self.b`).
             if a.writes & (b.reads | b.writes):
                 continue
-            if b.writes & (a.reads | a.writes):
+            if b.writes & an.alias_closure(fn, a.reads | a.writes):
                 continue
             if a.writes & b.escapes or b.writes & a.escapes:
                 continue
