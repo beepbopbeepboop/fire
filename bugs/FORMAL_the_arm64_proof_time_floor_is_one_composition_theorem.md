@@ -7,6 +7,28 @@ chains), against `lib/ProofLib.lean`'s `arm64_go_exit` and `lib/work.lean`'s
 `rec1_glue_gen` / `go_exit_step`. **arm64 only** — the x86-64 generator proves a
 different thing over `lib/X86.lean` and shares none of this code.
 
+**Status 2026-10-08 (`work/formal217-docs`): the FILE this document measures no
+longer proves at all, so the floor below is a floor of a proof that Lean now
+rejects — and the two reasons are independent and both filed.** Measured on
+this tree:
+
+* `python3 test_formal.py -j 1 bitops` is `PASS=0 FAIL=1` (not in
+  `EXPECTED_FAILURES`). `bitops`'s universal theorem is now
+  `bitops_reaches_call_at_0x10000041c` rather than a value theorem, because
+  `bfeec991`'s stack-floor guard put a `getrlimit` call in every arm64 prologue
+  (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+* And the file is rejected outright on `bitops_sr_240`, a step lemma about a
+  word inside the stack-trap message `bfeec991` embeds in `__TEXT`:
+  `_gen_step_lemmas` walks the WHOLE code buffer instead of the function's
+  range. That is `bugs/FORMAL_arm64_step_lemmas_are_generated_for_the_images_
+  diagnostic_string.md`, found while checking this document's pin.
+
+**So `bitops` proving in ~20 s is not a fact about this tree**, and this
+document's 83%-in-one-declaration attribution cannot be re-measured until both
+are fixed. Its `TestTheRegisterValueReaderReadsEveryWrapper` pin fails for the
+same reason (Lean rejects the generated prefix at the same `hb`), and the
+reader fix it records is unchanged — the proof moved under it.
+
 **Status: OPEN, measured, NOT FIXED. Re-measured 2026-10-05 three times over:
 the attribution HOLDS and is re-derivable with a committed instrument, and ALL
 THREE of the doc's remaining next steps are now REFUTED or RE-AIMED — item 1's

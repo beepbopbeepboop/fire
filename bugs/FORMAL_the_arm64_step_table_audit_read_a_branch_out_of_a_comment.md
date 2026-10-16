@@ -10,6 +10,20 @@ of the four signatures now carrying the obligation that fails, named from the
 generated file rather than from a truncated tail. Filed 2026-10-03 on
 `work/formal16-2`, refreshed 2026-10-04.
 
+**Status 2026-10-08 (`work/formal217-docs`): the CENSUS is reconciled to this
+tree and `TestTheRecursionFamiliesStillGenerate` is GREEN again.** The audit fix
+(§1) had landed, but the class's census still pinned `wdiff` as generating while
+the stack-floor guard's `getrlimit` (`bfeec991`, every arm64 prologue) had moved
+it into the loop contract — `_reached_without_a_condition`'s fix had landed and
+`wdiff`'s own refusal is the guard's address being the run terminal. `wdiff` is
+now a `REFUSED` row beside `sum_range`, with the needles its message actually
+carries (`unsupported edge to … loop back-edge / continuation`) and its owner
+named (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`,
+`formal213-docs`'s claim), so **ten generate and two refuse** and the census
+cannot go stale silently. §4.1's eleven Lean runs are unchanged and remain the
+integrator's.**
+
+
 **Update 2026-10-06 (`work/formal42-4`): the PIN class below went red again for
 a reason that is not the audit, and half of it is fixed.** The generator's
 `_reached_without_a_condition` returned False on meeting ANY reachable source

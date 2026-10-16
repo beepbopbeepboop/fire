@@ -5407,6 +5407,14 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
     #: generating proof that says something false.
     #:
+    #: `wdiff` was family 4 and PASSED when this census was written; it refuses
+    #: again on this tree because `bfeec991`'s stack-floor guard put a
+    #: `getrlimit` call in every arm64 prologue, and the guard's low address is
+    #: the run terminal, so the loop contract has no block to match. That is
+    #: `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`'s
+    #: regression, and the row is recorded rather than fixed here because the
+    #: repair is a `formal/arm64_codegen.py` change owned by that doc.
+    #:
     #: The needles are the three facts a reader needs to act, and the first two
     #: are what tell this refusal apart from "the loop shape is unrecognised"
     #: (an emitter change) and from "the contract is wrong for this shape" (a
@@ -5427,18 +5435,20 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     }
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
-    #: doc is named for the DEFECT rather than for the example. `sum_range` is
-    #: the only row, and its doc is
+    #: doc is named for the DEFECT rather than for the example. BOTH rows are
+    #: here, and neither doc contains its stem: `sum_range`'s is
     #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` — a name that says what is wrong and deliberately does not
-    #: contain the stem, which is why `test_the_owner_of_the_one_refusal_still_
-    #: exists` cannot find it by prefix.
+    #: flag.md` and `wdiff`'s is
+    #: `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` — each
+    #: a name that says what is wrong, which is why
+    #: `test_the_owners_of_the_refusals_still_exist` cannot find either by
+    #: prefix and has to be told.
     #:
-    #: The point of naming it is the same as the check's own: this refusal is a
+    #: The point of naming them is the same as the check's own: a refusal is a
     #: STOP, not a fix, and the doc is what a reader has to find to learn that.
     #: A row that pinned the refusal without naming the doc would let the doc be
     #: deleted on the grounds that the refusal it describes is now recorded
-    #: here — which is the opposite of true, because the doc records the part
+    #: here — which is the opposite of true, because each doc records the part
     #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
     #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
     REFUSED_OWNER = {
@@ -5508,7 +5518,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                                   f"say {needle!r}, which is what makes the "
                                   f"refusal actionable: {err} ({why})")
 
-    def test_the_owner_of_the_one_refusal_still_exists(self):
+    def test_the_owners_of_the_refusals_still_exist(self):
         """A refusal whose owning doc is gone is a doc to delete, not to keep.
 
         The rule the whole `bugs/` queue rests on: a doc for a bug that is fixed
@@ -5516,21 +5526,19 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **`REFUSED` is NOT empty** — `sum_range` joined it on 2026-10-05, when
+        **`REFUSED` has TWO rows** — `sum_range` joined it on 2026-10-05, when
         its loop contract was declined for stating an unsigned order against a
-        signed flag — so this check does real work from the first row. It was
-        vacuous while the table was empty, and an empty table and a table whose
-        rows all point at deleted docs look identical from the outside: that is
-        the difference between "nobody refuses" and "the records of the
-        refusals were thrown away". The census is asserted explicitly for the
-        same reason.
+        signed flag, and `wdiff` joined it when the stack-floor guard put a
+        `getrlimit` in every arm64 prologue — so this check does real work for
+        both. It was vacuous while the table was empty, and an empty table and a
+        table whose rows all point at deleted docs look identical from the
+        outside: that is the difference between "nobody refuses" and "the records
+        of the refusals were thrown away". The census is asserted explicitly for
+        the same reason.
         """
-        # Not vacuous any more: `sum_range` moved from GENERATE to REFUSED on
-        # 2026-10-05, so the total is asserted rather than derived from a
-        # table that used to be empty. The number is the census this class
-        # claims; a silent change to either list is how a refusal goes
-        # unrecorded, and the OWNER check below is what makes the row survive
-        # its own fix.
+        # The number is the census this class claims; a silent change to either
+        # list is how a refusal goes unrecorded, and the OWNER check below is
+        # what makes a row survive its own fix.
         self.assertEqual(
             len(self.GENERATE) + len(self.REFUSED), 12,
             "the census of the twelve red examples changed shape: "
