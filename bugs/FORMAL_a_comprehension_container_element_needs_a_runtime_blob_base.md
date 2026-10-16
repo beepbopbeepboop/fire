@@ -82,10 +82,13 @@ architectures cannot disagree), with the answers in the table.
 ## What landed 2026-10-06: the flat-container element is per-iteration
 
 **The refusal was replaced by real per-iteration storage for the shapes a byte
-copy makes sound, on both backends.** `model.comprehension_element_is_flat_container`
-is the one predicate: the element is a list / tuple / set / dict literal and
-NOTHING inside it builds a second container (a nested literal, a comprehension, a
-slice or a call). Both emitters' `_materialize_compr_element` then reserve a
+copy makes sound, on both backends.** `model.comprehension_element_is_copy_safe`
+(renamed 2026-10-12 from `comprehension_element_is_flat_container`, when the
+nested-comprehension shape below was added) is the one predicate: at this date it
+accepted the element as a list / tuple / set / dict literal with NOTHING inside it
+building a second container (a nested literal, a comprehension, a slice or a
+call) — see "What landed 2026-10-12" for the comprehension case it now also
+accepts. Both emitters' `_materialize_compr_element` then reserve a
 `cap`-slot array beside the element's own scratch blob and, at the element site,
 `memcpy` the element's blob into slot `i`, where `i` is the result blob's count
 word — the number appended so far, so the append that follows stores the copy and
@@ -283,8 +286,10 @@ a constructor call needs, and the three steps are still that work.**
 
 The natural implementation — reserve `cap` slots of the element's own size and
 index them by the iteration counter — **works for a list-literal and a
-dict-literal element, and does not work for a NESTED COMPREHENSION element,
-which is the doc's own reproducer.** Both were built and measured on arm64:
+dict-literal element, and (2026-10-12) for a NESTED COMPREHENSION element whose
+whole region is pointer-free; it still does not work for one whose region holds
+an in-region pointer.** The rows below were measured on arm64 before the
+2026-10-12 change, and the third is the one it supersedes:
 
 | element of the outer comprehension | after the array fix |
 |---|---|
@@ -292,7 +297,14 @@ which is the doc's own reproducer.** Both were built and measured on arm64:
 | `[{k: 1} for k in d]` (a dict literal) | correct |
 | `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` (a nested comprehension) | correct since 2026-10-08 — see above |
 
-**Why the third row is different, and it is structural.** A list literal's own
+**The copy already relocates the whole region, which is why the third row needed
+no new allocator — only the soundness rule for which regions it may copy.** With
+`model.comprehension_element_is_copy_safe` extended to the nested form, the same
+`memcpy` gives the third row its own inner object per outer iteration. The FOURTH
+row is what the structural argument below still applies to: an inner element that
+opens a container leaves an in-region pointer that the copy does not relocate.
+
+**Why the fourth row is different, and it is structural.** A list literal's own
 allocation happens *inside* `_emit_list`, so making it per-iteration is a change
 to `_emit_list` alone: skip `_reserve_blob`, and recompute the base as
 `frame + array_base + result_count · stride`. The result count is the index,
@@ -407,7 +419,12 @@ it affordable is the measured 0 above.
     $ grep -n "def _comprehension_result_is_a_flat_container" formal/model.py
     $ grep -n "def _iterable_yields_a_scratch_container" formal/model.py
 
-and the tests, no builds for the census:
+The shapes that still refuse are the ones whose region holds an in-region
+pointer, e.g. `[[[x + y] for x in [1, 2]] for y in [10, 20, 30]]`:
+
+    build: a comprehension in main: the element `[…] for …` opens a container, …
+
+and the tests:
 
 ```sh
 python3 test_formal_run.py a_comprehension_element_that_is_a_list_literal_is_per_iteration \
