@@ -6916,6 +6916,40 @@ int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
     return (int64_t)(intptr_t)mojo_list_new();
 }
 
+/* `s.startswith(p)` / `s.endswith(p)` with `p` held as a word: Python's
+ * tuple form (`name.startswith(_PREFIXES)`, `path.endswith(('.mojo',
+ * '.py'))`) or a string the codegen could not type. The tuple form had no
+ * lowering at all -- the tuple was handed to `mojo_str_startswith` as if it
+ * were the prefix, so every such test answered False, and the self-hosted
+ * compiler's `_is_selfhost_sibling_alias` (`_mod.startswith(
+ * _SELFHOST_SIBLING_MODULE_PREFIXES)`) never recognised `gimple_codegen` as
+ * its own module. Elements are classified the way every word-of-unknown-kind
+ * helper here classifies them; a non-string element never matches, as a
+ * non-str tuple element would raise in CPython rather than match. */
+static int _str_affix_word(char *s, int64_t p, int ends)
+{
+    if (!s) return 0;
+    if (mojo_is_registered_list(p)) {
+        MojoList *l = (MojoList *)(intptr_t)p;
+        int64_t n = mojo_list_len(l);
+        for (int64_t i = 0; i < n; i++) {
+            int64_t w = mojo_list_get_int(l, i);
+            if (!mojo_boxed_is_str(w)) continue;
+            char *a = (char *)(intptr_t)w;
+            if (ends ? mojo_str_endswith(s, a) : mojo_str_startswith(s, a)) return 1;
+        }
+        return 0;
+    }
+    if (mojo_boxed_is_str(p)) {
+        char *a = (char *)(intptr_t)p;
+        return ends ? mojo_str_endswith(s, a) : mojo_str_startswith(s, a);
+    }
+    return 0;
+}
+
+int mojo_str_startswith_word(char *s, int64_t p) { return _str_affix_word(s, p, 0); }
+int mojo_str_endswith_word(char *s, int64_t p) { return _str_affix_word(s, p, 1); }
+
 int mojo_word_eq(int64_t a, int64_t b)
 {
     if (a == b) return 1;

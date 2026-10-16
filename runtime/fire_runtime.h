@@ -874,6 +874,10 @@ double      mojo_str_to_float(MojoStr *s);
  * the whole source against a one-character prefix. */
 int mojo_str_startswith(char *s, char *prefix);
 int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop);
+/* `s.startswith(p)` / `s.endswith(p)` where `p` is a WORD: a tuple of
+ * strings (any of them matches) or a string. See the definitions. */
+int mojo_str_startswith_word(char *s, int64_t p);
+int mojo_str_endswith_word(char *s, int64_t p);
 int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop);
 int64_t mojo_str_find(char *s, char *needle);

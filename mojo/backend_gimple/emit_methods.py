@@ -5278,6 +5278,12 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
         arg0_val = arg_vals[0]
         st, sp, full_window = _str_window(gen, args, kwargs)
+        if full_window and arg0_type in ('MojoList *', 'int64_t'):
+            # A tuple of affixes, or a word that may be one: see
+            # mojo_str_startswith_word.
+            fn = 'mojo_str_startswith_word' if is_start else 'mojo_str_endswith_word'
+            _pw = gen._to_int64(arg0_type, arg0_val)
+            return 'int', gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
         if full_window:
             if arg0_type == 'char':
                 fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
