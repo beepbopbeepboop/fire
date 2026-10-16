@@ -26,6 +26,7 @@ order in one place, not twice.
 import collections
 import dataclasses
 from dataclasses import field
+from contextvars import ContextVar
 import keyword
 import os
 import re
@@ -14967,29 +14968,6 @@ SET_ALGEBRA_OPS = ("-", "&", "^")
 #: backends can lower it — arm64 has the emitters, x86-64 refuses it by name
 #: through `set_algebra_refusal` below.
 SET_ALGEBRA_OPS = ("&", "^", "-")
-
-
-def set_algebra_refusal(op: str, left: str, right: str) -> str:
-    """Why `left op right` between two SETS is not lowered on the backend asking.
-
-    `container_operator_refusal` no longer refuses a set-against-set `&`, `^` or
-    `-`, because arm64 lowers all three (`_emit_set_op`).  A backend without
-    those emitters must still refuse them LOUDLY rather than fall through to the
-    integer ALU, which is the SIGSEGV-and-wrong-number transcript that function's
-    docstring records.  This is the same second question `set_union_refusal`
-    answers for `|`, and it names the backend that DOES lower it, because
-    "unsupported" sends a reader looking for a spec when the answer is an
-    emitter.
-    """
-    meaning = {"&": "INTERSECTION", "^": "SYMMETRIC DIFFERENCE",
-               "-": "SET DIFFERENCE"}[op]
-    return (
-        f"{left} {op} {right} is {meaning} between two SETS, and this backend "
-        f"lowers `&`, `^` and `-` on two containers as integer arithmetic on "
-        f"the two blobs' ADDRESSES, which never looks at an element and is not "
-        f"a set. arm64 lowers set `&`, `^` and `-` correctly; this backend "
-        f"refuses them. Build the result with a loop over membership tests "
-        f"instead.")
 
 
 def set_operator_operand_refusal(shown: str, op: str, left_kind,

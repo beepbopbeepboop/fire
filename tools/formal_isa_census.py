@@ -288,16 +288,6 @@ def call_sites(arch):
     return out
 
 
-def call_sites(arch):
-    """{encoder: [(file, count)]} over the emitter files only, by AST."""
-    sites = {}
-    for rel in LEVER_ROOTS[arch]:
-        blob = _emitter_refs(os.path.join(ROOT, rel))
-        for name, n in blob.items():
-            sites.setdefault(name, []).append((os.path.basename(rel), n))
-    return {name: sites.get(name, []) for name in encoder_names(arch)}
-
-
 #: The names whose VALUES are the encoder test's byte-differential table.
 #:
 #: `test_arm64_encoders.py` builds its table in one function; the x86 file

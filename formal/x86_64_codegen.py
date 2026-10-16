@@ -7921,17 +7921,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             right_is_set=self._expr_is_set_like(e.right))
         if reason is not None:
             raise CodegenError(reason)
-        # `&`, `^` and `-` between two SETS are set algebra.  The shared gate
-        # above no longer refuses them — arm64 lowers them — so this backend,
-        # which has no set-algebra emitter, must refuse them BY NAME here
-        # instead of falling through to the integer ALU on two blob addresses.
-        if (op in M.SET_ALGEBRA_OPS
-                and M.container_operand_is_blob(self._expr_str_kind(e.left))
-                and M.container_operand_is_blob(self._expr_str_kind(e.right))
-                and self._expr_is_set_like(e.left)
-                and self._expr_is_set_like(e.right)):
-            raise CodegenError(M.set_algebra_refusal(
-                op, M.spelled(e.left), M.spelled(e.right)))
         # `|` on a container is a SET UNION only between two SETS, and it has
         # to be asked HERE rather than at the concat branch below: that branch
         # recognises a container by `_is_container_expr`, which on this backend

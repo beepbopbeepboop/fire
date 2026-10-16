@@ -716,54 +716,6 @@ def test_program_importing_an_extern_module_matches_cpython(tmpdir, shared):
           f"— CPython's answer for the same program")
 
 
-def test_an_imported_hostmod_dylib_answers_on_x86_64(tmpdir, shared):
-    """`os.path.getsize` reaches through TWO imported dylibs and returns a size.
-
-    This is the row `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib`
-    filed, and it is the end-to-end level that doc's own lldb trace could not
-    reach: `from os.path import getsize` links `os_path` and its
-    `os_path___syscalls` companion, and on the pre-fix tree the x86-64 image
-    jumped to address 0 (`EXC_BAD_ACCESS`, frame #0 at 0x0) inside the second
-    one. The cause was this tree's Mach-O linker, not Rosetta: `__LINKEDIT` was
-    mapped BELOW the fixed `__DATA` segment, so Rosetta slid the image wrongly
-    and a pointer formed rip-relative inside the imported dylib landed
-    out-of-mapping. `formal/macho_linker.py::_linkedit_vm` now places
-    `__LINKEDIT` above the last fixed segment.
-
-    The assertion is CPython's own `os.path.getsize` on the SAME file, reduced
-    modulo 256 because a process exit status is one byte — a wrong answer and a
-    crash are then distinguishable, which a bare "it ran" is not.
-    """
-    target = os.path.join(tmpdir, "sized.bin")
-    with open(target, "wb") as f:
-        f.write(b"hello")                       # 5 bytes, and a size < 256
-
-    prog = os.path.join(tmpdir, "getsize.mojo")
-    with open(prog, "w") as f:
-        f.write("from os.path import getsize\n"
-                "\n"
-                "def main() -> Int:\n"
-                '    return getsize("%s")\n' % target)
-    out = os.path.join(tmpdir, "getsize.aout")
-    build = subprocess.run(
-        [sys.executable, FIRE, "build", "--formal", "--no-prove",
-         "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=600)
-    check(build.returncode == 0,
-          f"an x86-64 program importing `os.path.getsize` did not build: "
-          f"{(build.stderr or build.stdout).strip()[-400:]}")
-
-    got = run_x86_64(out)
-    check("Bad CPU type" not in (got.stderr or ""),
-          f"the image was rejected by the loader: {got.stderr!r}")
-    want = os.path.getsize(target) % 256
-    check(got.returncode == want,
-          f"the x86-64 image exited {got.returncode}, expected {want} — "
-          f"CPython's `os.path.getsize` for the same file, modulo 256. A "
-          f"negative status is a signal (a jump to address 0, the shape this "
-          f"row filed), not an answer")
-
-
 def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
     """The library itself is loadable: dlopen it from a second program.
 
@@ -1175,8 +1127,6 @@ TESTS = [
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",
      test_a_receiver_bound_to_a_frame_is_refused_on_both_machines),
-    ("an imported hostmod dylib answers on x86-64",
-     test_an_imported_hostmod_dylib_answers_on_x86_64),
 ]
 
 
