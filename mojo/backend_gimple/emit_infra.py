@@ -1851,6 +1851,11 @@ def _elem_of(gen, name: str) -> str:
     # First, check if this is an int64_t-stored pointer with tracked element type
     if name in gen._elem_types:
         _v = gen._elem_types[name]
+        # A writer that records "element type not known" as an explicit
+        # None (`gen._elem_types[t] = gen._elem_types.get(src)`) leaves the
+        # key present with no type; that is the same answer as no key.
+        if _v is None:
+            return 'int64_t'
         # On the self-hosted path a metadata writer can leave an erased
         # sentinel here (`-1` / a tiny value) — the slot was stored via
         # `mojo_dict_set_int` after its value type unified to int64_t, so
