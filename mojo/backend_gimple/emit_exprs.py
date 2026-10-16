@@ -2128,6 +2128,38 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # receiver whose `.value` is a field of no known struct); otherwise fall through
     # to the runtime tag dispatch below, which reads the field directly.
     if node.member == 'value' and ot in ('void *', 'int64_t', 'int'):
+        if ot == 'int64_t' and not gen._is_known_field('value'):
+            # A WORD's `.value` when no struct in THIS translation unit's table
+            # has such a field is still not provably the identity: the table
+            # is per module, and a backend module that walks another module's
+            # nodes (`ownership_destruct`'s `st.value` over fire_compiler
+            # statements) sees none of their layouts. The identity answer
+            # handed `_is_maybe_fresh_expr` the STATEMENT instead of its
+            # value, so the self-hosted compiler found no loop-scoped owned
+            # local at all. Ask the reflection dispatch, which knows every
+            # struct of the program, and keep the identity only when it has
+            # no such field (a bracket parameter's `type.value`).
+            ov = gen._ensure_local('int64_t', ov)
+            _vp = gen._new_val('void *', f"(void *){ov}")
+            gen._emit("  _mojo_getattr_missed = 0;")
+            gen._emit("  _mojo_getattr_nothrow = 1;")
+            _r = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                [('void *', _vp), ('char *', gen._intern_string('value'))])
+            gen._emit("  _mojo_getattr_nothrow = 0;")
+            _missed = gen._new_val('int', '_mojo_getattr_missed')
+            _hit = gen._new_val('_Bool', f'{_missed} == 0')
+            t = gen._new_temp('int64_t')
+            _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
+            gen._emit(f"  if ({_hit}) goto {_bb_h}; else goto {_bb_m};")
+            gen._emit_label(_bb_h)
+            gen._emit(f"  {t} = {_r};")
+            gen._emit(f"  goto {_bb_e};")
+            gen._emit_label(_bb_m)
+            gen._emit(f"  {t} = {ov};")
+            gen._emit(f"  goto {_bb_e};")
+            gen._emit_label(_bb_e)
+            gen._dyn_word_vals.add(t)
+            return 'int64_t', t
         if ot == 'void *' or not gen._is_known_field('value'):
             t = gen._new_temp('int64_t')
             if ot == 'void *':
