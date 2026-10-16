@@ -942,7 +942,7 @@ CAUSES = (
     # carries — its `%s` sibling and its float sibling both open with a
     # different one, which is why a broader marker here would collect them.
     ("a printf conversion of a container",
-     (("reads its argument as a NUMBER",),)),
+     (("its one word is the address of its blob",),)),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
     # the callee has to hand the receiver back somehow. Four wordings and one
     # cause, because one convention covers the receiver and what is refused is

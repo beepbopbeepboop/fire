@@ -137,13 +137,20 @@ _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 # reader, and the hook handed here is `model.printf_arg_container_evidence`
 # reading the kind off the node — which is the whole of the rule, and is why
 # this sample exercises the message rather than a transcription of it.
+class _Kinds:
+    """The `vk` the evidence readers take: anything with `kind_of(expr)`."""
+
+    def __init__(self, kind_of):
+        self.kind_of = kind_of
+
+
 def _printf_container_message():
     """The `%d`-of-a-container refusal, built by asking for it."""
     container = F.ListExpr(elements=[F.IntLiteral(1)])
     msg = FM.printf_container_conversion_refusal(
         "printf", "v=%d", [container],
         lambda e: FM.printf_arg_container_evidence(
-            e, kind_of=lambda _e: FM.list_kind(FM.INT_KIND)))
+            e, _Kinds(lambda _e: FM.list_kind(FM.INT_KIND))))
     if msg is None:
         raise AssertionError(
             "formal/model.py no longer refuses a container at a number "

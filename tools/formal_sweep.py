@@ -973,7 +973,7 @@ _REFUSAL_FAMILIES = (
     # The marker is the clause only this message carries, for the reason the
     # four container-operand rows above give: first match wins, so a marker
     # that any sibling also contains would empty one of the rows.
-    ("reads its argument as a NUMBER", "a printf conversion of a container"),
+    ("its one word is the address of its blob", "a printf conversion of a container"),
     # A CPython BUILTIN this target does not lower, refused BY NAME before any
     # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
     # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
