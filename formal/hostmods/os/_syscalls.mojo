@@ -1614,7 +1614,7 @@ def fs_stat_field16(p, follow, at) -> int:
     return le16(buf, at)
 
 
-def fs_stat_field32(p, follow, at) -> int:
+def fs_stat_field32(p, follow, at, signed) -> int:
     """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
     `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
@@ -1626,6 +1626,8 @@ def fs_stat_field32(p, follow, at) -> int:
     var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
     if buf == 0:
         return 0 - 1
+    if signed == 1:
+        return le32_signed(buf, at)
     return le32(buf, at)
 
 

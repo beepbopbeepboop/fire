@@ -778,7 +778,7 @@ def show(p):
            isfile(p), isdir(p), islink(p), lexists(p), exists(p))
     printf("m1 mode=%d nlink=%d uid=%d gid=%d@@",
            stat_mode(p, 1), stat_nlink(p, 1), stat_uid(p, 1), stat_gid(p, 1))
-    printf("m2 size=%d ino=%d dev=%d blocks=%d blksize=%d@@",
+    printf("m2 size=%d ino=%d dev=%llu blocks=%d blksize=%d@@",
            stat_size(p, 1), stat_ino(p, 1), stat_dev(p, 1),
            stat_blocks(p, 1), stat_blksize(p, 1))
     printf("l1 lmode=%d lsize=%d lino=%d@@",

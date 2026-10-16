@@ -526,11 +526,11 @@ def samefile(a, b) -> int:
     wants to know which of the two is bad asks `exists` on each. There is no
     exception on this path to raise the one CPython raises.
     """
-    da = fs_stat_field64(a, 1, 0)
+    da = fs_stat_field32(a, 1, 0, 0)
     ia = fs_stat_field64(a, 1, 8)
     if da < 0 or ia < 0:
         return 0
-    db = fs_stat_field64(b, 1, 0)
+    db = fs_stat_field32(b, 1, 0, 0)
     ib = fs_stat_field64(b, 1, 8)
     if db < 0 or ib < 0:
         return 0
@@ -637,12 +637,12 @@ def stat_nlink(p, follow) -> int:
 
 def stat_uid(p, follow) -> int:
     """`st_uid` — the owning user id, 32 bits at offset 16."""
-    return fs_stat_field32(p, follow, 16)
+    return fs_stat_field32(p, follow, 16, 0)
 
 
 def stat_gid(p, follow) -> int:
     """`st_gid` — the owning group id, 32 bits at offset 20."""
-    return fs_stat_field32(p, follow, 20)
+    return fs_stat_field32(p, follow, 20, 0)
 
 
 def stat_blocks(p, follow) -> int:
