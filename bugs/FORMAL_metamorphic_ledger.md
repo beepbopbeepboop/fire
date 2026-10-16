@@ -315,6 +315,13 @@ run-time path, and `_drop_proof_decorators` already consumes its wrapped
 arguments. The `NORMALISES-DIFFERLY` gate covers them exactly as it covers the
 seven: the verbatim file keeps its annotation, and the two answers must agree.
 
+**2026-10-08: the dialect set grew by the eleven `@refines(…)` examples** (`absval`,
+`bigconst`, `bitops`, `chain`, `fact`, `identity`, `localmul`, `nonzero`, `pair`,
+`shiftlr`, `sum`), which the proof layer added after the measurement above. They are
+measured through the same verbatim-vs-normalised comparison every other rewritten
+file is, so a rule that removed more than the annotation would be
+`NORMALISES-DIFFERLY-<arch>` rather than a silent extra example in the tally.
+
 ## 5b. Three defects that only a LARGE-PROGRAM sweep could reach, and what each would have been filed as
 
 Sweep 7 is the row that found them and the reason §2's rows did not is in §2's own

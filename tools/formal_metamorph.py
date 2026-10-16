@@ -2142,6 +2142,14 @@ def t_reorder(module, an, rng):
                 continue
             if b.writes & an.alias_closure(fn, a.reads | a.writes):
                 continue
+            # A heap write may reach a container a heap access of the OTHER
+            # statement names through a different local, so neither a proof of
+            # disjointness nor the `.reads`/`.writes` name intersection above
+            # can license the swap.  See the SOUNDNESS note.
+            if a.heap_write and (b.heap_read or b.heap_write):
+                continue
+            if b.heap_write and (a.heap_read or a.heap_write):
+                continue
             if a.writes & b.escapes or b.writes & a.escapes:
                 continue
             if a.escapes & b.reads or b.escapes & a.reads:

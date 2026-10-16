@@ -809,6 +809,11 @@ class TheDriver(unittest.TestCase):
         prog = {"text": "def main() -> Int32:\n    return 0\n",
                 "verbatim": None, "driver_args": "", "test_input": None,
                 "notes": (), "reason": None}
+        # `oracle_answer`/`has_oracle` accept only an `OracleAnswer`, so a bare
+        # `(exit, stdout)` tuple reads as "CPython produced no answer" and every
+        # verdict below came back `not-answerable` — a stub that was right about
+        # the VALUES and wrong about the TYPE is exactly the stale mock the
+        # accessor exists to make impossible.
         with mock.patch.object(F, "cpython_answer",
                                return_value=(F.OracleAnswer(0, ""), "")), \
              mock.patch.object(M.F, "run_on",
