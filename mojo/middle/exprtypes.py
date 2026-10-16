@@ -61,8 +61,9 @@ _WALK_AST_MAX_DEPTH = 900
 # measurement is why: a counter invalidates everything, and this compiler
 # mutates a `StructDef`'s field list twice per module, so a counter at every
 # mutation site puts back exactly the per-level rescan the memo exists to
-# remove — 160-module chain, 194,684 node visits with per-node invalidation
-# against 5,405,540 with a counter at every site (baseline: 19,480,348).
+# remove — 160-module chain, 250,192 node visits with per-node invalidation
+# against 2,848,778 with a counter at every site and 5,405,540 with a counter
+# at each module boundary as well (baseline: 19,480,348).
 _WALK_AST_MEMO: dict = {}
 _WALK_AST_PARENTS: dict = {}
 
