@@ -5210,5 +5210,77 @@ class TestLabelUniqueness(unittest.TestCase):
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
 
 
+class TestABreachIsNotAVerdict(unittest.TestCase):
+    """`proof_census` publishes a verdict to the CAS, and a BREACH is not one.
+
+    The rule is `checked_run.py`'s, one layer down: a recorded FAILURE is
+    re-run, because the key covers the proof's bytes and the toolchain and
+    deliberately says nothing about the machine. A wall/CPU breach is a fact
+    about the MACHINE — how loaded, how many proofs at once — so publishing it
+    turns one slow afternoon into a permanent red that no re-run can clear.
+    This row pins the fix that landed in 2335a001 ("ONE launcher, bounded in
+    wall AND cpu"): `_run_lean` now reports a breach as its own fourth return
+    value and `proof_census` reports it WITHOUT calling `_publish_verdict`, so
+    the poisoned records can no longer be written — and the verdict VERSION
+    bump retired the ones that had been.
+
+    Both directions are asserted, and both are needed: a row that only checked
+    "a breach is not published" would pass on a `proof_census` that publishes
+    nothing at all, which is a cache that can never answer and the opposite
+    failure.
+    """
+
+    def _census(self, run_result, published):
+        import tempfile
+        from unittest import mock
+        fd, path = tempfile.mkstemp(suffix=".lean", prefix="verdict_")
+        os.close(fd)
+        self.addCleanup(os.unlink, path)
+        with open(path, "w") as f:
+            f.write("theorem t : True := by trivial\n")
+        # Every step of `proof_census` that would touch Lean, the library or
+        # the machine-wide CAS is replaced; `_run_lean`'s answer is the input
+        # and `_publish_verdict`'s calls are the output under test.
+        with mock.patch.object(L, "find_lean", lambda *a, **k: "/usr/bin/lean"), \
+                mock.patch.object(L, "ensure_library", lambda *a, **k: None), \
+                mock.patch.object(L, "library_census", lambda *a, **k: {}), \
+                mock.patch.object(L, "proof_verdict_key",
+                                  lambda *a, **k: "proof/deadbeef"), \
+                mock.patch.object(L, "cas_lookup_verdict", lambda k: None), \
+                mock.patch.object(L, "_run_lean", lambda *a, **k: run_result), \
+                mock.patch.object(L, "_publish_verdict",
+                                  lambda *a, **k: published.append(a)):
+            return L.proof_census(path)
+
+    def test_a_breach_is_reported_and_not_published(self):
+        published = []
+        c = self._census((False, "lean exceeded 2700s wall", None,
+                          "lean exceeded 2700s wall"), published)
+        self.assertFalse(c.ok)
+        self.assertFalse(c.cached)
+        self.assertEqual(
+            published, [],
+            "a wall/CPU breach is a fact about the machine, and publishing it "
+            "makes it a permanent verdict every worktree replays: the key "
+            "cannot tell a slow box from a false theorem")
+        self.assertIsNone(
+            c.n_sorries,
+            "a killed elaborator printed a PREFIX of the file's warnings; "
+            "reporting the prefix as a count says 'measured, N holes'")
+
+    def test_a_failure_that_is_a_verdict_is_still_published(self):
+        published = []
+        c = self._census((False, "error: unknown identifier", 2, None),
+                         published)
+        self.assertFalse(c.ok)
+        self.assertEqual(
+            len(published), 1,
+            "a proof that genuinely fails IS a verdict about the proof's bytes "
+            "and must be cached, or the cache buys nothing")
+        self.assertEqual(published[0][2], 2,
+                         "the published record carries the hole census with the "
+                         "verdict")
+
+
 if __name__ == "__main__":
     unittest.main()
