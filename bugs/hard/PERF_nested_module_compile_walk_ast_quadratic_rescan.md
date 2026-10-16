@@ -104,7 +104,7 @@ and it costs 21x the node visits to protect against nothing.
   produced by two trees of the SAME repo (`git archive HEAD~1` into a
   scratch directory, versus the working tree), from the same fixed module
   directory, so the `#line` directives are stable across the pair.
-* **`python3 test_gimple.py` 395 passed / 0 failed**, including two new
+* **`python3 test_gimple.py` 396 passed / 0 failed**, including three new
   checks: `walk_ast_memo_is_transparent_and_honours_invalidation` (content
   and order equal an independently written reference walk — no memo, no
   per-class caches; a repeat call is the SAME list object; the entry holds
@@ -112,13 +112,16 @@ and it costs 21x the node visits to protect against nothing.
   each cost the memo its answer, for the node AND for every node containing
   it) and `walk_ast_memo_never_answers_stale_over_real_compiles` (every
   `_walk_ast` call, over five real compiles, compared against a fresh
-  reference walk).
-* **Both new tests bite, and the second one bites on a MISSED SITE, which is
-  what it is for.** Emptying `_walk_ast_invalidate`'s body turns both red.
-  Dropping ONE `_walk_ast_invalidate(s)` at the `_collect_self_assigns`
-  field-append turns only the corpus one red — `call 18 on list: node 18
-  differs` — i.e. the shape of failure this memo could have had in the field:
-  a struct field silently missing from generated C.
+  reference walk) and `every_ast_mutation_site_invalidates_the_walk_memo`
+  (the census, below).
+* **The new tests bite, and the corpus one bites on a MISSED SITE, which is
+  what it is for.** Emptying `_walk_ast_invalidate`'s body turns both the
+  transparency test and the corpus test red. Dropping ONE
+  `_walk_ast_invalidate(s)` at the `_collect_self_assigns` field-append turns
+  only the corpus one red — `call 18 on list: node 18 differs` — i.e. the
+  shape of failure this memo could have had in the field: a struct field
+  silently missing from generated C. The census check's two failure modes
+  are verified separately, below.
 * `test_selfhost.py` 3 passed / 0 failed (it builds and links the
   self-hosted compiler and runs the produced binary on a two-line program),
   `test_gimple_runner.py` 461/0, `test_module_cache.py` 163/0,
@@ -126,22 +129,37 @@ and it costs 21x the node visits to protect against nothing.
 
 ### What remains, named
 
-1. **A static census of the mutation sites, as a check.** The corpus test
-   above is evidence, not a proof: a mutation reachable only from a shape
-   none of its five programs has is not covered, and the unit test cannot find
-   it because the memo is working exactly as written — the WRITER is what
-   forgot. `test_gimple.py` already has the executable form of such a census
-   for the OTHER hazard (`no_walk_ast_caller_mutates_what_it_is_handed`), and
-   the same shape applied to in-place AST-field writes — every such function
-   must call `_walk_ast_invalidate`, or be on a named allowlist with a reason
-   — is the thing to add next. The census run for this pass is reproducible
-   from the field names of every dataclass in `fire_compiler.py` (82 field
-   names, 82 direct write sites over `mojo/`, `gimple_codegen.py` and
-   `ast_rewriter.py`, 44 enclosing functions). Writes to SCALAR fields need
-   nothing — `s.name`, `value.kind`, `body_fd.is_async`, and
-   `for_target_single_name` peeling `'(a)'` to `'a'` all leave the walk
-   returning the same nodes — which is most of what the census turns up and is
-   why the allowlist has to be reasoned about rather than generated.
+1. ~~A static census of the mutation sites, as a check.~~ **LANDED, later
+   the same day.** `test_gimple.py`'s
+   `every_ast_mutation_site_invalidates_the_walk_memo` reads the field names
+   out of every dataclass in `fire_compiler.py` at run time, finds every
+   write that can change what a walk of some node returns, and attributes
+   each to the innermost function containing it; that function must either
+   call `_walk_ast_invalidate` or be on `_WALK_AST_MUTATION_ALLOWLIST` with a
+   reason. **82 write sites in 50 functions**: 11 invalidate, 39 are
+   classified into the three shapes the allowlist's own comment names — the
+   object is one of this compiler's own dataclasses (whose field names
+   collide with the AST's: `name`, `value`, `items`, `fields`, `kind`,
+   `params`, `methods`, `captures`, `index`, `extra`, `alias`), the field is
+   a SCALAR so the walk returns the same nodes either way (`StructDef.name`,
+   `Comprehension.kind`, `body_fd.is_async`, and `for_target_single_name`
+   peeling `'(a)'` to `'a'`), or the tree is one `gen_module` has not walked
+   (rewritten inside `ast_rewriter.rewrite` / `gimple_gen_coro.lower` in
+   `_run_pipeline`, freshly synthesized, or reached during `gen_module` only
+   through `hoist_awaits_from_call_args`, which invalidates the enclosing
+   `fn`). It is the census shape the 2026-10-05 entry wrote for the OTHER
+   hazard (`no_walk_ast_caller_mutates_what_it_is_handed`), turned on this
+   one. Both of its failure modes are verified to bite: a new never-called
+   `node.args.append(None)` in `emit_stmts.py` turns it red with the file,
+   function, line and field named, and an allowlist key naming no real
+   function turns it red too.
+
+   What it does NOT cover, and the reason the corpus test above still earns
+   its place: an in-place mutation reached through a LOCAL ALIAS
+   (`b = s.body` then `b.append(x)`), which no attribute-name predicate can
+   see. The census run for this pass found 307 aliasing assignments
+   (`x = <expr>.<ast field>`) across `mojo/`, and none of the hooked sites
+   uses one — but that is a reading of this tree, not a property of it.
 2. **Memory.** The memo and its parent edges are per-compile and cleared at
    each `_run_pipeline`. Measured where measured: n=160 chain, 1,279 memo
    entries / 23,212 parent edges at the end of the compile;
@@ -157,7 +175,7 @@ and it costs 21x the node visits to protect against nothing.
    node-visit column is the one this doc measures, and it is linear now.
 
 **Gate (worker pass only, every job under `tools/memslot.py --gb 8`)**
-`test_gimple.py` 395/0, `test_selfhost.py` 3/0, `test_gimple_runner.py` 461/0,
+`test_gimple.py` 396/0, `test_selfhost.py` 3/0, `test_gimple_runner.py` 461/0,
 `test_module_cache.py` 163/0, `test_link_mode.py` 17/0,
 `test_silent_noop_iter.py` 27/0.
 
