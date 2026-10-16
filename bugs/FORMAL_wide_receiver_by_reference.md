@@ -68,6 +68,16 @@ two are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs
 (`work_step_ldr_pre`, `work_step_str_off`) were dead and are deleted from
 `lib/ProofLib.lean`.
 
+**Update 2026-10-13 (`work/formal357-docs`).** Two stale claims above are
+corrected, from the code rather than from a re-run: the "two one-line fixes"
+step 6 named (`_stmts_go_t` rejecting `VarDecl`, `_expr_go_t` reading
+`e.args[0]`) have LANDED, so the generator no longer stops there — it stops at
+the missing struct DOMAIN, which is `FORMAL_wide_recv_model_has_no_domain_for_a_
+struct.md`'s subject; and the `_WORK_STEP` rename landed, so the two `work_step_*`
+aliases are referenced by nothing and are a `lib/ProofLib.lean` rebuild away
+from deletion. Nothing here is a code change; it is where the next reader
+should look.
+
 ## Is the one-word value a true invariant?
 
 **Yes, and the proof side's own account of it is correct.** Verified, not taken
@@ -546,15 +556,24 @@ instead of `MojoStmt`/`MojoExpr`, plus the per-block value flow for frame
 accesses, plus `FrameOk_except` in place of `FrameOk` in the method's contract.
 Its `_gen_go` (`:878`) is the place where the one-argument model is assumed.
 
-**Measured, so the next person does not have to rediscover it:** a two-field
-struct with methods does not reach the generator's *frame* problem at all. It
-stops two steps earlier, in `_stmts_go_t` (`formal/arm64_proof_gen.py:608`),
-which handles `Return`, `Pass`, `ExprStmt`, `Assign`, `AugAssign` and `IfStmt`
-and raises on everything else — so `var p = Point()` (a `VarDecl`) fails, and
-without the `var` a zero-argument constructor fails one line lower, in
-`_expr_go_t`, which reads `e.args[0]` unconditionally. Both are one-line fixes
-in that file and neither is about the receiver. What is genuinely open after
-them is the receiver's own per-block value flow, which is this step.
+**Update 2026-10-13 (`work/formal357-docs`): the two "one-line fixes" this
+section named have LANDED, so the boundary it measured is no longer where the
+generator stops, and the next reader should not go looking for them.** The
+binder in `_stmts_go_t` takes `VarDecl` (`isinstance(st, (Assign, AugAssign,
+VarDecl))` — the same walk `Assign` and `AugAssign` take), so `var p = Point()`
+binds; and `_expr_go_t`'s call arm is `_call_go`, which renders EVERY argument
+(`f_go` for a zero-argument call, SPACE-separated) rather than reading
+`e.args[0]`. So a two-field struct with methods no longer stops at either of
+those arms — it stops at the same place
+`formal/examples/{struct_point,struct_method,wide_recv}.mojo` do, which is the
+semantic model's missing struct DOMAIN: `Point()` is a call to a callee with no
+`_go` (`_call_go` refuses rather than guessing) and `p.x` is a `MemberExpr`
+whose value the model has no domain for (`_expr_go_t`'s `_no_value_model`
+arm). Both are `test_formal.py::EXPECTED_FAILURES` rows for that reason, and
+that domain is `bugs/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s
+subject — a representation project, not a step in this one. What remains this
+step's own is the receiver's per-block value flow, which is downstream of the
+struct domain and not reachable before it.
 
 ## The 14 remaining receivers, by band
 

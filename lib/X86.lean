@@ -1328,7 +1328,8 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     -- the codegen's own contract makes it mandatory rather than optional: an
     -- expression leaves its value in a GPR, so a `double`-valued expression
     -- ends with this.  A run whose model cannot take this step stops at it, and
-    -- a stopped run reads as result 0 (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`).
+    -- a stopped run reads as result 0 (the x86-64 ISA census's SSE2 gap, closed
+    -- 2026-10-13; the census's ratchet is `test_formal_isa_census.py`).
     --
     -- The ModRM halves are the OPPOSITE of `0F 6E`'s and that is the instruction,
     -- not a naming preference: `0F 7E` is `MOVQ r/m64, xmm` — the XMM is the
@@ -1407,7 +1408,7 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     Below the bound the mantissa (with its implicit leading one) is shifted
     into an integer and the sign applied by two's complement.  Truncation
     toward zero, not flooring: `int(-2.9)` is `-2` and this is the `T` in
-    `CVTTSD2SI` (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+    `CVTTSD2SI` (the x86-64 ISA census's SSE2 gap, closed 2026-10-13). -/
 def x86_cvttsd (a : UInt64) : UInt64 :=
   let sign := (a >>> 63) != 0
   let exp := (a >>> 52) &&& 0x7ff

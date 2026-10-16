@@ -6447,6 +6447,20 @@ BOTH_ARCH_CASES = [
      "    printf(\"x=%d\", xs[0])\n"
      "    return 0\n", 0, "x=21"),
 
+    # A TUPLE target with no star: before the fix, every leaf of a tuple
+    # for-target was classified as the element's CONTAINER kind, so
+    # `printf("%d", a)` refused with the `%d`-reads-a-CONTAINER sentence about
+    # an integer (the bug `FORMAL_a_tuple_for_target_leaf_is_classified_as_the_
+    # element_container.md` records).  Nested on purpose — a group's leaves are
+    # elements one level further down.
+    ("both_arch_a_tuple_for_target_binds_each_leaf_one_level_down",
+     "def main():\n"
+     "    for a, b in [(1, 2)]:\n"
+     "        printf(\"%d %d\", a, b)\n"
+     "    for c, (d, e) in [(3, (4, 5))]:\n"
+     "        printf(\" %d %d %d\", c, d, e)\n"
+     "    return 0\n", 0, "1 2 3 4 5"),
+
     # The CONTROL for the `printf("%d", <container>)` refusals in `REFUSAL_CASES`:
     # reading a NUMBER out of a container is a program this path answers, and the
     # new row must not turn the whole construct into a refusal. `len(xs)` is an

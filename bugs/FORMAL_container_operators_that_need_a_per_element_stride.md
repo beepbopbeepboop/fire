@@ -104,13 +104,45 @@ them through `_maybe_emit_set_binop`, which is asked by BOTH the binary and the
 augmented emitter — the augmented one used to reach the shared gate first, and
 `s -= {2}` and `s = s - {2}` are the same operator and must not get two answers.
 
+**2026-10-13 (`formal326-docs`): the three set operators AND the union are
+lowered on x86-64, so item 3 is complete on BOTH backends.**
+`formal/x86_64_codegen.py` grew `_emit_set_op`, `_emit_set_filter_pass`,
+`_emit_set_union` and `_maybe_emit_set_binop` as the twins of arm64's, with the
+same capacity rules (a union or a symmetric difference reserves `nL + nR`, a
+difference or intersection `nL`) and the same shared
+`_emit_blob_growth_guard`. The register discipline is `_emit_list_concat`'s
+rather than a second one: the left and right operands are the bases, the source
+is walked with a countdown, and the result count word is re-stored on every
+append (the difference pass returned an EMPTY set the first time it ran because
+the count word was written once, as zero, and never again — that is the one
+defect the CPython differential caught, and it is why the union's count word is
+written after its left-copy rather than before).
+
+Measured, both architectures, `test_formal_container_methods.py set` and
+`operator`: **the `set` group is 13 answers / 9 refusals on EACH backend**
+(x86-64 was 4 answers), and the `operator` group is **11 answers on each**
+instead of 11/6. Every set row left `BACKEND_ONLY` — `s_union`,
+`s_union_elems`, `s_union_str`, `s_union_ior`, `s_intersection_r`,
+`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r`, `o_xor`, `o_and`
+— and the table's own rule, "a backend that grows one has to delete its row",
+is what that deletion is.
+
+**The `s_symdiff_r`/`o_xor` cases were strengthened in the same commit, and
+they were a real gap**: both were `s = {1, 2}`; `t = s ^ {2}`, whose right
+operand holds NOTHING the left does not, so the second half of the symmetric
+difference — the elements only the right holds — never appended and a
+half-implemented `^` passed. They are `s ^ {2, 3}` now (sum 4, len 2, and `3`
+is the right-only element), which is the case that reads both passes. The
+difference between the two is the difference between a test that pins the
+lowering and one that pins half of it.
+
 **The gate did NOT narrow the way §"What to do, in order" item 1 prescribed, and
 the reason is a correction worth keeping.** Item 1 said to drop `&`/`^`/`-` from
 `model.CONTAINER_GATED_OPS` and move the rows to probes. That table is SHARED by
-both backends, so dropping an operator there would have made x86-64 — which has
-no set emitter at all — fall through to the integer ALU on two addresses, which
-is exactly the wrong answer the gate was widened for. Instead arm64 intercepts
-the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
+both backends, so dropping an operator there would have made a backend without
+the emitter fall through to the integer ALU on two addresses, which is exactly
+the wrong answer the gate was widened for. Instead each backend intercepts the
+two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
 `[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
 is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
@@ -245,7 +277,7 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 | `[1, 2] \| [3]` | `3` | `TypeError` | answering a program CPython rejects |
 | `[1] in [[1], [2]]` | `1` on arm64, `0` on x86-64 | `1` | the two architectures disagreeing |
 | `b = [1]; b in [[1], [2]]` | `0` on both | `1` | wrong number |
-| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop |
+| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop — **FIXED on arm64 2026-10-13** (item 4) |
 | `t = (1,2,3); t[0] = 9` | `t0=9 len=3` | `TypeError` | wrong *mutation* |
 | `for k in d: del d[k]` | `1` | `RuntimeError` | wrong number |
 | `for k in d: d["z"] = 5` | `2` | `RuntimeError` | wrong number |
@@ -253,6 +285,75 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 
 All of those are refused, or stopped with a diagnostic that names the rule. The
 table is not where the remaining work is.
+
+## Item 1 landed (2026-10-13): `==`/`!=` between two blobs of WORDS, both backends
+
+Item 1 was filed as "compare lengths, then compare element by element at the
+element's stride", and the stride is the whole of the fear (§"The obstacle"
+below): a string element is a `char *`, so a word compare answers by interning
+order, and a nested container's element is another blob's ADDRESS, so the
+compare is recursive. The landing is therefore scoped to the element kind where
+that fear is absent — an INTEGER element, whose value IS the word — and every
+other shape keeps the shared `container_operator_refusal`.
+
+**The predicate is shared; the class is flow-sensitive.** `model.blob_equality_
+word_comparable` says whether *both* operands are blobs whose element kind is a
+word (`BLOB_EQUALITY_WORD_KINDS` is `{int}`). Set-ness and dict-ness cannot live
+there — a set lowers as a list, so the KIND cannot tell them apart — so each
+backend's `_equality_blob_class` asks its own `_set_vars`/`_dict_vars` and, for a
+LIST-versus-TUPLE question the value model has never kept, a new positive
+`_list_vars` beside `_tuples_vars`. Both classes must be KNOWN and EQUAL, because
+`[1] == (1,)` is False in CPython whatever the elements: answering it off "not a
+tuple" would call a call's return value a list and print 1 where CPython prints
+0. A known-but-different pair is answered directly (CPython: never equal);
+anything unknown refuses.
+
+**Measured, both architectures, `test_formal_container_methods.py`:**
+`operator` 20 → 30 answers (10 → 15 per backend), `tuple` 16 → 18 (8 → 9 per
+backend), `PASS=6 FAIL=0`. The moved rows are:
+
+| row | was | now |
+|---|---|---|
+| `o_eq` (`a == [3, 1, 2]`) | refusal (answered 0 before the gate) | `1` |
+| `o_ne` | refusal | `0` |
+| `t_eq_r` (`(1,2,3) == (1,2,3)`) | refusal | `1` |
+| `o_eq_diff_elem` (same length, one element differs) | — (new) | `0` |
+| `o_eq_diff_len` (different lengths) | — (new) | `0` |
+| `o_eq_mixed` (`[1] == (1,)`) | — (new) | `0` |
+
+The two new element rows exist because a length-only or address-only lowering
+would pass `o_eq` by accident; `o_eq_diff_elem` is the row that requires a real
+per-element compare, and `o_eq_mixed` is the row that requires the class.
+
+**What still refuses, and each is a new pinned row rather than a hole:** a
+`char *` element (`o_eq_str_r`), a nested blob (`o_eq_nested_r`), a set
+(`o_eq_set_r`, order-independent) and a dict (`o_eq_dict_r`, pair stride). So
+`model.CONTAINER_GATED_OPS` is NOT narrowed — dropping `==` there would send
+x86-64 into the integer ALU on two addresses for exactly those shapes — and the
+emitters intercept before the shared gate the same way `|` already splits
+`_emit_set_union` from `set_union_refusal`.
+
+The arm64 flag path needed one extra hook: `_emit_branch_unless` branches on
+`CMP` flags rather than materializing a boolean, so `if a == b:` would have
+reached the refusal while `r = a == b` answered. It now falls through to the
+truthiness path when `_blob_equality_plan` accepts the pair. x86-64 has one
+comparison hook (`_emit_binop`), so it needed nothing extra.
+
+**A THIRD entry point, and it was a pre-existing SILENT WRONG ANSWER: the
+compare CHAIN.** `a == b == c` is one `F.CompareChain` and neither backend's
+`_emit_compare_chain` ever went through `_emit_binop`, so no gate reached it and
+each link was a raw word compare of two blob ADDRESSES. Measured on both
+backends before the fix: `a == b == c` for three equal lists answered **0 where
+CPython answers 1**, exit 0 — the wrong-answer class this whole document exists
+to prevent, reached by a spelling nobody had looked at. The chain emitter now
+asks the same `_blob_equality_plan` for each `==`/`!=` link: an accepted pair is
+lowered from the bases the chain has ALREADY evaluated (it must not re-evaluate
+a call operand — `_emit_blob_word_equality_bases` is the register-level body the
+binary spelling wraps) and ANDed into the running result; a blob link the
+lowering does not accept raises the shared refusal; a blob against a scalar
+falls through, because the address compare below is CPython's own answer there.
+Pinned by `o_chain_eq`, `o_chain_eq_false`, `o_chain_mixed`, `o_chain_ne` and
+`o_chain_eq_str_r` in `test_formal_container_methods.py`, on both backends.
 
 ## The obstacle, stated once
 

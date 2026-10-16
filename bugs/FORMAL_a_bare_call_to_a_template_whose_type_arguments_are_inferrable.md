@@ -2,7 +2,10 @@
 # the per-edge export gate hands 98 of the 163 files to
 
 **Area:** `formal/monomorph.py` (`demands`) / `formal/model.py` (the callee
-refusal) · **Status: PARTIAL — §2's half is FIXED (2026-10-04): the refusal no
+refusal) · **Status: PARTIAL — §2's half is FIXED (2026-10-04), and §0d fixes a
+fifth defect in the census INSTRUMENT (2026-10-13): the corpus's one `the
+declaration could not be read` row was a `#` inside a string, not a corpus fact.
+The refusal no
 longer tells a correct caller to add brackets, and says which side the fault is
 on. The inference is NOT done, and §5b is the measurement of what it would take
 and it REORDERS §5: the matcher bucket §5 called a patch is 2 sites, not 32, and
@@ -80,6 +83,65 @@ runner's scratch directory is itself under `ROOT/.tmp/`, so the assertion is
 spelled in the tool's own `os.path.relpath(path, ROOT)` form — the question is
 which files the WALK reached, and asking whether an absolute path equals
 another one would have failed on the spelling rather than on the walk.
+
+## 0d. 2026-10-13: a `#` inside a STRING is not a comment, and the census said it was
+
+**The census's own `the declaration could not be read` row was the instrument,
+not the corpus — the fifth defect of that kind this document has found.** One
+site, `std/collections/string/string_span.mojo:1284`'s `BytesIter(…)`, was filed
+there because `tools/formal_template_call_census.py::_strip_comments` cut every
+line at its FIRST `#`:
+
+```python
+        at = line.find("#")
+        out.append(line if at < 0 else line[:at])
+```
+
+so a `#` inside a string was treated as a comment. `BytesIter`'s declaration in
+`std/collections/string/iterators.mojo` carries the one-line docstring
+`"""UAX #29 segmentation state for forward iteration."""`, and the truncation left
+an UNTERMINATED `"""`:
+
+```
+raw:     """UAX #29 segmentation state for forward iteration."""
+stripped: """UAX
+```
+
+`elaborate._bracket_depth_by_line` is string-aware (`…_by_line`'s own docstring
+says a literal `#` inside a backtick MLIR literal must not be taken for a
+comment), and it is handed source `_strip_comments` has ALREADY edited — so the
+unterminated string made it ignore every bracket below line 502, `struct
+BytesIter[origin: ImmOrigin](`'s own `):` read as a depth-0 top-level boundary,
+and the 77-line declaration was extracted as 2. Its `__init__` was invisible, so
+`parameter_pieces` returned None and the site was reported `the declaration could
+not be read`. **A reader that edits the source another reader then scans has to
+agree with it on where a string ends.**
+
+**The fix is the same string rule in both readers.** `_strip_comments` is a
+character scan with `"`/`'` (escapes honoured), `"""`/`'''` and backtick state,
+exactly `_bracket_depth_by_line`'s, so the two cannot disagree. The corpus delta
+is one row and it is the point:
+
+| bucket | before | after |
+|---|---:|---:|
+| the declaration could not be read | 1 | **0** |
+| the argument's type is not written down | 71 | **72** |
+| some parameter trait-bounded (`B`) | 67 | **68** |
+
+Nothing else moves: `solvable` stays 2, no-unify 28, phantom 5, comptime-default
+8, no-parameter 0, calls 115, files 455. **The next four defects `_strip_comments`
+could still hide are not measured here** — a `#` inside a string was the one the
+corpus's own `could not be read` count pointed at, and it is now 0, which is the
+whole reason that bucket was worth a fix rather than a note.
+
+**Pinned by `test_formal_monomorph.py`'s
+`the census_answers_each_of_its_seven_questions`** (fixture `desync`): a module
+whose docstring spells `"""UAX #29 helper."""` on one line, before a multi-line
+`struct Hash[T: AnyType](…)` header. With the old line-splitting stripper the
+struct's header is read as its whole block and the site is `the declaration could
+not be read`; with the string-aware scan it is `solvable`. **Verified to fail
+without the fix** (`Hash(…) classified ['the declaration could not be read']`,
+against `PASS=38` with it).
 
 ## 1. The measurement
 

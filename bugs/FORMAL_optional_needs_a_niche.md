@@ -242,11 +242,15 @@ picking it up should check rather than take on trust:
    read through a word that is not a receiver.** Every frame read this path has
    lowers from a RECEIVER (`self.f`) or from a name whose candidate struct is in
    `fn._frame_candidates`; a name declared `Optional[…]` has no candidate struct
-   because `Optional` is not in this module's table. See
-   `FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_two_
-   backends_disagree.md` for the shape, and note that this pass already needed
-   `_frame_receivers`' census for the same reason (`h.<field>`), so the
-   mechanism exists and the missing piece is a stdlib-struct entry.
+   because `Optional` is not in this module's table. The shape is the one the
+   deleted `…_a_subscript_on_a_frame_slot_is_a_pointer_dereference_…` doc was
+   about: reading a field through a word the source has not proven is a frame
+   address. That case is now REFUSED by name rather than dereferenced
+   (`ba63213c`/`f0df70b2`, "a subscript on a base the source proves is a scalar
+   is refused"), so what this item needs is not a lowering but the stdlib-struct
+   entry that makes the word a frame holder in the first place. Note that this
+   pass already needed `_frame_receivers`' census for the same reason
+   (`h.<field>`), so the mechanism exists and the missing piece is that entry.
 3. **`x = None` becomes a store of a FRAME into a slot**, which is
    `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
    refusal is `formal13-5`'s claim to answer. `Slice.__init__` is exactly this
@@ -258,6 +262,27 @@ The niche table is what makes this row decidable rather than open-ended: it says
 list and not a project.
 
 ### 3. An UNSTATED payload type still folds to `== 0`, and that is a residual
+
+**Status 2026-10-13 (`work/formal361-docs`): the residue is a wrong ANSWER and
+not merely an unavailable one, and it is now pinned with that output.**
+Measured on this tree, both architectures:
+
+    def f(x) -> Int:
+        if x is None:
+            return 1
+        return 2
+
+    def main(n):
+        printf("%d\n%d\n", f(None), f(0))
+
+CPython prints `1` then `2`; the image prints `1` then `1`, because `f(0)`'s `0`
+IS the folded `None` word. `test_formal_optional.py`'s
+`unstated_payload_comparison_folds_0_as_none` pins `1\n1\n` and says in its own
+comment that CPython's second line is `2`, so the row goes red the day the
+inference below lands. This sharpens the paragraph below without changing its
+conclusion: the fold is deliberate, and the sentence "both are pinned in
+`test_formal_optional.py`" was true of the UNWRAP only — the comparison had no
+row of its own until now, which is how a wrong answer stayed invisible.
 
 `var z = None; if z is None:` still compares against 0, because the pass's
 obligation is discharged only where the SOURCE stated an `Optional[T]`.
@@ -403,8 +428,9 @@ be launched from a test.
   two-word row's cost was arrived at, and because a reader who wants the
   two-word form needs the history of why the niche was chosen first. **Its
   "NOT FIXED" headline is wrong as of this commit.**
-* `FORMAL_builtin_slice_optional_field_is_a_frame_holder.md` — unchanged and
-  still accurate; it is the `struct`-typed-field question, which this
-  representation does not touch.
+* the `builtin_slice` frame-holder doc — **deleted** (`32cfde0c`, "Three
+  resolved documents deleted"): it asked whether an
+  `Optional`-typed *field* is a frame holder, which this representation does not
+  touch, and it is resolved rather than open.
 * the `b10` round of `bugs/FORMAL_sweep_work_map.md` §2.4 — the row it names is not
   blocked on this any more, and was not (§1 above).

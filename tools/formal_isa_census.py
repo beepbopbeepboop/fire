@@ -610,7 +610,7 @@ BACKLOG = {
                             "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
-    # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
+    # `encode_imul_r64_r64_imm` was removed on 2026-10-06
     # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
     # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
     # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
@@ -641,10 +641,13 @@ BACKLOG = {
     # number in both halves; and a branch to the NEXT instruction stays inside
     # whatever the program has already put there.  All four are in the pool now
     # (`formal/x86_64_model_fuzz.py`), measured AGREE at four initial states
-    # each.  arm64's `encode_adrp` keeps its HARNESS_LIMITS entry, and that
+    # each.  arm64's `encode_adrp` keeps its `HARNESS_LIMITS` entry, and that
     # reason is the one that fits IT: this project does not map the arm64
     # harness's code at a fixed address, so a pc-relative RESULT cannot be
     # compared and only pc DELTAS are.
+    #
+    # So there is no x86-64 row in this dict any more; the arm64 entries above
+    # are the whole of it.
 }
 
 

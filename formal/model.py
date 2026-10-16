@@ -12541,6 +12541,176 @@ def fold_constant_interpolated_literals(stmts) -> int:
     return folded
 
 
+def integer_text_width(bits: int) -> int:
+    """The widest decimal text a signed `bits`-wide integer renders as.
+
+    **Including the sign, because that is what the value can be.** A 64-bit
+    integer reaches `-9223372036854775808`, which is 20 characters; the largest
+    positive one is 19. The derivation is `len(str(-(2 ** (bits - 1))))` rather
+    than a table of digits because a table would be 4 remembered rows where one
+    expression is right for every width, and because a reader checking this
+    against `decimal` should find a formula.
+
+    This is the number §7.1 of
+    `bugs/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
+    never been asked for: a buffer with a COMPILE-TIME-KNOWN bound needs each
+    field's WIDTH to be known at compile time, and an integer's width is a
+    property of its declared type rather than of its value — which is the only
+    reason the doc's step 1 can promise a bound at all.
+    """
+    if not isinstance(bits, int) or bits < 2:
+        return 0
+    return len(str(-(1 << (bits - 1))))
+
+
+# The four widths this path actually declares. Keyed on the bit width rather
+# than on a type name, because a name is a spelling the two backends share as
+# vocabularies (`formal/types.py`) and a width is arithmetic — and because a
+# `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
+# different spelling.
+INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
+
+# What an f-string's FIELD has to be for a buffer's bound to be known before
+# the program runs. Read out of the corpus by
+# `test_formal_run.py::check_interpolated_literal_bound_census`, which is where
+# the shape distribution behind this table is measured rather than assumed.
+FIELD_SHAPES = ("int-literal", "str-literal", "name", "attribute", "call",
+                "subscript", "other")
+
+
+def interpolated_field_shape(expr: str) -> str:
+    """Which of `FIELD_SHAPES` an f-string field's TEXT is written as.
+
+    The field is text, not an AST node: `interpolated_literal_segments` reads it
+    out of the source token because that is all the parser kept (see its
+    docstring), so this is a reader over a spelling and it says so — it answers
+    "what would have to be known about this text", never "what is this value".
+
+    The four shapes that can be resolved WITHOUT the enclosing scope — an
+    integer literal and a string literal, which carry their own width — and the
+    four that cannot: a bare name and an attribute need a DECLARED type to be
+    resolved at all, and a call, a subscript and anything else need the whole
+    expression tree this path never built. **Which of the two kinds a field is
+    is the number that decides whether a bound exists**, which is what the
+    census measures and what `interpolated_literal_bound` turns into a verdict.
+    """
+    text = (expr or "").strip()
+    if not text:
+        return "other"
+    try:
+        int(text, 0)
+        return "int-literal"
+    except ValueError:
+        pass
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return "str-literal"
+    if text.endswith(")") and "(" in text:
+        return "call"
+    if "[" in text and "]" in text:
+        return "subscript"
+    if "." in text:
+        return "attribute"
+    if text.isidentifier():
+        return "name"
+    return "other"
+
+
+def interpolated_literal_bound(spelled: str, field_width=None):
+    """`(bound, why)` — the compile-time-known bound of a composed literal, or
+    `(None, why)` naming the ONE obligation that stops there being one.
+
+    **`bound` counts the NUL terminator**, because the composed value has to be
+    one: a string on this path is a bare `char *` whose length is a `strlen`
+    over its bytes (`formal/model.py`'s text-encoding block and
+    `LENGTH_DEPENDENT_METHODS`), so a composition that is not terminated is a
+    `len()` that walks past the end of it. That is the obligation
+    `bugs/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
+    the first method which can build a string at run time inherits the
+    obligation" — and inheriting it is cheaper than a second word in every
+    string value on this path.
+
+    **`field_width(expr)` is the caller's resolver and is what makes this a
+    function of the SOURCE rather than of a guess.** It returns the widest
+    decimal rendering of that field — an integer for one it can bound, `None`
+    for one it cannot — and the default resolver below bounds exactly two
+    shapes, the two that carry their width with them:
+
+        >>> interpolated_literal_bound('f"--backend={7}"')
+        (12, None)
+        >>> interpolated_literal_bound('f"--backend={name}"')[0] is None
+        True
+        >>> interpolated_literal_bound('f"--backend={name}"',
+        ...                             lambda e: integer_text_width(64))
+        (31, None)
+
+    **The finding this exists to record is that the bound exists for exactly
+    one class of field.** A field whose value is an INTEGER has a width that is
+    a property of its declared type (`integer_text_width`), so the buffer's size
+    is arithmetic. A field whose value is a STRING does not: its width is a
+    `strlen` over bytes whose length is a property of the RUN, so no buffer in a
+    frame — whose size is reserved at compile time, which is what
+    `formal/arm64_codegen.py`'s blob cursor and `formal/model.py`'s
+    `frame_blob_refusal` are — can be sized for it. §7.1 of the doc says the
+    bound "is computable at compile time (chunk lengths are known; a field's
+    width is its declared type's)", which is true of the integer field and false
+    of the string one, and the false half is the half that decides how much of
+    the feature is buildable. `test_formal_run.py::
+    check_interpolated_literal_bound_census` is the measurement.
+
+    **`why` is a single sentence naming the FIRST unmet obligation, in the order
+    the obligations are independent of each other**: a t-string is refused for a
+    reason no buffer fixes (§7.3), a `:` spec and a `!` conversion are
+    RENDERINGS rather than values (§7.3 again, and the doc counts them
+    separately for exactly this reason), and only then does the width come up.
+    Reporting them in that order is what makes the sentence a next step rather
+    than a restatement.
+    """
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError as e:
+        return (None, f"its text could not be taken apart either: {e}")
+    if (spelled or "")[:1] in ("t", "T"):
+        return (None, "a t-string's `{name}` is a TEMPLATE, which is "
+                      "`str.format` evaluating an argument against a format "
+                      "string, so no bound over field VALUES is the right "
+                      "question for it")
+    if field_width is None:
+        def field_width(expr):                                # noqa: E306
+            shape = interpolated_field_shape(expr)
+            if shape == "int-literal":
+                return len(str(int(expr.strip(), 0)))
+            return None
+    total = 0
+    for seg in segs:
+        if seg[0] == "lit":
+            total += len(seg[1].encode("utf-8"))
+            continue
+        _kind, expr, spec, conv = seg
+        if spec:
+            return (None, f"the field `{expr}` carries a FORMAT SPEC (`:"
+                          f"{spec}`), which is a RENDERING rather than a value: "
+                          f"its width depends on the spec and on the field's "
+                          f"value, so it is not a compile-time constant")
+        if conv:
+            return (None, f"the field `{expr}` carries a CONVERSION "
+                          f"(`!{conv}`), which is a RENDERING rather than a "
+                          f"value")
+        width = field_width(expr)
+        if width is None:
+            shape = interpolated_field_shape(expr)
+            return (None, f"the field `{expr}` is a {shape} whose width is "
+                          f"not known before the program runs — a name or an "
+                          f"attribute is bounded only by its DECLARED type, "
+                          f"and an integer's width is arithmetic "
+                          f"(`integer_text_width`) while a STRING field's width "
+                          f"is a `strlen` over the value, which no frame buffer "
+                          f"reserved at compile time can be sized for")
+        total += int(width)
+    return (total + 1, None)      # the +1 is the NUL, and it is load-bearing
+
+
+
+
 def refuse_interpolated_literals(stmts) -> None:
     """Fold a field-less f-string, and raise `CodegenError` on the first one WITH a field.
 
@@ -26223,7 +26393,35 @@ def fn_declares_a_return(fn) -> bool:
     return declared_returns_a_value(fn)
 
 
-def function_returns_a_value(fn) -> bool:
+def _body_returns_a_value(fn, callee_returns_value) -> bool:
+    """`fn_returns_a_value`'s walk, with an optional transitive reading.
+
+    `callee_returns_value` is None for the source-only question and a callable
+    `name -> bool` for the extended one. The extension is one case and it is
+    the whole of what an intermediate function needs: `return f(…)` is a value
+    for the source-only reader (there IS a `return` and it has an expression),
+    but if `f` itself produces no value — the same `function_returns_a_value`
+    question one call down — then the `return` hands back the very word this
+    path cannot carry, so it is not a value-producing return either. Everything
+    else an expression can be (a literal, an arithmetic expression, a call to a
+    callee the resolver cannot answer for) is a value, which is the safe
+    direction: an unrecognised shape keeps the answer the caller already had.
+
+    The walk itself is `_value_return_exprs`'s (the shared reader), so this and
+    `returnless_function_names` classify the same `return`s.
+    """
+    for v in _value_return_exprs(fn):
+        if callee_returns_value is None:
+            return True
+        func = getattr(v, "func", None)
+        if (isinstance(v, F.CallExpr) and isinstance(func, F.IdentExpr)
+                and not callee_returns_value(func.name)):
+            continue
+        return True
+    return False
+
+
+def function_returns_a_value(fn, callee_returns_value=None) -> bool:
     """Whether a call to `fn` produces a value this path can carry.
 
     The conjunction of the two halves above, plus the two spellings whose
@@ -26233,10 +26431,48 @@ def function_returns_a_value(fn) -> bool:
     corpus. The parser's own `is_generator`/`is_async` are the answer, for the
     reason `tools/formal_returnless_census.py` gives: they are the front end's
     decision and not a re-read of the body.
+
+    **`callee_returns_value` carries the answer through a `return f(…)`, and it
+    is a hook because "does `f` produce a value" is a question about ANOTHER
+    function.** With it, `def h(): return g()` where `g` has no `return` is a
+    function that produces nothing — CPython's `h(…)` is `None` — so a `print`
+    of `h(…)` is refused by the same rule that refuses `print(g(…))` and
+    `v = g(); print(v)`, one call deeper. Without it the answer is the
+    source-only one and is unchanged, which is what the census and
+    `ValueKinds.returns_a_value` ask for. The resolver is the emitter's job
+    (`arm64_codegen`/`x86_64_codegen`'s `_callee_returns_value`), because the
+    name→definition table lives there and a cycle has to be stopped there.
     """
     if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
         return True
-    return fn_returns_a_value(fn) or fn_declares_a_return(fn)
+    if fn_declares_a_return(fn):
+        return True
+    return _body_returns_a_value(fn, callee_returns_value)
+
+
+def function_returns_a_value_resolver(functions):
+    """A `name -> bool` resolver for `function_returns_a_value`, over a
+    `{name: FunctionDef}` table.
+
+    The ONE implementation of the transitive half, so the two backends and the
+    value-model test cannot answer "does `f` produce a value" three ways. The
+    emitters build it over `self._functions` and hand it to the reader, which is
+    why the table is an argument: the name→definition map is the emitter's and
+    this file has no module index.
+
+    A name that is not in `functions` answers True, and so does a name already on
+    the recursion stack. Both are the safe direction — a value the source cannot
+    be asked about (a linked module's export) and a cycle are each left with the
+    answer the caller already had, where a wrong "no value" would refuse a
+    program CPython runs.
+    """
+    def resolve(name, _seen=frozenset()):
+        fn = functions.get(name)
+        if fn is None or name in _seen:
+            return True
+        return function_returns_a_value(
+            fn, lambda callee, _s=_seen | {name}: resolve(callee, _s))
+    return resolve
 
 
 def returnless_value_refusal(callee: str, rendering: str = "print()") -> str:
@@ -26944,6 +27180,50 @@ class ValueKinds:
             return INT_KIND
         return kind
 
+    def _bind_for_target(self, target, kind, own=None) -> None:
+        """Bind a `for` target's names, one level DOWN from the element.
+
+        `kind`/`own` are the kind and own shape of ONE ELEMENT of the iterable —
+        what `_iterable_kind`/`_iterable_own_shape` answer — and that element is
+        what a SMALL target (`for x in …`) binds directly.  A TUPLE target
+        UNPACKS that element, so each of its fixed names holds one element of
+        it: `subscript_element_kind(kind)` and not `kind` itself, which is the
+        narrowing the assignment path already applies
+        (`_unpacked_element_kind`) and this path was missing.  Measured, both
+        architectures, before this method: `for a, b in [(1, 2)]: printf("%d",
+        a)` refused with the `%d`-reads-a-CONTAINER sentence, because `a` was
+        classified as `list:int` — the kind of the whole TUPLE the loop binds —
+        where the source plainly says it holds an integer.  A trailing `*rest`
+        is the one target that IS a container: it holds the tail as a blob, so
+        it keeps `kind`, and its names are bound with the same rule the small
+        target uses.
+
+        A NESTED group recurses with the SAME `kind`, for the reason above it:
+        a group is an element of the element, and the only kind the model has
+        for it is the one the whole element carries (a homogeneous nesting such
+        as `for a, (b, c) in [(1, (2, 3))]` states it either way).  That is the
+        conservative direction — a group whose element kind the model cannot
+        state keeps the container claim the flat reader gave every leaf, so no
+        program that read a group's tail as a blob stops doing so."""
+        tree = for_target_tree(target) if isinstance(target, str) else target
+        if isinstance(tree, str):
+            name = tree[1:].strip() if tree.startswith("*") else tree
+            self._bind(name, kind, own=own)
+            return
+        if isinstance(tree, list):
+            for child in tree:
+                if isinstance(child, list):
+                    self._bind_for_target(child, kind, own=own)
+                    continue
+                if isinstance(child, str) and child.startswith("*"):
+                    self._bind(child[1:].strip(), kind, own=own)
+                    continue
+                self._bind(child,
+                           subscript_element_kind(kind) if kind else None,
+                           own=subscript_element_kind(own) if own else None)
+            return
+        self._bind_target(tree, kind, own=own)
+
     def _bind_target(self, target, kind, own=None) -> None:
         """Bind whatever names an assignment target introduces."""
         if isinstance(target, F.IdentExpr):
@@ -27308,8 +27588,8 @@ class ValueKinds:
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.ForStmt):
-                self._bind_target(s.target, self._iterable_kind(s.iterable),
-                                  own=self._iterable_own_shape(s.iterable))
+                self._bind_for_target(s.target, self._iterable_kind(s.iterable),
+                                      own=self._iterable_own_shape(s.iterable))
                 self._scan(s.body)
                 self._scan(s.else_body)
             elif isinstance(s, F.WithStmt):
@@ -53983,3 +54263,190 @@ def dotted_struct_construction(func, structs: dict, import_aliases: dict) -> boo
         return False
     base = getattr(func, "obj", None)
     return isinstance(base, F.IdentExpr) and base.name in (import_aliases or {})
+
+
+def context_enter_returns_receiver(struct_def) -> bool:
+    """True when this struct's `__enter__` hands its own receiver back.
+
+    The `with` alias is bound to `__enter__`'s RESULT, so the alias is the struct
+    exactly when `__enter__` returns the receiver — `def __enter__(self): return
+    self`, the spelling whose whole purpose is to let the body call the manager's
+    own methods.  `formal/build.py::_one_with_item` publishes the alias's struct
+    from this predicate, so a method called through the alias dispatches to the
+    manager the `with` actually entered rather than being refused by name.
+
+    **Every return must yield the receiver, and there must be one.**  A path that
+    returns a word (`return self.tag`, the `Ctx` fixture) makes the alias a word
+    on that path, and naming the struct from the other paths would lift a method
+    call to a struct the alias may not hold.  A method that falls off its end has
+    no return at all and is the same hazard, so it answers False.
+
+    The receiver name comes from `method_receiver_name`, so a manager that spells
+    its receiver `this` is accepted on the same evidence as one that spells it
+    `self`.  A parenthesised `return (self)` is the same node after the front end
+    folds the parentheses, so it needs no separate arm.
+    """
+    enter = None
+    for m in struct_methods(struct_def):
+        if getattr(m, "name", None) == CONTEXT_ENTER:
+            enter = m
+            break
+    if enter is None:
+        return False
+    recv = method_receiver_name(enter)
+    if not isinstance(recv, str):
+        return False
+    returns = [n for n in iter_nodes(getattr(enter, "body", None) or ())
+               if isinstance(n, F.ReturnStmt)]
+    if not returns:
+        return False
+    for node in returns:
+        value = getattr(node, "value", None)
+        if not (isinstance(value, F.IdentExpr)
+                and getattr(value, "name", None) == recv):
+            return False
+    return True
+
+
+def context_exit_suppression_at_site(struct_def, expr):
+    """The FIELD `__exit__` returns that THIS construction site makes truthy, or None.
+
+    `context_exit_returns_truthy` decides the case where `__exit__`'s return
+    VALUE is a literal, at the DECLARATION.  This is the other half of the same
+    wrong answer, and it is the case that gate cannot see: `__exit__` returns a
+    FIELD, so whether CPython would suppress depends on the value the field was
+    given at the site that CONSTRUCTED the manager — `nullcontext` returns its
+    own `exit_result`, and the doc's `Suppressor` returns `self.quiet`.  The
+    declaration alone cannot answer it; the construction site can, when the
+    argument is a foldable value.
+
+    **What is read, and why that is the whole of it.**  The manager is built by
+    an expression this build already recognises as a CONSTRUCTION — `S(...)` or
+    `mod.S(...)`, the same spelling `with_expr_struct` resolves through — and the
+    argument the field takes is the positional argument at the field's
+    declaration slot, or the keyword naming it.  Only the IMPLICIT field-init
+    constructor is read: a struct that declares `__init__` binds its parameters
+    to fields in a body this reader does not follow, and following it would be
+    the cross-FIELD flow `context_exit_returns_truthy`'s docstring names as the
+    remaining limit.  A struct without `__init__` has no such gap — position `i`
+    of the argument list IS field `i`.
+
+    **A `None` means "not decided" and is read as "leave it alone"**, exactly as
+    `_literal_return_truthiness`'s is: a non-construction expression, a computed
+    argument, a field with no argument at this site (its default stands), and a
+    truthiness none of the folded kinds answers all return None and the program
+    is built as before.  The direction is the ONE-SIDED one the gate above is
+    deliberately in: only a provably-true value is reported.
+
+    The caller pairs this with "the body can actually RAISE", because a truthy
+    `__exit__` is only consulted when the body leaves by an exception; on the
+    fall-through path CPython discards the return value too, so refusing a
+    non-raising body would refuse a program that is already correct.
+    """
+    if struct_def is None or expr is None:
+        return None
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    exit_ = methods.get(CONTEXT_EXIT)
+    if exit_ is None or "__init__" in methods:
+        return None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    # The construction has to NAME the struct.  `with make_suppressor() as v:`
+    # is a call to a function whose declared return type happens to be this
+    # struct, and its arguments are the function's, not the fields' — reading
+    # them by position would invent a field value the source never wrote.
+    spelled = getattr(callee, "name", None) or getattr(callee, "member", None)
+    if not isinstance(spelled, str) or spelled != getattr(struct_def, "name", None):
+        return None
+    fields = struct_field_names(struct_def)
+    args = list(getattr(expr, "args", None) or [])
+    kwargs = list(getattr(expr, "kwargs", None) or [])
+    exit_params = _param_names(getattr(exit_, "params", None))
+    self_name = exit_params[0] if exit_params else None
+    if self_name is None:
+        return None
+    for node in iter_nodes(getattr(exit_, "body", None) or ()):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        value = getattr(node, "value", None)
+        if not (isinstance(value, F.MemberExpr)
+                and isinstance(value.obj, F.IdentExpr)
+                and value.obj.name == self_name):
+            continue
+        name = value.member
+        if name not in fields:
+            continue
+        argument = _constructor_argument_for(fields, name, args, kwargs)
+        # `_literal_return_truthiness` is the ONE reader of "what would CPython
+        # read this as", float arm included, so the site-level and the
+        # declaration-level gates cannot disagree about what "true" means.
+        if argument is not None and _literal_return_truthiness(argument):
+            return name
+    return None
+
+
+def is_list_expr(e) -> bool:
+    """True when `e` builds a LIST literal or a list comprehension.
+
+    The third of the container-constructor predicates beside `is_dict_expr`,
+    `is_set_expr` and `is_tuple_expr`, and the one the value model never needed
+    until `==`/`!=` between two containers was lowered: a list, a set and a
+    tuple all classify as `list:<elem>` (`is_set_expr`'s docstring says why), so
+    nothing but a predicate of this shape can say which of the three an
+    expression builds — and CPython's `==` differs between them (`[1] == (1,)`
+    is False while `[1] == [1]` is True, and a set is order-independent where
+    both others are not).
+
+    `is_tuple_expr` is its twin and carries the measurement for the same
+    conflation; this is the LIST half. A list comprehension is a
+    `Comprehension` whose `kind` is `"list"` (or absent, the parser's default),
+    exactly as the other three spellings are `"set"`/`"dict"`/`"tuple"`.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.ListExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "list")
+
+
+def comprehension_element_not_sized(node_text: str) -> str:
+    """The compiler-internal refusal for an element blob the per-iteration
+    region was not sized for.
+
+    `blob_bytes_reserved` sizes the region and the emitters that build the blob
+    record what they actually reserved, and those are two readers of ONE
+    layout. A program that got an answer from one and not the other would get
+    the aliasing bug the region exists to remove — every element of the result
+    pointing at one object — so the disagreement is stopped here instead.
+    Reaching it is a compiler bug rather than a program error, and the sentence
+    says so rather than blaming the source."""
+    return (f"a comprehension's element (`{node_text}`) reserved a container "
+            f"that the per-iteration element region was not sized for. The "
+            f"region's size and the blob's own reservation are two readers of "
+            f"one blob layout (`model.blob_bytes_reserved` and the emitter's "
+            f"record of what it reserved), and this build got different "
+            f"answers from them — which is a compiler bug, not a program error")
+
+
+def _constructor_argument_for(fields, name, args, kwargs):
+    """The argument this construction gives field `name`, or None.
+
+    Keyword first — a construction may spell the field either way, and the
+    keyword is the one spelling that cannot be confused with a different field —
+    then the positional argument at the field's declaration slot.  An argument
+    list shorter than the slot is a field taking its DEFAULT, which this reader
+    does not fold and reports as not-decided.
+    """
+    for entry in kwargs:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            continue
+        if entry[0] == name:
+            return entry[1]
+    try:
+        index = fields.index(name)
+    except ValueError:
+        return None
+    if index < len(args):
+        return args[index]
+    return None

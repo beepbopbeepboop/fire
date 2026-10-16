@@ -7386,13 +7386,45 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 and entry != func_entry)
 
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
+    _reach_i = None
     if fuel is not None:
+        # The constant-fuel guard judges the CFG the RUN uses, which is the
+        # blocks REACHABLE from `func_entry` -- not every block `_cfg_blocks`
+        # finds in `[func_entry, func_end)`.  The two differ for the LAST
+        # export of an image: its extent is the end of the image
+        # (`_export_extent`), so it also spans whatever the emitter laid down
+        # after the last export's own code (the stack-floor handler, the
+        # runtime routines), and those carry back edges of their own.  Counting
+        # them made `_acyclic` False for a run that is a DAG, so the last
+        # export's `semantics_total` was a named `sorry` over a true
+        # termination claim -- measured on `test_formal_dylib.py`'s `pick`
+        # (`def pick(n): if n > 3: return 1; return 0`), whose own extent ends
+        # in a `ret` and whose three forward branches are all inside it.
+        #
         # A back edge is any branch whose target is at or before the branch
         # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
         # targets mean the walk is a DAG and each instruction runs at most once.
-        _acyclic = all(t > b["instrs"][-1] for b in blocks for t in b["targets"])
+        _by_start = {b["start"]: i for i, b in enumerate(blocks)}
+        _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
+        _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
+        _reach_i, _stack = set(), [_by_start[func_entry]]
+        while _stack:
+            _i0 = _stack.pop()
+            if _i0 in _reach_i:
+                continue
+            _reach_i.add(_i0)
+            _b0 = blocks[_i0]
+            _succ = [_by_start[t] for t in _b0["targets"] if t in _by_start]
+            # A `seq` block has no `targets` of its own: its successor is the
+            # next block in pc order, which is the fall-through the machine
+            # takes.  A `ret` has none.
+            if _b0["kind"] == "seq" and _i0 in _fall:
+                _succ.append(_fall[_i0])
+            _stack.extend(_j for _j in _succ if _j not in _reach_i)
+        _reach = [blocks[i] for i in _order if i in _reach_i]
+        _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
         if (recursive or not _acyclic or fuel < _TOTAL
-                or any(b["kind"] == "bl" for b in blocks)):
+                or any(b["kind"] == "bl" for b in _reach)):
             return None
     _RETS = ", ".join(str(b["instrs"][-1]) for b in blocks if b["kind"] == "ret")
     # Stack consumed by one call frame: the `_SCRATCH` reservation plus the
@@ -7522,6 +7554,21 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # --- per-block straight-line runs certificates ---
     run_info = {}  # bi -> (cert_name, mid_name, exit_expr, m_run)
     for bi, block in enumerate(blocks):
+        if _reach_i is not None and bi not in _reach_i:
+            # Not on any path from `func_entry`, so `emit_block` never visits
+            # it and its certificate is a def nothing consumes.  It MUST be
+            # skipped rather than generated, because the region this block is
+            # in may not be code at all: the LAST export's extent is the end of
+            # the image (`_export_extent`), so `[entry, func_end)` runs past
+            # the export's own `ret` into the emitter's runtime tail and then
+            # into the image's DATA.  `_gen_run_cert` returns None for a data
+            # word, which made the WHOLE walk `None` -- measured on
+            # `test_formal_dylib.py`'s `pick`, whose last data block decodes
+            # nothing.  The placeholder keeps `run_info` total so every index
+            # below stays valid; the entry is never read for a block with no
+            # visit.
+            run_info[bi] = (None, None, "st", 0, [], False, 0, [])
+            continue
         if block["kind"] in ("seq", "ret"):
             run_pcs = block["instrs"]
         else:  # b/bl/cbz: straight-line prefix excludes the trailing branch
@@ -7547,7 +7594,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # --- loop contract: a `b` block whose target is a cbz block (the loop
     # check) forms a countdown-style while loop; generate its contract. ---
     loop_check = None
-    for b in blocks:
+    for _bi0, b in enumerate(blocks):
+        # A loop the RUN cannot reach is not a loop this walk has to contract:
+        # the fixed-fuel export case is why this matters (see the guard above),
+        # where the LAST export's extent spans the image's runtime tail and that
+        # tail has back edges of its own.  A contract generated over them would
+        # be a lemma about code no argument reaches.
+        if _reach_i is not None and _bi0 not in _reach_i:
+            continue
         if b["kind"] == "b" and start_to_bi.get(b["targets"][0]) is not None:
             cbi = start_to_bi[b["targets"][0]]
             if blocks[cbi]["kind"] == "cbz":
@@ -7564,6 +7618,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     loop_check_bottom = None
     if loop_check is None:
         for bi, b in enumerate(blocks):
+            if _reach_i is not None and bi not in _reach_i:
+                continue
             if (b["kind"] == "cbz" and len(b["instrs"]) > 1
                     and b["targets"][1] == b["start"]):
                 loop_check_bottom = (bi, b["start"])
@@ -10116,7 +10172,8 @@ def _sign_extend_mask(idx: int) -> int:
     return bit if idx == 14 else bit << 5
 
 
-def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
+def _gen_step_result_lemmas(name: str, code: bytes, base: int,
+                            limit: int = None) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
     for i, (w, idx, rhs) in sorted(_step_result_plan(code, limit).items()):

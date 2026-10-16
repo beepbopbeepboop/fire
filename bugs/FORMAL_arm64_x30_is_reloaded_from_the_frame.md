@@ -99,29 +99,60 @@ worker.
 all five goals quoted, and the next step is now PRICED — this one is NOT behind
 the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
 
-**RE-MEASURED 2026-10-07 (`work/formal108-docs`): the five named examples no
-longer reach this obligation, so the doc's subject is currently MASKED rather
-than fixed.** `count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
+**RE-MEASURED 2026-10-12 (`work/formal290-docs`): the "masked at generation"
+paragraph below is STALE — the five examples GENERATE again, so the subject is
+LIVE — but none of them can be shown GREEN on this tree, because their proofs
+now carry several error sites besides the `hx30fr` one and the first of them
+belongs to another document.** `2b7e5ec8` (the conditional-halt refusal) was
+followed by `14af4cbe` ("a source conditional is a barrier for the halt-address
+question, not a global refusal"), which landed after it and relaxed exactly the
+refusal the paragraph below describes. Measured:
+`formal.build.compile_formal('formal/examples/<stem>.mojo', arch='arm64',
+prove=True, check=False)` returns a proof path for all five of `count`, `pow2`,
+`fact`, `sqsum`, `sum` — no generation-time refusal. Checking `count`'s proof
+through `formal/lean.py::check_proof_cached` reports **six** error sites, not the
+two this doc's §"What is broken" describes, and the first is
+
+    x_count_proof.lean:4305:58: error: maximum recursion depth has been reached
+
+inside a `rw [runs_cons_seq …]` over a `sp ± 131072` step — the same shape
+(`maximum recursion depth` on a `sp`-arithmetic step in a run proof) that
+`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` records for
+`mod_by_var` and `same_image_leaf` and attributes to the `arm64_ext_imm12`
+merge. **So steps 0–2 below are still the right work and still generator-only,
+but no dec1 example can be shown to typecheck until that separate fix lands**,
+and a proof that has not typechecked is not a fix. The `FrameOk` and `hx30fr`
+sites this doc names are still among the six (`…:4564:16` is the frame window's
+`rfl`), so the diagnosis stands; only the "masked" premise is gone.
+
+## (superseded) 2026-10-07: the five named examples no longer reach this obligation
+
+`count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
 GENERATION, before a proof is emitted, with the conditional-halt refusal added
 by `2b7e5ec8` (`formal/arm64_proof_gen.py::_reached_without_a_condition`):
 
-```
-$ python3 -c "…formal.build.compile_formal(…, prove=True, check=False)…"   # all five
-NotImplementedError: universal theorem: the call at 0x10000041c -> 0x10000086c
-is the halt address, and it is behind a CONDITIONAL, so whether the run reaches
-it is a fact about the test input rather than about the CFG. …
-```
+* **the `hx30fr_N` `rfl` this file is named for no longer errors.** The emitted
+  `FrameOk`-window facts (`hfrf_{n}_{K}`, `hfrwinup_{n}`, built from
+  `FrameOk_window_reindex`/`_up` off the threading `hfrwin_{n}`) discharge it, so
+  the x30-from-the-frame reload is no longer the site that fails.
+* **what fails now, identically in all five**, is the `runs-ret-frame-ok-window`
+  leaf's final `all_goals rfl`: its goal carries writes at `st.sp - 131120` and
+  `st.sp - 131112` (the recursive call's argument spills) that the emitted peel
+  set — drawn from `ctx["stores"]`, which here is the prologue's
+  `[16, 8, 32, 24, 80, 72]` — never names — **plus** the source conditional's
+  `rewrite` (`arm64_matches_condition 1 … ↔ ¬n = 0`: the emitted `rw` pattern
+  names a frame slot at `s_0.sp - 32 - 16` while the goal's store sits at
+  `s_0.sp - 131072 - 16`, so the pattern does not match). `count` and `pow2` are declared in
+  `test_formal.py`'s `EXPECTED_FAILURES` with this gap as the reason; `fact`,
+  `sqsum` and `sum` are NOT, so on this tree those three are UNDECLARED reds.
 
-So the `hx30fr_N` `rfl` this doc quotes is no longer reached by any corpus
-example, and the generator defect it describes — the emitted theorem
-`(…).x30 = st.x30` is FALSE for the `st.sp` this doc computes — is unchanged
-and latent, not repaired. It will be reachable again the moment a call on a
-conditional path can be followed (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_
-call_on_a_conditional_path.md`, whose step 1 is a set-valued exit in
-`lib/ProofLib.lean`). The "cheapest of the arm64 model work left" ordering in
-the paragraph above should now be read through that dependency: this fix cannot
-be verified on today's tree, because the programs that exercise it never get as
-far as the proof.
+The generator defect this file describes — the emitted theorem
+`(…).x30 = st.x30` being FALSE for the arbitrary `st.sp` of §"The correction" —
+is unchanged: the proof failing on the window clause is what an unprovable goal
+looks like, and nothing emitted states the frame/data-page separation that would
+make it true. So the ordering below still holds and the next step is unchanged:
+**step 0 (the `sp` premise) first**, then the frame-invariant discharge of
+`hx30fr_N` and the per-conjunct tactics of step 2.
 
 ```
 $ python3 tools/memslot.py --gb 8 --label lean -- python3 -c "…check_proof_cached…"
@@ -153,10 +184,9 @@ puts the address in the chain, and the frame's deepest slot is what
 
 **Why it is cheap here and is not behind the build wall.** §"What this costs the
 fix" offers `FrameBound`'s sibling in `lib/Refine.lean`, and that is the right
-place for the MEMORY form
-(`FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` §"The
-next step: a MEMORY hypothesis, not a constant" is the same fact and wants the
-same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
+place for the MEMORY form (the unconstrained-`st.mem` fact that a
+`runs-cbz-condition` leaf admitting over `mem_read_u64 (frame stores) A = 0`
+records is the same fact and wants the same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
 tree at `5e547907`, same `ensure_library` call, same minute, against
 `lib/ProofLib.lean`'s `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at the
 tree's own `-j 4`; method and control in

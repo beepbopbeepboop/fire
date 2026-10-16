@@ -31,7 +31,19 @@ their fixtures are a fixed, small, intentional number that a ceiling can
 honestly bound.
 """
 BASELINE = {
+    'bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md': 1,
+    'bugs/FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md': 1,
+    'bugs/FORMAL_arm64_the_method_frame_depth_helpers_mis_scale_imm12.md': 1,
+    'bugs/FORMAL_arm64_the_proof_generators_sp_trackers_drop_the_imm12_shift.md': 1,
+    'bugs/FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md': 1,
+    'bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md': 2,
+    'bugs/FORMAL_proof_census_tool_has_no_prooflib_dep.md': 2,
+    'formal/arm64_proof_gen.py': 2,
+    'formal/contracts.py': 4,
+    'test_formal_call_proof_gen.py': 5,
+    'test_formal_contracts.py': 2,
     'test_suite.py': 6,
+    'tools/suite.py': 1,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
@@ -46,7 +58,7 @@ BASELINE = {
 # and a file that GAINS one — which is what deleting a bug doc whose name is
 # cited without the directory does to every file that named it — is a failure at
 # the delete rather than at the next reader's convenience
-# (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`).
+# (`the surviving-citation bug`).
 #
 # The exclusions are the walk's, not this table's: `tools/dangling_refs_baseline
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
@@ -61,7 +73,6 @@ BARE_BASELINE = {
     'bugs/CODEGEN_generator_function_Lib_mailbox.md': 2,
     'bugs/CODEGEN_generator_function_Lib_modulefinder.md': 2,
     'bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md': 1,
-    'bugs/CODEGEN_gimplerunner_red_on_the_merged_batch.md': 1,
     'bugs/CODEGEN_module_boundary_carries_no_value_types.md': 2,
     'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
     'bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md': 1,
@@ -82,29 +93,23 @@ BARE_BASELINE = {
     'bugs/DOCS_formal16_2_deleted_the_bit_test_doc_under_a_survey_another_worker_owns.md': 3,
     'bugs/DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md': 1,
     'bugs/FORMAL_a_conditional_value_in_a_dylib_export.md': 2,
-    'bugs/FORMAL_a_surviving_citation_is_not_checked.md': 1,
-    'bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 2,
-    'bugs/FORMAL_arm64_instruction_coverage.md': 1,
-    'bugs/FORMAL_contract_ladder_reach.md': 1,
+    'bugs/FORMAL_a_tuple_for_targets_element_is_the_iterables_kind.md': 1,
+    'bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
+    'bugs/FORMAL_arm64_known_proof_gaps.md': 1,
+    'bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md': 1,
     'bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md': 1,
     'bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md': 2,
-    'bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md': 1,
+    'bugs/FORMAL_float_binary64_only.md': 1,
     'bugs/FORMAL_fuzz_ledger.md': 1,
     'bugs/FORMAL_known_limits.md': 4,
     'bugs/FORMAL_model_fuzz_ledger.md': 1,
     'bugs/FORMAL_module_state_no_storage.md': 4,
-    'bugs/FORMAL_optional_needs_a_niche.md': 1,
     'bugs/FORMAL_proof_coverage_census_2026-10-03.md': 2,
-    'bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md': 2,
     'bugs/FORMAL_string_value_model.md': 2,
-    'bugs/FORMAL_sweep12_singles_a.md': 1,
-    'bugs/FORMAL_sweep_singles_second_half.md': 2,
-    'bugs/FORMAL_sweep_work_map.md': 2,
-    'bugs/FORMAL_three_examples_fail_their_proofs_on_master.md': 1,
-    'bugs/FORMAL_time_struct_shaped_answers.md': 3,
-    'bugs/FORMAL_x86_endtoend_26_elaboration_failures_are_not_in_the_gate.md': 1,
-    'bugs/LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody.md': 1,
-    'bugs/OPEN_WORK.md': 2,
+    'bugs/FORMAL_sweep_singles_second_half.md': 1,
+    'bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
+    'bugs/FORMAL_time_struct_shaped_answers.md': 1,
+    'bugs/OPEN_WORK.md': 5,
     'bugs/PERF_selfhost_memory_leak_hunt.md': 1,
     'bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md': 7,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md': 4,

@@ -1,5 +1,14 @@
 # FORMAL_time_struct_shaped_answers: five `time` names are absent because their answer is a struct
 
+<!-- conflict 0: both statuses kept -->
+**Status 2026-10-12 (`work/formal285-docs`): the LIMIT is unchanged — the five
+names still stay absent — and this pass only removes the two citations of
+DELETED docs.** The store-through-a-declared-pointee capability landed in
+`bc3e5638` and the caller-owned returned frame for one image in `9ca853c7`, so
+both `bugs/` paths this document cited are gone; they are named by their fix
+now. `test_formal_time.py` is the standing measurement and is 5/5 groups on
+arm64 (`PASS limits`, `PASS structroute read yes / store yes`).
+
 **Status 2026-10-08 (`work/formal255-docs`): the limit below is unchanged and the
 five names still stay absent; this pass only removed the two citations of
 DELETED docs — the store capability landed in `bc3e5638` and the caller-owned

@@ -1,5 +1,51 @@
 # FORMAL_env_family_next_terminal: where the 55-file family stands, and what the next reader needs
 
+**Status 2026-10-12 (`work/formal299-docs`): the family's own test was RED and
+it is GREEN again; the cause was a false `String` refusal, not a family
+construct.** `test_formal_external_call.py` — the file §"What this worker
+verified about the construct itself" names as the pin for the closed half, the
+whole of `std/os/env.mojo`'s three functions transcribed and run — was **50/2**.
+One of the two was `env_round_trip`, `env.mojo`'s own `getenv` shape:
+
+```mojo
+var ptr = external_call[
+    "getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]
+](name)
+if not ptr:
+    return default
+return String(unsafe_from_utf8_ptr=ptr)
+```
+
+`String(unsafe_from_utf8_ptr=ptr)` was refused by
+`model.string_conversion_refusal` with *"this build classifies ptr as 'int'"*.
+The classification is `ValueKinds._value_kind`'s "a word is an integer" DEFAULT
+for a call result (the callee is a SUBSCRIPT, so `kind_of` answers None and
+`_value_kind` fills it in), and the refusal is written to fire only on POSITIVE
+evidence — so it was refusing a `char *` on the strength of a default. The
+`unsafe_from_utf8_ptr=` keyword is not a conversion to judge at all: it STATES
+the operand is a pointer, which is what the `unsafe_` means. `model` now
+publishes `POINTER_ASSERTING_STRING_KEYWORDS`, `string_conversion_refusal` takes
+the keyword the operand was passed under and returns None for it, and both
+emitters pass it. The positional spelling is unchanged and still refused
+(`refuse_a_positional_string_conversion_of_a_number`), so the exemption is the
+keyword's and not a hole. Measured: `test_formal_external_call.py` **53/0**
+(was 50/2), `test_formal_run.py` 1209/0, `test_formal_value_model.py` 124/0.
+
+The second red was the same file's
+`no_module_level_name_is_bound_twice_in_model`: `formal/model.py` bound
+`SET_ALGEBRA_OPS = ("-", "&", "^")` **twice**, at the top of
+`CONTAINER_GATED_OPS` and again above `container_operator_refusal` with a second
+copy of the comment. The two were identical, so the second only shadowed the
+first; the two comment blocks are merged onto the one binding now. That is a
+code-quality defect the file's own model-level rule caught, not a family
+construct.
+
+**Nothing here moves the family's TERMINAL.** `env.mojo` still stops on
+`binary_heap.mojo` and `std.memory.alloc`'s template-inference gap (the
+Re-measured section below), and step 3 — the `formal_sweep.py
+--stdlib-subtrees` re-run — is still the gate runner's. What changed is that the
+file's own transcription is once again a passing pin rather than a red one.
+
 **Status: SUPERSEDED IN PART (2026-10-05, `formal37-2`).** The terminal recorded
 below has **moved**: `binary_heap.mojo` is no longer in `env.mojo`'s refusal at
 all, and the family now stops on two *present* surfaces rather than on an absence.

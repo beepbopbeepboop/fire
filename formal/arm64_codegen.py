@@ -4885,7 +4885,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         return M.signature_return_type(
             entry.get("signature") or "").strip() == "void"
 
-    def _callee_returns_value(self, name):
+    def _callee_returns_value(self, name, _seen=frozenset()):
         """Whether a call to the local function `name` produces a value at all.
 
         The seventh question `ValueKinds` asks about a callee, and the only one

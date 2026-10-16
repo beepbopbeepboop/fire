@@ -10618,10 +10618,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         return-less is not read as a value one hop out. Its least fixed point is
         what keeps a cycle reading as a value rather than as an unwritten word.
 
-        True for a name that is not a function of this unit, which leaves every
-        caller with the answer it had: a linked module's export has no body here
-        to read, and a refusal asked about it would be a refusal about a
-        function this backend never saw.
+        **The answer is carried through `return f(…)`, and the recursion lives in
+        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
+        return-less `g` is a function whose result is `None` in CPython too, so
+        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
+        deeper, and the shape `v = g(); print(v)` already covers one binding up.
+        The resolver is built over `self._functions` (the emitter's own table)
+        and the cycle stop and the not-of-this-unit default are the shared
+        resolver's, so the two backends cannot answer this one differently.
         """
         fn = self._functions.get(name)
         if fn is None:

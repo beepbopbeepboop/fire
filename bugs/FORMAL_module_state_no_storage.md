@@ -612,6 +612,11 @@ that was the most dangerous to leave: a frame address printed as a plausible
 number is indistinguishable from a computation, so every downstream read of it
 was wrong rather than absent.
 
+**SUPERSEDED 2026-10-12 (`formal294-docs`) — the paragraph below is FALSE of
+this tree: `len()` of a returned container DOES cross now, and the KIND is
+`model.imported_callee_kind` reading the callee's own `-> List[Int]` (see the
+Status at the head). What is left is the run-time-LENGTH half, not the KIND.**
+
 **What is still missing is narrower than the item claimed, and the narrowing
 is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
 one does not, because the path has no KIND that says "this word is a heap
@@ -619,15 +624,16 @@ allocation with a run-time length":
 
 ```
 printf("%d\n", len(t))
-    -> len() of a value classified as 'int', and an integer has no length:
+    -> len() of a value classified as 'int', and an integer has no length:   # no longer what a build says
        there is no count to read at offset 0, and the word there is the
        integer itself
 ```
 
-That is item (1) of "What is still missing" below, unchanged, and it is the
-`BLOB_KIND` annotation channel `dylib_export_return_kind` already reads for
-`char *`. The representation is not the gap — the subscript works, so the blob
-and its count-word are read correctly — the KIND is.
+The KIND channel is `model.imported_callee_kind`, which reads the callee's own
+`-> List[Int]` rather than the manifest's C signature, and it landed 2026-10-02.
+The representation was never the gap — the subscript worked, so the blob and its
+count-word were read correctly — and the KIND is now asked. What remains under
+this paragraph is only the run-time-LENGTH half.
 
 **(4) `sys.argv` additionally has no SOURCE on this path.** The entry stub
 (`ARM64Codegen.compile`, and `X86_64Codegen`'s twin) loads the test input into
