@@ -6937,17 +6937,28 @@ def _walk_range(words: dict, func_entry: int, func_end=None) -> int:
 
 def _same_image_call_plan(code: bytes, base: int, func_entry: int,
                           func_end=None) -> tuple:
-    """`({call_pc: return_pc}, "")` for a call the CFG walk CAN follow into the
-    same image, and `(None, why)` for one it cannot.
+    """`({call_pc: return_pc}, "")` for the calls the CFG walk CAN follow into
+    the same image, and `(None, why)` for a set it cannot.
 
     The return-address map this file lacked is exact for ONE shape, and this is
-    that shape: a single `BL` whose target is a block start inside the walked
-    range, whose own body contains no call of its own, and which the caller
-    returns from itself.  For that shape `x30` at the callee's `RET` is the
-    constant `call_pc + 4`, so the callee's blocks are ordinary blocks with an
-    ordinary edge — no dispatch, no disjunction, no second induction chain.
+    that shape, once PER CALL SITE: a `BL` whose target is a block start inside
+    the walked range, whose own body contains no call of its own, and which the
+    caller returns from itself.  For such a call `x30` at the callee's `RET` is
+    the constant `call_pc + 4`, so the callee's blocks are ordinary blocks with
+    an ordinary edge — no dispatch, no disjunction, no second induction chain.
     The doc named this the whole limit (`bugs/FORMAL_arm64_the_universal_theorem_
     cannot_follow_a_call_into_the_same_image.md` step 1) and it is.
+
+    **More than one such call is followable when their CALLEES are DISTINCT, and
+    that is the whole of the extension.** The walk is already keyed by call site
+    (`_gen_universal_e2e_cfg`'s `bl` arm reads `_intra_returns[bl_pc]`, and the
+    caller's continuation drops the return address again), so two calls that
+    each enter their OWN callee's blocks emit each callee's certificates once.
+    Two calls to the SAME callee are refused instead: its blocks would be entered
+    from two sites, the block certificates are named by block index and cannot be
+    told apart, and the second entry would emit a duplicate declaration rather
+    than a second certificate.  The doc's step 2 (a map keyed by `return_pc` so a
+    shared callee's blocks can be parameterised) is still the work for that case.
 
     Every other shape is REFUSED, and it is refused HERE rather than in each of
     the two places that need to know: `generate_arm64_proof` writes the reason
@@ -6963,65 +6974,70 @@ def _same_image_call_plan(code: bytes, base: int, func_entry: int,
     if not intra:
         return {}, ""
     where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x}" for c in intra)
-    if len(intra) > 1:
+    targets = [c["target"] for c in intra]
+    if len(set(targets)) != len(targets):
         return None, (
-            f"there are {len(intra)} calls into the same image ({where}) and ONE "
-            f"return address does not serve them: a path can reach the second "
-            f"without passing the first, so `x30` at the callee's `RET` would be "
-            f"a property of the CALL PATH rather than a constant")
-    c = intra[0]
-    if not (func_entry <= c["target"] < end):
-        return None, (
-            f"the callee at {c['target']:#x} lies outside the range the walk "
-            f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be a "
-            f"second walk over code this theorem does not cover")
+            f"there are {len(intra)} calls into the same image ({where}) and two "
+            f"of them target the same callee: its blocks would be entered from "
+            f"two call sites, so one return address does not serve them and the "
+            f"block certificates cannot be told apart")
     blocks = _cfg_blocks(words, func_entry, end)
-    if c["target"] not in {b["start"] for b in blocks}:
-        return None, (
-            f"the callee's entry {c['target']:#x} is not a block start of the "
-            f"walk, so no certificate would exist for its first run")
-    inner = [pc for pc, w in words.items()
-             if c["target"] <= pc < end and _step_branch_index(w) == 15]
-    if inner:
-        # Two different things, and the refusal must not call both of them
-        # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
-        # to follow again (and its frame bound and fuel descent with it), while a
-        # `BL` out of it is a call the model stops at — which is the halt-address
-        # family's own question, decided by `_unfollowable_calls` above. Saying
-        # "recursion" about a `printf` sends a reader after a program that has
-        # none.
-        again, outside = [], []
-        for pc in inner:
-            tgt = _branch_target(words, pc)
-            (again if (tgt is not None and func_entry <= tgt < end)
-             else outside).append(pc)
-        what = []
-        if again:
-            what.append(
-                f"it calls back into this image at "
-                f"{', '.join(hex(p) for p in again)}, which is RECURSION and not "
-                f"a return-address map: the frame bound and the fuel descent of "
-                f"the recursion contract would have to be re-proved for a second "
-                f"function")
-        if outside:
-            what.append(
-                f"it calls OUT of the image at "
-                f"{', '.join(hex(p) for p in outside)}, so the run stops there "
-                f"and the theorem becomes reachability of that call — which the "
-                f"callee's own return address cannot also be, because the two "
-                f"answers are about different terminals")
-        return None, (
-            f"the callee is not a straight-line leaf, because "
-            + "; and ".join(what))
-    if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
-        return None, (
-            f"the caller has no return of its own before {c['target']:#x}, so "
-            f"nothing states what the program returns once the callee has")
-    if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
-        return None, (
-            f"the callee has no `RET` inside the walked range, so its blocks "
-            f"have no terminal and the walk would leave the function without one")
-    return {c["pc"]: c["pc"] + 4}, ""
+    starts = {b["start"] for b in blocks}
+    plan = {}
+    for c in intra:
+        if not (func_entry <= c["target"] < end):
+            return None, (
+                f"the callee at {c['target']:#x} lies outside the range the walk "
+                f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be "
+                f"a second walk over code this theorem does not cover")
+        if c["target"] not in starts:
+            return None, (
+                f"the callee's entry {c['target']:#x} is not a block start of the "
+                f"walk, so no certificate would exist for its first run")
+        inner = [pc for pc, w in words.items()
+                 if c["target"] <= pc < end and _step_branch_index(w) == 15]
+        if inner:
+            # Two different things, and the refusal must not call both of them
+            # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
+            # to follow again (and its frame bound and fuel descent with it), while
+            # a `BL` out of it is a call the model stops at — which is the
+            # halt-address family's own question, decided by `_unfollowable_calls`
+            # above. Saying "recursion" about a `printf` sends a reader after a
+            # program that has none.
+            again, outside = [], []
+            for pc in inner:
+                tgt = _branch_target(words, pc)
+                (again if (tgt is not None and func_entry <= tgt < end)
+                 else outside).append(pc)
+            what = []
+            if again:
+                what.append(
+                    f"it calls back into this image at "
+                    f"{', '.join(hex(p) for p in again)}, which is RECURSION and "
+                    f"not a return-address map: the frame bound and the fuel "
+                    f"descent of the recursion contract would have to be re-proved "
+                    f"for a second function")
+            if outside:
+                what.append(
+                    f"it calls OUT of the image at "
+                    f"{', '.join(hex(p) for p in outside)}, so the run stops there "
+                    f"and the theorem becomes reachability of that call — which "
+                    f"the callee's own return address cannot also be, because the "
+                    f"two answers are about different terminals")
+            return None, (
+                f"the callee at {c['target']:#x} is not a straight-line leaf, "
+                f"because " + "; and ".join(what))
+        if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
+            return None, (
+                f"the caller has no return of its own before {c['target']:#x}, so "
+                f"nothing states what the program returns once the callee has")
+        if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
+            return None, (
+                f"the callee has no `RET` inside the walked range, so its blocks "
+                f"have no terminal and the walk would leave the function without "
+                f"one")
+        plan[c["pc"]] = c["pc"] + 4
+    return plan, ""
 
 
 def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
@@ -11722,7 +11738,14 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"semantic model for the call is correct and emitted (see the `_go` "
             f"definitions above); what is missing is the return-address map for "
             f"the shape named above.")
-    if len(_calls) - (1 if _intra else 0) > 1:
+    # Counted as OPAQUE calls and not as "calls minus the one the map followed":
+    # every intra-image call is followed once the plan above returned (it returns
+    # all of them or refuses), so the calls that still need a halt address are
+    # exactly the out-of-image ones — and a program may now have more than one
+    # FOLLOWED intra-image call, which the old `len(_calls) - 1` miscounted as an
+    # unfollowable one.
+    n_opaque = sum(1 for c in _calls if c["kind"] == "opaque")
+    if n_opaque > 1:
         # The halt address is ONE address and the walk reaches it only on the
         # paths that pass it, so a second unfollowable call has a path of its own
         # and the walk executes it as if it were a self-call — landing in the
@@ -11735,7 +11758,6 @@ def generate_arm64_proof(prog, code, info) -> str:
         # than as a defect in the generator.
         where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x} ({c['kind']})"
                           for c in _calls if c["kind"] == "opaque")
-        n_opaque = sum(1 for c in _calls if c["kind"] == "opaque")
         raise NotImplementedError(
             f"universal theorem: {n_opaque} calls this walk cannot follow "
             f"({where}), every one of them OUT OF THE IMAGE, and ONE halt "
