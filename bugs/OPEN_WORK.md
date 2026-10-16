@@ -114,7 +114,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
 | `FORMAL_the_hprior_fact_growth_bound_is_exceeded.md` | **unclaimed** | `TestNestedConditionFactSharing`'s x2.2 bound is red on master |
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
-| `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 
 ### `formal/build` — 15 documents, 12 claimed
 
