@@ -84,11 +84,12 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stack_floor_charge_is_dead_and_one_frame_off.md` | `formal409-docs` | the helper the guard's comments name would charge one frame too little if anyone called it |
 | `FORMAL_arm64_step_lemmas_are_generated_for_the_images_diagnostic_string.md` | **unclaimed** | `_gen_step_lemmas` walks the whole code buffer, so `bfeec991`'s embedded stack-trap message gets false `sr`/`step_ok` lemmas and `bitops` no longer proves |
 
-### `formal/arm64_proof_gen` — 23 documents, 16 claimed
+### `formal/arm64_proof_gen` — 24 documents, 17 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md` | `formal417-docs` | A conditional expression has no value in the arm64 semantic model, and it is the largest single thing between a generated program and a proof |
+| `FORMAL_a_conditional_value_in_a_dylib_export.md` | `formal417-docs` | A conditional VALUE in a dylib export: the block layer already takes it, and the cost is the certificate |
 | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` | `formal417-docs` | `bv_decide` reports a counterexample for a flag the spill hid |
 | `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md` | `formal418-docs` | The arm64 range-loop contract states the UNSIGNED order against a SIGNED flag rewrite, so `sum_range`'s flag obligation is FALSE and admits a `sorry` |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `formal408-docs` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
@@ -150,11 +151,10 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_module_names_are_not_classified.md` | `formal416-docs` | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
-### `formal/lean` — 14 documents, 12 claimed
+### `formal/lean` — 13 documents, 11 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_conditional_value_in_a_dylib_export.md` | `formal417-docs` | A conditional VALUE in a dylib export: the block layer already takes it, and the cost is the certificate |
 | `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | `formal406-docs` | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
 | `FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md` | `formal406-docs` | A generated proof that exceeds Lean's memory ceiling is REJECTED, and four short-circuit proofs are red for that reason alone |
 | `FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_contract.md` | `formal406-docs` | 8 of the 44 examples added to `formal/examples` on 2026-10-05, and the model it used to emit for them was a diverging `partial def` |
