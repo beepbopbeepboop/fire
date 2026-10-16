@@ -11771,11 +11771,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `model.division_overflow_refusal`, which is the shared decision
             # and the shared message. Asked before anything is emitted because
             # it is decidable here: both operands fold.
+            folded_left = M.fold_literal_expr(e.left)
+            folded_right = M.fold_literal_expr(e.right)
             reason = M.division_overflow_refusal(
-                M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+                folded_left, folded_right,
                 op if op != "/" else "//", [e.left, e.right])
             if reason:
                 raise CodegenError(reason)
+            # A nonzero LITERAL divisor cannot be zero, so the divide-by-zero
+            # test is dead code — and its taken arm is the exit, which begins
+            # with a `bl fflush`, so emitting it put an unfollowable extern call
+            # in the image and stopped the universal theorem generating at all.
+            # `model.division_needs_zero_guard` is the shared decision, asked by
+            # both backends for the reason `division_floors` gives above.
+            needs_guard = M.division_needs_zero_guard(folded_right)
             self._if_counter += 1
             cid = self._if_counter
             fn = self.func_name
@@ -11785,9 +11794,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.right, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
-            self.asm.emit(encode_cmp_xn_imm(1, 0))
-            self.asm.emit(encode_cbz_xn(0, 1))
-            self.asm.emit_label_rel(div0_label, here_offset=-4)
+            if needs_guard:
+                self.asm.emit(encode_cmp_xn_imm(1, 0))
+                self.asm.emit(encode_cbz_xn(0, 1))
+                self.asm.emit_label_rel(div0_label, here_offset=-4)
             if signed:
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
@@ -11811,11 +11821,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_mov_zr_xn(0, 2))
             self._emit_trunc(common_type(self._ttype(e.left),
                                          self._ttype(e.right)))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(ok_label, here_offset=-4)
-            self.asm.label(div0_label)
-            self._emit_exit(1)
-            self.asm.label(ok_label)
+            if needs_guard:
+                self.asm.emit(encode_b(0))
+                self.asm.emit_label_rel(ok_label, here_offset=-4)
+                self.asm.label(div0_label)
+                self._emit_exit(1)
+                self.asm.label(ok_label)
             return
 
         if op in ("<<", ">>"):

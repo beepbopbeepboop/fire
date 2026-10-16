@@ -235,7 +235,6 @@ _ARM64_WRITES = [
     (0xFFE0FC00, 0x13003C00, ("rd",)),
     (0xFFE0FC00, 0x93407C00, ("rd",)),
     (0xFFC0FC00, 0x92401C00, ("rd",)),
-    (0xFFC0FC00, 0x92403C00, ("rd",)),
     (0xFFC0FC00, 0x92407C00, ("rd",)),
     (0xFFE0FC00, 0x9AC00800, ("rd",)),
     (0xFFC0FC00, 0x9AC00C00, ("rd",)),
@@ -260,6 +259,19 @@ _ARM64_WRITES = [
     (0xFFE00000, 0xAB000000, ("rd",)),
     (0xFFE00000, 0xEA000000, ("rd",)),
     (0xFFE00C00, 0xF8000000, ()),
+    # The six rows below close `_ARM64_READS`' side: every class the read table
+    # decodes also needs a write row, even the ones that write NOTHING (a
+    # `CMP`, a store), because a missing row is not "writes nothing" — it is
+    # "unknown", and unknown is `writes_arm64`'s UNSOUND direction. Measured
+    # before this change, over `formal/examples`: `SUB Xd, Xn, #imm` (the typo
+    # above), `AND`, `EOR`, `SUBS`/`CMP` and `CMP Xn, #imm` each answered
+    # "writes all 31 registers", which is the answer that makes a rewrite fire.
+    (0xFFE00000, 0x8A000000, ("rd",)),        # AND Xd, Xn, Xm
+    (0xFFE00000, 0xCA000000, ("rd",)),        # EOR Xd, Xn, Xm
+    (0xFFE00000, 0xEB000000, ("rd",)),        # SUBS/CMP Xn, Xm (Rd = 31 → ∅)
+    (0xFF800000, 0xF1000000, ()),            # CMP Xn, #imm
+    (0xFFE00000, 0xB9000000, ()),            # STR Wt, [Xn, #imm]
+    (0xFFE00000, 0x2A00FA00, ("rd",)),
     # Control flow writes NO register: a branch only moves the pc, and `ret`
     # reads X30. Listed explicitly because a word no row covers is taken to
     # write EVERYTHING, which would make every register live across every
@@ -278,7 +290,7 @@ _ARM64_WRITES = [
 
 def _fields(word, table):
     """The register numbers `table`'s first matching row names, or `None` for
-    a word no row covers — which every caller reads as "assume everything"."""
+    a word no row covers."""
     for mask, value, fields in table:
         if (word & mask) != value:
             continue
@@ -393,6 +405,57 @@ _ARM64_BRANCHES = [
     (0x7F000000, 0x36000000, 0x003FFF, 5, 0xFFF8001F),      # TBZ  (W or X)
     (0x7F000000, 0x37000000, 0x003FFF, 5, 0xFFF8001F),      # TBNZ (W or X)
 ]
+
+#: `BL`, as a re-patchable row rather than a branch. Its `kind` is `call`, which
+#: `_successors` reads as "fallthrough only" — a call's target is another
+#: function's entry and control comes back — and which `_repatch_branches` reads
+#: as any other displacement to re-encode.
+_ARM64_BL_ROW = (0xFC000000, 0x94000000, 0x03FFFFFF, 0, "call")
+
+
+def _arm64_branch(word: int, index: int):
+    """`(row, target_index)` for a word that is a PC-relative branch, else `None`.
+
+    The pair `_successors` needs to build an edge and `_repatch_branches` needs
+    to re-encode a displacement, from ONE decode. Recorded on `Entry.branch` at
+    decode time because the assembler's `relocs` table is empty by then (see
+    `Entry.branch`), so this is the only place the fact survives.
+
+    `BL` is recorded too, and for the RE-PATCH alone: as a call it has only the
+    fallthrough as a successor (control returns), but its displacement is a
+    real PC-relative field that a deletion above it invalidates like any other
+    branch, and `sqsum.mojo`'s recursion is one `BL` — it was the whole of that
+    program's wrong answer.
+    """
+    row = _arm64_branch_row(word)
+    if row is None:
+        if (word & 0xFC000000) == 0x94000000:            # BL
+            return _ARM64_BL_ROW, index + _imm26(word)
+        return None
+    mask, _value, field, shift, _kind = row
+    raw = (word >> shift) & field
+    sign = 1 << (field.bit_length() - 1)
+    disp = raw - (1 << field.bit_length()) if raw & sign else raw
+    return row, index + disp
+
+
+def _imm26(word: int) -> int:
+    """A sign-extended `imm26` — `B` and `BL` share the layout and the shift."""
+    raw = word & 0x03FFFFFF
+    return raw - (1 << 26) if raw & (1 << 25) else raw
+
+
+def _arm64_branch_row(word: int):
+    """The `_ARM64_BRANCHES` row this word is, or `None`.
+
+    Both consumers ask this rather than re-deriving the class: the CFG needs the
+    `kind` and the displacement re-patch needs `field`/`shift`, and two
+    hand-written tests of "is this a branch" is how they came to disagree.
+    """
+    for row in _ARM64_BRANCHES:
+        if (word & row[0]) == row[1]:
+            return row
+    return None
 
 
 def _branch_slot(word: int):
@@ -813,6 +876,21 @@ class Entry:
     writes: frozenset
     flag_read: bool
     index: int = 0
+    #: The `(branch-row, displacement)` this instruction's word encodes, as
+    #: `(row, disp)` where `disp` is the ORIGINAL index it branched to. `None`
+    #: for everything that is not a PC-relative branch with a decoded field.
+    #:
+    #: **It exists because `Assembler.resolve()` clears `relocs`, so by the time
+    #: this pass runs the assembler's relocation table is empty and there is
+    #: nothing left that says which word was a branch to where.** Measured on
+    #: `formal/examples/sqsum.mojo` with `copy_chain` on: the image's
+    #: `b.ne`/`b.hs`/`cbz` all kept their pre-deletion displacements, so `b.ne`
+    #: at index 29 branched to 36 when the instruction it had named had moved to
+    #: 35 — and the program answered 109 for 129. The label table alone cannot
+    #: repair this, because it holds no record of WHICH instruction carried
+    #: which displacement; `_Remap` moves labels and stubs, and a branch
+    #: displacement is neither.
+    branch: tuple | None = None
     #: Where this instruction WAS, as a byte offset into the section. Carried
     #: rather than recomputed, because once the pass deletes something the
     #: survivors are no longer contiguous and an accumulating cursor is one
@@ -872,7 +950,8 @@ def _decode_region(asm, text, arch):
                                  dec=decode_arm64(word),
                                  reads=reads_arm64(word),
                                  writes=writes_arm64(word),
-                                 flag_read=False, orig=off))
+                                 flag_read=False, orig=off,
+                                 branch=_arm64_branch(word, len(entries))))
     else:
         from formal import x86_64_decode as DEC
         off = 0
@@ -1026,6 +1105,17 @@ class _Ctx:
         if not self.readers(reg) <= {second.index}:
             return False
         return self.predecessors()[second.index] <= {first.index}
+
+    def _predecessors(self):
+        """index -> the indices that can reach it, as a flat list."""
+        if getattr(self, "_preds", None) is None:
+            n = len(self.entries)
+            preds = [[] for _ in range(n)]
+            for i in range(n):
+                for s in self.successors[i]:
+                    preds[s].append(i)
+            self._preds = preds
+        return self._preds
 
     def after_adrp_add(self, entry) -> bool:
         """Is this instruction the `ADD` half of a resolved ADRP+ADD pair?
@@ -1226,6 +1316,82 @@ def _redecode(raw: bytes, arch):
     if arch == "arm64" and len(raw) == 4:
         return decode_arm64(struct.unpack_from("<I", raw, 0)[0])
     return None
+
+
+def _repatch_branches(entries):
+    """Re-encode every PC-relative branch displacement for the CURRENT layout.
+
+    Called after each rewrite, because a deletion moves every instruction below
+    it and a branch's displacement is the DISTANCE to its target — so a branch
+    above the deletion is correct and one below it is now off by the number of
+    deleted words.
+
+    This was missing entirely, and `Entry.branch` exists because of it.
+    `Assembler.resolve()` has already run (the rules read the patched
+    displacements) and it ends with `self.relocs.clear()`, so the assembler's
+    relocation table is EMPTY by the time the pass starts and `_Remap` has
+    nothing to move: labels and extern stubs are remapped, and a branch
+    displacement is neither of those. Measured on
+    `formal/examples/sqsum.mojo` with `arm64/copy_chain` enabled — one
+    instruction deleted, below three branches and above a fourth:
+
+        before   exit 129
+        after    exit 109     `b.ne` branched one instruction past its target
+
+    Two things this deliberately does NOT do, both because a wrong answer here
+    is a miscompiled image rather than a refusal:
+
+    * **A branch whose named instruction was DELETED lands on whatever now
+      occupies that position** — the next survivor at or after its old index.
+      That is the same answer `_rebuild`'s `at` table already gives a label
+      naming a deleted instruction, so a branch and a label cannot disagree
+      about where a deleted byte went.
+    * **The recorded target never moves out of ORIGINAL coordinates.** This
+      function runs again after the NEXT deletion, and a target already
+      translated once would then be compared against `orig // 4`: two
+      coordinate systems in one expression, and a wrong answer rather than a
+      loud one. (It was translated on the first call. The corpus differential
+      caught it: 10 of 93 examples disagreed, and every one of them had two or
+      more firings.)
+    """
+    n = len(entries)
+    # Survivors in ORIGINAL order. `Entry.orig` is a byte offset and
+    # `Entry.branch`'s target is an instruction index in the ORIGINAL list, so
+    # the comparison is against `orig // 4`.
+    #
+    # **`e.branch`'s target stays in ORIGINAL coordinates across every call.**
+    # It was tempting to rewrite it to the current index, and it is wrong: this
+    # function runs again after the NEXT deletion, and by then a target already
+    # translated once is compared against `orig // 4` — two coordinate systems in
+    # one expression, which is a wrong answer rather than a loud one.
+    order = sorted(range(n), key=lambda j: entries[j].orig)
+    origs = [entries[j].orig // 4 for j in order]
+    for i, e in enumerate(entries):
+        if e.branch is None:
+            continue
+        row, target = e.branch
+        # A target outside the ORIGINAL image is left alone: the branch left the
+        # decoded region, and inventing a displacement for a target this pass
+        # cannot justify would be a miscompiled image rather than a refusal.
+        if not 0 <= target <= max(origs, default=-1):
+            continue
+        # Where the instruction this branch NAMED is now. If it was deleted,
+        # it is the next surviving instruction at or after its original index —
+        # which is what `_rebuild`'s gap fill does to a label naming it.
+        new_target = None
+        for k, j in enumerate(order):
+            if origs[k] >= target:
+                new_target = j
+                break
+        if new_target is None:
+            continue
+        disp = new_target - i
+        _mask, _value, field, shift, _kind = row
+        word = struct.unpack_from("<I", e.raw, 0)[0]
+        word = (word & ~(field << shift)) | ((disp & field) << shift)
+        e.raw = struct.pack("<I", word)
+        e.reads = reads_arm64(word)
+        e.writes = writes_arm64(word)
 
 
 def _rebuild(text, entries, code_end):

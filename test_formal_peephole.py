@@ -358,7 +358,18 @@ class TestRules(unittest.TestCase):
         # `mov x1, x2 ; mov x3, x1` — nothing reads x1 again, so the first
         # instruction's write can be dropped and its destination rewritten.
         words = _w(encode_add_xd_xn_imm(1, 2, 0), encode_add_xd_xn_imm(3, 1, 0),
-                  encode_ret())
+                   encode_ret())
+        asm, removed = self._run_words(words)
+        self.assertEqual(1, removed)
+        self.assertEqual([_i(encode_add_xd_xn_imm(3, 2, 0)), _i(encode_ret())],
+                         asm.words())
+
+    def test_copy_chain_declines_when_the_middle_is_read_again(self):
+        # The other direction of the same condition, and the one whose absence
+        # made the rule unsound: `xa` is live after the window, so dropping the
+        # write to it would change what a later instruction reads.
+        words = _w(encode_add_xd_xn_imm(1, 2, 0), encode_add_xd_xn_imm(3, 1, 0),
+                   encode_add_xd_xn_imm(5, 1, 0), encode_ret())
         asm, removed = self._run_words(words)
         self.assertEqual(1, removed)
         self.assertEqual([_i(encode_add_xd_xn_imm(3, 2, 0)), _i(encode_ret())],
@@ -480,6 +491,225 @@ class TestRules(unittest.TestCase):
         self.assertEqual(frozenset(), P.writes_arm64(_i(encode_b(3))))
         self.assertEqual(frozenset(), P.reads_arm64(_i(encode_b_cond("ge", 4))))
         self.assertEqual(frozenset(), P.writes_arm64(_i(encode_b_cond("ge", 4))))
+
+    def test_copy_chain_declines_across_a_loop_that_reads_the_middle(self):
+        # The case the CFG exists for, and the one a linear scan cannot see:
+        # the reader is at the TOP of the loop, textually BEFORE the window, and
+        # is only reachable from the window by the back edge. A backward linear
+        # scan reaches the window having already passed the reader, so it
+        # reports `x1` dead and drops a write the next iteration needs.
+        #
+        #     0  loop:  mov x1, x6        <- reads x1: the next iteration's value
+        #     1         mov x1, x2        <- the chain's FIRST copy writes x1
+        #     2         mov x3, x1        <- the chain's SECOND copy
+        #     3         b loop            <- back to 0
+        #
+        # Measured before this case existed: with the linear analysis the chain
+        # fired, `formal/examples/sqsum.mojo` answered 109 for 129 and
+        # `sum_range.mojo` never terminated.
+        words = _w(encode_add_xd_xn_imm(5, 1, 0), encode_add_xd_xn_imm(1, 2, 0),
+                   encode_add_xd_xn_imm(3, 1, 0), encode_b(-3), encode_ret())
+        asm, removed = self._run_words(words)
+        self.assertEqual(0, removed,
+                         "x1 is read at the top of the loop, so the chain's "
+                         "intermediate write is live")
+
+    def test_copy_chain_fires_when_the_loop_does_not_read_the_middle(self):
+        # …and the control, which is the half that makes the row above a
+        # measurement rather than a refusal: the same loop shape, but reading a
+        # register the chain does not name, so `x1` really is dead after the
+        # window and the rule must fire. A liveness check that declines
+        # everything is not sound, it is inert.
+        words = _w(encode_add_xd_xn_imm(5, 6, 0), encode_add_xd_xn_imm(1, 2, 0),
+                   encode_add_xd_xn_imm(3, 1, 0), encode_b(-3),
+                   encode_add_xd_xn_imm(4, 6, 0), encode_ret())
+        asm, removed = self._run_words(words)
+        self.assertEqual(1, removed)
+        self.assertEqual([_i(encode_add_xd_xn_imm(5, 6, 0)),
+                          _i(encode_add_xd_xn_imm(3, 2, 0)),
+                          _i(encode_b(-2)),
+                          _i(encode_add_xd_xn_imm(4, 6, 0)),
+                          _i(encode_ret())], asm.words())
+
+
+class TestBranchDecode(unittest.TestCase):
+    """`arm64_branch_target`, against `formal/arm64.py`'s own encoders.
+
+    Every row of `_ARM64_BRANCHES` was wrong on this tree, all six by the same
+    mistake: the displacement's shift was written `2` where A64 puts the field
+    (`imm26` at bit 0, `imm19`/`imm14` at bit 5). The function therefore
+    answered a garbage index for every branch in the corpus, `_back_edges`
+    found no backward edge anywhere, and the failure surfaced as a LIVENESS
+    bug rather than a decode bug. These are the cases that hid it.
+    """
+
+    def _cases(self):
+        from formal.arm64 import (encode_b, encode_b_cond, encode_cbz_xn,
+                                  encode_cbnz_xn, encode_tbz_xn_bit,
+                                  encode_tbnz_xn_bit)
+        # `encode_b` takes INSTRUCTION units; the relative forms take BYTES.
+        return [(encode_b(5), 5), (encode_cbz_xn(20, 3), 5),
+                (encode_cbnz_xn(20, 3), 5), (encode_b_cond("ne", 20), 5),
+                (encode_tbz_xn_bit(5, 3, 20), 5),
+                (encode_tbnz_xn_bit(5, 3, 20), 5)]
+
+    def test_a_forward_branch_decodes_to_its_target(self):
+        for encoded, disp in self._cases():
+            word = _i(encoded)
+            self.assertEqual(10 + disp, P.arm64_branch_target(word, 10),
+                             f"{word:#010x}: forward displacement {disp}")
+
+    def test_a_backward_branch_decodes_to_its_target(self):
+        from formal.arm64 import encode_b, encode_b_cond, encode_cbz_xn
+        for encoded, disp in ((encode_b(-5), -5),
+                              (encode_cbz_xn(-20, 3), -5),
+                              (encode_b_cond("eq", -20), -5)):
+            word = _i(encoded)
+            self.assertEqual(10 + disp, P.arm64_branch_target(word, 10),
+                             f"{word:#010x}: backward displacement {disp}")
+
+    def test_a_non_branch_decodes_to_nothing(self):
+        for word in (_i(encode_ret()), _i(encode_add_xd_xn_imm(1, 2, 3))):
+            self.assertIsNone(P.arm64_branch_target(word, 0),
+                              f"{word:#010x} is not a branch")
+
+
+class TestTables(unittest.TestCase):
+    """The read and write tables are the same decode read twice.
+
+    A class in `_ARM64_READS` with no row in `_ARM64_WRITES` is not "writes
+    nothing" — it is UNKNOWN, and `writes_arm64` answers unknown with every
+    register, which is the direction that makes a rewrite fire. Six classes were
+    in that state, and `_ARM64_WRITES` had a nine-hex-digit `0xD10000000` where
+    the field is `0xD1000000`, so `SUB Xd, Xn, #imm` was one of them.
+    """
+
+    def test_every_read_row_has_a_write_row(self):
+        reads = {(m, v) for m, v, _f in P._ARM64_READS}
+        writes = {(m, v) for m, v, _f in P._ARM64_WRITES}
+        self.assertEqual([], sorted(
+            (hex(m), hex(v)) for m, v in reads - writes),
+            "a read class with no write row is unknown to writes_arm64, and "
+            "unknown is every register")
+
+    def test_every_branch_row_is_a_real_pc_relative_field(self):
+        # A row whose value has bits outside its own mask can never match: the
+        # `0xD10000000` shape, which is how that typo survived this long. And a
+        # field that runs past bit 31 would silently lose its high bits.
+        for mask, value, field, shift, _kind in P._ARM64_BRANCHES:
+            self.assertEqual(0, value & ~mask,
+                             f"branch row {value:#x} has bits its mask "
+                             f"{mask:#x} does not test, so it matches nothing")
+            self.assertLessEqual(shift + field.bit_length() - 1, 31,
+                                 f"branch row {value:#x}'s field runs past "
+                                 f"bit 31")
+
+    def test_a_sub_immediate_is_not_unknown(self):
+        # The regression, named: this class answered all 31 registers for
+        # writes, because the row meant to cover it read `0xD10000000` — nine
+        # hex digits, one more than a 32-bit word has, so it matched nothing.
+        # The word is built by the emitter's own class rather than spelled by
+        # hand, so the test cannot drift from the encoding it is about.
+        from formal.arm64 import encode_sub_xd_xn_imm
+        word = _i(encode_sub_xd_xn_imm(0, 29, 0x22))    # sub x0, x29, #0x22
+        self.assertEqual({0}, set(P.writes_arm64(word)))
+        self.assertEqual({29}, set(P.reads_arm64(word)))
+
+    def test_a_branch_reads_no_register(self):
+        # `B` and `B.cond` read the FLAGS, which this table does not model, and
+        # neither had a READ row — so `reads_arm64` answered "every register"
+        # for both. Since a loop's latch IS a `B.cond` or a `B`, that made every
+        # register live at the top of every loop body and `copy_chain` declined
+        # every window inside a loop. Measured: this one row took the corpus
+        # from 10 firing to 107.
+        self.assertEqual(frozenset(), P.reads_arm64(_i(encode_b(4))))
+        self.assertEqual(frozenset(), P.reads_arm64(_i(encode_b_cond("ne", 4))))
+
+    def test_a_conditional_branch_is_not_unknown(self):
+        # The other half: `b.ne`'s word is a class `_ARM64_READS` decodes (it
+        # reads the flags, so its read row names no register, which is right)
+        # and `_ARM64_WRITES` must still cover — a branch writes no register.
+        word = _i(encode_b_cond("ne", 4))
+        self.assertEqual(frozenset(), P.writes_arm64(word))
+
+
+class TestDisplacementRepatch(unittest.TestCase):
+    """Deleting a byte invalidates every branch DISPLACEMENT below it.
+
+    `Assembler.resolve()` ends with `self.relocs.clear()`, so by the time the
+    peephole runs the relocation table is empty and `_Remap` has nothing to
+    move for a branch — a displacement is neither a label nor a stub. Nothing
+    re-patched them, so every branch below the first deletion kept its old
+    distance and the image branched into the wrong place. Measured on
+    `formal/examples/sqsum.mojo` with `arm64/copy_chain` on: exit 129 became
+    exit 109.
+    """
+
+    def _run(self, words):
+        asm = _Asm(words)
+        return asm, P._run(asm, "arm64", P.ARM64_RULES)
+
+    def _disp(self, asm, i):
+        word = asm.words()[i]
+        row = P._arm64_branch_row(word)
+        if row is None and (word & 0xFC000000) == 0x94000000:
+            row = P._ARM64_BL_ROW
+        self.assertIsNotNone(row, f"index {i} is not a branch")
+        _m, _v, field, shift, _k = row
+        raw = (word >> shift) & field
+        return raw - (1 << field.bit_length()) if raw & (1 << field.bit_length() - 1) \
+            else raw
+
+    def test_a_branch_above_a_deletion_keeps_its_distance(self):
+        # `b` over the self-copy, which the pass deletes. The branch and its
+        # target are both above the deletion, so the distance is unchanged —
+        # which is the case a naive "subtract the deletions below me" gets
+        # wrong in the other direction.
+        words = _w(encode_add_xd_xn_imm(4, 4, 0), encode_b(2), encode_ret(),
+                   encode_ret())
+        asm, removed = self._run(words)
+        self.assertEqual(1, removed)
+        # index 0 was the self-copy; the branch is now index 0 and the two
+        # rets follow it.
+        self.assertEqual(2, self._disp(asm, 0), "the target moved down by one")
+
+    def test_a_branch_below_a_deletion_has_its_distance_shortened(self):
+        # The regression case: the branch is BELOW the deleted instruction and
+        # its target is ABOVE it, so the distance shrinks by exactly the number
+        # of deleted words.
+        words = _w(encode_ret(), encode_add_xd_xn_imm(4, 4, 0),
+                   encode_add_xd_xn_imm(5, 6, 0), encode_b(-3))
+        asm, removed = self._run(words)
+        self.assertEqual(1, removed)
+        self.assertEqual(-2, self._disp(asm, 2),
+                         "one instruction below the branch was deleted")
+
+    def test_a_branch_below_two_deletions_is_shortened_by_both(self):
+        # The control for the row above, and the case that makes the
+        # "translate once, in original coordinates" bug visible: this function
+        # runs again after the SECOND deletion, so a target already translated
+        # would be compared against an original index.
+        words = _w(encode_ret(), encode_add_xd_xn_imm(4, 4, 0),
+                   encode_add_xd_xn_imm(5, 5, 0), encode_add_xd_xn_imm(6, 7, 0),
+                   encode_add_xd_xn_imm(8, 9, 0), encode_b(-5))
+        asm, removed = self._run(words)
+        self.assertEqual(2, removed)
+        self.assertEqual(-3, self._disp(asm, 3),
+                         "two instructions below the branch were deleted")
+
+    def test_a_call_below_a_deletion_is_repatched_too(self):
+        # `sqsum.mojo`'s recursion: a `BL` is a call, so it has no fallthrough
+        # edge for LIVENESS, but its displacement is a real PC-relative field
+        # and a deletion above it invalidates it like any other branch.
+        words = _w(encode_ret(), encode_add_xd_xn_imm(4, 4, 0),
+                   encode_add_xd_xn_imm(5, 6, 0), encode_bl(-3), encode_ret())
+        asm, removed = self._run(words)
+        self.assertEqual(1, removed)
+        word = asm.words()[2]
+        self.assertEqual(0x94000000, word & 0xFC000000, "still a BL")
+        # It named index 0 (`ret`) with displacement -3; one instruction below
+        # it was deleted, so it must now be -2 from its new index 2.
+        self.assertEqual(-2, self._disp(asm, 2))
 
 
 class TestRemap(unittest.TestCase):

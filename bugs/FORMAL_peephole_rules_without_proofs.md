@@ -137,7 +137,16 @@ one is a rule with no theorem at all — and the difference is why the registry
 has `RULES` (enabled) and `PENDING_RULES` (proved, matcher unsound) rather
 than one list with exceptions in it.
 
-## 1. `arm64/copy_chain` — proved, matcher wrong for a loop
+## 1. `arm64/copy_chain` — proved, matcher wrong for a loop — **FIXED, see above**
+
+Everything in this section is the diagnosis as it stood before
+`work/formal53-docs`, kept because the "Where to look" note below was closer
+to the truth than the section's own conclusion. **Its conclusion — that the
+liveness check was wrong for a loop and needed a better relaxation — was
+wrong**: the branch DECODE was wrong, so the relaxation had no edges to relax,
+and two further defects (the displacement re-patch and the table
+disagreements) were producing codegen failures that all looked like liveness
+failures. Read the status section above, not this one, for what to do next.
 
 `peephole_arm64_copy_chain` (`lib/Peephole.lean`) says that `mov xa, xb ;
 mov xc, xa` and `mov xc, xb` leave the machine model agreeing on every
