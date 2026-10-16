@@ -97,6 +97,92 @@ pre-existing div0 residual recorded elsewhere, not a new failure.
 fixed here — a light worker cannot iterate on a proof this deep without a Lean
 run per attempt, and the corrected site above is the next step.
 
+## 2026-10-12, second pass: items 1, 2 and 4 are the `runs` side condition and the shifted immediate, and NEITHER is `arm64_ext_imm12` mis-stated
+
+With `lib/ProofLib.olean` built, the Lean rows run and items 1, 2 and 4
+reproduce exactly as written. **The recursion depth is the argument to
+`runs_cons_seq`, not the step lemma or `arm64_ext_imm12`:**
+
+* the error column is the `rfl` in
+  `rw [runs_cons_seq st (mod_by_var_b6_qT0 st) mod_by_var_code 0 hs0 rfl, …]`,
+  the proof of `(qT0 st).pc = st.pc`;
+* `rfl` on `(qT st).pc = (qS st).pc` reaches the kernel's recursion limit once
+  the block's `sp` adjust is a `UInt64` literal at or above **512** — measured
+  on a four-field toy structure:
+  `{ st with sp := st.sp + (1024 : UInt64) }.pc = st.pc` fails under `rfl`
+  while `+ 257` succeeds. `ADD sp, sp, #32, lsl #12` is `+131072`, inserted by
+  the div0 guard arm, so `mod_by_var_b6_self1` is exactly the first block over
+  the line. **This is why the `sh`-field fix is what exposed it and why reverting
+  the fix is not the repair** — before it the immediate was `32`;
+* `work_step_add_imm64` and `mod_by_var_sr_87` themselves elaborate fine (no
+  error at their own lines), so §"The most likely cause" is wrong about this.
+
+**Fixed in the emitter** (generator side, no `lib/` change): the side condition
+is now `(by simp only [<qS>, <qT>, arm64_set_reg])` instead of `rfl`, at the six
+`runs_cons_seq`/`runs_cons_jump` sites (`arm64_proof_gen.py`'s block run-theorem
+emission). Unfolding `qS`/`qT` closes the `{ … with sp := … }` shape by
+projection without reducing the `sp` term, and unfolding `arm64_set_reg` is what
+keeps the register-setting transitions `rfl` DID handle working.
+
+**Item 4 (`sgt8`) is the OTHER half of the same `sh`-field fix**: the model and
+`_step_rhs`/`_cbz_reg_const` read the shift, but the Python spill-address
+decoders (`_hcond_mem_rws`, `_frame_read_addrs`, `_frame_ldp_addrs`,
+`_sp_stores`) did not, so a `#32, lsl #12` frame adjust was tracked as `+32`
+where the code does `+131072` and the condition proof emitted a
+`mem_read_two_writes_adj_uint` rewrite for an address the goal does not contain
+(`Tactic 'rewrite' failed: Did not find an occurrence of the pattern …
+⊢ arm64_matches_condition 13`). They now share `_addsub_imm12`. That one fix is
+also what makes `sign`, `twoifs` and `elif3` elaborate again — examples the
+committed baseline records as `proved`, so this was a live regression outside
+this doc's table. See
+`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` for the
+model half.
+
+Verified: `mod_by_var`, `same_image_leaf`, `sign`, `twoifs`, `elif3` and `sgt8`
+now elaborate; running `test_formal_call_proof_gen.py` drops from 8 failures to
+**5**, and the five that remain are all item 5's
+(`TestTheZeroDivisorGuardAgainstLean`). Pinned by
+`TestARunsSideConditionUnfoldsItsBlocks` and
+`TestTheImmediateShiftReachesTheSpDecoders` (generation only, no Lean) and by the
+Lean rows that now pass.
+
+## 2026-10-12: item 3 is a miscalibrated TEST, not the generator
+
+The first non-Lean red, and it is not the `arm64_ext_imm12` change either:
+
+* the `hprior_*` emission is **byte-identical** to `cfd550b5` (the commit that
+  introduced the per-path memo and where the bound was calibrated), verified by
+  diffing `git show cfd550b5:formal/arm64_proof_gen.py` against HEAD in the
+  emission region;
+* the counts are now `c_k = 2 * c_{k-1} + 3`, i.e. `3 * (2**k - 1)` — **the PATH
+  count (x2) plus one fixed startup constant**, measured 9 / 21 / 45 / 93 for
+  k = 2/3/4/5, residual exactly 3 at every step;
+* the old ratio bound of 2.2 was calibrated on `3 * 2**(k+1)` (24 / 48 / 96 /
+  192 at `cfd550b5`), where the ratio is exactly 2. The counts are ~2x smaller
+  now (a block-layout change after `cfd550b5`, not a memo change), so the fixed
+  startup alone puts the k=2 -> 3 ratio at 2.33 while it falls back to 2.03 by
+  k=6. **A ratio cannot distinguish "x2 plus a constant" from "exponential" at
+  three samples of a small integer.**
+
+**Fixed test-side, and the new assertion is the stronger one.**
+`test_the_fact_count_grows_with_the_paths_and_not_with_the_branches` now reads
+the RESIDUAL `c_k - 2*c_(k-1)` over FIVE programs (k = 2..5) and requires it to
+be one constant across three independent steps: a generator that had gone
+exponential shows a GROWING residual and fails, which the old single-ratio
+bound could not see at these counts. No generator behaviour changed. **The
+`CONDS` tuple grew one disjoint-bit condition so k=5 is a real 5-condition
+program**; the two classes above still build their own programs from it.
+
+## What is NOT fixed, and whose it is
+
+Item 5 (`TestTheZeroDivisorGuardAgainstLean`'s rows) remains, **and the filing
+already called it pre-existing** ("the class's state on the base tree"). It is
+the div0 residual `FORMAL_a_conditions_operand_read_through_an_earlier_stores_
+slot.md` owns, not this doc's, and the five remaining failures of the file are
+exactly its subtests. Measured after the fixes: **183 tests, 5 failures**, down
+from 8.
+
+
 ## What was run
 
     python3 tools/memslot.py --gb 8 --label t -- \
