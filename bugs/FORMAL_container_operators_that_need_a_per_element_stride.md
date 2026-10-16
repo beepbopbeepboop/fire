@@ -272,11 +272,13 @@ with the element's own width known only at run time
    emitters were not. **LANDED on arm64 2026-10-08 as `_emit_set_op`, one
    generic implementation of all four; x86-64 remains (see §"What to do").**
 4. **A length-changing slice store** — `xs[a:b] = v` where `len(v) != b - a`:
-   a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
-   primitives are both already here: `_emit_del_list_range` memmoves a tail and
-   shrinks the count, and `_emit_list_append` grows it past the count into
-   reserved capacity. arm64's `_emit_slice_store` is a same-length copy loop and
-   x86-64 has no slice store at all.
+   a memmove of the tail and a count bump. The primitives are both already
+   here: `_emit_del_list_range` memmoves a tail and shrinks the count, and
+   `_emit_list_append` grows it past the count into reserved capacity. arm64's
+   `_emit_slice_store` is the same-length copy loop, x86-64 has no slice store
+   at all. **2026-10-11: the `len(v) < b - a` half is LANDED on arm64** (the
+   tail moves DOWN, which needs no extra room); `len(v) > b - a` is still
+   refused/stopped because it needs the reservation half.
 
 The stride is the whole of it, and it is not free: `model.blob_elem_stride`
 already answers it for `list:int`, `list:str` and a dict's `list:<value-elem>`
@@ -310,7 +312,13 @@ the second reason this is a project rather than a rewrite.
    different exit.
 4. **A length-changing slice store** (item 4). arm64 first (it is the backend
    that has the store), and only then x86-64, which needs a slice to stop being
-   a materialized copy before the store can mean anything.
+   a materialized copy before the store can mean anything. **The SHORTER half
+   landed 2026-10-11** (`l_slice_store_shrink_empty`/`_mid`, and the growing
+   stop is pinned by `l_slice_store_grow_r`); the GROWING half is the
+   reservation work: a literal receiver that is the target of a
+   length-changing slice store must reserve `count + (vlen - slice_len)` slots,
+   which is `_scan_list_caps`'s job, and the `slice_store_static_length_refusal`
+   gate must drop the growing case only when a backend can actually lower it.
 
 ## The rows that must not be "fixed" by deleting the case
 

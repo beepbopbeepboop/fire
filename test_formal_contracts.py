@@ -1210,25 +1210,29 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # `_EXTRA_SIMP` toNat bridges plus `omega`); `first` restores the goal when
     # a rung fails, so that rung can only ADD reach, and these two still close.
     #
-    # `mini.mojo` and `abspos.mojo` are named here as the NEGATIVE half, and
-    # they are the rows that make this list a measurement of the ladder's reach
-    # rather than a list of things that happen to pass: both are still UNREACHED
-    # (their verdict is UNKNOWN) and their rows would go red the moment a rung
-    # closed them, which is what says the reach is still short of "everything".
-    # `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the same line at the
-    # `classify` level; the reason each is still unreached, measured, is in
-    # `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # `mini.mojo` joined the positive half when the emitter learned to split
+    # the selection tests its OWN rendering introduces (`_selection_splits`):
+    # its `max(n, 3)` postcondition tests `n > 3` while the body tests `n < 3`,
+    # so splitting the body alone left a symbolic `if` and every rung failed.
+    # That fix is a shape, not a spelling -- the same split is what any clause
+    # with a `min`/`max`/`abs`/`clamp` the body does not branch on needs.
     #
-    # `mini` and `abspos` need an xor-cancellation fact this toolchain does not
-    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): the goal is an
+    # `abspos.mojo` is the row that makes this list a measurement of the
+    # ladder's reach rather than a list of things that happen to pass: it is
+    # still UNREACHED (its verdict is UNKNOWN) and its row would go red the
+    # moment a rung closed it, which is what says the reach is still short of
+    # "everything".  It needs an xor-cancellation fact this toolchain does not
+    # carry (`n.toNat ^^^ 2^63 = 2^63` implies `n.toNat = 0`): its goal is an
     # EQUALITY over `UInt64`, so the `toNat` bridges the ladder carries -- all
     # of them about `<`/`≤` -- do not rewrite it, and `UInt64.toNat_inj` only
     # turns it into a Nat equality the simplifier cannot discharge without that
-    # missing lemma.
+    # missing lemma.  `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the
+    # same line at the `classify` level; the reason it is still unreached,
+    # measured, is in `bugs/FORMAL_contract_ladder_reach.md` §6.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),
-             ("mini.mojo", "mini", False),
+             ("mini.mojo", "mini", True),
              ("abspos.mojo", "abspos", False),
              ("wrong_clampv.mojo", "wrong_clampv", False)]
     for name, fnname, want_ok in cases:
@@ -1284,6 +1288,7 @@ ALL = [
     test_the_ladder_is_generated_from_the_list_it_reports,
     test_a_multi_postcondition_contract_is_split_before_its_first_bullet,
     test_the_ladders_simp_set_carries_the_UInt64_order_bridge,
+    test_a_selection_the_body_does_not_branch_on_is_split,
     test_a_false_contract_is_REFUTED_with_the_input,
     test_a_true_contract_is_NOT_reported_as_REFUTED,
     test_UNKNOWN_is_reachable_and_is_not_a_pass,

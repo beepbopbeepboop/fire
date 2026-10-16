@@ -670,27 +670,82 @@ def _lean_of(node, result_text=None) -> str:
         return f"(Not {_lean_of(node[1], result_text)})"
     if tag == _Op.TRUTHY:
         return f"({_lean_of(node[1], result_text)}) != 0"
+    if tag in (_Op.ITE, _Op.SEL, _Op.ABS, _Op.MIN, _Op.MAX, _Op.CLAMP):
+        return _lean_selection(tag, node, result_text)[1]
+    raise ContractError(f"no Lean rendering for the IR tag {tag!r}")
+
+
+def _lean_selection(tag, node, result_text=None):
+    """A selection as Lean: its `if` TEST propositions AND its VALUE.
+
+    One function because the test's spelling is load-bearing twice over: the
+    VALUE is the `if` that ends up in the goal, and the emitter's `by_cases`
+    must name a proposition IDENTICAL to the test inside that `if`, or the
+    hypothesis is about a different proposition and no rung can decide the
+    `if`.  That is exactly how `mini`'s `max(n, 3)` stayed UNKNOWN: the emitter
+    split the body's `n < 3` while the postcondition's `if` tests `n > 3`.
+
+    `tests` is returned rather than re-derived by the caller, so
+    `_selection_splits` collects the SAME strings the rendering uses.
+    """
+    def sub(i):
+        return _lean_of(node[i], result_text)
     if tag in (_Op.ITE, _Op.SEL):
-        return (f"(if {_lean_of(node[1], result_text)} then "
-                f"{_lean_of(node[2], result_text)} else "
-                f"{_lean_of(node[3], result_text)})")
+        cond = _lean_of(node[1], result_text)
+        return ([cond], f"(if {cond} then {sub(2)} else {sub(3)})")
     if tag == _Op.ABS:
-        x = _lean_of(node[1], result_text)
+        x = sub(1)
         lt = f"(({x}) ^^^ {_SIGN_FLIP}) < (0 ^^^ {_SIGN_FLIP})"
-        return f"(if {lt} then 0 - {x} else {x})"
+        return ([lt], f"(if {lt} then 0 - {x} else {x})")
     if tag in (_Op.MIN, _Op.MAX):
-        a, b = _lean_of(node[1], result_text), _lean_of(node[2], result_text)
+        a, b = sub(1), sub(2)
         op = "<" if tag == _Op.MIN else ">"
         test = f"(({a}) ^^^ {_SIGN_FLIP}) {op} (({b}) ^^^ {_SIGN_FLIP})"
-        return f"(if {test} then {a} else {b})"
+        return ([test], f"(if {test} then {a} else {b})")
     if tag == _Op.CLAMP:
-        x = _lean_of(node[1], result_text)
-        lo = _lean_of(node[2], result_text)
-        hi = _lean_of(node[3], result_text)
+        x, lo, hi = sub(1), sub(2), sub(3)
         below = f"(({x}) ^^^ {_SIGN_FLIP}) < (({lo}) ^^^ {_SIGN_FLIP})"
         above = f"(({x}) ^^^ {_SIGN_FLIP}) > (({hi}) ^^^ {_SIGN_FLIP})"
-        return f"(if {below} then {lo} else if {above} then {hi} else {x})"
+        return ([below, above],
+                f"(if {below} then {lo} else if {above} then {hi} else {x})")
     raise ContractError(f"no Lean rendering for the IR tag {tag!r}")
+
+
+def _selection_splits(node, result_text=None):
+    """Every selection TEST inside a clause IR, as `by_cases` strings.
+
+    The emitter splits the MODEL's own branch conditions (`model_conditions`);
+    this collects the `if` tests the RENDERING of a clause introduces, which
+    is a DIFFERENT set whenever a clause builds a choice the body does not
+    branch on.  `max(n, 3)` tests `n > 3` while `mini`'s body tests `n < 3`;
+    `abs(n)` tests `n < 0` while `abspos`'s body tests `n > 0`.  Without those
+    splits the goal keeps a symbolic `if` that no rung can decide -- not
+    `omega` (no arithmetic over `Fin`), not `decide` (a free variable), not
+    `simp_all` (the test is not a hypothesis).
+
+    Recurses through every clause node that can carry a subterm, so a
+    selection nested inside a comparison or an arithmetic operand is found
+    too.  Order is irrelevant: `first` restores the goal when a rung fails, and
+    `by_cases` alternatives are independent.
+    """
+    out = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if not isinstance(n, tuple) or not n:
+            continue
+        tag = n[0]
+        if tag in (_Op.ITE, _Op.SEL, _Op.ABS, _Op.MIN, _Op.MAX, _Op.CLAMP):
+            out.extend(_lean_selection(tag, n, result_text)[0])
+            stack.extend(x for x in n[1:] if isinstance(x, tuple))
+        elif tag in (_Op.CMP, _Op.ARITH):
+            stack.extend(x for x in n[2:] if isinstance(x, tuple))
+        elif tag in (_Op.AND, _Op.OR):
+            stack.extend(x for x in n[1:] if isinstance(x, tuple))
+        elif tag in (_Op.NOT, _Op.TRUTHY, _Op.NEG, _Op.POS, _Op.INVERT):
+            if isinstance(n[1], tuple):
+                stack.append(n[1])
+    return out
 
 
 def _eval_of(node, env, fuel=None):
@@ -1073,6 +1128,25 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     splits = model_conditions(fn, params) if fn is not None else None
     emitted_split = splits is not None
     splits = splits or []
+    # Every selection the clause RENDERING introduces is a second source of
+    # `if`s the goal carries, and they are not always the model's own branch
+    # conditions: `max(n, 3)` tests `n > 3` where `mini`'s body tests `n < 3`.
+    # Splitting only the body leaves that `if` symbolic and every rung fails,
+    # which is why `mini` (an `<`/`>` mismatch, now closed) stayed UNKNOWN.
+    # `abspos` has the same split defect, but its goal is an EQUALITY, so the
+    # split is necessary there and not sufficient -- the residual is a missing
+    # xor-cancellation fact, `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # Appended rather than merged, because a
+    # selection test that happens to equal a body condition is at worst a
+    # redundant alternative: `by_cases` alternatives are independent and
+    # `first` restores the goal, so reach here is monotonic and cannot regress.
+    if emitted_split:
+        seen = set(splits)
+        for clause in tuple(pres) + tuple(posts):
+            for test in _selection_splits(clause, result_term):
+                if test not in seen:
+                    seen.add(test)
+                    splits.append(test)
     hs = [f"h{i}" for i in range(len(splits))]
     by_cases = (" ".join(f"by_cases {h} : {c} <;>" for h, c in zip(hs, splits))
                 if splits else "")

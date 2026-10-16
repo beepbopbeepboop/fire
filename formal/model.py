@@ -13624,31 +13624,32 @@ def slice_store_refusal() -> str:
     return (
         "assignment to a slice target is not lowered on this path: a formal "
         "list blob lives in the frame and cannot change length without a "
-        "compaction pass, so `xs[a:b] = v` is only answerable when `v` has "
-        "exactly as many elements as the range. Python resizes instead — with "
+        "compaction pass, so `xs[a:b] = v` is only answerable when `v` has no "
+        "more elements than the range. Python resizes instead — with "
         "`xs = [3, 1, 2]`, `xs[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]` and "
-        "`xs[0:1] = []` is `[1, 2]` — so a slice store that changes the length "
+        "`xs[0:1] = []` is `[1, 2]` — so a slice store that GROWS the length "
         "is a different program from the one this path can emit. arm64 lowers "
-        "the same-length case; here a slice is a materialised copy, so writing "
-        "through one would have to write back into its source blob")
+        "the same-length case and the SHORTER case; here a slice is a "
+        "materialised copy, so writing through one would have to write back "
+        "into its source blob")
 
 
 def slice_store_static_length_refusal(target, value) -> str | None:
-    """Why `xs[a:b] = v` cannot keep the blob's length, or None when it can.
+    """Why `xs[a:b] = v` cannot be a GROWING store, or None when it can.
 
     **The one question about a slice STORE that can be answered before anything
     runs, and answering it is the difference between a diagnostic and a silent
-    wrong answer.** This path lowers `xs[a:b] = v` as a SAME-LENGTH in-place
-    replace — it copies `v`'s elements over the range and stops — so a `v` whose
-    length differs from the range's has nowhere to put the difference. CPython
-    resizes: `a = [3, 1, 2]; a[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]`, and
-    `a[0:1] = []` is `[1, 2]`. Measured on this tree, arm64, both of those
-    **exited 1 with no output and no message at all** — and that is the worst
-    outcome class there is, because the program looks like it ran. x86-64
-    refuses the whole construct at build time with a sentence that names the
-    reason, which is the right answer and the wrong SCOPE: a same-length
-    replace is a real lowering, and refusing every slice store would take it
-    away.
+    wrong answer.** This path lowers `xs[a:b] = v` as an in-place replace when
+    `v` is the same length as the range and as a tail-shift plus count bump
+    when `v` is SHORTER — the blob lives in the frame, so a `v` LONGER than
+    the range has no room to grow into. CPython resizes: `a = [3, 1, 2];
+    a[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]`, and `a[0:1] = []` is `[1, 2]`.
+    Measured on this tree, arm64, both of those **exited 1 with no output and
+    no message at all** — and that is the worst outcome class there is, because
+    the program looks like it ran. x86-64 refuses the whole construct at build
+    time with a sentence that names the reason, which is the right answer and
+    the wrong SCOPE: a same-length replace is a real lowering, and refusing
+    every slice store would take it away.
 
     So this asks only what is statically decidable, and refuses only then:
 
@@ -13696,19 +13697,20 @@ def slice_store_static_length_refusal(target, value) -> str | None:
         return None
     if stop <= start:
         stop = start
-    if stop - start == vlen:
+    if stop - start >= vlen:
         return None
     return (
         f"slice assignment writes {vlen} element(s) over a range of "
-        f"{stop - start}, and this path lowers `xs[a:b] = v` as a SAME-LENGTH "
-        f"in-place replace — there is no room for the difference and no "
-        f"compaction pass to make room. Python resizes instead: with "
-        f"`xs = [3, 1, 2]`, `xs[0:1] = [9, 9, 9]` is `[9, 9, 9, 1, 2]` and "
-        f"`xs[0:1] = []` is `[1, 2]`. Measured on this tree, arm64 before the "
-        f"gate, both of those exited 1 with no output at all, which is a "
-        f"program that looks like it ran. Build the list at its final length "
-        f"instead — assign into it, or `append` into a literal sized for what "
-        f"the program needs — or split the shift out of this line")
+        f"{stop - start}, and this path can move the tail DOWN for a SHORTER "
+        f"value and replace in place for one of the same length, but a value "
+        f"LONGER than the range needs room the blob did not reserve. Python "
+        f"resizes instead: with `xs = [3, 1, 2]`, `xs[0:1] = [9, 9, 9]` is "
+        f"`[9, 9, 9, 1, 2]` while `xs[0:1] = []` is `[1, 2]`. Measured on this "
+        f"tree, arm64 before the gate, both of those exited 1 with no output "
+        f"at all, which is a program that looks like it ran. Build the list at "
+        f"its final length instead — assign into it, or `append` into a "
+        f"literal sized for what the program needs — or split the shift out "
+        f"of this line")
 
 
 def container_membership_refusal(spelled_needle: str, spelled_haystack: str,
