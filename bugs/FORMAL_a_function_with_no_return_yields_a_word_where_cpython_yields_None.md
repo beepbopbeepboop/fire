@@ -9,10 +9,15 @@ nothing in the pair knows the callee returns nothing.
 **Status: PARTIAL, and the half that is OBSERVABLE is FIXED (2026-10-04,
 `formal/model.py` + both emitters).** `print` of a call to a function of this
 module that returns nothing — and of a local every one of whose bindings is such
-a call, and, since 2026-10-07 (§0d), the same value as a `printf` vararg — is
-now REFUSED on both architectures, with a message that names the
+a call, and, since 2026-10-07 (§0d), the same value as a `printf` vararg, and,
+since 2026-10-13 (§0e), the same value RETURNED by a function (`return g(…)`) —
+is now REFUSED on both architectures, with a message that names the
 callee, says what CPython answers (`None`) and says what this path would have
-printed instead. §0b is what landed and §0b's measurement is the one §4 step 1
+printed instead.
+**§0e closes the third position (the `returned` one §0c names as "the clearest
+divergence"); the two sections agree that direction (b) — representing `None` —
+is still the only direction that makes every position correct, so the doc stays
+open.** §0b is what landed and §0b's measurement is the one §4 step 1
 was waiting for: **the refusal reaches 0 call sites in 379 files** (§0a counted
 510, all of them at positions where nothing observes the value), so the two
 gate counts §4 asked for are no longer the decisive measurement — the position
@@ -176,6 +181,111 @@ scope. Re-measured 2026-10-13: `test_formal_value_model.py` PASS=125 FAIL=0
 
 **What is still not fixed is unchanged** — the positions where nothing OBSERVES
 the value are §0c's, and direction (b) is still the only answer for them.
+
+## 0e. The `returned` position is now REFUSED too (2026-10-13,
+## `work/formal360-docs`) — the third position, and the census says it reaches
+## 0 build sites in this repository
+
+**What landed.** The THIRD position a value this path cannot carry can occupy,
+and the one §0c's `position_file_table` calls "the clearest divergence": here
+the word is not rendered as TEXT (that is §0b's `print` and §0d's `printf`), it
+becomes the FUNCTION'S OWN RESULT. `formal/model.py::returnless_return_refusal`
+is the one reader, asked at the `ReturnStmt` of both emitters
+(`_refuse_returnless_value`) over the SAME `ValueKinds.no_value_callee_of`
+evidence the two rendering positions ask, so `return g(…)`, `print(g(…))` and
+`printf("%d", g(…))` for one `g` cannot get three answers. A bare `return`
+(`value is None`) is left alone: it is not a value at all.
+
+Measured, both architectures, before the change:
+
+```console
+$ cat .tmp/rr.mojo
+def g(a, b):
+    w = 1
+
+def f(a, b):
+    return g(a, b)
+
+def main() -> Int32:
+    print(f(1, 2))
+    return 0
+$ python3 tools/memslot.py --gb 8 --label t -- python3 fire.py build --formal \
+      --no-prove -o .tmp/rr .tmp/rr.mojo && .tmp/rr
+0                       # CPython: None
+```
+
+and after it, identically on both backends:
+
+```
+build: f returns the value of g(…), and g returns nothing: CPython answers
+`None` and f answers `None`, and a value on this path is one 64-bit word with no
+way to say `no value` — the epilogue writes no return register, so the word f
+would answer with is whatever g's last instruction left there, which is a number
+nothing in the source wrote … Refused rather than emitted, because a plausible
+number is worse than a refusal. Give g a `return`, or do not return its value
+```
+
+**Why it is affordable now, and it is §0c's corrected census rather than the
+stale one.** The position table in §0c (line 84, `work/formal28-1`) reported
+`returned 62 of 76` in `formal/hostmods/argparse.mojo` and concluded no
+consuming position is affordable — but that table was measured BEFORE §0c
+(line 184)'s conjunction fix. On the corrected census `argparse.mojo` has **0**
+candidates and the repository half is **0** sites:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label rlc -- \
+      python3 tools/formal_returnless_census.py --rows 40
+   same-file candidates by where the value goes:
+      returned                     8   (was 76; every one in the stdlib)
+      MemberExpr                   3
+      argument of a call           2
+      assigned                     2
+      a subscript index            2
+   files with a same-file candidate: 7, every one under
+      ../new-modular/Mojo/stdlib/std/ — ZERO in this repository and in
+      formal/hostmods/
+```
+
+So this closes 8 sites, and every one is a stdlib `out`-parameter helper
+(`_remove_trailing_zeros`, `_sqrt_nvvm`, `_rsqrt_nvvm`, `_recip_nvvm`,
+`_powf`, `_unsafe_add_functions`) — a call whose value is its own out-param's
+mutation and whose `return` answers `None` in CPython.
+
+**The decline, and it is `function_body_is_absent`.** The rule does NOT claim a
+callee whose body is the no-implementation marker `def g(): ...`: that is a
+DECLARATION this path cannot lower, `ellipsis_refusal` owns it when the walk
+reaches the body, and `return g(…)` must keep the `no body to lower` message
+(without the decline it took that message away — the pin is
+`test_formal_run.py::limit_ellipsis_function_body`, and the new value-model row
+`a_return_of_a_function_with_no_body_keeps_its_own_refusal` says so where the
+refusal lives). A `pass` body is NOT absent: it lowers, and falls off its end,
+which is the real subject.
+
+**The builds behind it.** `test_formal_hostmods_census.py` **74/74 rows build**
+(`formal/hostmods` is the repository's own copy of these modules, and a
+`returned` candidate reaches **none** of them);
+`test_formal_value_model.py` **PASS=127** with the three new rows
+(`a_return_of_a_return_less_function_is_refused`,
+`a_return_less_local_is_refused_at_the_return`,
+`a_return_of_a_function_with_no_body_keeps_its_own_refusal`, build on BOTH
+architectures that must refuse naming `f returns the value of g(…)`);
+`test_refusal_taxonomy.py` **PASS (364/364 checks, 73 causes)** with the new
+cause row `a returned value that is not a value: the callee returns nothing` and
+its sample cut from `model.py`'s own f-string, so a reword of the sentence fails
+a test instead of emptying the row into `other refusal`
+(`tools/formal_sweep_causes.py` keys it on `returns the value of` + `CPython
+answers `None`` — a clause it does NOT share with the `print` row's `CPython
+evaluates that call to `None``, which is why the two do not collapse).
+
+**What is still not fixed, and it is direction (b).** The three REMAINING
+positions §0c lists — `assigned` (2, WEAKEST: the local may never be read),
+`operand`/`MemberExpr` (3, CPython raises `TypeError`), `argument of a call`
+(2) — are all refused by nothing, and a refusal asked at any of them needs a
+liveness pass (which this path has none of) or is a refusal of ordinary code
+CPython runs. Only representing `None` makes all of them correct rather than
+refused, and that is still a change to the value model, both emitters' return
+paths and `lib/ProofLib.lean` at once. So this section lands one more step of
+direction (a); it does not close the doc.
 
 ## 0c. What is left, measured per POSITION (2026-10-04, `work/formal28-1`) —
 ## and the one bucket that decides nothing is 62 sites in one file the gate
