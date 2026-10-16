@@ -923,6 +923,254 @@ def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
                                               scope)]
 
 
+def _eval_closed_cond(p: str):
+    """Evaluate a closed Lean UInt64 condition string to True/False, or None.
+
+    Only the condition vocabulary this generator itself emits is supported —
+    parenthesised u64 arithmetic (`+ - * / % &&& ||| ^^^ <<< >>> asr64`),
+    the sign-flip of a signed comparison (`(l ^^^ 0x8000…) < (r ^^^ 0x8000…)`),
+    `(N : UInt64)` literals, and `==  ≠  <  ≤  >  ≥  ∧  ∨`.  Anything else —
+    a parameter name, an operator outside the subset, a division whose divisor
+    is not known to be non-zero — is NOT a sign that the condition is
+    decidable or not; it is the evaluator declining to guess, and the caller
+    treats `None` exactly as it treated every condition before this function
+    existed.
+    """
+    import re
+
+    M = 1 << 64
+    SIGN = 0x8000000000000000
+    CMPS = ("=", "!=", "<=", ">=", "<", ">")
+    ARITH = {
+        "+": lambda x, y: (x + y) % M,
+        "-": lambda x, y: (x - y) % M,
+        "*": lambda x, y: (x * y) % M,
+        "/": lambda x, y: None if y == 0 else x // y,
+        "%": lambda x, y: None if y == 0 else x % y,
+        "&&&": lambda x, y: x & y,
+        "|||": lambda x, y: x | y,
+        "^^^": lambda x, y: x ^ y,
+        "<<<": lambda x, y: (x << (y & 63)) % M,
+        ">>>": lambda x, y: x >> (y & 63),
+    }
+    toker = re.compile(
+        r"\s*(0x[0-9a-fA-F]+|\d+|<<<|>>>|&&&|\|\|\||\^\^\^|!=|<=|>=|"
+        r"UInt64\.ofNat|UInt64|ofNat|asr64|[=<>+\-*/%&|^:().,∧∨≤≥≠])")
+
+    def toks(s):
+        out = []
+        i = 0
+        while i < len(s):
+            m = toker.match(s, i)
+            if not m:
+                return None
+            out.append(m.group(1))
+            i = m.end()
+        return out
+
+    def split_top(t):
+        depth = 0
+        for i, x in enumerate(t):
+            if x == "(":
+                depth += 1
+            elif x == ")":
+                depth -= 1
+            elif depth == 0 and (x in CMPS or x in ARITH
+                                 or x in ("∧", "∨", "≠", "≤", "≥")):
+                return t[:i], x, t[i + 1:]
+        return None
+
+    def match_close(t, pos):
+        depth = 0
+        for j in range(pos, len(t)):
+            if t[j] == "(":
+                depth += 1
+            elif t[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return j
+        return None
+
+    def num(x):
+        return int(x[2:], 16) if x.startswith("0x") else int(x)
+
+    def sra(a, b):
+        b &= 63
+        if b == 0:
+            return a
+        if a & SIGN:
+            return (a >> b) | (M - (1 << b))
+        return a >> b
+
+    def value(t, pos):
+        """(v, next_pos) for a u64 value starting at t[pos], or None."""
+        if pos >= len(t):
+            return None
+        x = t[pos]
+        if x == "asr64":
+            a = value(t, pos + 1)
+            b = a and value(t, a[1])
+            if a is None or b is None:
+                return None
+            return sra(a[0], b[0]), b[1]
+        if x == "UInt64.ofNat":
+            if pos + 1 >= len(t):
+                return None
+            return num(t[pos + 1]) % M, pos + 2
+        if x == "UInt64" and pos + 3 < len(t) and t[pos + 1] == "." \
+                and t[pos + 2] == "ofNat":
+            return num(t[pos + 3]) % M, pos + 4
+        if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", x):
+            v = num(x) % M
+            p = pos + 1
+            if p < len(t) and t[p] == ":" and p + 1 < len(t) \
+                    and t[p + 1] == "UInt64":
+                if p + 2 < len(t) and t[p + 2] == ")":
+                    return v, p + 3
+                if p + 2 == len(t):
+                    return v, p + 2
+            return v, p
+        if x == "(":
+            close = match_close(t, pos)
+            if close is None:
+                return None
+            inner = t[pos + 1:close]
+            if not inner:
+                return None
+            sp = split_top(inner)
+            if sp is None:
+                vv = value(inner, 0)
+                if vv is None or vv[1] != len(inner):
+                    return None
+                return vv[0], close + 1
+            a, op, b = sp
+            av = value(a, 0)
+            bv = b and value(b, 0)
+            if av is None or bv is None or av[1] != len(a) or bv[1] != len(b):
+                return None
+            f = ARITH.get(op)
+            if f is None:
+                return None
+            r = f(av[0], bv[0])
+            if r is None:
+                return None
+            return r, close + 1
+        return None
+
+    def yes(a, b, op):
+        if op in ("=", "=="):
+            return a == b
+        if op in ("!=", "≠"):
+            return a != b
+        if op in ("<",):
+            return a < b
+        if op in ("<=", "≤"):
+            return a <= b
+        if op in (">",):
+            return a > b
+        if op in (">=", "≥"):
+            return a >= b
+        return None
+
+    def cond(t):
+        if not t:
+            return None
+        if t[0] == "(" and t[-1] == ")":
+            close = match_close(t, 0)
+            if close == len(t) - 1:
+                t = t[1:-1]
+        if not t:
+            return None
+        sp = split_top(t)
+        if sp is not None:
+            a, op, b = sp
+            if op in ("∧", "∨"):
+                av = cond(a)
+                bv = cond(b)
+                if av is None or bv is None:
+                    return None
+                return (av and bv) if op == "∧" else (av or bv)
+            av = value(a, 0)
+            bv = value(b, 0)
+            if av is None or bv is None or av[1] != len(a) or bv[1] != len(b):
+                return None
+            if op in CMPS or op in ("≠", "≤", "≥"):
+                return yes(av[0], bv[0], op)
+            f = ARITH.get(op)
+            if f is None:
+                return None
+            r = f(av[0], bv[0])
+            if r is None:
+                return None
+            return r != 0
+        v = value(t, 0)
+        if v is not None and v[1] == len(t):
+            return v[0] != 0
+        return None
+
+    return cond(toks(p))
+
+
+def _u64_cast_numerals(p: str):
+    """Ascribe `(N : UInt64)` to every bare decimal in a u64 condition.
+
+    In the model's `if` conditions a bare `0 - 7` is typed by the u64
+    context around it, so `(x - 7) ...` means wrap-around.  In an isolated
+    `have h : (0 - 7 ≠ 0 - 12) := by native_decide` there IS no such context,
+    and Lean infers the default `Nat`, whose subtraction saturates at 0 — a
+    different proposition that `native_decide` then refutes.  Wrapping each
+    numeral in the proposition pins every operation to UInt64 so the fact is
+    the same one the model's `if` sees.  Hex `(0x… : UInt64)` literals already
+    carry the suffix and are not matched.
+    """
+    import re
+    return re.sub(r"\b(\d+)\b", r"((\1 : UInt64))", p)
+
+
+def _eval_eq_conds_tactic(conds, hs: str, simp_lems: str, extra: str = ""):
+    """The `eval_eq_mojo` tactic over a straight-line split, or None to keep
+    the historical text (byte-identical).
+
+    A `by_cases` on a condition `native_decide` can settle outright is two
+    goals where one fact is the whole content, and the cost is real: every
+    split DOUBLES the number of `simp_all +decide` passes, so a k-condition
+    program costs 2^k passes and the constant-condition programs carry all of
+    it in leaves whose arithmetic is decided anyway.  So each condition that is
+    a closed constant proposition is emitted as a `have` fact (`native_decide`
+    computes it; `decide` would reduce it in the kernel instead), and
+    `by_cases` splits only the conditions that actually depend on an argument.
+    `simp_lems` and `extra` (the sign-lemma tail) are the same sets the
+    historical tactic used; the have-facts replace the by_cases hypotheses for
+    the conditions they decide, so the final pass sees the same information.
+
+    Returns None when no condition is a closed constant the evaluator is
+    confident of, so the caller emits today's exact text for those programs.
+    """
+    haves = []
+    opens = []
+    for i, c in enumerate(conds):
+        truth = _eval_closed_cond(c)
+        if truth is True:
+            haves.append(f"have h{i} : ({_u64_cast_numerals(c)}) := (by native_decide)")
+        elif truth is False:
+            haves.append(f"have h{i} : ¬ ({_u64_cast_numerals(c)}) := (by native_decide)")
+        else:
+            opens.append(i)
+    if not haves:
+        return None
+    if not opens:
+        tail = f"simp +decide [{hs}, {simp_lems}{extra}]"
+    else:
+        bys = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in opens)
+        tail = f"{bys} simp_all +decide [{hs}, {simp_lems}{extra}]"
+    # One tactic line, `;`-joined: the callers embed this text as
+    # `f"... := by\n  {tactic}"`, which indents only the FIRST line, and a
+    # Lean tactic block ends the moment a following line is indented LESS than
+    # the block's first line — which is exactly what a multi-line string with
+    # internal indentation produces.  A single line has no such boundary.
+    return "; ".join(haves) + "; " + tail
+
+
 def eval_split_conds(fn, param: str, env: dict, vtypes: dict = None,
                      call_types: dict = None, scope=None) -> list:
     """The propositions `eval_eq_mojo` splits on: source conditions FIRST.
@@ -11278,6 +11526,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = eval_split_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
+        hs_join = f"{hs}, " if hs else ""
         # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
         # comparison, and it has to be in the simp set or the `by_cases`
         # hypothesis is not the goal's `if` test: `_cmp_go` spells the
@@ -11289,13 +11538,20 @@ def generate_arm64_proof(prog, code, info) -> str:
         # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
         # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
         # generator has had `sKey` in this set for the same reason.
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
+        simp_lems = f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
-            eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
+            eval_eq_mojo_proof = f"simp +decide [{hs_join}{simp_lems}]"
         else:
+            # `_eval_eq_conds_tactic` decides the constant conditions with
+            # `have`/`native_decide` and splits only the argument-dependent
+            # ones; it returns None (the historical full-`by_cases` text) for
+            # a program whose conditions are all beyond its subset.
             eval_eq_mojo_proof = (
-                f"{by_cases} simp_all +decide [{simp_lems}, "
-                f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+                _eval_eq_conds_tactic(
+                    conds, hs, simp_lems,
+                    extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
+                or f"{by_cases} simp_all +decide [{hs_join}{simp_lems}, "
+                   f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
             )
     else:
         eval_eq_mojo_proof = None
