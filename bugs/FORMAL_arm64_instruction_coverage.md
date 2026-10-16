@@ -13,9 +13,12 @@ measurements are not lost. Not a bug report: a **survey**, kept because the
 answer is not guessable and the tooling to re-derive it should not be written
 twice. Bugs found *by* this work have their own documents — see
 `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` for the spill-displacement sign
-and the loop-exit bugs, `FORMAL_arm64_known_proof_gaps.md` for the three
-unproved examples, and `FORMAL_arm64_bit_test_branch_is_not_provable.md` for the
-one gap the TBZ/TBNZ wiring left behind.
+and the loop-exit bugs, and `FORMAL_arm64_known_proof_gaps.md` for the unproved
+examples. The one gap the `TBZ`/`TBNZ` wiring left behind — a bit-test
+condition that compiled and ran but could not be PROVED — was closed after this
+survey's measurements: `formal/examples/bittest.mojo` proves, and
+`test_formal_call_proof_gen.py::TestBitTestBranches` pins the emitted `hcond` as
+the bit test rather than the whole register.
 
 ## Re-measured 2026-10-05 (later), and the "modelled, unwired" pair is now
 ## WIRED: `TST` and `CMN`
@@ -383,15 +386,17 @@ instruction:
    `work_step_*` theorems that negate every branch before their own, and
    `lib/ProofLib.lean` did not typecheck until all 18 had them.
 
-**What is NOT done, and it is one arm.** An `if` whose condition is a bit test
-**compiles, runs, and answers CPython**, and cannot be *proved*: the generator
-derives a branch's source-level proposition out of the cset that wrote the tested
-register, and TBZ/TBNZ write no register and set no flags. The generator refuses
-rather than emitting an `hcond` about the wrong thing, which is the correct
-failure. `“An `if` whose condition is a BIT TEST cannot be PROVED”` has the
-measurement, the site, and the next step — and it is why
-`formal/examples/bittest.mojo` is not committed with this: the example fails
-today and a failing example with no `EXPECTED_FAILURES` entry is the wrong shape.
+**What was NOT done at this measurement, and has since been closed: the one
+arm.** An `if` whose condition is a bit test **compiled, ran, and answered
+CPython**, but could not be *proved*: the generator derived a branch's
+source-level proposition out of the cset that wrote the tested register, and
+`TBZ`/`TBNZ` write no register and set no flags, so the generator refused rather
+than emitting an `hcond` about the wrong thing. The way out was not to keep
+refusing — the branch's own condition IS the proposition, one bit of one
+register — and it is landed: the generator emits that bit test as the `hcond`,
+`formal/examples/bittest.mojo` proves, and
+`test_formal_call_proof_gen.py::TestBitTestBranches` pins the emitted proposition
+as `((arm64_reg r s >>> bit) &&& 1)` rather than the whole register.
 
 **The six encoders of 2026-10-02 are still six.** The genuinely-uncovered list
 is still dominated by NEON, FP and the cryptographic extensions, none of which

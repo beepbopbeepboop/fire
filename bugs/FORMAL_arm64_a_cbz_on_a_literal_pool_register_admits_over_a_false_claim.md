@@ -1,7 +1,32 @@
-# `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach
+# `runs-cbz-condition`: the conditional branch that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach
 
 **Area:** FORMAL (the arm64 proof generator's CFG walk, `emit_runs`' `cbz`
 arm). Claim `project22:arm64-cfg-leaves`.
+
+**Re-measured 2026-10-08 (`work/formal213-docs`), after the stack-floor guard's
+`getrlimit` moved to the startup stub (`arm64_codegen.py::_emit_stack_floor_init`):
+the leaf's INSTRUCTION changed and the bug did not.** The guard is now a load and
+a compare — `LDR X16, [&floor] ; ADD X17, SP, #0 ; CMP X17, X16 ; B.HS ok` — so
+the conditional-branch leaf that reads the floor word is a `B.cond` (`hs`), not
+the `CBNZ` this doc was written about, and the residual is a `<` rather than the
+`= 0` quoted below:
+
+    ⊢ st.sp - 32 <
+        mem_read_u64
+          (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64 st.mem
+              (st.sp - 16).toNat st.x29) (st.sp - 8).toNat st.x30)
+              (st.sp - 32).toNat st.x19) (st.sp - 24).toNat st.x20)
+          4299161608
+
+`st.mem` is still unconstrained by the theorem, so the branch is still undecided
+and the obligation still cannot be closed by any tactic: the fix is still the
+memory hypothesis §"The next step" describes, and this doc stays OPEN for the
+same reason. Two of `count`'s six `runs-cbz-condition` leaves went with the
+`CBNZ` (its census is 4 now, not 6), and the two that remain are this guard leaf
+and the recursion branch this doc already scoped out. The `hx30fr`/`FrameOk`
+diagnostics that were 5 of the 9 are gone on this tree, leaving 2 — measured
+through `formal/lean.py::check_proof_cached` on `count.mojo` with the admission
+fallback stripped (`G.no_admission_fallback`), 3.7 GB peak.
 
 **Status: OPEN, PARTIAL LANDED (2026-10-04, `work/formal23-2`), and the
 SUBJECT of this document is misidentified — which is the finding.** The
