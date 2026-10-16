@@ -813,7 +813,9 @@ def _stat_oracle(p):
     and `os.stat` for the rest. A path CPython cannot stat is answered as
     -1/`0` rather than raising, because this path has no exception to raise and
     a case that raised would be testing CPython's error handling rather than the
-    module.
+    module.  Every numeric field is rendered through
+    `_as_printed_by_the_image`, so the comparison is between the 64-bit words
+    and not between two different `%d` rules.
     """
     out = {}
     out["pred"] = "isfile=%d isdir=%d islink=%d lexists=%d exists=%d" % (
@@ -865,18 +867,22 @@ def _stat_oracle(p):
         return v if v < 0 else v & 0xFFFFFFFF
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
-        field(s, "st_mode"), field(s, "st_nlink"), field(s, "st_uid"),
-        field(s, "st_gid"))
+        _as_printed_by_the_image(field(s, "st_mode")),
+        _as_printed_by_the_image(field(s, "st_nlink")),
+        _as_printed_by_the_image(field(s, "st_uid")),
+        _as_printed_by_the_image(field(s, "st_gid")))
     out["m2"] = "size=%d ino=%d dev=%d blocks=%d blksize=%d" % (
         field(s, "st_size"), field(s, "st_ino"), device(field(s, "st_dev")),
         field(s, "st_blocks"), field(s, "st_blksize"))
     out["l1"] = "lmode=%d lsize=%d lino=%d" % (
-        field(ls, "st_mode"), field(ls, "st_size"), field(ls, "st_ino"))
+        _as_printed_by_the_image(field(ls, "st_mode")),
+        _as_printed_by_the_image(field(ls, "st_size")),
+        _as_printed_by_the_image(field(ls, "st_ino")))
     try:
         g = os.path.getsize(p)
     except OSError:
         g = -1
-    out["g1"] = "getsize=%d" % g
+    out["g1"] = "getsize=%d" % _as_printed_by_the_image(g)
     return out
 
 

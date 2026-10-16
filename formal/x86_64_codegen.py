@@ -7011,12 +7011,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # where arm64 and CPython both answer.  `M.for_target_tree` is the
             # one parser both backends now use, so the two cannot disagree
             # about what a target's shape is.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
+            #
+            # A `*rest` leaf KEEPS its star: `_emit_for_unpack` owns the rest
+            # binding, so stripping it here (which this did while the star was
+            # broken on both backends) would bind the star's name to the whole
+            # element and leave the star's own arm unreachable.
+            ttree = M.for_target_tree(stmt.target) \
+                if isinstance(stmt.target, str) else None
+            why = _for_target_refusal(ttree)
+            if why is not None:
+                raise CodegenError(why)
 
             self._while_counter += 1
             wid = self._while_counter
@@ -7351,19 +7355,43 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason.
         """
         fn = self.func_name
+        # A trailing `*name` leaf binds a REST blob of the element's tail; the
+        # arity check then requires `count >= n_fixed` rather than `count ==
+        # len(targets)`, and the star's own arm builds the tail blob. This is
+        # the x86-64 twin of arm64's `_emit_for_unpack` / its `star_i` branch,
+        # and the two must agree or `for a, *rest in [(1,)]` is a build refusal
+        # on one machine and a wrong program on the other (the starred
+        # for-target defect this arm fixes).
+        star_i = -1
+        for i, child in enumerate(targets):
+            if isinstance(child, str) and child.startswith("*"):
+                if i != len(targets) - 1:
+                    raise CodegenError(
+                        f"starred for-target {child!r} must be last")
+                star_i = i
+        n_fixed = len(targets) - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
         self._if_counter += 1
         uid = self._if_counter
         ok_label = f"{fn}_fu{uid}_ok"
         bad_label = f"{fn}_fu{uid}_bad"
-        self._emit_jcc(COND_NE, bad_label)
+        if star_i >= 0:
+            # `count < n_fixed` is the only arity failure a star has — the rest
+            # may be empty.
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, n_fixed))
+            self._emit_jcc(COND_L, bad_label)
+        else:
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
+            self._emit_jcc(COND_NE, bad_label)
         self._emit_jmp(ok_label)     # arity matches: skip the exit
         self.asm.label(bad_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
         for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                self._emit_for_unpack_star_rest(target[1:], tag, n_fixed)
+                continue
             # `stride` is 0 for a `[count][e0...]` blob and `M.PAIR_STRIDE` for
             # a dict's `[npairs][k0][v0]...`: a tuple unpack over a dict binds
             # the KEYS, and an element-stride read binds the key and the value.
@@ -7385,6 +7413,62 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._pop_slot(Reg.R10)
             else:
                 self._store_var(target, Reg.RAX)
+
+    def _emit_for_unpack_star_rest(self, name: str, tag: str,
+                                   n_fixed: int) -> None:
+        """Bind `name` to a fresh blob of the tail `[n_fixed, count)`.
+
+        The x86-64 twin of arm64's `_emit_for_unpack_star_rest`, and it has to
+        agree with it element for element: the loop runs while `i < rest_count`,
+        copies `src[8 + 8*(n_fixed + i)]` to `rest[8 + 8*i]`, and caps the rest
+        at 64 elements — the same `rest_cap` arm64 uses — exiting 1 on overflow.
+        The bound is a CAP rather than the source's own length so a long tail is
+        a loud stop rather than a silent overrun of the reserved blob.
+
+        On entry R10 is the source element's blob base and R11 its count, which
+        is what the caller holds across the whole unpack; this routine uses
+        RDX/RCX/R8/R9/RAX and leaves R10/R11 alone.
+        """
+        rest_cap = 64
+        offset = self._reserve_blob(8 + 8 * rest_cap,
+                                    "a for-star unpacking buffer")
+        self._emit_blob_base(offset, Reg.RDX)            # RDX = rest base
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R11))
+        self.asm.emit(encode_sub_r64_imm32(Reg.RCX, n_fixed))  # RCX = rest_count
+        self.asm.emit(encode_mov_r64_imm32(Reg.R8, 0))   # R8 = i
+
+        self._while_counter += 1
+        w = self._while_counter
+        loop = f"{tag}_sl{w}"
+        done = f"{tag}_sd{w}"
+        oob = f"{tag}_so{w}"
+        oob_end = f"{tag}_sx{w}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.RCX))
+        self._emit_jcc(COND_AE, done)                    # i >= rest_count
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R8, rest_cap))
+        self._emit_jcc(COND_AE, oob)                     # i >= cap
+        # src address: R9 = R10 + 8 + 8*(n_fixed + i)
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_add_r64_imm32(Reg.R9, n_fixed))
+        self.asm.emit(encode_shift_r64_imm8("<<", Reg.R9, 3))
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.R10))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R9, 8))
+        # dst address: R9 = RDX + 8 + 8*i
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_shift_r64_imm8("<<", Reg.R9, 3))
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.RDX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RCX))  # rest[0] = count
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+        self._store_var(name, Reg.RAX)
+        self._emit_jmp(oob_end)
+        self.asm.label(oob)
+        self._emit_call_exit(1)
+        self.asm.label(oob_end)
 
     # ── expressions (result in RAX) ──────────────────────────────────
 
@@ -9833,8 +9917,7 @@ preference.
             leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
-                    f"comprehension target must be a plain name or tuple of "
-                    f"plain names (got {gen.target!r})")
+                    f"comprehension target {why} (got {gen.target!r})")
             if isinstance(ttree, str):
                 self._store_var(ttree, Reg.RAX)
             else:
