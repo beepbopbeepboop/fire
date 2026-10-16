@@ -14084,6 +14084,66 @@ PRINTF_TEXT_CASES = [
      "    var c = One(7)\n"
      "    printf(\"[%d]\", c)\n"
      "    return 0\n", 0, "[7]"),
+    # ── A NUMBER conversion handed a CONTAINER ──────────────────────────────
+    #
+    # The other direction of the `%s` family above, and the mirror of the
+    # `printf_kind_conversion_refusal` rows: a container's value on this path is
+    # a BLOB — a frame address whose first word is the element count — so a
+    # numeric conversion reads eight bytes of that blob and prints the ADDRESS
+    # rather than the container.  Measured, both architectures, from GREEN
+    # builds, before `model.printf_container_conversion_refusal` existed:
+    #
+    #     printf("v=%d\n", [1, 2, 3])   arm64 1809329920   x86-64 1870638832
+    #
+    # two DIFFERENT heap addresses for one program, where CPython raises
+    # `TypeError: %d format: a real number is required, not list`.  The evidence
+    # is the operand's own `list:`-prefixed kind (`is_list_kind`), so one row
+    # covers every container spelling — the `bytearray` and `Dict` rows below
+    # are the ones that would pass if the check read a constructor NAME instead.
+    ("printf_d_of_a_list_container_is_refused",
+     "def main(n):\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%d\\n\", xs)\n"
+     "    return 0\n",
+     "refuse:is a container (kind `list:int`)", None),
+    ("printf_d_of_a_dict_container_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": 1}\n"
+     "    printf(\"v=%d\\n\", d)\n"
+     "    return 0\n",
+     "refuse:is a container (kind `list:int`)", None),
+    # A byte blob is the row that separates the KIND from the constructor: its
+    # kind is `list:byte` (`model.byte_blob_kind`), not `list:int`, and a test
+    # that only read a `ListExpr` would let this one print an address.
+    ("printf_x_of_a_bytearray_container_is_refused",
+     "def main(n):\n"
+     "    var b = bytearray()\n"
+     "    b.append(65)\n"
+     "    printf(\"v=%x\\n\", b)\n"
+     "    return 0\n",
+     "refuse:is a container (kind `list:byte`)", None),
+    # A CONTAINER PARAMETER, and it is a different evidence path from the three
+    # above: the name is bound by the CALL SITE rather than by a statement in
+    # this function, and `ValueKinds.kind_of` still answers `list:int` for it —
+    # so the refusal does not depend on how the name got its kind.
+    ("printf_d_of_a_list_parameter_is_refused",
+     "def show(xs):\n"
+     "    printf(\"v=%d\\n\", xs)\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    show([1, 2, 3])\n"
+     "    return 0\n",
+     "refuse:is a container (kind `list:int`)", None),
+    # THE GUARDS, and they are the reason this is a row about the CONVERSION
+    # rather than about the container: an element and a count are numbers and
+    # must keep printing — a refusal that also stopped these would be an
+    # over-refusal of correct programs.
+    ("printf_d_of_a_list_element_and_len_still_prints",
+     "def main(n):\n"
+     "    var xs = [10, 20, 30]\n"
+     "    printf(\"n=%d e=%d\\n\", len(xs), xs[1])\n"
+     "    return 0\n", 0, "n=3 e=20"),
     # The rest of the family, and it is one family: `%s` is the one conversion
     # that DEREFERENCES its argument, so every shape whose word is a number is a
     # walk off the end of it.  Measured on both architectures, from GREEN
