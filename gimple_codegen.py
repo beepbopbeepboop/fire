@@ -196,6 +196,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     # set
     'mojo_set_new':               'MojoSet *',
     'mojo_set_contains_int':      'int',
+    'mojo_set_contains_word':     'int',
     'mojo_set_contains_str':      'int',
     'mojo_set_add_bytes':         'void',
     'mojo_set_contains_bytes':    'int',
@@ -3414,6 +3415,9 @@ class GimpleGen:
         'mojo_set_new':          ('MojoSet *', []),
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
+        'mojo_set_add_word':     ('void',      ['MojoSet *', 'int64_t']),
+        'mojo_set_contains_word': ('int',      ['MojoSet *', 'int64_t']),
+        'mojo_set_discard_word': ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
         'mojo_set_contains_bytes': ('int',      ['MojoSet *', 'MojoBytes *']),
         'mojo_set_clear':        ('void',      ['MojoSet *']),

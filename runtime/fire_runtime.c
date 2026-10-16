@@ -6330,6 +6330,44 @@ int mojo_set_contains_str(MojoSet *s, char *v)
     return idx >= 0 && s->slots[idx].tag == 1;
 }
 
+/* The word-of-unknown-kind trio. The codegen reaches these when it holds an
+ * `int64_t` it cannot type -- most often a name the self-hosted compiler read
+ * out of a heterogeneous dict (`gen._extra_no_mangle.add(m['body_name'])`)
+ * or an untyped loop variable (`for name in free: if name in self.module_
+ * names`). Through the int view such a word was an ADDRESS: added under the
+ * int tag it never matched the same text probed as a `char *`, and probed
+ * through the int view it never found an element added as a string. So the
+ * genexp desugarer captured `os` as a parameter, and every generator body
+ * was overload-mangled under a name its trampoline does not call.
+ *
+ * This is NOT the cross-view `contains` the note below rejects: that read
+ * every int SLOT as a possible string, which dereferences values that were
+ * never pointers. Here only the NEEDLE is classified, by `mojo_boxed_is_str`,
+ * which is sound by provenance (a registered literal or a live heap block
+ * that is not a container, a box or a struct). A word that is not a string is
+ * exactly the int element it always was. `contains` probes the int domain
+ * first, so a set that stored the word through the int view still finds it.
+ */
+void mojo_set_add_word(MojoSet *s, int64_t w)
+{
+    if (mojo_boxed_is_str(w)) mojo_set_add_str(s, (char *)(intptr_t)w);
+    else mojo_set_add_int(s, w);
+}
+
+int mojo_set_contains_word(MojoSet *s, int64_t w)
+{
+    if (!s) return 0;
+    if (mojo_set_contains_int(s, w)) return 1;
+    return mojo_boxed_is_str(w) && mojo_set_contains_str(s, (char *)(intptr_t)w);
+}
+
+void mojo_set_discard_word(MojoSet *s, int64_t w)
+{
+    if (!s) return;
+    mojo_set_discard_int(s, w);
+    if (mojo_boxed_is_str(w)) mojo_set_discard_str(s, (char *)(intptr_t)w);
+}
+
 /* NOTE on the `contains` pair: unlike the iterator accessors below, these
  * are deliberately NOT made cross-view. An int slot holds a bare 64-bit
  * value with no way to tell a boxed `char *` from a genuine integer (a

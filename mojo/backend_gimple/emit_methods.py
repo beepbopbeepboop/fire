@@ -5042,6 +5042,9 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         at, av = _set_str_elem_arg(gen, ov, at, av)
         if at == 'char *':
             return gen._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
+        if at == 'int64_t' and av not in gen._int_word_vals:
+            # A word of unknown kind: see mojo_set_add_word.
+            return gen._void_call('mojo_set_add_word', [('MojoSet *', ov), ('int64_t', av)])
         av64 = gen._to_int64(at, av)
         return gen._void_call('mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av64)])
     if method == 'discard' and args:
@@ -5049,6 +5052,8 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         at, av = _set_str_elem_arg(gen, ov, at, av)
         if at == 'char *':
             return gen._void_call('mojo_set_discard_str', [('MojoSet *', ov), (at, av)])
+        if at == 'int64_t' and av not in gen._int_word_vals:
+            return gen._void_call('mojo_set_discard_word', [('MojoSet *', ov), ('int64_t', av)])
         av64 = gen._to_int64(at, av)
         return gen._void_call('mojo_set_discard_int', [('MojoSet *', ov), ('int64_t', av64)])
     if method == 'copy':

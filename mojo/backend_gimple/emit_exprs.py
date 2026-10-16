@@ -5037,6 +5037,13 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tu
     return res
 
 
+def _set_needle_is_word(gen, xv: str) -> bool:
+    """An `int64_t` set needle whose kind is unknown -- anything this function
+    has not recorded as a real integer (`_int_word_vals`). See
+    mojo_set_contains_word."""
+    return xv not in gen._int_word_vals
+
+
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
     given both operands already lowered. Split out of
@@ -5152,6 +5159,10 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             return 'int', ti
         if xt == 'char *':
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
+        elif xt == 'int64_t' and _set_needle_is_word(gen, xv):
+            # A word of unknown kind against a set that is not known to hold
+            # ints: see mojo_set_contains_word.
+            gen._emit_call('int', ti, 'mojo_set_contains_word', [('MojoSet *', rv), ('int64_t', xv)])
         else:
             xv64 = gen._to_int64(xt, xv)
             gen._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])

@@ -1589,6 +1589,13 @@ MojoSet *mojo_set_copy(MojoSet *s);
 void     mojo_set_update(MojoSet *dst, MojoSet *src);
 void     mojo_set_discard_int(MojoSet *s, int64_t v);
 void     mojo_set_discard_str(MojoSet *s, char *v);
+/* A WORD of unknown kind (an `int64_t` the codegen could not type: a
+ * value read out of a heterogeneous dict, an untyped loop variable). A
+ * word that is soundly a string (`mojo_boxed_is_str`) is the string's own
+ * element; anything else is the int element. See the definitions. */
+void     mojo_set_add_word(MojoSet *s, int64_t w);
+int      mojo_set_contains_word(MojoSet *s, int64_t w);
+void     mojo_set_discard_word(MojoSet *s, int64_t w);
 
 int64_t *mojo_set_order_indices(MojoSet *s);
 
