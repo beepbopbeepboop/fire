@@ -10991,7 +10991,7 @@ def _lowered_string_method_result(call, vk, is_text):
 
 
 def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
-    """`"float"` / `"int"` / None — which side of a FLOATING conversion this is.
+    """`"float"` / `"int"` / `"container"` / None — this operand's conversion class.
 
     THE evidence for `printf_kind_conversion_refusal`, and it is a second
     function rather than an extension of `printf_arg_text_evidence` because the
@@ -11000,7 +11000,7 @@ def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
     NAME can carry, while the floating axis needs `FLOAT_KIND`, and `FLOAT_KIND`
     is never a default — it comes from an annotation, a literal, a declared
     return type or a float initializer. So `"float"` needs no such hunt and
-    `"int"` does, and folding them into one three-way would have had to pick
+    `"int"` does, and folding them into one answer would have had to pick
     which axis's discipline governs the other.
 
     **No conversion is unwrapped, and that is the difference from
@@ -11029,14 +11029,45 @@ def printf_arg_float_evidence(expr, vk, is_float=None) -> str | None:
     answers `INT_KIND` for a callee it cannot see, and `printf("%.17g",
     get())` may well be handed a double by a caller this build knows nothing
     about.
+
+    **`"container"` is the third class, and it is read from the operand's own
+    KIND** (`ValueKinds.kind_of` through `is_list_kind`) rather than from a
+    constructor's name, so a list, a `bytearray` and a `Dict` are one answer.
+    `printf("%d", xs)` for `var xs = [1, 2, 3]` is a program whose own source is
+    wrong in the other direction from `%s` of an integer: a blob's first word is
+    its element COUNT and the vararg placement hands the C library the blob's
+    ADDRESS, so `%d` renders the low 32 bits of a heap address. Measured on BOTH
+    architectures it printed `1809329920` (arm64) / `1870638832` (x86-64) where
+    CPython raises `TypeError: %d format: a real number is required, not list`.
+    The kind is POSITIVE evidence — a `list:…` kind is never a default, unlike
+    `INT_KIND` — which is why the same `kind_of` the `"int"` hunt must not trust
+    is exactly what this class may: a default can only ever say "integer", so a
+    container answer cannot be manufactured by an unclassified word.
     """
     if is_float is not None and is_float(expr):
         return "float"
+    if isinstance(expr, F.CallExpr):
+        # A CALL is never evidence, for the reason `_own_shape_of` gives, and
+        # the CONTAINER question does not change that: `kind_of` answers
+        # `list:…` for a callee whose declared return type is a container, but
+        # it answers `INT_KIND` — this model's DEFAULT for a word — for one it
+        # cannot see. Reading a container off a call would refuse
+        # `printf("%d", get())` for a callee this build knows nothing about, so
+        # the whole call shape is declined here, exactly as the FLOAT question
+        # declines it below.
+        return None
+    if vk is not None and is_list_kind(vk.kind_of(expr)):
+        # A CONTAINER: see `printf_kind_conversion_refusal`. The kind is the
+        # evidence and it is the operand's OWN shape rather than a name's
+        # `own_shape`, because `printf("%d", xs)`, `printf("%d", [1, 2, 3])` and
+        # `printf("%d", d)` for a dict are one question asked of three spellings
+        # and must not disagree.
+        return "container"
     if isinstance(expr, F.IdentExpr):
         if vk is not None and vk.own_shape_kind(expr.name) == INT_KIND:
             return "int"
         return None
-    if isinstance(expr, F.CallExpr) or vk is None:
+    if vk is None:
         return None
     return "int" if vk.kind_of(expr) == INT_KIND else None
 
@@ -11095,6 +11126,15 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
     `float(x)` is `SCVTF`, so the message names both rather than offering a
     guess.
 
+    **A CONTAINER is the third disagreement**, and it is worse than either
+    numeric one: `PRINTF_NUMBER_CONVERSIONS` is refused a container the same way
+    a double is refused an integer conversion, because a blob has no C rendering
+    at all — its first word is an element COUNT and the vararg placement passes
+    its ADDRESS, so `%d` of a list renders the low bits of a heap address.
+    `printf("%s", …)` is NOT these: it is `printf_text_conversion_refusal`'s
+    question, and `%p`/`%n` are in neither set (Darwin's `%p` renders the address,
+    which a blob does have).
+
     Measured, both architectures, before this existed:
 
         def f(x: Float64): printf("[%d]", x)      # x = 3.9
@@ -11106,7 +11146,7 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
     `[3.4584595208887258e-323]` for `printf("%.17g", 7)`. Green builds, exit 0,
     wrong numbers on the screen.
 
-    `class_of` is `printf_arg_float_evidence`'s three-way answer and the
+    `class_of` is `printf_arg_float_evidence`'s four-way answer and the
     permissive direction is load-bearing: **None never refuses.** An
     unannotated parameter holding a double (`def show(x): printf("%f", x)`
     called `show(2.5)`) is a program this path prints correctly today, because
@@ -11129,6 +11169,26 @@ def printf_kind_conversion_refusal(callee: str, fmt_text, args: list,
         got = class_of(args[j])
         if got is None:
             continue
+        if got == "container":
+            if conv not in PRINTF_NUMBER_CONVERSIONS:
+                continue
+            return (
+                f"the `%{conv}` conversion in {callee}'s format string reads "
+                f"`{spelled(args[j])}` as a number, and `{spelled(args[j])}` is "
+                f"a CONTAINER — a blob whose first word is its element COUNT and "
+                f"whose remaining words are its elements, with no C spelling at "
+                f"all. This path hands the format to the C library and a "
+                f"container is passed as its ADDRESS, so `%{conv}` renders the "
+                f"low bits of a heap address rather than any value the source "
+                f"wrote. Measured on BOTH architectures, `printf(\"v=%d\", xs)` "
+                f"for `var xs = [1, 2, 3]` printed 1809329920 (arm64) / "
+                f"1870638832 (x86-64) from a green build, exit 0, where CPython's "
+                f"`\"%d\" % [1, 2, 3]` raises `TypeError: %d format: a real "
+                f"number is required, not list`. Refused rather than emitted, "
+                f"because no conversion in the format asks for a container: use "
+                f"`len(xs)` for the element count, `xs[i]` for one element, or "
+                f"render a number the source builds (`String(len(xs))`, `%lld`)"
+            )
         wants_float = conv in PRINTF_FLOAT_CONVERSIONS
         if (got == "float") == wants_float:
             continue
@@ -11275,7 +11335,8 @@ def call_argument_kind_refusal(callee: str, args: list, declared_params,
     wrote, on two machines that agreed with each other and not with the program.
 
     **The evidence discipline is `printf_kind_conversion_refusal`'s, unchanged and
-    deliberately: `class_of` is `printf_arg_float_evidence`'s three-way answer,
+    deliberately: `class_of` is `printf_arg_float_evidence`'s answer, and a
+    `"container"` is simply not `"float"` (this rule asks only about doubles),
     and `None` never refuses.** An unannotated parameter is not evidence against
     a double — `def g(x): return x + 1` called `g(3.9)` is `4.9` here today and
     must stay `4.9` — so a disagreement is only ever claimed where the callee's

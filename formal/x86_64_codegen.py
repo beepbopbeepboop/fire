@@ -4391,7 +4391,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.string_literal_text(arg)
 
     def _printf_arg_conversion_class(self, arg):
-        """`"float"` / `"int"` / None — see `model.printf_arg_float_evidence`.
+        """`"float"` / `"int"` / `"container"` / None — see
+        `model.printf_arg_float_evidence`.
 
         The third hook of `model.printf_format_refusal`, and the same two facts
         the other two ask for: this function's `ValueKinds` and the flow-
@@ -4424,7 +4425,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Delegation, and nothing else: the callee's declared parameters, the
         receiver that is dropped rather than counted (`method_function_name`
         lifts `Box.put` to one flat name and its `params` still carry `self`),
-        the three-way evidence and the words are all
+        the evidence and the words are all
         `model.call_argument_kind_refusal`, shared with arm64. The RECEIVER is
         the reason it is not a bare copy of the arm64 body: a method call's
         `args` do not include the receiver while the lifted method's `params`

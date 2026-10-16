@@ -6524,7 +6524,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         return M.string_literal_text(arg)
 
     def _printf_arg_conversion_class(self, arg):
-        """`"float"` / `"int"` / None — see `model.printf_arg_float_evidence`.
+        """`"float"` / `"int"` / `"container"` / None — see
+        `model.printf_arg_float_evidence`.
 
         The third hook of `model.printf_format_refusal`, and the same two facts
         the other two ask for: this function's `ValueKinds` and the flow-

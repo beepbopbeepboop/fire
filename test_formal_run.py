@@ -19173,6 +19173,59 @@ FLOAT_REFUSALS = [
      "    if a == b:\n"
      "        return 1\n"
      "    return 2\n", 2, None),
+    # ── A CONTAINER at a NUMBER conversion ─────────────────────────────────────
+    #
+    # The other direction of the same table, and the one with no representation
+    # at all: a blob's first word is its element COUNT and the vararg placement
+    # hands the C library the blob's ADDRESS, so `%d` of a list renders the low
+    # bits of a heap address. Measured on BOTH architectures before this refusal,
+    # from a green build, exit 0: `printf("v=%d", xs)` for `var xs = [1, 2, 3]`
+    # printed 1809329920 (arm64) / 1870638832 (x86-64), where CPython raises
+    # `TypeError: %d format: a real number is required, not list`. It is the
+    # mirror of `PRINTF_TEXT_CASES`' `%s`-of-an-integer row: there `%s` walks
+    # bytes at a number, here `%d` renders the address of a structure.
+    ("container_refuse_an_integer_conversion_of_a_list",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%d\", xs)\n"
+     "    return 0\n",
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
+    # The row that decides the rule is asked of the KIND and not of the
+    # constructor's NAME: a `Dict` and a `bytearray` are the same blob shape and
+    # the same answer. `d` is not spelled `list`, so a rule keyed on the
+    # spelling would let this one through.
+    ("container_refuse_an_integer_conversion_of_a_dictionary",
+     "def main() -> Int:\n"
+     "    var d = {1: 10, 2: 20}\n"
+     "    printf(\"v=%d\", d)\n"
+     "    return 0\n",
+     "refuse:reads `d` as a number, and `d` is a CONTAINER", None),
+    # …and the FLOATING conversions are in the set too, because a blob has no
+    # binary64 rendering either. A separate row so a fix that only taught the
+    # INTEGER readers about containers fails here.
+    ("container_refuse_a_floating_conversion_of_a_list",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    printf(\"v=%.17g\", xs)\n"
+     "    return 0\n",
+     "refuse:the `%g` conversion in printf's format string reads `xs` as a "
+     "number", None),
+    # THE CONTROLS. A number the source BUILDS from a container is what the
+    # refusal message points a reader at, and it must keep printing: `len(xs)`
+    # is the count word and `xs[1]` is one element, both integers by their own
+    # shape. A rule that refused every conversion in a function that mentions a
+    # list would pass the three refusal rows and fail this one.
+    ("container_a_number_built_from_a_container_still_prints",
+     "def main() -> Int:\n"
+     "    var xs = [10, 20, 30]\n"
+     "    printf(\"[%d %d]\", len(xs), xs[1])\n"
+     "    return 0\n", 0, "[3 20]"),
+    # …and `%s` is NOT this rule's question (it is `printf_text_conversion_
+    # refusal`'s), so a string is untouched, and `%p` is deliberately absent
+    # from `PRINTF_NUMBER_CONVERSIONS` — a blob does have an address, and
+    # Darwin's `%p` renders it. Neither is asserted to build here because a
+    # `%s` of a container is a different (unfixed) shape and `%p`'s output is an
+    # address that is not stable to compare; the row above is the control.
 ]
 
 # The CONTAINER family, the other half of the same "the conversion and the
