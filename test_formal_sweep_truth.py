@@ -4661,8 +4661,13 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
     #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
     #: so the corpus walks four more steps. The trees are unchanged at 105.
-    TOTAL = (105, 3697)
-    TOTAL_PRE_MERGE52 = (69, 2368)
+    #: **Re-pinned from 105 / 3 697 to 107 / 3 767 by the bulk merge of the
+    #: formal-worker branches** (two more leaves and seventy more steps, measured
+    #: on the merged tree; the 67 trees are the same ones).
+    TOTAL = (107, 3767)
+    #: Re-pinned from (69, 2368) by the bulk merge of the formal-worker
+    #: branches: one more leaf and fifteen more steps on the same 52 examples.
+    TOTAL_PRE_MERGE52 = (70, 2383)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",
