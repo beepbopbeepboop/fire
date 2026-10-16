@@ -279,6 +279,28 @@ def group_blake2b(tmpdir, verbose):
           + (f"; first: {bad[0][0]} got {bad[0][1][:24]} "
              f"want {bad[0][2][:24]}" if bad else ""))
 
+    # The OMITTED argument: `digest_size` defaults to 64, which is the property
+    # the signature now spells and the one only a CROSS-IMAGE call can measure —
+    # `hashlib` is a module dylib, so the default has to be materialized at the
+    # call site from the callee's declaration (`formal/imports.py`'s
+    # `external_declarations`). One length is enough: the claim is the
+    # materialization, not a second corpus.
+    n = 200
+    default_src = (
+        "import hashlib\n\ndef main() -> int:\n"
+        f"  var m: Pointer[UInt8] = malloc({n})\n"
+        f"  memset(m, 97, {n})\n"
+        f'  printf("dflt=%s{REC}", hashlib.blake2b_hex(m, {n}))\n'
+        "  return 0\n")
+    default_got = re.search(r"dflt=([0-9a-f]*)" + REC,
+                            run(build(default_src, "b2d")))
+    default_want = hashlib.blake2b(b"a" * n).hexdigest()
+    check(default_got is not None and default_got.group(1) == default_want,
+          "the omitted `digest_size` did not arrive as CPython's default 64: "
+          f"got {default_got and default_got.group(1)!r} want {default_want!r} "
+          "— a default that is not materialized across a dylib boundary is "
+          "whatever the caller left in the register")
+
     # The truncated digests are DIFFERENT HASHES, not prefixes. Asserted
     # explicitly because it is the one property of `digest_size` that a
     # plausible implementation gets wrong: returning the first 20 bytes of the

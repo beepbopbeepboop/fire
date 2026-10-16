@@ -652,6 +652,7 @@ def group_fs(tmpdir, verbose):
     })
     for tag, path in (("made", p("a", "b", "c")),
                       ("made-deep", p("p", "q", "r")),
+                      ("made-default", p("dd", "ee")),
                       ("removed", p("a", "b", "c", "d", "e")),
                       ("removed-file", p("f.txt")),
                       ("gone", p("x1")), ("renamed", p("z2")),
