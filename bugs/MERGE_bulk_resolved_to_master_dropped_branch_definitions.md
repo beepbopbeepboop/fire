@@ -83,6 +83,18 @@ still defines it). Then run the touched suites:
 * `an_extremum_of_a_container_and_a_literal_is_refused_by_the_blob_table` — a
   refusal wording mismatch; likely pre-existing.
 
+`test_formal_peephole.py` is **60 pass / 4 fail**, and the same shape: the
+`work/formal53-docs` branch replaced `_repatch_branches(entries)` with
+`_repatch_branches(entries, at, arch)` (an `at` layout map), master has only its
+own `(entries, at, arch)`, and the branch's rows
+(`test_a_branch_below_two_deletions_is_shortened_by_both`,
+`test_a_call_below_a_deletion_is_repatched_too`,
+`test_copy_chain_declines_when_the_middle_is_read_again`) expect the branch's
+behaviour. The fourth, `test_every_read_row_has_a_write_row`, is an arm64 model
+table row and may be pre-existing.
+
 The rest of the touched `test_formal_*.py` files (about forty) have NOT been run
 — running them all is the integrator's call, and any failure in one of them is a
-candidate for this same class of dropped-definition breakage.
+candidate for this same class of dropped-definition or two-mechanism breakage.
+The two mechanisms that most need a decision are the comprehension element copy
+(above) and the peephole displacement repatch.
