@@ -32,6 +32,35 @@ truthy-float REFUSAL rows and their falsy siblings
 `an_exit_returning_zero_point_zero_still_runs_the_protocol`). **§2's computed
 case is untouched and is still the whole of what is left.**
 
+**Update 2026-10-13 (`work/formal335-docs`): the FOLDABLE half had a SECOND
+incomplete edge, and it is now closed.** The 2026-10-07 update below was right
+that the gate tests the returned value's TRUTHINESS and fixed the string and
+float arms, but `_literal_return_truthiness` still answered `None` for a whole
+class of compile-time constants — so a `__exit__` ending in one SUPPRESSED in
+CPython while this path ran the cleanup and exited 1, the same wrong answer as
+`return True`. Measured on both architectures, each of
+
+    return not 0     return 1 < 2     return 1 == 1     return 1 != 2
+    return 1 and 2   return 0 or 3    return not ""     return not 0 and 1
+    return 1 if 1 else 0              return "a" == "a"  return None == None
+    return len("ab")
+
+built, printed `enter / body 7 / exit`, never printed `after` and exited 1 where
+CPython prints `after` and exits 0. `_literal_return_truthiness` now decides
+three more arms: a `not` from its OPERAND's truthiness (so `not 1` is falsy and
+still lowers — the word reader would have got that backwards), the
+`a if c else b` / `and` / `or` / six-comparison shapes via
+`fold_module_select_expr`, and `==`/`!=` over two literals plus
+`len(<string literal>)` itself (`fold_module_select_expr` refuses a string
+comparison operand and has no `len`-of-a-string arm). `fold_module_select_expr`
+is safe to delegate to here because it cannot return a truncated float — its
+only float arm is `fold_module_value`'s top-level `FloatLiteral`, which this
+reader decides from its own value first. Pinned in `test_formal_with.py` by
+seven refusal rows and their five falsy siblings (450 checks, up from 378).
+**§2's computed case is untouched and is still the whole of what is left**:
+`return self.quiet` depends on a constructor argument, which is cross-FIELD flow
+rather than a fold.
+
 
 
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of
@@ -137,8 +166,21 @@ this one is the smaller of the two and is the one to build first.
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py \
         an_exit_returning_true_is_refused_as_a_suppression_it_cannot_perform \
         an_exit_returning_one_is_refused_for_the_same_reason \
+        an_exit_returning_not_zero_is_refused_as_a_suppression \
+        an_exit_returning_a_true_comparison_is_refused_for_the_same_reason \
+        an_exit_returning_a_truthy_logic_and_is_refused_for_the_same_reason \
+        an_exit_returning_a_truthy_ternary_is_refused_for_the_same_reason \
+        an_exit_returning_a_true_string_equality_is_refused_for_the_same_reason \
+        an_exit_returning_none_equality_is_refused_for_the_same_reason \
+        an_exit_returning_len_of_a_string_is_refused_for_the_same_reason \
+        an_exit_returning_a_false_comparison_still_runs_the_protocol \
+        an_exit_returning_a_falsy_not_still_runs_the_protocol \
+        an_exit_returning_a_falsy_and_still_runs_the_protocol \
+        an_exit_returning_a_falsy_string_inequality_still_runs_the_protocol \
+        an_exit_returning_len_of_an_empty_string_still_runs_the_protocol \
         an_exit_returning_false_still_runs_the_protocol
 
-§1's two refusals and §3's falsy boundary. The `nullcontext` consumer that §3 is
+§1's two refusals, the boolean/comparison/equality/`len` arms the 2026-10-13
+update added, and §3's falsy boundary. The `nullcontext` consumer that §3 is
 about is `python3 tools/memslot.py --gb 8 --label t -- python3
 test_formal_core_hostmods.py ctx` (three CPython pairs, both backends).
