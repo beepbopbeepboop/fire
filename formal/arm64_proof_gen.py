@@ -9710,6 +9710,33 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
+def executable_step_code(code: bytes, base_addr: int, info: dict) -> bytes:
+    """`code` truncated at the first interned STRING, so the step lemmas cover
+    the EXECUTABLE region only.
+
+    `__TEXT` carries every function body and THEN every interned string
+    (`arm64_codegen.compile`'s string-emission loop), and `_step_result_plan`/
+    `_gen_step_lemmas` walk every 4-byte word of the `code` they are handed.  A
+    string byte pattern that decodes as an instruction the step table knows gets
+    a step lemma for a word no execution reaches, and the step-OK lemma's
+    discriminator fact for that branch is FALSE, so the whole proof fails to
+    typecheck: `model.stack_trap_message` contains `909189220` (`0x36312064`,
+    `TBZ w4, #…`), which every guarded image carries, so EVERY arm64 proof was
+    red on it before this.  `info["str_addrs"]` is the published string table,
+    so the first string's address is the end of the code.
+
+    ONE home for the truncation, because it is the same fact at all three call
+    sites (`generate_arm64_proof`, `_generate_frame_proof`,
+    `generate_dylib_proof`) and a copy at each was how the ordinary path got the
+    fix while the other two kept walking the data.  The run tests still read the
+    whole `code` (`{name}_code` is unchanged), so nothing else moves.
+    """
+    str_addrs = list((info.get("str_addrs") or {}).values())
+    code_end = (min(str_addrs) - base_addr) if str_addrs else len(code)
+    code_end = max(0, min(code_end, len(code)))
+    return code[:code_end]
+
+
 def _step_result_plan(code: bytes) -> dict:
     """Which instruction indices get a step-RESULT lemma, and with what.
 
@@ -11293,22 +11320,9 @@ def generate_arm64_proof(prog, code, info) -> str:
             "externs declared but no call sites recorded (codegen gap): run test unsupported")
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
-    # **The step lemmas cover the EXECUTABLE region only, not the string data.**
-    # `__TEXT` carries every function body and THEN every interned string
-    # (`compile`'s string-emission loop), and `_step_result_plan`/`_gen_step_
-    # lemmas` walk every 4-byte word of `code`.  A string byte pattern that
-    # decodes as an instruction the step table knows is therefore planned a step
-    # lemma for a word no execution reaches — and the step-OK lemma's `hne` for
-    # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
-    # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
-    # which every guarded image carries, so EVERY arm64 proof was red on it.
-    # `info["str_addrs"]` is the published string table, so the first string's
-    # address is the end of the code.  The run tests still read the whole
-    # `code` (`{name}_code` is unchanged), so nothing else moves.
-    _str_addrs = list((info.get("str_addrs") or {}).values())
-    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
-    code_end = max(0, min(code_end, len(code)))
-    step_code = code[:code_end]
+    # The step lemmas cover the EXECUTABLE region only, not the string data;
+    # `executable_step_code` is the one home for that truncation.
+    step_code = executable_step_code(code, base_addr, info)
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
     step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
@@ -12453,9 +12467,13 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
     decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
-    # step-OK derives from step-RESULT, so the results come first.
-    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(stem, code, base_addr))
+    # step-OK derives from step-RESULT, so the results come first.  The
+    # executable-region truncation is the ordinary path's: this file's image
+    # carries the same interned strings after the bodies, so a step lemma over a
+    # data word would fail to typecheck here for the same reason.
+    _step_code = executable_step_code(code, base_addr, info)
+    step_lemmas = (_gen_step_result_lemmas(stem, _step_code, base_addr) + "\n\n"
+                   + _gen_step_lemmas(stem, _step_code, base_addr))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -13468,7 +13486,7 @@ set_option linter.unusedVariables false
 
 {_gen_decode_lemmas("dylib", code, base)}
 
-{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
+{_gen_step_result_lemmas("dylib", executable_step_code(code, base, info), base) + "\n\n" + _gen_step_lemmas("dylib", executable_step_code(code, base, info), base)}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new

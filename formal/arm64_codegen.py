@@ -3770,41 +3770,134 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_for_unpack(self, tree, tag: str) -> None:
         """Unpack a for-target tree from the blob pointer in X0.
 
-        `tree` is a leaf name (`str`) or a list of children (tuple target).
-        Leaf: move X0 into the name's register. List: X0 must be a blob
-        `[count][e0…]` with count == len(children); each child recurses with
-        its element in X0. Arity mismatch → exit(1).
-
-        A starred leaf (`*rest`) never reaches this method: the for- and
-        comprehension-target validation asks `M.for_target_leaves`, whose
-        leaves keep the star, and refuses the target at the identifier check
-        with the one shared sentence the x86-64 site gives it. The rest-blob
-        machinery this method used to own (`_emit_for_unpack_star_rest`) was
-        deleted with that refusal — the option (1) resolution of
-        `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md` —
-        rather than left as dead code that reads as support."""
+        `tree` is a leaf name (`str`), `'*name'` (trailing star), or a list
+        of children (tuple target). Leaf: move X0 into the name's register.
+        Star leaf: X0 is a blob; build a rest blob of the tail and store its
+        base under `name` (only legal as the last element of a tuple). List:
+        X0 must be a blob `[count][e0…]` with count == len(children) (or
+        >= n_fixed when a trailing star is present); each child recurses
+        with its element in X0. Arity mismatch → exit(1)."""
         if isinstance(tree, str):
+            if tree.startswith("*"):
+                self._store_var(tree[1:], 0)
+                return
             self._store_var(tree, 0)
             return
         n_t = len(tree)
+        star_i = -1
+        for i, child in enumerate(tree):
+            if isinstance(child, str) and child.startswith("*"):
+                if i != n_t - 1:
+                    raise CodegenError(
+                        f"starred for-target {child!r} must be last")
+                star_i = i
+        n_fixed = n_t - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_zr_xn(9, 0))          # X9 = blob base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))   # X1 = count
-        self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t))  # count - n_t
-        self.asm.emit(encode_mov_zr_xn(1, 2))           # reuse for test
-        self.asm.emit(encode_cmp_xn_imm(1, 0))
+        if star_i >= 0:
+            # Need count >= n_fixed. cmp X1, #n_fixed → lt means count short.
+            self.asm.emit(encode_cmp_xn_imm(1, n_fixed))
+        else:
+            self.asm.emit(encode_sub_xd_xn_imm(2, 1, n_t))  # count - n_t
+            self.asm.emit(encode_mov_zr_xn(1, 2))           # reuse for test
+            self.asm.emit(encode_cmp_xn_imm(1, 0))
         self._tup_counter += 1
         tid = self._tup_counter
         fail_label = f"{tag}_bad{tid}"
         ok_label = f"{tag}_ok{tid}"
-        self.asm.emit(encode_cbnz_xn(0, 1))
+        if star_i >= 0:
+            self.asm.emit(encode_cset_xd_cond(2, "lt"))
+            self.asm.emit(encode_cbnz_xn(0, 2))
+        else:
+            self.asm.emit(encode_cbnz_xn(0, 1))
         self.asm.emit_label_rel(fail_label, here_offset=-4)
         self._emit_b_to(ok_label)
         self.asm.label(fail_label)
         self._emit_exit(1)
         self.asm.label(ok_label)
+        # Keep src base and n_fixed across fixed-child unpack (X9/X1 are
+        # clobbered by nested _emit_for_unpack). Push [n_fixed, src_base]:
+        # stp_pre(X6, X9) → [SP+0]=n_fixed, [SP+16]=src_base after adjust?
+        # stp pre-index: SP -= 16; [SP]=X6; [SP+8]=X9. So [0]=n_fixed,
+        # [8]=src. Star helper expects [0]=n_fixed, [16]=src — mismatch.
+        # Push as [0]=n_fixed, [8]=src and read src from [8].
+        if star_i >= 0:
+            self._emit_mov_imm("X6", n_fixed)
+            self.asm.emit(encode_stp_sp_pre(6, 9))
         for i, child in enumerate(tree):
+            if isinstance(child, str) and child.startswith("*"):
+                self._emit_for_unpack_star_rest(child[1:], tag)
+                continue
             self._emit_blob_load(9, 8 * (i + 1))
             self._emit_for_unpack(child, tag)
+
+    def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
+        """Build rest blob under `name` from [src_base, n_fixed] on stack.
+
+        Stack layout on entry (stp_pre X6=n_fixed, X9=src): [SP+0]=n_fixed,
+        [SP+8]=src_base. Rest = source elements [n_fixed, count). Cap 64;
+        overflow → exit(1). Pops both slots."""
+        rest_cap = 64
+        nbytes = 8 + 8 * rest_cap
+        if self._list_cursor + nbytes > self._blob_cap:
+            raise CodegenError(M.frame_blob_refusal(
+                "a for-star unpacking buffer", self._list_cursor + nbytes,
+                self._blob_cap))
+        offset = self._list_cursor
+        self._list_cursor += nbytes
+
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 0))   # X6 = n_fixed
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 8))   # X5 = src base
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 5, 0))    # X3 = count
+        # `rest_count = count - n_fixed`, and n_fixed is the 64-bit word loaded
+        # into X6 above — NOT the immediate 6.  `sub x3, x3, #6` (the pre-fix
+        # spelling) subtracted the literal six for every target, so `len(rest)`
+        # was `count - 6` whatever the arity: measured `(9,9,9,9,9,9,9)` -> 1
+        # and `(9,…,9)` (nine) -> 3, where CPython says 6 and 8.
+        self.asm.emit(encode_sub_xd_xn_xm(3, 3, 6))    # rest_count
+        self.asm.emit(encode_movz_wd_imm(4, 0))         # i = 0
+
+        self._while_counter += 1
+        loop = f"{tag}_sl{self._while_counter}"
+        done = f"{tag}_sd{self._while_counter}"
+        oob = f"{tag}_so{self._while_counter}"
+        oob_end = f"{tag}_sx{self._while_counter}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_xn_xm(4, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        # `while i < rest_count` — X0 is `i >= rest_count`, so the branch to
+        # `done` has to fire when X0 is NON-zero.  `cbz` here (the pre-fix
+        # spelling) left the body reachable only for an EMPTY rest and made a
+        # non-empty tail run past the blob into the OOB arm, which is the
+        # `exit(1)` the doc's reproducer showed.
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
+        self.asm.emit(encode_cmp_xn_imm(4, rest_cap))
+        self.asm.emit(encode_cset_xd_cond(0, "cs"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(oob, here_offset=-4)
+        # elem = src + 8 + 8*(n_fixed + i)
+        self.asm.emit(encode_add_xd_xn_xm(7, 6, 4))
+        self.asm.emit(encode_add_xd_xn_imm(0, 5, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 7))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self._emit_list_base(offset)
+        self.asm.emit(encode_add_xd_xn_imm(7, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(7, 7, 4))
+        self.asm.emit(encode_str_xt_xn_imm(0, 7, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))
+        self._emit_b_to(loop)
+        self.asm.label(done)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(1, 3))           # rest_count
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+        self._store_var(name, 0)
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # pop [n_fixed, src]
+        self._emit_b_to(oob_end)
+        self.asm.label(oob)
+        self._emit_exit(1)
+        self.asm.label(oob_end)
 
     def _range_info(self, rargs: list) -> tuple:
         """(start, end, step) expressions for range(): 1/2/3 args."""

@@ -246,6 +246,42 @@ def _range_args(iterable):
     return None
 
 
+<<<<<<< HEAD
+||||||| 1a08f414
+def _strip_stars(tree):
+    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
+    leaf.
+
+    This backend has never handled a starred for-target as a REST binding: it
+    read the leaf names from `_lbn_target_names`, which drops the star, and
+    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
+    keeps the nested fix from turning the (already broken on both backends)
+    starred spelling into a build refusal on one architecture only — see
+    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
+    if isinstance(tree, list):
+        return [_strip_stars(c) for c in tree]
+    if isinstance(tree, str) and tree.startswith("*"):
+        return tree[1:].strip()
+    return tree
+
+=======
+def _strip_stars(tree):
+    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
+    leaf.
+
+    The COMPREHENSION generator target's reader still asks this, because a
+    `*rest` there is not a rest binding: `_emit_compr_gen` reads a leaf and a
+    star leaf would name a blob nothing allocates.  The FOR-LOOP path no longer
+    strips (that is what made the starred spelling a `'*rest' has no home`
+    refusal here while arm64 built the same program); `_emit_for_unpack` owns
+    the rest binding and `_emit_for_unpack_star_rest` builds the tail."""
+    if isinstance(tree, list):
+        return [_strip_stars(c) for c in tree]
+    if isinstance(tree, str) and tree.startswith("*"):
+        return tree[1:].strip()
+    return tree
+
+>>>>>>> work/formal289-docs
 
 def _collect_var_names(f: F.FunctionDef) -> list:
     """Parameters first, then locals in first-assignment order.
@@ -6649,6 +6685,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # 3))]` compared an element count of 2 against a target count of 3
             # and exited(1) with nothing printed, where arm64 and CPython both
             # answer. arm64 reads the same tree through the same `M` reader.
+<<<<<<< HEAD
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
             # The SHAPE's leaves, for the same reason the arm64 site asks for
@@ -6673,6 +6710,33 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
+||||||| 1a08f414
+            ttree = M.for_target_tree(stmt.target) \
+                if isinstance(stmt.target, str) else None
+            # `*rest` leaves keep their star in the tree; strip it so a starred
+            # for-target keeps the (already broken on both backends) spelling
+            # from becoming a build refusal on one architecture only — see
+            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
+            ttree = _strip_stars(ttree)
+            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            if not leaves or any(not n.isidentifier() for n in leaves):
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+            # The target as a TREE, not the flattened leaf list: a nested
+            # group is a second unpack against the element at that position,
+            # and comparing the outer blob's count against the number of
+            # LEAVES made `for a, (b, c) in [(1, (20, 300))]` check 2 against 3
+            # and exit 1 with nothing printed, where arm64 and CPython answer
+            # 21. `M.for_target_tree` is the one builder both backends ask.
+            ttree = M.for_target_tree(stmt.target) if isinstance(
+                stmt.target, str) else None
+            if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+=======
+>>>>>>> work/formal289-docs
             # The TARGET AS A TREE, not the flattened name list: a nested group
             # `a, (b, c)` must stay a nested group so the arity check counts 2
             # against the element's blob and recurses, exactly as arm64's
@@ -6682,9 +6746,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # where arm64 and CPython both answer.  `M.for_target_tree` is the
             # one parser both backends now use, so the two cannot disagree
             # about what a target's shape is.
+            #
+            # A trailing `*rest` leaf KEEPS its star (the `_strip_stars` this
+            # used to ask is gone): `_emit_for_unpack` now owns the rest
+            # binding, so a for-target like `for a, *rest in [(1, 2, 3)]`
+            # answers CPython on this backend too.  Stripping the star here is
+            # what made the spelling a `'*rest' has no home` refusal on x86-64
+            # while arm64 built the same program.
             ttree = M.for_target_tree(stmt.target) if isinstance(
                 stmt.target, str) else None
             if ttree is None:
+                raise CodegenError(
+                    f"for-loop target must be a plain name or tuple of plain "
+                    f"names (got {stmt.target!r})")
+            # The identifier check reads a star leaf as its bound NAME, which
+            # is what `_lbn_target_names` (the register allocator's own reader)
+            # does: a name the allocator gives a home to must not be refused
+            # here, and the unpacker is what enforces the star's position.
+            leaves = _for_tree_leaves(ttree)
+            if not leaves or any(
+                    not (n[1:] if n.startswith("*") else n).isidentifier()
+                    for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
                     f"names (got {stmt.target!r})")
@@ -7021,19 +7103,44 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason.
         """
         fn = self.func_name
+        # A trailing `*rest` entry is the ONE target shape whose arity check is
+        # not an equality: the blob must hold AT LEAST the fixed names, and the
+        # rest blob is empty when it holds exactly that.  Every other shape
+        # still requires the count to match exactly, so the `a, (b, c)` fix
+        # above is untouched.  The star must be last — a `*rest` in any other
+        # position is refused by name, the same refusal arm64's unpacker gives.
+        n_t = len(targets)
+        star_i = -1
+        for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                if i != n_t - 1:
+                    raise CodegenError(
+                        f"starred for-target {target!r} must be last")
+                star_i = i
+        n_fixed = n_t - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
         self._if_counter += 1
         uid = self._if_counter
         ok_label = f"{fn}_fu{uid}_ok"
         bad_label = f"{fn}_fu{uid}_bad"
-        self._emit_jcc(COND_NE, bad_label)
+        if star_i >= 0:
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, n_fixed))
+            self._emit_jcc(COND_B, bad_label)     # count < n_fixed
+        else:
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, n_t))
+            self._emit_jcc(COND_NE, bad_label)
         self._emit_jmp(ok_label)     # arity matches: skip the exit
         self.asm.label(bad_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
         for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                # R10 is the element blob base and is what the rest helper
+                # copies from; it is left alone across the copy.
+                self._emit_for_unpack_star_rest(target[1:], Reg.R10, tag,
+                                                n_fixed)
+                continue
             # `stride` is 0 for a `[count][e0...]` blob and `M.PAIR_STRIDE` for
             # a dict's `[npairs][k0][v0]...`: a tuple unpack over a dict binds
             # the KEYS, and an element-stride read binds the key and the value.
@@ -7055,6 +7162,68 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._pop_slot(Reg.R10)
             else:
                 self._store_var(target, Reg.RAX)
+
+    def _emit_for_unpack_star_rest(self, name: str, blob_reg: Reg, tag: str,
+                                   n_fixed: int) -> None:
+        """Bind a trailing `*name` target to a fresh rest blob.
+
+        `blob_reg` (R10, set by `_emit_for_unpack` and left alone across this)
+        is the element blob `[count][e0…]`; the rest is the tail
+        `e_{n_fixed}…e_{count-1}` in a NEW `[count][e…]` blob under `name`, so
+        `len(rest)` and `rest[i]` read it exactly as they read any other tuple.
+        arm64's `_emit_for_unpack_star_rest` is the twin and builds the same
+        blob at the same element stride, which is what keeps the two
+        architectures answering the same program the same way — the
+        divergence this whole path exists to close: before it, arm64 read
+        `count - 6` and branched on the inverted guard while this backend had no
+        rest arm at all and refused the spelling.
+
+        The rest buffer is `_REST_CAP` elements of frame scratch, reserved here
+        and reused every iteration; a blob whose tail is longer exits(1), the
+        same bounded stop the arity mismatch gives, because there is no room to
+        copy it.  R8 is the copy index, R9 the address temp, R11 the tail
+        length, RDI the destination base; `_store_var(name, RAX)` is last so
+        the frame-slot store's own R10/R11 use cannot disturb the source."""
+        # The same cap arm64's `_emit_for_unpack_star_rest` reserves (`64`),
+        # so a tail both backends can carry is a tail both can carry.
+        rest_cap = 64
+        off = self._reserve_blob(8 + 8 * rest_cap,
+                                 "a for-star unpacking buffer")
+        fn = self.func_name
+        self._while_counter += 1
+        wid = self._while_counter
+        loop = f"{fn}_fs{wid}_loop"
+        done = f"{fn}_fs{wid}_done"
+        oob = f"{fn}_fs{wid}_oob"
+        end = f"{fn}_fs{wid}_end"
+        # R11 = count - n_fixed (the tail length).
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, blob_reg, 0))
+        if n_fixed:
+            self.asm.emit(encode_sub_r64_imm32(Reg.R11, n_fixed))
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, rest_cap))
+        self._emit_jcc(COND_A, oob)              # tail longer than the cap
+        self._emit_mov_imm(Reg.R8, 0)            # i = 0
+        self._emit_blob_base(off, Reg.RDI)
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R11))
+        self._emit_jcc(COND_AE, done)            # i >= tail length
+        # &source[n_fixed + i]
+        self.asm.emit(encode_lea_r64_rm64(Reg.R9, Reg.R8, n_fixed))
+        self._emit_elem_addr(blob_reg, Reg.R9, Reg.R9)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R9, 0))
+        # &rest[i], then the copy.
+        self._emit_elem_addr(Reg.RDI, Reg.R8, Reg.R9)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R11))   # the count
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+        self._store_var(name, Reg.RAX)
+        self._emit_jmp(end)
+        self.asm.label(oob)
+        self._emit_call_exit(1)
+        self.asm.label(end)
 
     # ── expressions (result in RAX) ──────────────────────────────────
 
