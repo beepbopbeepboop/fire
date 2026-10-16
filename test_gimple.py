@@ -46,6 +46,67 @@ _RUNTIME_INC = os.path.join(_PROJECT_DIR, 'runtime')
 _PASS = 0
 _FAIL = 0
 
+# Every function that writes an AST node's dataclass field, and the
+# reason it does not have to call `_walk_ast_invalidate`. Keyed
+# "<path>::<enclosing function>"; a key that no longer matches a real
+# function is reported by the check below, so the table cannot rot
+# silently — it is an inventory, not a suppressions file.
+#
+# Three shapes cover every entry:
+#   * the written object is NOT an AST node — it is one of this
+#     compiler's own dataclasses, which happen to use field names
+#     (`name`, `value`, `items`, `fields`, `kind`, `params`, `methods`,
+#     `captures`, `index`, `extra`, `alias`) the AST also uses;
+#   * the field is a SCALAR — `StructDef.name`, `Comprehension.kind`,
+#     `body_fd.is_async`, and `for_target_single_name` peeling `'(a)'`
+#     to `'a'` — so the walk returns the same nodes either way;
+#   * the tree being written is one `gen_module` has not walked: it is
+#     rewritten inside `ast_rewriter.rewrite` / `gimple_gen_coro.lower`
+#     in `_run_pipeline`, or freshly synthesized, or is reached during
+#     `gen_module` only through `hoist_awaits_from_call_args`, which
+#     invalidates the enclosing `fn` once the rewrite is done.
+_WALK_AST_MUTATION_ALLOWLIST = {
+    "ast_rewriter.py::Lit.__init__": "the rewriter's own pattern dataclass, not an AST node",
+    "ast_rewriter.py::Node.__init__": "ditto",
+    "ast_rewriter.py::Optional_.__init__": "ditto",
+    "ast_rewriter.py::RewriteRule.__init__": "ditto",
+    "ast_rewriter.py::Seq.__init__": "ditto",
+    "ast_rewriter.py::Var.__init__": "ditto",
+    "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
+    "mojo/backend_gimple/elab_intu.py::_Work.__init__": "`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
+    "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
+    "mojo/backend_gimple/elab_intu.py::run": "ditto",
+    "mojo/backend_gimple/emit_exprs.py::_lower_comprehension": "`Comprehension.target` is a str and `for_target_single_name` returns a str — a scalar write",
+    "mojo/backend_gimple/emit_metal.py::MetalEmitter.__init__": "the MSL emitter's own dataclass",
+    "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
+    "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
+    "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
+    "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
+    "mojo/middle/closures.py::discover_closures": "ditto",
+    "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
+    "mojo/middle/coro.py::_append_box_arg": "appends to a call this same rewrite just built",
+    "mojo/middle/coro.py::_apply_nested_async_capture": "`lower()` only, before `gen_module` walks anything",
+    "mojo/middle/coro.py::_cap_rewrite_stmts": "ditto",
+    "mojo/middle/coro.py::_copy_call_with_replaced_arg": "builds a FRESH call, so nothing has walked its `args` yet",
+    "mojo/middle/coro.py::_hoist_nested_async": "`lower()` only",
+    "mojo/middle/coro.py::_hoist_stmt": "during `gen_module` reached only through `hoist_awaits_from_call_args`, which invalidates the enclosing `fn`",
+    "mojo/middle/coro.py::_lower_one": "`lower()` only",
+    "mojo/middle/coro.py::_lower_one_async": "ditto",
+    "mojo/middle/coro.py::_lower_one_async_gen": "ditto",
+    "mojo/middle/coro.py::_rewrite_async_gen_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_async_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_asyncio_run_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_elif": "ditto",
+    "mojo/middle/coro.py::_rewrite_stmts": "ditto",
+    "mojo/middle/coro.py::_thread_box_through_siblings": "ditto",
+    "mojo/middle/coro.py::fix": "ditto",
+    "mojo/middle/coro.py::lower": "ditto",
+    "mojo/middle/offload.py::Offloadable.__init__": "the offload record's own dataclass",
+    "mojo/middle/solvers.py::ClosureInfo.__init__": "the solver's own record",
+    "mojo/middle/solvers.py::DispatchTable.__init__": "ditto",
+    "mojo/middle/solvers.py::DispatchTable.add_method": "ditto",
+}
+
 
 def _check_gcc():
     r = subprocess.run([GCC, '--version'], capture_output=True)
@@ -9942,6 +10003,177 @@ print("%r" % p)
               f"them answered from the memo, none stale)")
         _PASS += 1
 
+    def test_every_ast_mutation_site_invalidates_the_walk_memo():
+        """A function that writes an AST node's field must invalidate the
+        `_walk_ast` memo — or say why it need not.
+
+        `walk_ast_memo_never_answers_stale_over_real_compiles` is the check
+        that CATCHES a missed site, and it is evidence rather than a proof:
+        it covers the shapes its corpus has, and a mutation reachable only
+        from a shape it does not have is silent. This is the other half —
+        the census the 2026-10-05 entry already wrote for the OTHER hazard
+        (`no_walk_ast_caller_mutates_what_it_is_handed`), turned on this
+        one, so the inventory is a named list rather than a habit.
+
+        The field names are not hard-coded: they are read out of every
+        dataclass in `fire_compiler.py` at run time, so a new AST node with
+        a new field is covered the day it is written. The predicate is the
+        set of shapes that can change what a walk of some node returns — an
+        attribute store, an in-place `append`/`extend`/`insert`/…, a store
+        into one of those — and each hit is attributed to the innermost
+        function containing it, which is where the invalidation has to be.
+
+        Two ways it can be wrong, both reported: an unclassified site (the
+        common one — add the call, or add the reason), and an allowlist key
+        that no longer names a real function (a rotted suppression is one
+        nobody re-reads).
+        """
+        global _PASS, _FAIL
+        name = "every_ast_mutation_site_invalidates_the_walk_memo"
+        import ast as _ast
+        import dataclasses as _dc
+        import inspect as _inspect
+        import fire_compiler as _fc
+
+        problems = []
+        n_sites = 0
+        try:
+            fields = set()
+            for _n in dir(_fc):
+                _o = getattr(_fc, _n)
+                if _inspect.isclass(_o) and _dc.is_dataclass(_o):
+                    for _f in _dc.fields(_o):
+                        fields.add(_f.name)
+            mutators = {"append", "extend", "insert", "pop", "remove",
+                        "clear", "sort", "reverse", "update", "add",
+                        "setdefault"}
+            paths = []
+            for _r in ("mojo", "gimple_codegen.py", "ast_rewriter.py"):
+                if os.path.isfile(_r):
+                    paths.append(_r)
+                    continue
+                for _dp, _dn, _ns in os.walk(_r):
+                    _dn[:] = [d for d in _dn if d != "__pycache__"]
+                    for _n2 in sorted(_ns):
+                        if _n2.endswith(".py"):
+                            paths.append(os.path.join(_dp, _n2))
+            allow = _WALK_AST_MUTATION_ALLOWLIST
+            found = {}
+
+            def calls_invalidate(fn):
+                for n in _ast.walk(fn):
+                    if not isinstance(n, _ast.Call):
+                        continue
+                    f = n.func
+                    nm = (f.id if isinstance(f, _ast.Name)
+                          else f.attr if isinstance(f, _ast.Attribute) else "")
+                    if nm in ("_walk_ast_invalidate", "_walk_ast_reset"):
+                        return True
+                return False
+
+            def writes(node):
+                """The AST-field writes ON THIS STATEMENT, if any."""
+                out = []
+                tgts = []
+                if isinstance(node, _ast.Assign):
+                    tgts = node.targets
+                elif isinstance(node, _ast.AnnAssign):
+                    tgts = [node.target]
+                elif isinstance(node, _ast.AugAssign):
+                    tgts = [node.target]
+                elif isinstance(node, _ast.Delete):
+                    tgts = list(node.targets)
+                for t in tgts:
+                    if isinstance(t, _ast.Attribute) and t.attr in fields:
+                        out.append("`" + t.attr + "`")
+                    elif (isinstance(t, _ast.Subscript)
+                          and isinstance(t.value, _ast.Attribute)
+                          and t.value.attr in fields):
+                        out.append("`" + t.value.attr + "[...]`")
+                if (isinstance(node, _ast.Call)
+                        and isinstance(node.func, _ast.Attribute)
+                        and node.func.attr in mutators
+                        and isinstance(node.func.value, _ast.Attribute)
+                        and node.func.value.attr in fields):
+                    out.append("`.%s` on `%s`"
+                               % (node.func.attr, node.func.value.attr))
+                return out
+
+            for p in paths:
+                rel = os.path.relpath(p, _PROJECT_DIR)
+                with open(p, errors="replace") as f:
+                    text = f.read()
+                try:
+                    tree = _ast.parse(text, filename=rel)
+                except SyntaxError:
+                    continue
+                funcs = [n for n in _ast.walk(tree)
+                         if isinstance(n, (_ast.FunctionDef,
+                                           _ast.AsyncFunctionDef))]
+
+                def qual(line, _funcs=funcs, _tree=tree):
+                    """The innermost function containing `line` — a write
+                    belongs to the function that performs it, which for a
+                    nested `def` is the inner one."""
+                    best = None
+                    for g in _funcs:
+                        if g.lineno <= line <= (g.end_lineno or 0):
+                            if best is None or g.lineno > best.lineno:
+                                best = g
+                    if best is None:
+                        return None
+                    owner = None
+                    for c in _ast.walk(_tree):
+                        if isinstance(c, _ast.ClassDef) and best in c.body:
+                            owner = c.name
+                    return (owner + "." if owner else "") + best.name
+
+                invalidating = set()
+                for g in funcs:
+                    if calls_invalidate(g):
+                        invalidating.add(qual(g.lineno))
+                for node in _ast.walk(tree):
+                    ws = writes(node)
+                    if not ws:
+                        continue
+                    owner = qual(node.lineno)
+                    if owner is None:
+                        continue        # module level: no walk has an entry
+                    key = rel + "::" + owner
+                    found.setdefault(key, []).append(
+                        (node.lineno, ", ".join(ws[:2])))
+                    n_sites += 1
+                for key in list(found):
+                    if not key.startswith(rel + "::"):
+                        continue
+                    owner = key[len(rel) + 2:]
+                    if owner in invalidating or key in allow:
+                        found[key] = []
+                        continue
+                    places = ", ".join("%d %s" % (ln, what)
+                                        for ln, what in found[key][:3])
+                    problems.append(
+                        "%s writes an AST node's field (%s) and never "
+                        "invalidates the memo - either call "
+                        "`_walk_ast_invalidate(<the node it wrote>)` there, "
+                        "or add the key to `_WALK_AST_MUTATION_ALLOWLIST` "
+                        "with the reason" % (key, places))
+            for key in sorted(allow):
+                if key not in found:
+                    problems.append(
+                        "_WALK_AST_MUTATION_ALLOWLIST has %s, which no longer "
+                        "names a function that writes an AST field" % key)
+        except Exception as e:  # noqa: BLE001
+            problems.append("%s: %s" % (type(e).__name__, e))
+        if problems:
+            print("FAIL  %s: %d problem(s):" % (name, len(problems)))
+            for q in problems[:12]:
+                print("  " + q)
+            _FAIL += 1
+            return
+        print("PASS  %s (%d write sites in %d functions, each invalidating "
+              "or classified)" % (name, n_sites, len(found)))
+        _PASS += 1
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -12178,6 +12410,7 @@ print(run('x/y.txt'))
     test_no_walk_ast_caller_mutates_what_it_is_handed()
     test_walk_ast_memo_is_transparent_and_honours_invalidation()
     test_walk_ast_memo_never_answers_stale_over_real_compiles()
+    test_every_ast_mutation_site_invalidates_the_walk_memo()
     test_scalar_arity_min_max_params_are_not_containers()
     test_a_forwarded_string_argument_keeps_its_type()
     test_a_forwarded_container_argument_takes_the_callees_kind()
