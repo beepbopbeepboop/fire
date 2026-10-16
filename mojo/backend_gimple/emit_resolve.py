@@ -3665,6 +3665,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         et = _as_str(_sr[0]); ev = _sr[1]
         if et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
+        elif et == 'int64_t' and ev not in gen._int_word_vals:
+            # A word of unknown kind: see mojo_set_add_word.
+            gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', res), ('int64_t', ev)])
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])

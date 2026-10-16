@@ -6092,6 +6092,13 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
                            [('MojoSet *', t), ('MojoBytes *', ev)])
         elif et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', t), ('char *', ev)])
+        elif et == 'int64_t' and not _provably_int_word(gen, el, ev):
+            # `{_hn}` of a word of unknown kind: see mojo_set_add_word. Under
+            # the int view a string word was an ADDRESS, so `sorted(s)` of
+            # the self-hosted compiler's exception-descendant names sorted by
+            # address and its `except (A, B, ...)` tag tests came out in a
+            # different order from the reference compiler's.
+            gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', t), ('int64_t', ev)])
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', t), ('int64_t', ev64)])
