@@ -107,10 +107,10 @@ augmented emitter — the augmented one used to reach the shared gate first, and
 **The gate did NOT narrow the way §"What to do, in order" item 1 prescribed, and
 the reason is a correction worth keeping.** Item 1 said to drop `&`/`^`/`-` from
 `model.CONTAINER_GATED_OPS` and move the rows to probes. That table is SHARED by
-both backends, so dropping an operator there would have made x86-64 — which has
-no set emitter at all — fall through to the integer ALU on two addresses, which
-is exactly the wrong answer the gate was widened for. Instead arm64 intercepts
-the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
+both backends, so dropping an operator there would have made a backend without
+the emitter fall through to the integer ALU on two addresses, which is exactly
+the wrong answer the gate was widened for. Instead each backend intercepts the
+two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
 `[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
 is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
