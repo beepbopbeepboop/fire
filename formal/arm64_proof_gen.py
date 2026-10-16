@@ -3402,7 +3402,7 @@ def _step_rhs(w: int, idx: int):
     if idx == 13:  # CMP immediate
         imm12 = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         return (f"some {{ s with nzcv := arm64_subs_flags "
-                f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
+                f"(arm64_reg {rn} s) (UInt64.ofNat {ext}) }}")
     if idx == 14:  # B
         imm = w & 0x03ffffff
         off = (f"(if (({imm} : UInt32) &&& 0x02000000) ≠ 0 then "
@@ -3461,6 +3461,7 @@ def _step_rhs(w: int, idx: int):
         # the shift total without ever computing a reserved immediate.
         imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
+        op = "+" if idx in (9, 10) else "-"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
