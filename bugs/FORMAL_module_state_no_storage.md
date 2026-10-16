@@ -612,6 +612,11 @@ that was the most dangerous to leave: a frame address printed as a plausible
 number is indistinguishable from a computation, so every downstream read of it
 was wrong rather than absent.
 
+**SUPERSEDED 2026-10-12 (`formal294-docs`) — the paragraph below is FALSE of
+this tree: `len()` of a returned container DOES cross now, and the KIND is
+`model.imported_callee_kind` reading the callee's own `-> List[Int]` (see the
+Status at the head). What is left is the run-time-LENGTH half, not the KIND.**
+
 **What is still missing is narrower than the item claimed, and the narrowing
 is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
 one does not, because the path has no KIND that says "this word is a heap

@@ -1,5 +1,17 @@
 # FORMAL_std_builtin_sys_time_slice_2026-10-04: round 2 over eight `std/` directories — one root cause fixed, and the claim census that says why the other 73 refusals are not this slice's
 
+**Status 2026-10-12 (`formal294-docs`): the whole slice re-swept on BOTH
+architectures, and THREE files moved — one of them to a PASS. The class table is
+now **12 pass / 11 codegen / 62 codegen/dependency** (coverage **12/85 =
+14.1 %**), where this document published 11 / 14 / 60 (12.9 %):
+`builtin/float_literal.mojo` BUILDS, and `utils/variant.mojo` and
+`math/uutils.mojo` are now refused one level DOWN. §6.2 has the run, the two
+committed logs, the 12-pass list and the three rows; §1's class table and §3's
+rows 6/13/14 are superseded by it, and §5's `0 files` is the one number this
+round falsifies. **The claim census does not move**: every one of the 11
+remaining in-file refusals and all 62 dependency refusals is still another
+claim's, exactly as §3 and §4 say.**
+
 **Status 2026-10-05 (`work/formal27-5`): §3's row 12 is no longer "the same
 monomorphisation wall as 11, from the other side" — it is its own wall, it now
 has a doc, and the "other side" is a comptime VALUE parameter rather than a
@@ -126,6 +138,12 @@ is **not** this slice's; §4 says what the six files here are doing.
 
 ## 3. The 14 in-file refusals, each against what is behind it
 
+**RE-MEASURED 2026-10-12 (§6.2): the slice has ELEVEN in-file refusals, not
+fourteen** — `builtin/float_literal.mojo` now builds (a PASS), and
+`utils/variant.mojo` and `math/uutils.mojo` are refused one level down (rows 6
+and 4, each marked below). The table is kept as the round wrote it, with each
+moved row's RE-MEASURED note on it.
+
 **The fourteenth is §5's** — `builtin/float_literal.mojo`, the one this round
 worked on — so the table below is the thirteen that remain. **Six of the
 fourteen are the bare-call row of §2**, and they are one feature, not six bugs:
@@ -137,15 +155,15 @@ fourteen are the bare-call row of §2**, and they are one feature, not six bugs:
 | 3 | `builtin/builtin_slice.mojo` | `FormatStruct(writer, "Allocation")` | same |
 | 4 | `math/uutils.mojo` | ~~`align_up(x)`~~ — **RE-MEASURED 2026-10-05: not this file's terminal construct any more.** It is now refused in a module it IMPORTS: `uutils.mojo imports 'std.builtin.dtype', which cannot be built either: FormatStruct … imported from std.format._utils`. So the bare-call row moved DOWN a layer, and this file belongs in §4's dependency table rather than in this one | the bare-call row again, one level down (`formal19-1`'s) |
 | 5 | `random/_rng.mojo` | `PhiloxRandom(seed)` | same |
-| 6 | `utils/variant.mojo` | `FormatStruct(writer, …)` | same |
+| 6 | `utils/variant.mojo` | ~~`FormatStruct(writer, …)`~~ — **RE-MEASURED 2026-10-12: not this file's terminal construct any more.** It is refused one level DOWN, in `std.builtin.rebind` (`variant.mojo imports 'std.builtin.rebind', which cannot be built either: Allocation.write_to: FormatStruct … imported from std.format._utils`), so the file belongs in §4's dependency table and not in this one (§6.2) | the bare-call row again, one level down (`formal19-1`'s) |
 | 7 | `builtin/len.mojo` | a `...` body where instructions are needed | the body is `@unavailable`'d. Round 1 §4 measured that **giving it a body gains nothing**: the next refusal is `value.__len__()` on a string, `FORMAL_string_value_model` (`formal16-8`) |
 | 8 | `builtin/none.mojo` | `writer.write_string("None")` on a `Some[Writer]` | deliberate and correct: a multi-field struct's receiver is a frame address, and lowering it as `write` would pass that address as `fd(2)`. Needs a `Writer` value model — `FORMAL_wide_receiver_by_reference` (`formal16-8`) |
 | 9 | `builtin/type_aliases.mojo` | `comptime Never = __mlir_type.\`!kgen.never\`` | an MLIR TYPE bound to a module-level `comptime`. The MLIR dialect construct's area (`formal19-4`) |
 | 10 | `format/repr.mojo` | `value.write_repr_to(string)` on a type parameter | a generic body is never specialized, and behind it `return string^` returns a 3-field `String`. Written up in `FORMAL_sweep_work_map_2026-10-02_std-b.md` §6 — **RE-MEASURED 2026-10-05: the sentence a reader gets is now the method-call one** (`value.write_repr_to()` is a method call on a value, and this backend lowers only append, clear, close, write … and the string methods …), which names the RECEIVER's kind rather than the specialization. Same file, same callee, different sentence, and the sentence is the one that says what to do |
 | 11 | `math/polynomial.mojo` | ~~`comptime num_coefficients = len(coefficients)`~~ — **RE-MEASURED 2026-10-05: the terminal construct is `reversed(...)`**, refused BY NAME by the pre-pass `formal/model.py::not_lowered_builtin_refusal` (added 2026-10-05, `27bd1f5d`), which quotes `NOT_LOWERED_BUILTINS`'s own sentence for the name. The comptime fold this row names is no longer what stops the file, so the row's attribution is stale — the monomorphisation limit is still real (`FORMAL_known_limits.md` §1.2) and still owned, it is just not this file's terminal |
 | 12 | `sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]()` — an explicit-parameter list naming a TYPE and a comptime VALUE | **the comptime one, and the attribution here was wrong**: `ImmStaticOrigin` is a `comptime` alias whose initializer is an MLIR attribute template (`std/origin/__init__.mojo:123`), and that module does not build, so there is no word to bind. Measured both architectures, with a near-identical program whose comptime argument folds BUILDING — which is what rules out the monomorphisation reading this row recorded. `FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template` (`work/formal25-5`) — **and its next step is LANDED, see §5.1** **and it now has its own doc, filed 2026-10-05 by `work/formal27-5`: `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` — a one-element type bracket builds and runs (measured), so it is NOT row 11 from the other side and NOT the bare-call inference row; the wall is the comptime VALUE half, which the demand walk has no substitution for.** |
-| 13 | `utils/_serialize.mojo` | ~~`p.unsafe_load(off)` — a read at an OFFSET~~ — **RE-MEASURED 2026-10-05: the terminal construct is `max(...)`**, refused by the same pre-pass and for the same reason as row 11. Round 1 §2.2 fixed the NAME; what is left is the POINTE's width, and none of that is what stops the file today. Same wall as 11 behind it |
-| — | `builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` | **§5.** The receiver's type is in a `-> T` and the callee is in another module |
+| 13 | `utils/_serialize.mojo` | ~~`p.unsafe_load(off)` — a read at an OFFSET~~ — **RE-MEASURED 2026-10-05: the terminal construct is `max(...)`**, refused by the same pre-pass and for the same reason as row 11. Round 1 §2.2 fixed the NAME; what is left is the POINTE's width, and none of that is what stops the file today. Same wall as 11 behind it. **RE-MEASURED AGAIN 2026-10-12: the terminal construct is now `unsafe_offset()` is a method call on a value** — the `max` wall came down with `formal/build.py::_lower_builtin_extremum` (the two-argument form is a compare and a select), so the file walked past it to the method-call wall behind it. Same class, same claim, different sentence (§6.2) |
+| — | `builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` | **§5.** The receiver's type is in a `-> T` and the callee is in another module. **RE-MEASURED 2026-10-12: the file now BUILDS on both architectures** — the receiver fixes after §5 took the method-on-a-CALL-RESULT, so this is a PASS and not a codegen row (§6.2, and §5's `0 files` is superseded) |
 
 **Every one of the thirteen is a feature someone else's claim is already
 written down against** — and row 12's has been WRITTEN DOWN since (`work/formal25-5`,
@@ -157,6 +175,12 @@ it is the reason no in-file row is fixed here except §5's.
 ---
 
 ## 4. The 60 dependency refusals, by cause and by owner
+
+**RE-MEASURED 2026-10-12 (§6.2): the slice now has SIXTY-TWO dependency
+refusals, not sixty.** The two that joined are `std.builtin.rebind` (from
+`utils/variant.mojo`) and `std.builtin.dtype` (from `math/uutils.mojo`), both of
+which stop at the same `FormatStruct` bare-call row this table already ranks
+(`std.format._utils`, `formal19-1`). The table below is kept as written.
 
 `formal_sweep_causes.py` on the AFTER log, trimmed to the rows a reader needs:
 
@@ -186,6 +210,16 @@ as one half of a single feature owned by `FORMAL_module_state_no_storage`
 One commit, `26f0ee62`. **Worth 0 files in this slice, and the 85-file sweep is
 the measurement** (`…-arm64-BEFORE.txt` vs `…-arm64-AFTER.txt`: 11 / 14 / 60
 before, 11 / 14 / 60 after, and the file lists are identical).
+
+**RE-MEASURED 2026-10-12 (§6.2): the file this commit unblocked the MESSAGE for
+now BUILDS, so the `0 files` is superseded — the slice is 12 / 11 / 62 and
+`builtin/float_literal.mojo` is one of the 12 passes.** This commit did not do
+that (the `26f0ee62` sweep measured 11 / 14 / 60 either side, as recorded here);
+the receiver fixes after it did, notably `9f986358` ("a method on a CALL RESULT
+was emitted as a call to a bare name"), which makes `_is_value_receiver` answer
+True for a `CallExpr` and so takes `self.__int_literal__().__int__(…)`. The
+message quoted below is therefore true of the tree this commit was measured on
+and is not what a build prints today, because today there is no refusal.
 
 `builtin/float_literal.mojo`'s `self.__int_literal__().__int__(…)` was refused
 with **"What is missing is the receiver's TYPE: this path has no inference that
@@ -389,6 +423,69 @@ this document does not hold. The fourteen above are the rows a reader is most
 likely to act on — they are this document's own subject — and the other three
 sections are already marked as needing a re-measurement before they are quoted.
 
+## 6.2 Status 2026-10-12 (`formal294-docs`): the whole slice re-swept, THREE files
+## moved, and §1's class table is no longer the tree's
+
+§6.1 said §1's class table needed a re-measurement before it was quoted, and
+this round is that measurement: both arms run to completion over the whole
+85-file scope, `-j 2 -t 120`, `peak 0.3 GB`, no `tool` row, no file
+unclassified. The two logs are committed —
+`bugs/sweeps/sweep20-std-builtin-sys-time-arm64-2026-10-12.txt` and
+`bugs/sweeps/sweep20-std-builtin-sys-time-x86_64-2026-10-12.txt` — and the
+sweep's own `verdict history` names the three files that moved against the
+2026-10-04 baseline: `codegen -> pass: 1`, `codegen -> codegen/dependency: 2`,
+`unchanged: 82`.
+
+| class | arm64 | x86-64 |
+|---|---|---|
+| **pass** | **12** | **12** |
+| built-with-admitted-contracts | 0 | 0 |
+| **codegen** (a refusal IN this file) | **11** | **11** |
+| **codegen/dependency** (refused one level down) | **62** | **62** |
+| not-answerable / backend-crash / tool | 0 | 0 |
+| **codegen coverage** | **12/85 = 14.1 %** | **12/85 = 14.1 %** |
+
+The two architectures are still the same sweep, file for file and message for
+message: **73** classified paths, the same class and the same text on both (§1's
+"74" is the same table one pass lighter). The 12 passes, read off the log rather
+than restated from §1's incomplete list:
+
+    builtin/{__init__,_closure,float_literal,floatable,identifiable,inline_level,swap}.mojo
+    math/constants.mojo
+    sys/{_io,debug}.mojo
+    utils/{_select,_visualizers}.mojo
+
+**The three rows that moved, each measured on both architectures:**
+
+* **`builtin/float_literal.mojo` now BUILDS** — §3's row 14, and the one number
+  §5 falsifies. Its `self.__int_literal__().__int__(…)` refusal is gone because
+  the construct is a method on a CALL RESULT and the receiver fixes after §5 took
+  it (`9f986358`, "a method on a CALL RESULT was emitted as a call to a bare
+  name", makes `_is_value_receiver` answer True for a `CallExpr`). The message §5
+  added was true of the tree it was measured on and is no longer what a build
+  prints, because there is no refusal to print.
+* **`utils/variant.mojo` is now refused one level DOWN** — §3's row 6, refused in
+  `std.builtin.rebind` (`Allocation.write_to: FormatStruct is called, and it is
+  imported from std.format._utils`). The file's own `FormatStruct` is never
+  reached, so it belongs in §4's dependency table and not in §3.
+* **`math/uutils.mojo`** — §6.1 already moved it to `std.builtin.dtype`; this
+  round is the class table's record of that move
+  (`codegen -> codegen/dependency`).
+
+**And one row whose CONSTRUCT changed again, with no class change.**
+`utils/_serialize.mojo` (§3 row 13) was `max(...)` when §6.1 measured it; it is
+now **`unsafe_offset()` is a method call on a value** — the `max` wall came down
+with `formal/build.py::_lower_builtin_extremum` (the two-argument form is a
+compare and a select), and the file walked past it to the method-call wall behind
+it. Same class, same claim (`FORMAL_listdir_no_run_time_sequence`'s neighbour),
+different sentence.
+
+**What this does NOT move: the census.** Every one of the 11 remaining in-file
+refusals and all 62 dependency refusals is still another claim's, exactly as §3
+and §4 say, and no file's OWN wall was fixed this round. `builtin/float_literal.mojo`
+is the exception, and it was not fixed by this document either — it was fixed by
+the receiver work, and this round is the measurement.
+
 ## 7. Reproducing
 
 ```sh
@@ -397,6 +494,14 @@ S=../new-modular/Mojo/stdlib/std
 python3 tools/formal_sweep.py -j 2 -t 120 $S/{builtin,math,bit,random,format,utils,sys,time}
 python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 $S/{builtin,math,bit,random,format,utils,sys,time}
 python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep20-std-builtin-sys-time-arm64-AFTER.txt
+
+# §6.2's re-measurement (2026-10-12): the same two arms, the two logs committed
+python3 tools/memslot.py --gb 8 --label s -- \
+  python3 tools/formal_sweep.py -j 2 -t 120 $S/{builtin,math,bit,random,format,utils,sys,time} \
+  > bugs/sweeps/sweep20-std-builtin-sys-time-arm64-2026-10-12.txt 2>&1
+python3 tools/memslot.py --gb 8 --label s -- \
+  python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 $S/{builtin,math,bit,random,format,utils,sys,time} \
+  > bugs/sweeps/sweep20-std-builtin-sys-time-x86_64-2026-10-12.txt 2>&1
 
 # §5's file, both architectures, the message the commit changed
 for a in arm64 x86_64; do
