@@ -205,7 +205,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_str_repr_format_and_percent_have_no_lowering.md` | **unclaimed** | `str()`, `repr()`, `format()`, `%` and `.format()` have no lowering: a value's TEXT is not a compile-time constant |
 | `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
-| `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |
 | `FORMAL_type_name_as_a_value.md` | **unclaimed** | a bare TYPE name in a value position is refused as a name with no register |
 
 ### `formal/monomorph` — 3 documents, 3 claimed
@@ -241,7 +240,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | `formal406-docs` | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
 | `FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_decode.md` | `formal408-docs` | An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py` |
 
-### `formal/x86_64_endtoend_test` — 3 documents, 0 claimed
+### `formal/x86_64_endtoend_test` — 3 documents, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
