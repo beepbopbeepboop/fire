@@ -6007,7 +6007,8 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     elif kt == 'int64_t' and (
             kv in gen._dyn_word_vals
             or (isinstance(key_expr, IdentExpr)
-                and key_expr.name in gen._dyn_word_locals)):
+                and key_expr.name in gen._dyn_word_locals)
+            or not _provably_int_word(gen, key_expr, kv)):
         # A word of unknown kind (an untyped attribute read, an unpacked slot
         # with no record): a string as often as an int. The runtime's own
         # discriminator keys a string by its text and an int by its decimal;
@@ -6015,6 +6016,13 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # `{st.name: st for st in defs}` over StructDefs built a dict of
         # address strings and every `name in d` missed (the self-hosted
         # compiler then minted each method of a class as a phantom field).
+        # The same holds for ANY `int64_t` key this function has not proven
+        # to be an integer: `{kname: ... for kname, kexpr in node.kwargs}`
+        # unpacks the keyword NAME into an untyped word, and keying it by its
+        # decimal made every `'filename' in kwarg_dict` miss, so the
+        # self-hosted compiler passed every keyword argument of a statement
+        # call as 0. The runtime discriminator renders a real integer as its
+        # decimal, so a genuine int key is stored exactly as before.
         # Transient: released right after the one store that copies it.
         kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
