@@ -57,6 +57,21 @@ TestTheRecursionFamiliesStillGenerate` is 3 tests OK on this tree, with
 root causes are the two fixes above, pinned by `TestTheReachedWalkIsPerPath`
 and `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`.
 
+**Status 2026-10-08 (`work/formal205-docs`): the PIN class is GREEN again, and
+the split is now TEN generate / TWO refuse.** `test_formal_call_proof_gen.py::
+TestTheRecursionFamiliesStillGenerate` had `wdiff` in its `GENERATE` tuple while
+it refused at generation — the census above (2026-10-06) already records why — so
+`test_every_one_of_them_still_generates` was red on `master`. `wdiff` is moved
+back to `REFUSED`, with the two needles its refusal actually carries
+(`unsupported edge to …` and `loop back-edge / continuation; no loop contract
+matches`) and `REFUSED_OWNER` naming
+`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, which
+is where the `getrlimit` halt-boundary defect is filed. The class docstring's
+"all twelve generate" and the census total are corrected to 10 + 2. The
+underlying bug is still that other doc's; what this pins is the honest split, and
+`test_the_owner_of_the_one_refusal_still_exists` will fail if the owning doc is
+deleted (i.e. when the fix lands), which is the cue to move `wdiff` back.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
 here:

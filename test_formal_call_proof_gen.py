@@ -5214,20 +5214,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
     recorded twelve red examples on 2026-10-03 and measured them one family at a
     time, which is the right discipline and produced a list that has since gone
-    stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
-    `sorry`, and `sum_range` was the last one refusing at generation — its
-    back edge is a conditional branch, and a `for`-range loop lowers with the
+    stale in BOTH directions: `wdiff` was on it and passed for a while with zero
+    admitted `sorry`, and `sum_range` was the last one refusing at generation —
+    its back edge is a conditional branch, and a `for`-range loop lowers with the
     test at the BOTTOM of the body, so the walk's "is the taken target the loop
     top?" question had to be asked on the conditional arm too.
 
-    **All twelve now generate**, and the reason the count is stated here rather
-    than left to the reader is that it was WRONG in this file for a while: the
-    census pinned `sum_range` as the one refusal, its owner doc recorded the
-    generation refusal as fixed, and the two had been merged onto this tree
-    without either noticing the other. That is what `REFUSED` below is for — an
-    empty dict here is not a table nobody filled in, it is the assertion that
-    every one of the twelve reaches a proof file, and the moment one stops, the
-    case below says which and why.
+    **TEN generate and TWO refuse**, and the reason the count is stated here
+    rather than left to the reader is that it was WRONG in this file for a
+    while: the census pinned `sum_range` as the one refusal, its owner doc
+    recorded the generation refusal as fixed, and the two had been merged onto
+    this tree without either noticing the other. That is what `REFUSED` below is
+    for — an empty dict here is not a table nobody filled in, it is the
+    assertion that every one of the twelve reaches a proof file, and the moment
+    one stops, the case below says which and why. `wdiff` moved BACK to
+    `REFUSED` on 2026-10-08 (`work/formal205-docs`): the doc's 2026-10-06 update
+    records that the stack-floor guard's `getrlimit` in every arm64 prologue is
+    counted as a program call, which becomes the theorem's halt boundary and
+    leaves the loop contract unreachable, so it refuses at generation again.
 
     A census that has gone stale is worth exactly as much as the measurement
     that refreshed it, and the refresh is cheap: **emission needs no Lean**, so
@@ -5242,12 +5246,12 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The eleven that still generate, grouped as the doc grouped them, so a
-    #: reader can see which family each is in.
+    #: The ten that still generate, grouped as the doc grouped them, so a
+    #: reader can see which family each is in. `wdiff` was family 4's other
+    #: member and moved to `REFUSED` on 2026-10-08 (see the class docstring).
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
-                "both", "either",                               # family 3
-                "wdiff")                                        # family 4
+                "both", "either")                               # family 3
 
     #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
     #: is HERE rather than deleted because the refusal is the FIX and not a
@@ -5269,6 +5273,13 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                        "while_lt_exit_contract_bottom"],
                       "its loop test is signed and the contract is stated in "
                       "the unsigned order, so the obligation would be false"),
+        "wdiff": (["unsupported edge to",
+                   "loop back-edge / continuation; no loop contract matches"],
+                  "the stack-floor guard's `getrlimit` in the prologue is "
+                  "counted as a program call, so it becomes the theorem's halt "
+                  "boundary and the loop contract is never reached; the address "
+                  "in the message is a build detail, so the needles name the "
+                  "shape rather than the address"),
     }
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
@@ -5289,6 +5300,8 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     REFUSED_OWNER = {
         "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
                      "against_a_signed_flag.md",
+        "wdiff": "FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_"
+                 "call.md",
     }
 
     @classmethod
@@ -6275,7 +6288,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         it is there after the doc's next step is applied verbatim, so the next
         step is not a smaller version of the fix — it is not a version of it.
         """
-        for label in ("as_emitted", "doc_next_step"):
+        for label, _patch in self.SPELLINGS:
             with self.subTest(spelling=label):
                 # Distinguish "the residual moved" from "there is no residual
                 # here to move": the misleading diagnosis is the defect this

@@ -21722,7 +21722,7 @@ def no_public_api_reason(source_paths: list) -> str:
         return (f"{head} exports nothing under doc/ABI.md's rules because it "
                 f"declares no function and no type at all — only module-level "
                 f"constants, and a constant is not a boundary symbol: there is "
-                f"no address an importer could bind, so the refusal itself is "
+                f"nothing an importer could bind, so the refusal itself is "
                 f"correct. What would remove it is not a declaration this file "
                 f"is missing, and saying so is the point: the two things that "
                 f"would answer it are a value model for a container-valued "
