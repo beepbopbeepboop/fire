@@ -1,59 +1,41 @@
 # FORMAL_a_variadic_parameter_read_has_no_abi: the row was unowned, and the refusal in it is CORRECT
 
-<<<<<<< HEAD
-**Status: the READ half is NOT FIXED, and correctly so at the width it is
-written at; the CALLER-SIDE half had a real wrong answer and is FIXED
-(2026-10-08, `work/formal137-docs`).** The read refusal is right and the ABI
-decision is still unmade. But §"Why the refusal is RIGHT" claimed "the caller
-side is already correct and needs no change", and that was FALSE: the extra
-arguments were dropped WITHOUT BEING EVALUATED, so a side effect in one was
-lost. CPython evaluates every argument expression before the call, so
-`def f(x, *rest): return x` called as `f(1, g())` (where `g` prints) printed
-only `x` here — `g` never ran — against CPython's `g-called / 1`. The same held
-for a keyword a `**kwargs` swallowed. `formal/model.py::bind_call_arguments` now
-returns the dropped argument NODES (`dropped`) and both emitters evaluate them
-for effect after the fixed arguments; `test_formal_cross_module.py`'s
+**Status: the READ half is NOT FIXED; the CALLER-SIDE half had a real wrong
+answer and is FIXED (2026-10-08, `work/formal137-docs`); and step 1 of §5, the
+ABI decision, is DONE (2026-10-05, `work/formal59-docs`).** The read refusal is
+right and the implementation it needs is step 2, which is untouched. But
+§"Why the refusal is RIGHT" claimed "the caller side is already correct and
+needs no change", and that was FALSE: the extra arguments were dropped WITHOUT
+BEING EVALUATED, so a side effect in one was lost. CPython evaluates every
+argument expression before the call, so `def f(x, *rest): return x` called as
+`f(1, g())` (where `g` prints) printed only `x` here — `g` never ran — against
+CPython's `g-called / 1`. The same held for a keyword a `**kwargs` swallowed.
+`formal/model.py::bind_call_arguments` now returns the dropped argument NODES
+(`dropped`) and both emitters evaluate them for effect after the fixed
+arguments; `test_formal_cross_module.py`'s
 `test_a_dropped_variadic_argument_is_still_evaluated` compares the WHOLE stdout
 with CPython on the one backend the file runs on (arm64), and the fix was
 measured on both (`.tmp/ep/pv_side`: arm64 and x86-64 via Rosetta both print
-`g-called / 1`). The CORPUS half is also done (2026-10-04, `formal21-2`):
-`tools/formal_fuzz.py` can emit a `*rest` DEFINITION and a call site for it, so
-the day the ABI lands, a `--mix limits` sweep measures it instead of being
-unable to produce the construct at all. That was §5 step 5 and it was measured
-ABSENT; the measurement and what it now shows are in §5 below. The remaining
-work is the READ/ABI, and the reason it is untouched is the doc's own: the
-emitters and `lib/ProofLib.lean` have to move together and the latter's 27 MB
-`.olean` peaks at 7.82 GB to rebuild.
-||||||| cd2a1678
-**Status: NOT FIXED, and correctly so at the width it is written at.** The
-refusal is right and the ABI decision is still unmade — but the CORPUS half is
-now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
-DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
-sweep measures it instead of being unable to produce the construct at all. That
-was §5 step 5 and it was measured ABSENT; the measurement and what it now shows
-are in §5 below. Everything else on this list is untouched, and the reason is
-the doc's own: the emitters and `lib/ProofLib.lean` have to move together and
-the latter's 27 MB `.olean` peaks at 7.82 GB to rebuild.
-=======
-**Status: NOT FIXED, and correctly so at the width it is written at. Step 1 of
-§5 — the ABI decision, which this doc says must be written down before any
-emitter moves — is DONE (2026-10-05, `work/formal59-docs`): a `*rest` parameter
-becomes a FIXED-ARY SPECIALIZATION per call site, carried across the dylib
-boundary by the demand mechanism `doc/ABI.md`'s `Generics` section already uses
-for a type argument, so it needs no calling-convention change, no
-`lib/ProofLib.lean` change and therefore no ABI break. The decision and its five
-load-bearing properties are in `doc/ABI.md` under *Functions and methods*. The
+`g-called / 1`).
+
+**The ABI decision this doc says must be written down before any emitter moves
+is now made (2026-10-05, `work/formal59-docs`): a `*rest` parameter becomes a
+FIXED-ARY SPECIALIZATION per call site**, carried across the dylib boundary by
+the demand mechanism `doc/ABI.md`'s *Generics* section already uses for a type
+argument, so it needs no calling-convention change, no `lib/ProofLib.lean`
+change and therefore no ABI break. The decision and its five load-bearing
+properties are in `doc/ABI.md` under *Functions and methods*; the one step 2 has
+to carry is that the BODY is rewritten, not just re-declared. **The
 implementation is step 2 and is untouched.**
 
-The refusal is right and the ABI decision WAS unmade — but the CORPUS half is
-now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
-DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
-sweep measures it instead of being unable to produce the construct at all. That
-was §5 step 5 and it was measured ABSENT; the measurement and what it now shows
-are in §5 below. Everything else on this list is untouched, and the reason is
-the doc's own: the emitters and `lib/ProofLib.lean` have to move together and
-the latter's 27 MB `.olean` peaks at 7.82 GB to rebuild.
->>>>>>> work/formal59-docs
+The CORPUS half is also done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py`
+can emit a `*rest` DEFINITION and a call site for it, so the day the ABI lands,
+a `--mix limits` sweep measures it instead of being unable to produce the
+construct at all. That was §5 step 5 and it was measured ABSENT; the measurement
+and what it now shows are in §5 below. The remaining work is the READ/ABI
+implementation (step 2), and the reason it is untouched is the doc's own: the
+emitters and `lib/ProofLib.lean` have to move together and the latter's 27 MB
+`.olean` peaks at 7.82 GB to rebuild.
 
 **Area:** `formal/build.py::_refuse_variadic_reads` /
 `formal/model.py::variadic_read_refusal` (the refusal), and for the fix

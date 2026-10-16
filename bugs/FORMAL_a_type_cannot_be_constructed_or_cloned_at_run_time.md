@@ -199,54 +199,25 @@ reachable by the same step.
    `namedtuple` and what this target offers instead — it converts zero files and
    it is the difference between a reader who knows what to do and a reader who
    files the next bug doc about `collections`.
-<<<<<<< HEAD
 2. ~~**`copy.copy` for a compile-time-known struct**~~ **DONE, and it was
-   already done — measured on both architectures 2026-10-05, and the missing
-   half was the test, not the lowering.** See "What item 2 turned out to be"
-   above: `S(x)` is a fresh block and a field-by-field copy in BOTH backends,
-   answers CPython, copies a `List[Int]` field as a reference, and is now pinned
-   by `test_formal_returned_frame.py`'s
+   already done — measured on both architectures 2026-10-05, and independently
+   re-measured that same day by `work/formal59-docs`, which is what corrects
+   this list.** See "What item 2 turned out to be" above: `S(x)` is a fresh
+   block and a field-by-field copy in BOTH backends, answers CPython, copies a
+   `List[Int]` field as a reference, and is now pinned by
+   `test_formal_returned_frame.py`'s
    `a_copy_construction_is_a_fresh_block_not_an_alias` — the row that can tell a
    copy from an alias, which the row it joins could not. `formal/model.py`'s
-   `_frame_source_structs` is the recognition it rests on and its own docstring
-   already states the refusal that keeps an unrecognised frame from being copied
-   as eight bytes of unrelated memory.
-   **What is still NOT answered here, and is the reason this doc exists**:
-   `import copy` itself is a HOST module (`formal/hostmods/` has no
-   `copy.mojo`, and cannot: `deepcopy` walks an arbitrary object graph), so a
-   caller that writes `copy.copy(node)` still stops at the import. That is §1's
-   advice sentence doing its job, not a gap in the copy construction.
-||||||| cd2a1678
-2. **`copy.copy` for a compile-time-known struct**: a fresh block and a
-   field-by-field copy, with references copied as references. That is a
-   LOWERING in both backends plus a representation rule ("a clone of a framed
-   struct is a fresh frame"), and it is the same feature
-   `formal/model.py`'s copy-construction refusal already names as missing —
-   "`S(x)` — a copy construction — has no lowering, for any struct and any
-   argument. A fresh block plus an `n`-slot copy is a feature in both backends."
-   **Do these as one change**: they are one feature with two call sites, and
-   filing them separately is how they get half-built.
-   **Not done here, and the reason is a CLAIM rather than a difficulty**: this was
-   `FORMAL_frame_receiver_handoff.md` §4c's write set, and that lane held it —
-   the doc was DELETED 2026-10-03 by `work/formal10-3` with its eight waves
-   landed, its copy-construction gap handed to this document and its string
-   sub-family to the docs that still hold it. The advice sentence above is what a
-   caller gets in the meantime, and it names the honest limit ("a copy chosen at
-   run time, over a graph whose shape the build cannot see, has no answer here").
-   `mojo/middle/offload.py` and `tools/extract_family.py` are additional
-   `import copy` sites the original five did not list.
-=======
-2. ~~**`copy.copy` for a compile-time-known struct**: a fresh block and a
-   field-by-field copy, with references copied as references.~~ **DONE, and
-   measured on this tree 2026-10-05 (`work/formal59-docs`), which is what
-   corrects this list.** `formal/model.py`'s `struct_construction_plan` is the
-   one place both backends and the build pass read the answer from, and it
-   recognises the copy BEFORE the arity rule — which is the order that matters,
-   because `R(r)` on a two-field `R` is not a one-field construction, it is a
-   copy of a two-field object, and an arity check first reports it as a
-   construction with a missing argument. It returns `CONSTRUCTION_COPY`, and the
-   representation rule is the one this step named: a clone of a framed struct is
-   a FRESH FRAME.
+   `struct_construction_plan` is the one place both backends and the build pass
+   read the answer from, and it recognises the copy BEFORE the arity rule —
+   which is the order that matters, because `R(r)` on a two-field `R` is not a
+   one-field construction, it is a copy of a two-field object, and an arity
+   check first reports it as a construction with a missing argument. It returns
+   `CONSTRUCTION_COPY`, and the representation rule is the one this step named:
+   a clone of a framed struct is a FRESH FRAME. `_frame_source_structs` is the
+   recognition it rests on and its own docstring already states the refusal that
+   keeps an unrecognised frame from being copied as eight bytes of unrelated
+   memory.
 
    Measured here, both architectures, against CPython's own `copy.copy` on the
    same object graph:
@@ -257,7 +228,7 @@ reachable by the same step.
        # both backends: r=1,2,3 s=9,2,3      CPython: identical
 
    so the copy is field-wise, the references are shared rather than re-derived,
-   and mutating the clone does not touch the original. It is pinned by
+   and mutating the clone does not touch the original. It is also pinned by
    `test_formal_run.py`'s `constr_copy_of_a_nested_frame_shares_it`,
    `constr_copy_of_a_parameter_frame`, and the two refusals that keep the
    recognition honest — `constr_refuse_copy_of_another_struct` and
@@ -273,8 +244,11 @@ reachable by the same step.
    measured here on both architectures. That is item 3's half, not this step's:
    a one-word struct's clone is a word, and deciding that a word IS the clone
    needs to know which struct the word is a value of, which is the reflection
-   table's question and not a lowering question.
->>>>>>> work/formal59-docs
+   table's question and not a lowering question. And `import copy` itself is a
+   HOST module (`formal/hostmods/` has no `copy.mojo`, and cannot: `deepcopy`
+   walks an arbitrary object graph), so a caller that writes `copy.copy(node)`
+   still stops at the import. That is §1's advice sentence doing its job, not a
+   gap in the copy construction.
 3. **The reflection table** — a runtime-readable type descriptor and
    construction from it — which is what `namedtuple` at run time and
    `deepcopy` over an arbitrary graph both need, and which is the actual root
