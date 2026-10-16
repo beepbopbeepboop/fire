@@ -59,9 +59,9 @@ no hash, no bucket array, no probe sequence, no load factor, and no resize. So:
 |---|---|---|---|
 | `len(s)` | the element count | the element count | the count word — of the DISTINCT elements when every one is word-canonical, and of the REPEATS otherwise (see the Status at the top) |
 | `x in s` | a hash probe | a linear scan | same answer, different cost |
-| `s.add(x)` for a member | no change | no change | a list walk finds it |
+| `s.add(x)` | insert if absent | **REFUSED** | `add` is not in `model.BUILTIN_VALUE_METHODS`; a set is a list here and the count word is what an insert would have to re-check, so it is named rather than lowered as an append |
 | `for x in s` | HASH order | **INSERTION order** | the one disagreement |
-| `print(s)` | `{3, 1, 2}` | refused or a blob | `print` will not guess a set's spelling |
+| `print(s)` | `{3, 1, 2}` | refused | `print` will not guess a set's spelling |
 
 ## The measurement
 
