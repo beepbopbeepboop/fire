@@ -291,6 +291,21 @@ direction (a); it does not close the doc.
 ## and the one bucket that decides nothing is 62 sites in one file the gate
 ## compiles
 
+> **SUPERSEDED by the second §0c below (2026-10-04, `tools/formal_returnless_
+> census.py`) AND by a re-run on 2026-10-13 (`work/formal391-docs`): the file
+> this section is named for — `formal/hostmods/argparse.mojo` — has **0**
+> same-file candidates, not 62.** Its `_err` (and `_fld`, `_cp`,
+> `_alpha_index`, `_name_ptr`) each end in a `return <value>`, so a candidate
+> reader that asks "returns nothing AND declares nothing" correctly excludes
+> every one; the 62 here are rows the census's `decided_names` CONJUNCTION read
+> before the second §0c fixed it. The re-run over this repository,
+> `formal/hostmods/` and 252 stdlib files reports **17 same-file candidate
+> sites in 7 files, all in the stdlib** (`returned` 8, `MemberExpr` 3,
+> `argument of a call` 2, `assigned` 2, a subscript index 2), so the
+> per-position reasoning below is kept for what it says about POSITIONS while
+> its per-FILE numbers are the pre-fix ones. §4 item 5 quotes them and carries
+> the same note.
+
 §0b landed the OBSERVATION position and §"What is still not fixed" item 1 names
 the rest as one question: *"the positions where nothing observes the value — an
 operand, an argument, a `return`, an assigned-and-never-read local — each of
@@ -890,7 +905,11 @@ sites in 7 modules, so the counts no longer stand between (a) and the code.
    there, `operand of ==` 82 of 83 — and `argparse.mojo` is a host module the
    gate compiles, so a refusal at any of the three refuses it. The fourth,
    `assigned`, is the bucket a liveness pass would shrink, so the pass this step
-   asked for does not change the answer.
+   asked for does not change the answer. **The per-FILE numbers in this item are
+   the pre-fix ones: a re-run on 2026-10-13 puts `argparse.mojo` at 0 (see the
+   banner on the first §0c), and §0e closed the RENDERED OPERAND spelling of the
+   first position. The `returned`, `assigned` and `argument of a call`
+   positions, and an operand that is not rendered, are what is left.**
 6. **What is next, and it is direction (b)**: representing `None`, which makes
    every USE correct rather than only the observed one, and is a change to the
    value model, both emitters' return paths and `lib/ProofLib.lean` at once.
