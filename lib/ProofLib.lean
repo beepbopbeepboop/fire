@@ -5389,20 +5389,6 @@ theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
   have hne_tbnz : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_pos h, if_neg hne_bcond, if_neg hne_tbz, if_neg hne_tbnz]; try dsimp; try rfl; try simp
 
-/-- Per-instruction step: `work_step_ldr_post` -- HISTORICAL NAME.  The word
-    0xB9000000 is `STR Wt, [Xn, #imm]`, not a post-index load, so this used to
-    state something false; the statement is now `work_step_str_uoff32`'s and the
-    name is kept only so an older `_WORK_STEP` entry still resolves. -/
-theorem work_step_ldr_post : ∀ (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe00000) = 0xb9000000),
-    arm64_step s code = some { s with
-      mem := mem_write_u32 s.mem
-        ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
-          + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
-        (arm64_reg ((w &&& 0x1f).toNat) s) } :=
-  work_step_str_uoff32
-
 /-- Per-instruction step: `work_step_adrp`. -/
 theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)

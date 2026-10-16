@@ -320,7 +320,8 @@ arm64_step s lst2_code = some
   { s with mem := mem_write_u64 s.mem (s.sp + UInt64.ofNat 0).toNat (arm64_reg 10 s) }
 ```
 
-matched the old `work_step_str_off` exactly. Against the corrected library the
+matched the old `work_step_str_off` exactly (that theorem is since deleted;
+its corrected form is `work_step_str_uoff`). Against the corrected library the
 same proof has 19 errors, the extra 8 being `Type mismatch` at exactly those
 statements (`:4275` … `:4419`).
 
@@ -1351,7 +1352,7 @@ load-bearing.**
    and is now fixed on both sides: `0xB9000000` is `STR Wt, [Xn, #imm]`, and both
    `arm64_step` and the generator had it as a post-index LOAD from `SP`.
    `lib/ProofLib.lean`'s `work_step_ldr_post` became `work_step_str_uoff32`
-   (with the old name kept as an alias, as for the other two). Measured first:
+   (the historical name is deleted now, along with the other two aliases). Measured first:
    **zero of the 43 examples emitted any of the three**, which is exactly why
    the suite was green throughout.
 

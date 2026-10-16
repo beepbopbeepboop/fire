@@ -381,11 +381,34 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
         s += 80
     return o + cmdsize
 
+# `mach-o/loader.h`'s header, section and segment flags, named because the
+# numbers are not self-describing and a wrong one is still a valid value.
+MH_NOUNDEFS = 0x1
+MH_DYLDLINK = 0x4
+MH_TWOLEVEL = 0x80
+MH_NO_REEXPORTED_DYLIBS = 0x100000
+MH_PIE = 0x200000
+MH_HAS_TLV_DESCRIPTORS = 0x800000
+
+# A GOT-carrying __DATA_CONST is hardened once dyld has applied its fixups:
+# `SG_READ_ONLY` says "map this read-only after binding". `ld` sets it on the
+# GOT segment of every executable and library; this tree left it 0.
+SG_READ_ONLY = 0x10
+
 # MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE. The last two are not
 # cosmetic: a main executable without MH_DYLDLINK and MH_PIE is killed by
 # dyld before it reaches its entry point (verified by bisecting the load
 # commands of a hand-built image — the same image runs with these flags set).
-MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
+MH_EXECUTE_FLAGS = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
+
+# The same set `ld` writes for a dylib: MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+# | MH_NO_REEXPORTED_DYLIBS (0x100085). It used to be the literal 0x800005,
+# which is missing MH_TWOLEVEL and sets MH_HAS_TLV_DESCRIPTORS — a bit saying
+# the library carries thread-local descriptors, which it does not. Measured:
+# `otool -hv` on a `clang -dynamiclib` output reads
+# `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS` for the same shape.
+MH_DYLIB_FLAGS = (MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
+                  | MH_NO_REEXPORTED_DYLIBS)
 
 # MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS — the flags
 # `ld` emits for a dylib. The literal this replaced was `0x800005`, which set
@@ -964,7 +987,7 @@ def build_macho_executable_extern(
     patch(o + 56, "<I", 0x3)  # rw- : dyld writes the GOT slot at load time
     patch(o + 60, "<I", 0x3)
     patch(o + 64, "<I", 1)  # nsects: __got
-    patch(o + 68, "<I", 0)
+    patch(o + 68, "<I", SG_READ_ONLY)  # dyld remaps it read-only after fixups
     s = o + 72
     file[s : s + 16] = b"__got".ljust(16, b"\0")
     file[s + 16 : s + 32] = b"__DATA_CONST".ljust(16, b"\0")
@@ -1580,7 +1603,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         patch(o + 56, "<I", 0x3)
         patch(o + 60, "<I", 0x3)
         patch(o + 64, "<I", 1)             # nsects: __got
-        patch(o + 68, "<I", 0)
+        patch(o + 68, "<I", SG_READ_ONLY)  # dyld remaps it read-only after fixups
         s2 = o + 72
         file[s2 : s2 + 16] = b"__got".ljust(16, b"\0")
         file[s2 + 16 : s2 + 32] = b"__DATA_CONST".ljust(16, b"\0")
