@@ -131,23 +131,28 @@ sites this doc names are still among the six (`…:4564:16` is the frame window'
 GENERATION, before a proof is emitted, with the conditional-halt refusal added
 by `2b7e5ec8` (`formal/arm64_proof_gen.py::_reached_without_a_condition`):
 
-```
-$ python3 -c "…formal.build.compile_formal(…, prove=True, check=False)…"   # all five
-NotImplementedError: universal theorem: the call at 0x10000041c -> 0x10000086c
-is the halt address, and it is behind a CONDITIONAL, so whether the run reaches
-it is a fact about the test input rather than about the CFG. …
-```
+* **the `hx30fr_N` `rfl` this file is named for no longer errors.** The emitted
+  `FrameOk`-window facts (`hfrf_{n}_{K}`, `hfrwinup_{n}`, built from
+  `FrameOk_window_reindex`/`_up` off the threading `hfrwin_{n}`) discharge it, so
+  the x30-from-the-frame reload is no longer the site that fails.
+* **what fails now, identically in all five**, is the `runs-ret-frame-ok-window`
+  leaf's final `all_goals rfl`: its goal carries writes at `st.sp - 131120` and
+  `st.sp - 131112` (the recursive call's argument spills) that the emitted peel
+  set — drawn from `ctx["stores"]`, which here is the prologue's
+  `[16, 8, 32, 24, 80, 72]` — never names — **plus** the source conditional's
+  `rewrite` (`arm64_matches_condition 1 … ↔ ¬n = 0`: the emitted `rw` pattern
+  names a frame slot at `s_0.sp - 32 - 16` while the goal's store sits at
+  `s_0.sp - 131072 - 16`, so the pattern does not match). `count` and `pow2` are declared in
+  `test_formal.py`'s `EXPECTED_FAILURES` with this gap as the reason; `fact`,
+  `sqsum` and `sum` are NOT, so on this tree those three are UNDECLARED reds.
 
-So the `hx30fr_N` `rfl` this doc quotes is no longer reached by any corpus
-example, and the generator defect it describes — the emitted theorem
-`(…).x30 = st.x30` is FALSE for the `st.sp` this doc computes — is unchanged
-and latent, not repaired. It will be reachable again the moment a call on a
-conditional path can be followed (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_
-call_on_a_conditional_path.md`, whose step 1 is a set-valued exit in
-`lib/ProofLib.lean`). The "cheapest of the arm64 model work left" ordering in
-the paragraph above should now be read through that dependency: this fix cannot
-be verified on today's tree, because the programs that exercise it never get as
-far as the proof.
+The generator defect this file describes — the emitted theorem
+`(…).x30 = st.x30` being FALSE for the arbitrary `st.sp` of §"The correction" —
+is unchanged: the proof failing on the window clause is what an unprovable goal
+looks like, and nothing emitted states the frame/data-page separation that would
+make it true. So the ordering below still holds and the next step is unchanged:
+**step 0 (the `sp` premise) first**, then the frame-invariant discharge of
+`hx30fr_N` and the per-conjunct tactics of step 2.
 
 ```
 $ python3 tools/memslot.py --gb 8 --label lean -- python3 -c "…check_proof_cached…"
