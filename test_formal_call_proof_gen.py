@@ -2303,11 +2303,15 @@ class TestNestedConditionFactSharing(unittest.TestCase):
 
     #: The doc's programs: N conditions that touch DISJOINT bits of `n`, which
     #: is the case where the facts are most obviously the same question asked
-    #: again, and the only shape in which they are.
+    #: again, and the only shape in which they are.  Two more than the
+    #: `(2, 3, 4)` programs below, because the growth test measures at a depth
+    #: where the per-condition ratio has settled.
     CONDS = ("    if n & 8:\n        x = x + 1\n",
              "    if not (n & 4):\n        x = x + 2\n",
              "    if 16 & n:\n        x = x + 4\n",
-             "    if n & 32:\n        x = x + 8\n")
+             "    if n & 32:\n        x = x + 8\n",
+             "    if n & 64:\n        x = x + 16\n",
+             "    if n & 128:\n        x = x + 32\n")
 
     def _proof(self, tmp, k):
         src = "def f(n):\n    x = 0\n" + "".join(self.CONDS[:k]) + "    return x\n"
@@ -2404,7 +2408,7 @@ class TestNestedConditionFactSharing(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="hprior_growth_")
         try:
             counts = {}
-            for k in (2, 3, 4):
+            for k in (2, 3, 4, 5):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
             self.assertTrue(all(counts[k] > 0 for k in counts), counts)
@@ -2685,7 +2689,7 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         code_end = (min(str_addrs) - base) if str_addrs else len(code)
         code = code[:max(0, min(code_end, len(code)))]
         words = [int.from_bytes(code[i:i + 4], "little")
-                 for i in range(0, len(code) - len(code) % 4, 4)]
+                 for i in range(0, end - end % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
                     if G._step_branch_index(w) is not None]
         self.assertEqual(expected, self.step_ok)

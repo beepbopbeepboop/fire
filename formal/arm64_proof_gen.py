@@ -3052,10 +3052,37 @@ def _stmts_ast(stmts, scope=None) -> list:
     return parts
 
 
-def _gen_decode_lemmas(name: str, code: bytes, base: int) -> str:
+def _exec_code_limit(code: bytes) -> int:
+    """The byte length of the EXECUTABLE code: through the last `RET`.
+
+    `code` is the whole `__TEXT` section, and interned string literals — the
+    program's own and the stack-floor trap's message — are appended to it AFTER
+    the last function's `RET` (`formal/arm64_codegen.py::compile`'s string
+    emission). A per-word scan that ran to `len(code)` therefore emitted decode
+    and step lemmas for the DATA, and a data word that happened to decode as an
+    instruction produced a lemma whose hypotheses are false: measured, the trap
+    message's bytes `64 20 31 36` ("d 16") decode as `TBZ W4, #6, …`, and
+    `native_decide` rejected the `hb` hypothesis the generator wrote for it, so
+    EVERY arm64 proof containing the trap message failed to typecheck. The
+    message arrived with `bfeec991` (the run-time RLIMIT read), which is also
+    why no proof generated at all on that tree and this was never reached.
+
+    A `RET` is the one instruction whose meaning is the same in every function
+    of an image (`_walk_range`'s argument), so "after the last one" is data.
+    An image with no `RET` at all reads as all-code, which keeps a synthetic
+    single-word call site unchanged.
+    """
+    rets = [i for i in range(0, len(code) - len(code) % 4, 4)
+            if code[i:i + 4] == b"\xc0\x03\x5f\xd6"]
+    return (max(rets) + 4) if rets else len(code)
+
+
+def _gen_decode_lemmas(name: str, code: bytes, base: int,
+                       limit: int = None) -> str:
     """Generate per-instruction decode lemmas (each rfl-provable)."""
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     blocks = []
     for i, w in enumerate(words):
         pc = base + i * 4
@@ -9653,7 +9680,8 @@ def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
     return sorted(out)
 
 
-def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
+def _gen_step_lemmas(name: str, code: bytes, base: int,
+                     limit: int = None) -> str:
     """Generate real per-instruction coverage lemmas.
 
     For every instruction word the machine model handles, a lemma proves
@@ -9677,9 +9705,10 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     cover (a word the model recognises but has no right-hand side for), where
     there is nothing to derive from.
     """
-    plan = _step_result_plan(code)
+    plan = _step_result_plan(code, limit)
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     blocks = []
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9746,7 +9775,7 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
-def _step_result_plan(code: bytes) -> dict:
+def _step_result_plan(code: bytes, limit: int = None) -> dict:
     """Which instruction indices get a step-RESULT lemma, and with what.
 
     `{index: (word, model branch, right-hand side text)}`, derived ONCE and read
@@ -9759,8 +9788,9 @@ def _step_result_plan(code: bytes) -> dict:
     derivation is what makes "the `sr` exists" a checkable consequence of the
     plan rather than a second guess at it.
     """
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     plan = {}
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9807,7 +9837,7 @@ def _sign_extend_mask(idx: int) -> int:
 def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
-    for i, (w, idx, rhs) in sorted(_step_result_plan(code).items()):
+    for i, (w, idx, rhs) in sorted(_step_result_plan(code, limit).items()):
         pc = base + i * 4
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
@@ -10236,6 +10266,7 @@ def _program_extern_calls(info: dict) -> list:
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
+                     func_entry: int = None,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
                      entry_values: list = None, scope=None,
@@ -12488,10 +12519,12 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     exit_pc = base_addr + len(code)
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
-    decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
+    _code_end = _exec_code_limit(code)
+    decode_lemmas = _gen_decode_lemmas(stem, code, base_addr, _code_end)
     # step-OK derives from step-RESULT, so the results come first.
-    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(stem, code, base_addr))
+    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr, _code_end)
+                   + "\n\n"
+                   + _gen_step_lemmas(stem, code, base_addr, _code_end))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -13506,9 +13539,9 @@ set_option linter.unusedVariables false
 
 {_gen_code_defs("dylib", code, base, test_input)}
 
-{_gen_decode_lemmas("dylib", code, base)}
+{_gen_decode_lemmas("dylib", code, base, _exec_code_limit(code))}
 
-{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
+{_gen_step_result_lemmas("dylib", code, base, _exec_code_limit(code)) + "\n\n" + _gen_step_lemmas("dylib", code, base, _exec_code_limit(code))}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new

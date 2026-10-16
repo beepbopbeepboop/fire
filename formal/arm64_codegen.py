@@ -1640,18 +1640,24 @@ dylib_exports: list = None, globals_base: int = None,
         # `ulimit -s 2048` where the usable stack is exactly 14 frames: `n=13`
         # exits 0 and `n=14` dies of SIGSEGV with no output.
         #
-        # AFTER the argument moves because the guard's own `getrlimit` is a CALL
-        # and AAPCS gives a call every caller-saved register: X0..X17, which is
-        # where every incoming argument still is at the top of this prologue.
-        # The guard parks argument 0 in X14 and puts it back, because it is the
-        # one register whose value it needed for itself, and arguments 1..7 were
+        # AFTER the argument moves, and the reason is a LIBRARY's guard rather
+        # than a program's. A program image's guard is four instructions that
+        # touch only X16/X17 (the startup stub already read `getrlimit` — see
+        # `_emit_stack_floor_init`), but a LIBRARY has no stub, so its first
+        # guarded prologue still emits the `getrlimit` call, and AAPCS gives a
+        # call every caller-saved register: X0..X17, which is where every
+        # incoming argument still is at the top of this prologue. That guard
+        # parks argument 0 in X14 and puts it back, because it is the one
+        # register whose value it needed for itself, and arguments 1..7 would be
         # simply destroyed. Measured, and the shape of the failure is a contract
         # check reading a parameter that is no longer the caller's: on arm64,
         # `formal/examples/bounds_index.mojo`'s `at_offset(2, 5)` and
         # `at_offset(4, 5)` exited 1 through `debug_assert` where CPython answers
         # 2 and 4 — two parameters, and the guard ran before the second was
         # saved. One-argument functions were unaffected, which is why this sat
-        # behind every single-argument case in the corpus.
+        # behind every single-argument case in the corpus. Keeping the homes
+        # first for BOTH shapes is one ordering to reason about, and a program's
+        # guard is unharmed by registers it never writes.
         #
         # It cannot be fixed by pushing the arguments around the call instead:
         # a `sub sp, #16` across `getrlimit` was measured as a hang or a SIGSEGV
@@ -1934,11 +1940,29 @@ dylib_exports: list = None, globals_base: int = None,
         necessary: the `getrlimit` that fills `&limit` lives in the startup stub
         (`_emit_stack_floor_init`), where no path tree walks it.
 
-**Every one of those forms is one `lib/ProofLib.lean` already reads.**
-        That is not luck and it is the reason the sequence is shaped this way
-        rather than as the shorter `CMP SP, X16`: the model reads an `Rn` of 31
-        as `s.sp` in exactly the forms A64 gives that encoding to — the
-        add/subtract IMMEDIATE forms and every memory form — and as the ZERO
+                ADRP+ADD X16, &floor ; LDR X16, [X16]
+                ADD X17, SP, #0 ; CMP X17, X16
+                B.HS ok                                    SP >= floor: carry set
+                movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
+            ok:
+
+          * **A library** (no stub) has no floor in `__DATA` yet, so the first
+            guarded prologue reads the limit itself and stores the floor — the
+            original shape, below.
+
+        The move is the arm64 twin of x86-64's `_emit_stack_floor_init` and it is
+        the WALKER, not taste, that decided it: a `BL getrlimit` in every
+        prologue is a call `arm64_step` cannot follow, so it ended every
+        function's path tree at the call and the whole corpus lost its value
+        theorem. The stub is above every body and is walked by nothing, so the
+        call is gone from the walked range and the guard is four already-proven
+        instructions.
+
+**Every one of the forms either shape uses is one `lib/ProofLib.lean` already
+        reads.** That is not luck and it is the reason the sequence is shaped
+        this way rather than as the shorter `CMP SP, X16`: the model reads an
+        `Rn` of 31 as `s.sp` in exactly the forms A64 gives that encoding to —
+        the add/subtract IMMEDIATE forms and every memory form — and as the ZERO
         register everywhere else, `SUB`/`SUBS`/`CMP` (register) included
         (measured: a `SUBS X0, X31, X1` computes `-1`, not `sp - 1`;
         `lib/ProofLib.lean`'s `arm64_step_cmp_reg_n31_reads_zero` is the pin and
@@ -1997,19 +2021,8 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_movz_xd_imm(0, M.STACK_TRAP_STATUS))
         self.asm.emit(encode_movz_xd_imm(16, 1))
         self.asm.emit(encode_svc(0x80))
-        # `label`, not `emit_label_rel`: this DEFINES where the branch above
-        # goes, and it lands on the first instruction of the BODY because the
-        # trap is the fall-through. Branching OVER the trap rather than TO it
-        # is the layout the divide-by-zero arm already uses
-        # (`_emit_div_shift_pow`), and keeping the two the same shape is what
-        # keeps the basic-block structure of a prologue the same as the one the
-        # proof generator already walks: a branch to a three-instruction trap
-        # block whose successor is the next thing to do. The alternative — a
-        # `b` over the trap — adds a basic block that is nothing but an
-        # unconditional branch, and a block with no instructions to run breaks
-        # `formal/arm64_proof_gen.py`'s syntactic fuel chain (measured: `rw`
-        # fails on `fuel - 0`).
         self.asm.label(ok_label)
+
 
     def _emit_stack_trap_message(self) -> None:
         """`write(2, model.stack_trap_message(), len)` as a raw Darwin syscall.
