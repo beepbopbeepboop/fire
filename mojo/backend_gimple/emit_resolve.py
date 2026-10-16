@@ -3294,6 +3294,10 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     else:
         gen._emit(f"  {idx_c} = {idx64};")
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    # An element whose kind nothing recorded is a word of unknown kind (see
+    # `_dyn_word_locals`), exactly as in the `for` statement's enumerate.
+    if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
+        gen._dyn_word_locals.add(_as_str(val_var))
     if suf == 'double':
         gen._emit(f"  {val_c} = mojo_list_get_double ({it_val}, {idx64});")
     elif suf == 'str':

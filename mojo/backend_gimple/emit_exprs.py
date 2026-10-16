@@ -6435,10 +6435,16 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         if len(gen0.iterable.args) >= 2:
             _, _start_raw = gen.lower_expr(gen0.iterable.args[1])
             _start_val = gen._new_val('int64_t', f"(int64_t){_start_raw}")
-        if _inner_it_type == 'MojoList *':
-            gen._compr_enumerate_loop(node, gen0, res, res_type, _inner_it_val, _start_val)
-        else:
-            gen._emit(f"  /* TODO: enumerate comprehension over {_inner_it_type} */")
+        if _inner_it_type != 'MojoList *':
+            # A dict, set, string or word of unknown kind: the same
+            # materialization `enumerate` gets as a `for` statement
+            # (`_materialize_as_list` asks the runtime what a word is). This
+            # used to emit a TODO and an EMPTY result, so the self-hosted
+            # compiler's `', '.join(f'{ct} __a{i}' for i, ct in
+            # enumerate(params))` declared every coroutine start function
+            # `(void)`.
+            _inner_it_val = gen._materialize_as_list(_inner_it_type, _inner_it_val)
+        gen._compr_enumerate_loop(node, gen0, res, res_type, _inner_it_val, _start_val)
         return res_type, res
 
     is_range = (isinstance(gen0.iterable, gimple_ctypes.CallExpr) and
