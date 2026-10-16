@@ -335,7 +335,7 @@ def group_blake2b(tmpdir, verbose):
     if verbose:
         print(f"    {len(got)} BLAKE2b digests byte-exact over "
               f"{len(lens)} lengths x {len(BLAKE2B_DIGEST_SIZES)} sizes, "
-              f"{len(omit_got)} with digest_size omitted")
+              f"{len(om_got)} with digest_size omitted")
     return True, f"{len(got)} digests byte-exact"
 
 

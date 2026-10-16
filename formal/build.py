@@ -4227,6 +4227,50 @@ def _widen_printf_integer_conversions(functions: list) -> int:
     return count
 
 
+def _one_word_return_structs(functions, structs_by_name, one_field=None) -> dict:
+    """`{callee name: the one-field struct its declared `-> T` names}`.
+
+    The evidence a CALL-RESULT binding needs and a construction does not:
+    `def make(x: Int) -> Box: return Box(x)` binds a name to the same word a
+    `Box(x)` binding produces, and the declaration says so.  Without this the
+    binding tables read only `structs_by_name.get(value.func.name)`, so a local
+    bound from such a call held no struct and its field read was refused by
+    name while the same program's `make(x).method()` lowered — the method lift
+    reads the declared return type, and the field read had no reader for it.
+    Measured both architectures (`.tmp` probe, 2026-10-08): `r = make(7);
+    printf("%d", r.field)` refuses, `r = make(7); printf("%d", r.rc())` builds
+    and answers 7.
+
+    Unanimity over every definition of a name, for the reason
+    `callees_returning_containers` gives: an overloaded name whose definitions
+    disagree answers no single question, and picking one would attribute a
+    layout to a body the call may not have selected.  A definition whose
+    annotation names nothing, a multi-field struct, or a type this module does
+    not declare takes the whole name out.
+    """
+    by_name = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    out = {}
+    for name, defs in by_name.items():
+        st = None
+        for d in defs:
+            base = M.annotation_base_name(getattr(d, "return_type", None))
+            cand = (structs_by_name or {}).get(base) if base else None
+            if cand is None or not M.one_field_answer(cand, one_field):
+                st = None
+                break
+            if st is not None and st.name != cand.name:
+                st = None
+                break
+            st = cand
+        if st is not None:
+            out[name] = st
+    return out
+
+
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = (),

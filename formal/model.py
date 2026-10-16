@@ -3237,6 +3237,37 @@ NON_C_BARE_CALLEES = {
                 "the same way",
 }
 
+def bare_c_callee_is_project_function(callee: str, by_name: dict,
+                                      by_module: dict, forwarded: dict,
+                                      aliases: dict, dylib_syms: dict) -> bool:
+    """True when a bare callee's return is a MOJO value, whatever it is spelled.
+
+    Two ways, and they are the two halves of `bare_c_return_kind`'s `None`:
+
+      * the name is one a linked Mojo library PUBLISHES — a symbol on this
+        image's link line whose return is a formal value, whose width is this
+        path's own 64-bit word whatever the function is called;
+      * the name arrives through an import ALIAS, which is how
+        `from m import f as g` binds and is the same fact with a different
+        spelling on the source side.
+
+    Split out from `bare_c_return_kind` because `refuse_unprototyped_bare_call`
+    below asks the same question for the OPPOSITE reason and must reach the same
+    answer: the export exception is what stops a call into another host module
+    from being refused as an unprototyped C call, and a second copy of the
+    resolution order in the refusal is a second chance for the two to disagree
+    about `read`, which is libc's and this tree's own at the same time.
+
+    **Which library answered is asked of `dylib_callee_export`** — the ONE
+    resolution, in `dylib_extern_symbol`'s order — rather than decided here,
+    because a caller that asked in a different order could normalise a call to
+    somebody's Mojo function as though libc had declared it.
+    """
+    return (callee in dylib_syms
+            or dylib_callee_export(by_name, by_module, forwarded, aliases,
+                                   callee) is not None)
+
+
 def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
                        forwarded: dict, aliases: dict, dylib_syms: dict):
     """What a BARE call's C prototype says about the return register, or None.
@@ -12082,6 +12113,48 @@ STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 # question is decided where the source token is, and an ordinary literal's
 # `value` is its BODY — so a prefix test cannot tell `f"n={n}"` from `'f"n"'`,
 # which is a four-character string.
+def fold_interpolated_literal(node) -> bool:
+    """Rewrite an f-string with NO `{…}` fields into the plain literal it is.
+
+    `f"n=7"` has no replacement field, so its value is its text and CPython
+    treats it exactly as `"n=7"` — the `f` prefix changes nothing. On this path
+    there is no buffer, so a FIELD is refused (`interpolated_literal_refusal`),
+    but a field-LESS literal needs no buffer at all: it is the same interned
+    `__TEXT` bytes `"n=7"` already is, through the same `_intern_string`.
+    Refusing it refuses correct source and a spelling the corpus writes, and the
+    message then told the reader to rewrite a literal that was already a plain
+    one.
+
+    Returns True when `node` was rewritten IN PLACE and False when it still has a
+    field (and must be refused) or is not an f-string. The rewrite is a plain
+    `StringLiteral` step: `value` becomes the body, `is_interpolated` clears, and
+    `is_raw` records an `r` in the prefix, because the body of `rf"a\\nb"` must
+    stay four characters just as `r"a\\nb"` does (`fire_compiler.decoded_literal`
+    is the one reader of that distinction). A `t"…"` template is NOT folded even
+    with no fields: its value is a `Template`, not the text, so it stays on the
+    refusal path.
+    """
+    if not is_interpolated_literal(node):
+        return False
+    spelled = getattr(node, "value", "")
+    if not isinstance(spelled, str):
+        return False
+    quote_at = interpolated_literal_quote_start(spelled)
+    prefix = spelled[:quote_at]
+    if "t" in prefix or "T" in prefix:
+        return False
+    try:
+        segs = interpolated_literal_segments(spelled)
+    except CodegenError:
+        return False
+    if any(seg[0] != "lit" for seg in segs):
+        return False
+    node.value = "".join(seg[1] for seg in segs)
+    node.is_interpolated = False
+    node.is_raw = "r" in prefix or "R" in prefix
+    return True
+
+
 def is_interpolated_literal(node) -> bool:
     """Whether `node` is a `StringLiteral` that was WRITTEN as an f-string or a
     t-string.
@@ -26318,7 +26391,9 @@ class ValueKinds:
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=(), deref_kind=None):
+                 callee_returns_value=None, float_names=(), bool_names=(),
+                 callee_is_bool=None, deref_kind=None,
+                 pointer_pointee_kind=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -53048,7 +53123,7 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()", mappings)
+        list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
         return None, [], spread_refusal
     slots: list = list(args or [])

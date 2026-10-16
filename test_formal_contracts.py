@@ -1273,6 +1273,42 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
 
 # ── harness ──────────────────────────────────────────────────────────────────
 
+def test_a_selection_the_body_does_not_branch_on_is_split(tmpdir=None):
+    """`mini`'s postcondition tests a DIFFERENT `if` than its body.
+
+    The emitter splits the model's branch conditions (`model_conditions`), but
+    a clause's RENDERING introduces `if`s of its own: `max(n, 3)` tests `n > 3`
+    where the body tests `n < 3`, and `abs(n)` tests `n < 0` where `abspos`'s
+    body tests `n > 0`.  Splitting only the body leaves a symbolic `if` that no
+    rung can decide -- not `omega` (no arithmetic over `Fin`), not `decide` (a
+    free variable), not `simp_all` (the test is not a hypothesis) -- which is
+    why `mini`, a TRUE contract, reported UNKNOWN.  This row is the cheap half
+    of that fix: it asserts the SELECTION's own test is a `by_cases`, so
+    dropping `formal/contracts.py::_selection_splits` (and with it `mini`)
+    turns this red without a Lean run.  The proof half is
+    `test_lean_closes_a_true_contract_and_refuses_a_false_one`.
+    """
+    from formal import contracts as CT
+    path = os.path.join(EXAMPLES, "mini.mojo")
+    src = open(path).read()
+    params = CT._param_names(fn := [f for f in functions(parse(src, path))
+                                    if getattr(f, "name", None) == "mini"][0])
+    contract = CT.read_contracts(fn, path, src)
+    reader = CT._Reader(params)
+    tests = []
+    for clause in contract.ensures:
+        ir = reader.clause_ir(clause, params)
+        if ir is not None:
+            tests += CT._selection_splits(ir)
+    check(any(t.rstrip().endswith(">") or " > " in t for t in tests),
+          "the_max_selection_contributes_its_own_condition", repr(tests))
+    e = CT.contract_theorems(contract, params, fn=fn)
+    splits = [ln for ln in e.lean.splitlines() if "by_cases" in ln]
+    check(any(" > " in ln for ln in splits),
+          "the_emitted_theorem_splits_the_selection_not_only_the_body",
+          "\n".join(splits))
+
+
 ALL = [
     test_the_reader_takes_both_spellings,
     test_the_reader_reads_the_ASTs_own_division,

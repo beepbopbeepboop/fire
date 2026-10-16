@@ -11833,131 +11833,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         finally:
             self._loops.pop()
 
-    def _emit_compr_element(self, element, cap: int):
-        """X0 = the element's value, and `(base, nbytes)` when it needs a COPY.
 
-        THE element site is reserved ONCE, at the element's own place in the
-        source, so a container the element BUILDS is rewritten in place on every
-        iteration of the generator — and the append copies the ADDRESS, which is
-        the same address every time. Every element of the result is then one
-        container holding the LAST iteration's contents:
-        `for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]` answered 90
-        where CPython answers 60, on both architectures, with exit 0 and nothing
-        on stderr.
 
-        **So the question is not "is the element a container" but "did the
-        element reserve anything here"**, and the frame ledger already answers
-        it: `_list_cursor` moves only when something was reserved, and a name, an
-        arithmetic expression and the generator's own target all reserve nothing.
-        That distinction is the language's, not a convenience: `[one for y in
-        ys]` is three references to ONE list in CPython too, so aliasing a name's
-        container is right and only a container the element BUILDS is the bug. A
-        call that returns a container is covered by the same rule for free — the
-        caller reserves the callee's block at the call's own site
-        (`container_returned_blob_sites`), so `[mk(y) for y in ys]` rewrites one
-        block per iteration exactly as a display does, and it answers 90 the same
-        way.
-
-        The returned pair is `(copies_base, span)`: `cap` slots of the element's
-        reserved span, which the append fills one per iteration. `None` when
-        there is nothing to copy, and that `None` is what keeps a bare name
-        aliasing.
-
-        The one shape a word copy cannot make right is refused rather than
-        answered: an element whose own blob holds the ADDRESS of a container the
-        same expression rebuilds. See
-        `model.comprehension_element_borrowes_inner_container`.
-        """
-        if M.comprehension_element_borrowes_inner_container(element):
-            raise CodegenError(M.comprehension_element_shared_inner_message(element))
-        before = self._list_cursor
-        self._emit_expr(element)
-        # A container the element BUILDS moved the blob cursor; one a CALL handed
-        # back did not, because `container_returned_blob_sites` parks those blocks
-        # above the blob region up front and `_emit_returned_blob_copy` writes
-        # into one. It is the same per-site aliasing — `[mk(y) for y in ys]`
-        # answered 90 where CPython answers 60 — so the span is the sum of the
-        # two, and X0 is the block either way.
-        span = self._list_cursor - before
-        ret = self._ret_blob_sites.get(id(element))
-        if ret is not None:
-            span += ret[0]
-        if not span:
-            return None
-        return (self._reserve_blob(span * cap, "a comprehension's own copy of "
-                                   "its element"), span)
-
-    def _emit_compr_element_copy(self, base: int, nbytes: int, src: int) -> None:
-        """`src` = THIS iteration's own copy of the element blob, in slot X1.
-
-        X1 is the result blob's count — the index the append is about to write
-        at — so the copy lands in the slot the append fills, and the capacity
-        guard that ran before this has already answered an out-of-range iteration
-        with `exit(1)` rather than with a write one slot past the reservation.
-        That is why this is emitted INSIDE the append and not beside it: a
-        separate guard would be a second answer to a question the append already
-        asks, and the two could disagree.
-
-        `src` is the frame SLOT the element was parked in (`_compr_append_elem`'s
-        `[sp+0]`, `_compr_append_pair`'s `[sp+0]` for a key and `[sp+8]` for a
-        value), and the copy's address is written back to that same slot — so the
-        store the append already emits picks it up with no change to that code,
-        and neither append has to learn that copies exist.
-
-        **X9 is the RESULT blob's base and the append still needs it**, so it is
-        parked in X2 — dead since the capacity guard that ran before this — and
-        put back on the way out. `_emit_list_base` writes X9 and nothing says so,
-        which is what made the first version of this append the copies region's
-        base and store every element at the wrong address.
-
-        **The copy is over the element's whole RESERVED SPAN, not over its blob
-        alone**, and the span is what makes this work for every shape: a nested
-        comprehension also reserves its iterable and a display's capacity scan
-        can enlarge its own, so the element's blob is only ever a PART of what
-        `span` words. Copying the span covers it either way, and the count word
-        at a blob's head is what every reader goes by, so the words past the
-        live elements are never read.
-
-        X4-X6 and X10-X17 are this loop's; none of them is an argument register
-        or a callee-saved one, and `_emit_mov_imm` / `_emit_list_base` write only
-        the register they are handed.
-        """
-        nwords = nbytes // 8
-        self.asm.emit(encode_mov_zr_xn(2, 9))              # X2 = result base
-        self._emit_list_base(base)                         # X9 = copies base
-        self._emit_mov_imm("X4", nbytes)
-        self.asm.emit(encode_mul_xd_xn_xm(5, 1, 4))       # X5 = count * nbytes
-        self.asm.emit(encode_add_xd_xn_xm(16, 9, 5))      # X16 = this slot
-        self.asm.emit(encode_ldr_xt_xn_imm(17, 31, src))   # X17 = the element
-        self.asm.emit(encode_movz_wd_imm(10, 0))          # X10 = i = 0
-        self._emit_mov_imm("X11", nwords)
-        self._while_counter += 1
-        fn = self.func_name
-        loop = f"{fn}_cecp{self._while_counter}"
-        self.asm.label(loop)
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(12, 16, 10))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(13, 17, 10))
-        self.asm.emit(encode_ldr_xt_xn_imm(14, 13, 0))
-        self.asm.emit(encode_str_xt_xn_imm(14, 12, 0))
-        self.asm.emit(encode_add_xd_xn_imm(10, 10, 1))
-        self.asm.emit(encode_cmp_xn_xm(10, 11))
-        self.asm.emit(encode_cset_xd_cond(15, "lt"))
-        self.asm.emit(encode_cbnz_xn(0, 15))
-        self.asm.emit_label_rel(loop, here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 16))             # X4 = the copy
-        self.asm.emit(encode_str_xt_xn_imm(4, 31, src))   # ... and park it back
-        self.asm.emit(encode_mov_zr_xn(0, 4))              # X0 = the copy
-        self.asm.emit(encode_mov_zr_xn(9, 2))              # X9 = the result blob
-
-    def _compr_append_elem(self, res_offset: int, cap: int,
-                           copies=None) -> None:
-        """Append X0 to list result at res_offset; exit(1) past cap.
-
-        `copies` is `_emit_compr_element`'s `(base, span)` for an element that
-        reserved a container of its own; `None` for every other caller and for
-        every element that reserved nothing, which is what keeps `[one for y in
-        ys]` aliasing, as CPython does.
-        """
+    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+        """Append X0 to list result at res_offset; exit(1) past cap."""
         self.asm.emit(encode_stp_sp_pre(0, 2))
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
@@ -11969,19 +11848,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         ok = f"{self.func_name}_cgok{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
-        if copies is not None:
-            self._emit_compr_element_copy(copies[0], copies[1], 0)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
-        if copy is None:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
-        else:
-            self._emit_compr_element_copy(copy)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        if copy is not None:
-            # X9 is the SOURCE after the copy; the count goes back into the
-            # RESULT's header, which is the one thing above that still needs it.
-            self._emit_list_base(res_offset)
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -11990,37 +11860,27 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_exit(1)
         self.asm.label(ok)
 
-    def _compr_append_pair(self, res_offset: int, cap: int,
-                           key_copies=None, val_copies=None) -> None:
-        """Append (X0=key, X1=value) to dict result; exit(1) past cap.
-
-        ONE 16-byte frame slot, with the key at [sp+0] and the value at
-        [sp+8], and both loads reading back exactly those offsets.
-
-        This used to be two STP pairs — `stp x0, x1` then `stp x1, x31` —
-        which the comment above it read back as "the second stp lands lower,
-        so [sp+0] is the value and [sp+8] is the key". It does not: STP
-        Xrt1, Xrt2 stores Xrt1 at [SP] and Xrt2 at [SP+8], so after those
-        two pushes [sp+8] holds **X31**, a scratch register, and the key was
-        sitting unused at [sp+16]. Every dict comprehension therefore
-        stored a garbage key and the right value: the first pair read 0 out
-        of X31 by luck, so `{i: 100 + i for i in range(3)}[0]` was right and
-        [1] and [2] were a miss (exit 1). The value needed a second slot
-        only because the count load below clobbers X1; a plain STR into the
-        slot the STP already reserved is that, without moving the frame
-        twice or putting the key somewhere the loads cannot see.
-
-        `key_copies`/`val_copies` are `_emit_compr_element`'s `(base, span)` for
-        a key or a value that reserved a container of its own; a dict
-        comprehension's key and value are two independent element positions and
-        each gets its own region. The VALUE's is emitted first, and both read
-        their source out of the frame slot the two stores below already read, so
-        neither this nor the stores has to know which of them was copied.
-        """
+    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+        """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
+        # ONE 16-byte frame slot, with the key at [sp+0] and the value at
+        # [sp+8], and both loads reading back exactly those offsets.
+        #
+        # This used to be two STP pairs — `stp x0, x1` then `stp x1, x31` —
+        # which the comment above it read back as "the second stp lands lower,
+        # so [sp+0] is the value and [sp+8] is the key". It does not: STP
+        # Xrt1, Xrt2 stores Xrt1 at [SP] and Xrt2 at [SP+8], so after those
+        # two pushes [sp+8] holds **X31**, a scratch register, and the key was
+        # sitting unused at [sp+16]. Every dict comprehension therefore
+        # stored a garbage key and the right value: the first pair read 0 out
+        # of X31 by luck, so `{i: 100 + i for i in range(3)}[0]` was right and
+        # [1] and [2] were a miss (exit 1). The value needed a second slot
+        # only because the count load below clobbers X1; a plain STR into the
+        # slot the STP already reserved is that, without moving the frame
+        # twice or putting the key somewhere the loads cannot see.
         self.asm.emit(encode_stp_sp_pre(0, 31))            # key at [sp+0]
         self.asm.emit(encode_str_xt_xn_imm(1, 31, 8))     # value at [sp+8]
         self._emit_list_base(res_offset)
-        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))       # npairs
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
         self._emit_mov_imm("X2", cap)
         self.asm.emit(encode_cmp_xn_xm(1, 2))
         self.asm.emit(encode_cset_xd_cond(3, "cs"))
@@ -12029,21 +11889,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         ok = f"{self.func_name}_cpok{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
-        if val_copies is not None:
-            self._emit_compr_element_copy(val_copies[0], val_copies[1], 8)
-        if key_copies is not None:
-            self._emit_compr_element_copy(key_copies[0], key_copies[1], 0)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        if copy is None:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
-        else:
-            self._emit_compr_element_copy(copy)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
-        if copy is not None:
-            self._emit_list_base(res_offset)
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))

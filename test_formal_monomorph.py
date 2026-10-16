@@ -3460,6 +3460,186 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
             "is a positional spelling and a keyword collection is not one")
 
 
+CLS_ATTR_LIB = """\
+struct TypeDict[T: AnyType, values: List[T]]:
+    comptime length = len(Self.values)
+    var n: Int
+
+    def get(self) -> Int:
+        return self.n
+"""
+
+
+CLS_ATTR_PROG = """\
+from sizelib import TypeDict
+
+def main():
+    var d = TypeDict[Int, [1, 2, 3, 4]]()
+    print(TypeDict.length)
+    d.n = 7
+    print(d.get())
+"""
+
+
+CLS_ATTR_CPYTHON = """\
+class TypeDict:
+    length = 4
+
+    def __init__(self):
+        self.n = 0
+
+    def get(self):
+        return self.n
+
+def main():
+    d = TypeDict()
+    print(TypeDict.length)
+    d.n = 7
+    print(d.get())
+"""
+
+
+CLS_ATTR_TWO_PROG = """\
+from sizelib import TypeDict
+
+def main():
+    var d = TypeDict[Int, [1, 2, 3, 4]]()
+    var e = TypeDict[Int, [9]]()
+    print(TypeDict.length)
+    print(d.get())
+    print(e.get())
+"""
+
+
+def test_a_class_attribute_through_the_templates_name_answers_one_instantiation(
+        tmpdir):
+    """`TypeDict.length` builds, runs, and answers CPython on both backends.
+
+    The construct is a `comptime` class attribute of a generic STRUCT — a value
+    of the CLASS BODY — read through the TEMPLATE's name instead of through an
+    instance. It was refused on both architectures with
+    `formal/model.py::struct_parameter_not_bound_refusal`, whose sentence is
+    about the class body: at the class body there is no instantiation, and
+    `Self.values` names a parameter nothing has supplied. Both halves of that
+    sentence are false HERE — the consumer's own program supplies the value as an
+    argument, and the declaration that carries the value has already been built,
+    under a mangled name, by `formal/imports.py::borrowed_structs` — so the
+    reader was sent to a line that does not exist.
+
+    The fix is the same rewrite `Pair[Int]()` already got, reaching the one
+    position it did not: `monomorph.rewrite_instantiation_uses` rewrites a
+    `Template.<attr>` read's BASE to the mangled instantiation when this file
+    applies that template at exactly one instantiation, and the class-constant
+    machinery then reads the instantiated body's own `comptime length =
+    len([1, 2, 3, 4])`, which is a foldable literal. One traversal and one
+    table, which is the property `imported_instantiations` is built around: a
+    rewritten read with no declaration is a read of a struct nothing published.
+
+    `4` and not `0`: the wrong answer this path gave before the rewrite was the
+    TEMPLATE's own alias, unsubstituted, and a lowering that dropped the
+    substitution would print the other instantiation's value here just as
+    plausibly.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_clsattr", CLS_ATTR_LIB,
+                            CLS_ATTR_PROG, CLS_ATTR_CPYTHON,
+                            libname="sizelib.mojo")
+        check(got == "4\n7\n",
+              f"[{arch}] printed {got!r} for a `comptime` class attribute read "
+              f"through the template's name")
+
+
+def test_the_class_attribute_read_is_the_rewrite_in_one_file_too(tmpdir):
+    """The ONE-FILE shape of the same read, because `_own_instantiations` is a
+    different caller of the same rewrite and neither is covered by the other.
+
+    `build_pair_case(lib=None)` writes the shape where this module declares AND
+    applies the template, so the demand comes from `monomorph.own_demands` and
+    the instantiated body is appended to the executable's own statements. If the
+    read were rewritten only on the imported half, this would build and print
+    the unsubstituted alias — or refuse — and the two-file case would stay green.
+    """
+    one_file = CLS_ATTR_LIB + """
+def main():
+    var d = TypeDict[Int, [1, 2, 3, 4]]()
+    print(TypeDict.length)
+    d.n = 7
+    print(d.get())
+"""
+    cpython = CLS_ATTR_CPYTHON.split("\ndef main():")[0] + """
+def main():
+    d = TypeDict()
+    print(TypeDict.length)
+    d.n = 7
+    print(d.get())
+"""
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_clsattrone", None, one_file,
+                            cpython)
+        check(got == "4\n7\n",
+              f"[{arch}] printed {got!r} for the same read in one file, which "
+              f"is `formal/imports.py::_own_instantiations`'s caller of the "
+              f"rewrite rather than the imported half's")
+
+
+def test_a_class_attribute_through_two_instantiations_is_refused(tmpdir):
+    """Two instantiations and a read through the template name: a refusal.
+
+    The third arm of the same rule, and the one that has to be a refusal
+    because the other two answers are both wrong in the way this repository
+    refuses everywhere: the TEMPLATE's own alias is a number no instantiation
+    stands behind, and the first instantiation built is an order the source does
+    not state. `d.length` is the spelling that names one, and it answers — the
+    case above is that it answers correctly.
+
+    Asserted as a REFUSAL that names both instantiations, because a message
+    that said only "ambiguous" would leave the reader with nothing to act on and
+    the two mangled names are the two things they could have written.
+    """
+    for arch in ARCHES:
+        text = run_pair_case(tmpdir, arch, "mm_clsattrtwo", CLS_ATTR_LIB,
+                             CLS_ATTR_TWO_PROG, "", expect_ok=False,
+                             libname="sizelib.mojo")
+        check("applies TypeDict at 2 of them" in text,
+              f"[{arch}] two instantiations of one template with a read through "
+              f"its name did not stop with the ambiguity refusal: "
+              f"{text.strip()[-500:]}")
+        check("values_52__x005B1" in text and "values_13__x005B9" in text,
+              f"[{arch}] the refusal did not name both instantiations: "
+              f"{text.strip()[-500:]}")
+
+
+def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
+    """A VALUE binding of the template's name is a value, and the guard is the
+    same scope table the bracket reader uses.
+
+    `var Sized = 3` beside `Sized.length` is a read of an integer's nonexistent
+    attribute, and rewriting its base to a mangled struct name would turn a
+    program that is wrong into one that answers. The scope tables are
+    `formal/build.py::_names_bound_in` for a function and
+    `formal/model.py::collect_module_symbols` at module level — the two
+    `monomorph.all_instantiation_calls` already walks with, so the position that
+    says "this name is a value here" and the position that says "this name is a
+    type here" cannot disagree.
+    """
+    from formal import monomorph as MM
+    from formal.build import parse_module
+    prog = ("def main():\n"
+            "    var Sized = 3\n"
+            "    var a = Sized[Int]()\n"
+            "    print(Sized.length, a.get_first())\n")
+    stmts = parse_module(prog)
+    n = MM.rewrite_instantiation_uses(stmts, {("Sized", ("Int",)): "Sized_Int"})
+    check(n == 1,
+          f"only the CONSTRUCTOR is an instantiation use — `Sized.length` reads "
+          f"the local `Sized`, and rewriting it would invent a struct out of an "
+          f"integer — and {n} were rewritten")
+    read = stmts[0].body[2].value.args[0]
+    check(getattr(read.obj, "name", None) == "Sized",
+          f"the read's base is {getattr(read.obj, 'name', None)!r}, so a local "
+          f"of a template's name was rewritten into a mangled struct name")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),

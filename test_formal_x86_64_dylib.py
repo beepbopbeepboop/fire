@@ -1092,6 +1092,45 @@ def test_a_receiver_bound_to_a_frame_is_refused_on_both_machines(tmpdir,
               f"{text}")
 
 
+def test_a_program_importing_os_path_getsize_matches_cpython(tmpdir, shared):
+    """A HOST-MOD dylib's outbound call runs: `os.path.getsize` answers.
+
+    The reduced reproduction of the getsize hostmod-dylib crash (found
+    2026-10-07): `getsize` builds `os_path` and `os_path.__syscalls`, and the syscalls dylib calls
+    libSystem — the exact shape that used to jump to address 0 on x86-64 because
+    the Mach-O linker mapped `__LINKEDIT` below the fixed `__DATA` segment and
+    Rosetta slid the image wrongly (`_linkedit_vm`, `3ac56981`). A file this test
+    makes is the argument, so the expected size is CPython's own answer on the
+    same bytes; the exit status is that size modulo 256, which a jump to 0 cannot
+    produce and a wrong-but-surviving answer does not match.
+    """
+    target = os.path.join(tmpdir, "sized.dat")
+    with open(target, "wb") as f:
+        f.write(b"A" * 342)
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                "    return getsize(%r)\n" % target)
+    out = os.path.join(tmpdir, "getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"an x86-64 program importing os.path.getsize did not build: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 image died on a signal ({got.returncode}); before "
+          f"3ac56981 it jumped to address 0 (SIGSEGV, -11) here")
+    size = os.path.getsize(target)
+    check(got.returncode == size % 256,
+          f"the x86-64 image exited {got.returncode}, expected {size % 256} "
+          f"(CPython's os.path.getsize = {size} mod 256)")
+
+
 TESTS = [
     ("x86-64 dylib stubs are jmpq *(%rip)",
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),

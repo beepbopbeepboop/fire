@@ -2746,6 +2746,44 @@ def run_layout(name, source, fn_name, want, verbose):
     return True, ""
 
 
+RETURNLESS_CHAINS = [
+    ("a_return_chain_is_closed_over_every_hop",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a):\n"
+     "    return h(a)\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     {"h", "f", "g"}),
+    ("a_real_value_breaks_the_chain",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a):\n"
+     "    return 5\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     {"h"}),
+    ("a_cycle_is_not_provably_return_less",
+     "def f(a):\n"
+     "    return g(a)\n"
+     "\n"
+     "def g(a):\n"
+     "    return f(a)\n",
+     set()),
+    ("a_declared_return_type_keeps_a_name_out",
+     "def h(a):\n"
+     "    w = 1\n"
+     "\n"
+     "def f(a) -> Int:\n"
+     "    return h(a)\n",
+     {"h"}),
+]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")

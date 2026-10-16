@@ -599,6 +599,42 @@ def _call(name: str, args: list):
     return F.CallExpr(func=F.IdentExpr(name=name), args=list(args))
 
 
+def _for_target_refusal(tree):
+    """Why `tree` (`model.for_target_tree`'s output) is not a `for` target, or
+    None when it is one.
+
+    A target is a single plain name, or a tuple/list of them, where a leaf may
+    be a trailing `*name` rest binding — the one spelling `_emit_for_unpack`
+    binds as a REST blob rather than as an element. This reader is shared by the
+    for-loop and the comprehension so the two cannot come to disagree about
+    which spellings are targets (the shape a private copy produced for the
+    nested-group arity check, before `model.for_target_tree`).
+    """
+    bad = "must be a plain name or tuple of plain names"
+    if tree is None:
+        return bad
+    if isinstance(tree, str):
+        # A bare `*rest` target (`for *rest in …`) is not Python and is not a
+        # target here; a single plain name is.
+        return None if tree.isidentifier() else bad
+    if not tree:
+        return bad
+    for i, child in enumerate(tree):
+        if isinstance(child, list):
+            why = _for_target_refusal(child)
+            if why is not None:
+                return why
+            continue
+        if not isinstance(child, str):
+            return bad
+        if child.startswith("*"):
+            if i != len(tree) - 1 or not child[1:].strip().isidentifier():
+                return bad
+        elif not child.isidentifier():
+            return bad
+    return None
+
+
 class X86_64Codegen:
     """x86-64 code generator over the fire_compiler AST."""
 

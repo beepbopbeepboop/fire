@@ -806,6 +806,25 @@ def _as_word64(v):
     return v - (1 << 64) if v >= (1 << 63) else v
 
 
+def _as_printed_by_the_image(v):
+    """`v` as the image's `printf("%d", …)` renders the same 64-bit word.
+
+    The image's `%d` is C's `%lld` on a signed 64-bit word (the formal backend's
+    `%d` is signed for a signed value), while Python's `%d` on an
+    arbitrary-precision int prints the UNSIGNED magnitude.  The two agree for
+    every value below `2**63`; they differ for `st_dev` of `/dev/null`, whose
+    `dev_t` is `int32_t` with the high bit set: CPython reports the 32-bit
+    `0xa8fb1a80` as `18446744072249612928` (`0xffffffffa8fb1a80`), and the image
+    reports the same 64-bit word as `-1459938688`.  This normalisation is a
+    rendering change and NOT a value change — the word both sides hold is
+    identical — so the case still checks what it always did, and it is applied
+    to every stat field rather than to `st_dev` alone so a second field over
+    `2**63` cannot arrive as a surprise.
+    """
+    v = int(v)
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
 def _stat_oracle(p):
     """CPython's answers for one path, in the keys `STAT_PROGRAM` prints.
 

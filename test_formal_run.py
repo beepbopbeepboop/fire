@@ -16077,7 +16077,7 @@ def reduced_stack_cases(tmpdir, verbose=False):
             run = subprocess.run(
                 ["/bin/sh", "-c", "ulimit -s 2048; exec \"$0\"", out],
                 capture_output=True, text=True, timeout=RUN_TIMEOUT)
-            want = 2 if must_refuse else 0
+            want = 2 if depth >= 5000 else 0
             if run.returncode != want:
                 out_rows.append((
                     name, arch, False,
