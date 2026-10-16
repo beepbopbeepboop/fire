@@ -7398,11 +7398,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         nothing is live across this (every caller is on a path that stops), and
         SP needs no adjustment because there is no call any more — which also
         removes the alignment note this method used to carry.
+
+        **The length is `M.diagnostic_length(text)` and not `len(text)`, and
+        that is the whole of a defect this used to have.** A `write` length is a
+        BYTE count and a message is a Python `str`, so `len` counts characters
+        and every non-ASCII one is a byte the program never wrote: measured on
+        both architectures, the list-append overflow wrote 774 bytes of a
+        778-byte message and stopped mid-word, losing the sentence that names
+        what does NOT help. The reader is the shared one so this emitter and
+        x86-64's cannot answer it differently, and `test_formal_run.py`'s
+        `STDERR_EXACT_CASES` compares each stop's stderr against the message
+        byte for byte so the class is a red row rather than a shorter sentence.
         """
         label = self._intern_string(text)
         self.asm.emit_adrp_add(1, label)                   # X1 = text
         self.asm.emit(encode_movz_xd_imm(0, 2))            # X0 = fd = stderr
-        self.asm.emit(encode_movz_xd_imm(2, len(text)))    # X2 = length
+        self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))
         self.asm.emit(encode_movz_xd_imm(16, DARWIN_SYS_WRITE))
         self.asm.emit(encode_svc(0x80))
 

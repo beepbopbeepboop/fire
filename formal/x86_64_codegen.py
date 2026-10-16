@@ -5528,11 +5528,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         System V argument triple can be set without saving anything. RSP is
         already 16-byte aligned (the append's own pushes are a multiple of it)
         and is left where it was, so the pushed base and value stay readable
-        past the call."""
+        past the call.
+
+        **The length is `M.diagnostic_length(text)` and not `len(text)`**, which
+        is arm64's fix and the same defect: a `write` length is a BYTE count, a
+        message is a Python `str`, and every non-ASCII character is a byte the
+        program never wrote. Measured on this tree before the fix, both
+        architectures wrote 774 of the list-append message's 778 bytes and
+        stopped mid-word. One shared reader for both emitters, so the two
+        machines cannot write a different number of bytes of the same sentence,
+        and `test_formal_run.py`'s `STDERR_EXACT_CASES` is the row that keeps
+        it honest."""
         self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
         self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
         self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
-        self._emit_mov_imm(Reg.RDX, len(text))         # length
+        self._emit_mov_imm(Reg.RDX, M.diagnostic_length(text))   # length
         self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
         self._emit_extern_call("write")
 

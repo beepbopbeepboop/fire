@@ -12569,6 +12569,43 @@ def dict_store_capacity(fn, sites) -> tuple:
     return by_node, by_name
 
 
+def diagnostic_length(text: str) -> int:
+    """The length a `write(2, text, …)` of this text must be given, in BYTES.
+
+    **The run-time stops write their message with a LENGTH, and a length is a
+    byte count while every message in this module is a Python `str`.** The two
+    agree only while the text is ASCII, and five of the seven messages a formal
+    image can write to fd 2 are not: measured on this tree, both architectures,
+    `list_append_overflow_message("ys", 1)` is 774 characters and 778 bytes (two
+    `—`/`…`), and `write` was handed 774 — so the last four bytes never left
+    the program and the message ended mid-word:
+
+        formal: list.append overflowed 'xs': … so the overflow follows the appe
+
+    which is the same defect class as the silence this message replaced, one
+    step down: the reader is told the bound and then loses the last sentence,
+    which is the one naming what does NOT help. The same measurement for
+    `dict_store_overflow_message`, `dict_store_no_room_message`,
+    `dict_store_other_blob_message` and `blob_growth_overflow_message` loses 2-4
+    bytes each; `int_parse_trap_message` and `int_overflow_trap_message` are
+    ASCII today and lose nothing, which is exactly why this went unnoticed —
+    two emitters with `len(text)` are correct for every message that has no
+    typographic punctuation in it.
+
+    So the emitters ask THIS, in both of them, rather than each writing `len()`:
+    one reader for "how many bytes is this text", because the length and the
+    bytes come from two different places (the buffer is interned by
+    `_intern_string`, the count was computed at the call site) and two
+    independent answers to one question is how the fourth word of a message
+    diverges between architectures. The typographic characters are NOT the
+    defect and are not removed: every other diagnostic on this path is written
+    with them, and `test_formal_run.py`'s `STDERR_EXACT_CASES` compares each
+    stop's stderr against the message this module builds, byte for byte, so a
+    re-truncation is a red row rather than a sentence nobody reads to the end.
+    """
+    return len(text.encode())
+
+
 def dict_store_overflow_message(name: str, capacity: int) -> str:
     """The ONE text a `d[k] = v` that has run out of room writes to fd 2.
 
@@ -47699,6 +47736,8 @@ def _static_container_words(value):
             for cell in pair[:2]:
                 word = _static_word(cell)
                 if word is None:
+                    if missing is not None:
+                        missing.append(cell)
                     return None
                 words.append(word)
         return words
@@ -47709,9 +47748,48 @@ def _static_container_words(value):
     for el in elements:
         word = _static_word(el)
         if word is None:
+            if missing is not None:
+                missing.append(el)
             return None
         words.append(word)
     return words
+
+
+# The element `_static_container_words` could not answer, when somebody is
+# listening. A context variable rather than an argument because the walk is
+# recursive (a nested container is this same function one level down) and an
+# out-parameter would have to be threaded through every level to say the same
+# thing; `None` when nobody is, which is every call on the hot path.
+_MISSING_REPORTER = ContextVar("formal_missing_element", default=None)
+
+
+def container_element_without_a_word(value):
+    """The element of a container literal `_static_word` cannot answer, or None.
+
+    **This exists because the refusal it feeds named a CALL for every shape that
+    reached it, and two of the three that still reach it have no call in them.**
+    Measured on this tree, both architectures, before `_static_word` learned to
+    fold: `TBL = [1 + 2, 3]`, `TBL = [7 // 2, 3]`, `TBL = [K, 3]` and
+    `TBL = [1.5, 2]` were each refused as *"one of its elements is computed by a
+    call"* — four programs with no call anywhere in them, and the first of those
+    is arithmetic on two integer literals. Those four build now; what is left is a
+    call (`[f(), 1]`), a name the build cannot fold (`[os.pi, 1]`, `[K, 1]` where
+    `K` is imported rather than declared), and a value outside one 64-bit word
+    (`[2 ** 64, 1]`), and only the first of the three is a call.
+
+    So the walk is asked WHICH element it could not answer rather than only
+    whether it could answer all of them, and the message quotes it. The reporter
+    is a `ContextVar` so the recursion needs no extra argument and so a nested
+    container's own missing element — the one a reader has to be sent to — wins
+    over its parent's, which is what the inner walk reports last.
+    """
+    missing = []
+    token = _MISSING_REPORTER.set(missing)
+    try:
+        _static_container_words(value)
+    finally:
+        _MISSING_REPORTER.reset(token)
+    return missing[-1] if missing else None
 
 
 def _static_word(node):
@@ -47744,6 +47822,51 @@ def _static_word(node):
     element `_static_word` could not answer for was `None`, and the reason
     string picked by `static_initializer_refusal_reason` was the closest of its
     four rather than the right one.
+
+    **THE SAME MISDIAGNOSIS, THREE ARMS FURTHER OUT, and this arm is the one that
+    cost a corpus its `__DATA`.** Measured on this tree, every one of these was
+    refused with that same sentence about a call, and none of them has a call in
+    it:
+
+        K = 5
+        TBL = [1 + 2, K]      # arithmetic on two literals, and a constant
+        TBL = [7 // 2, 3]     # a floor division of two literals
+        TBL = [2 ** 10, 3]    # a power of two literals
+        TBL = [1 << 4, 3]     # a shift of two literals
+        TBL = [1.5, 2]        # a float LITERAL
+
+    Every one of those is a word the build KNOWS, and the local spelling of each
+    already works — `var xs = [1 + 2, 3]` builds, runs and answers `3 3` on both
+    architectures — because a frame blob is built by INSTRUCTIONS that compute
+    the element, and only the `__DATA` initializer has to compute it at BUILD
+    time. So the gap was never a capability: it was this function asking four
+    questions about a node's SHAPE (is it a literal? is it a sign? is it a
+    container?) where the tree already has one folder that answers the fifth
+    question — what does this expression COME TO — and whose answer is the same
+    arithmetic the emitter emits.
+
+    Three arms, each asking one existing reader rather than writing arithmetic
+    here:
+
+      * **an expression** → `fold_module_int_expr`, which is the folder both
+        backends' module-constant path and `mojo/middle/comptime.py` already
+        agree with, range-checked here against `_FOLD_INT_MIN`/`_FOLD_INT_MAX`
+        because THAT is the caller's half of the contract (`fold_module_value`
+        makes the same check for a whole module-level initializer). A folded
+        value outside one word is refused rather than truncated: a `__DATA` word
+        that is not a value the source has is the plausible wrong number this
+        backend refuses everywhere else, and `2 ** 64` is exactly that.
+      * **a float literal** → `float_literal_bits`, the one reader of a literal's
+        IEEE-754 pattern both backends ask, as a SIGNED word: `_lay_out_blob_words`
+        writes an int with `signed=True`, so an unsigned pattern above `2**63`
+        would raise out of `to_bytes` — a compiler crash rather than a refusal —
+        and the signed reading of the same 64 bits is the value a register
+        holds.
+      * **a name** → `module_constant_literal`, the read both backends and the
+        substitution pass ask for a module-level constant's folded value. It is
+        asked for the name alone, which is why a name this unit does not fold
+        (`math.pi`, a `from … import K` alias) still answers None and keeps the
+        refusal: the fold is the build's, not a guess.
     """
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0):
         return node.value
@@ -47763,7 +47886,72 @@ def _static_word(node):
     if _is_static_container(node):
         words = _static_container_words(node)
         return None if words is None else StaticNestedBlob(words)
-    return None
+    # The three arms below are the CHANGE, and each is one existing reader. They
+    # come after the arms above so every element that already had a word keeps
+    # the word it had — in particular a unary sign of a string or a container,
+    # which the arm above answers and the int-only folder would not.
+    return _static_folded_word(node)
+
+
+def _static_folded_word(node, bound=()):
+    """The word a `__DATA` element is, for the three shapes `_static_word`'s own
+    arms do not cover: an ARITHMETIC EXPRESSION over words, a FLOAT literal, and a
+    NAME this unit folds.
+
+    None means "the build does not know this", which is a refusal and not a zero
+    — the same distinction `fold_literal_expr` draws, and the reason nothing here
+    invents a value.
+
+    `bound` is the names this walk has already read, and it exists for one shape:
+    a module constant bound to another module constant (`A = B`) is one hop, and
+    `A = B; B = A` is a cycle a fold must refuse rather than chase. The value
+    comes from `GlobalSymbol.literal`, which is the FOLDED NODE
+    (`IntLiteral` / `StringLiteral` / `BoolLiteral`) `collect_module_symbols`
+    already built in source order — so a name is answered from the build's own
+    decision about that name, not from a second fold here.
+    """
+    if isinstance(node, F.FloatLiteral):
+        # `float_literal_bits` is unsigned and `_lay_out_blob_words` writes an int
+        # with `signed=True`, so the pattern is read as the SIGNED word: the same
+        # 64 bits, and the value a register holds after a 64-bit load.
+        bits = float_literal_bits(node.value)
+        return bits - (1 << 64) if bits >= (1 << 63) else bits
+    if isinstance(node, F.IdentExpr):
+        if node.name in bound:
+            return None                    # `A = B; B = A` — a cycle, not a value
+        sym = module_symbol(node.name)
+        literal = getattr(sym, "literal", None) if sym is not None else None
+        if literal is None:
+            return None                    # not folded: no word to put in the blob
+        return _static_folded_word(literal, bound + (node.name,))
+    return _folded_data_word(node)
+
+
+def _folded_data_word(node):
+    """What an expression of LITERALS comes to, as a word, or None.
+
+    **The composition `fold_module_int_expr`'s own `operand` helper already
+    spells, applied to the node ITSELF rather than to each of its operands** —
+    which is the whole gap: `fold_module_int_expr` answers a `BinaryOp` or a
+    `UnaryOp` and returns None for a bare `IntLiteral`, so a name's folded
+    literal (`GlobalSymbol.literal`, always a literal NODE) came out as no value
+    at all. `fold_literal_expr` first, then the wider folder, is that
+    composition and nothing else: two readers because they answer two questions,
+    both of them the tree's own, and neither of them rewritten here.
+
+    The range check is `fold_module_value`'s, made here because this is the caller
+    half of its contract: a folded value that is not one 64-bit word has no
+    representation in `__DATA`, and writing its low bits would be a plausible
+    number rather than this value. `2 ** 64` is exactly that case.
+    """
+    value = fold_literal_expr(node)
+    if value is None:
+        value = fold_module_int_expr(node)
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if _FOLD_INT_MIN <= value <= _FOLD_INT_MAX else None
 
 
 def static_initializer_refusal_reason(slot) -> str:
@@ -47893,6 +48081,74 @@ def module_slot_unreadable_refusal(slot, fn) -> str:
                           " records the design")
 
 
+def _computed_element_clause(slot) -> str:
+    """The `computed_element` half of `global_value_refusal`, naming the ELEMENT.
+
+    **This sentence used to say "computed by a CALL" for every shape that reached
+    it, and it was false of most of them.** Measured on this tree, both
+    architectures, `TBL = [1 + 2, 3]` — arithmetic on two integer literals — was
+    refused with it, and so were `[7 // 2, 3]`, `[2 ** 10, 3]`, `[1 << 4, 3]`,
+    `[K, 3]` for a module constant `K = 5`, and `[1.5, 2]`: six programs, no call
+    in any of them. That was the same misdiagnosis `static_initializer_refusal_
+    reason` records for `None` in 2026-10-04, one level out, and the fix is the
+    same one — `_static_word` now folds what the tree's own folders can answer, so
+    those six build.
+
+    What is left is three shapes with three different reasons, and a reader sent
+    after "a call" for the second or third is sent after nothing:
+
+      * a CALL — its result is not known before the program runs, and no
+        arrangement of `__DATA` changes that;
+      * a NAME the build cannot fold — `os.pi`, or a constant imported from
+        another module. It is a value the program has and this path cannot see;
+      * a value outside one 64-bit word — `2 ** 64`. It is a value the source
+        does not have, and writing its low bits would be a plausible number rather
+        than this one.
+
+    So the clause asks `container_element_without_a_word` which element it was and
+    quotes it, and the three cases get their own sentence. The lead — a container
+    is a run of words, so an element that is not a word has nothing to put in the
+    blob — is kept because it is true of all three and is what makes the missing
+    thing storage rather than arithmetic.
+    """
+    lead = ("a container is laid out here as a run of words — so an element that "
+            "is not a word has nothing to put in the blob. An int element, a "
+            "string element, a float element and a NESTED container of those all "
+            "do (the string as a pointer the initializer fills in, the nested "
+            "container as a blob of its own with one more fixup for the word that "
+            "points at it), and so does an element the build can FOLD — "
+            "`1 + 2`, `7 // 2`, `2 ** 10`, `1 << 4`, or a module-level constant "
+            "this unit folds — because those are the same arithmetic the "
+            "instructions would emit, computed here instead")
+    value = getattr(getattr(slot, "site", None), "value", None)
+    element = container_element_without_a_word(value) if value is not None else None
+    if element is None:
+        # The walk said no without saying which element, which means the shape is
+        # not one it walked at all — a container it does not recognise. Say the
+        # one thing that is true rather than naming an element it cannot name.
+        return (f"this build cannot compute its initializer from the source. "
+                f"{lead}, and what this one spells has no word in it")
+    spelled = expr_spelling(element)
+    if isinstance(element, F.CallExpr):
+        return (f"its element `{spelled}` is computed by a CALL, and a call's "
+                f"result is not known before the program runs. {lead}; no "
+                f"arrangement of `__DATA` changes that")
+    if isinstance(element, (F.IdentExpr, F.MemberExpr)):
+        return (f"its element `{spelled}` is a NAME this build cannot fold — a "
+                f"value the program has and this path cannot see, which is a "
+                f"different missing thing from a call: an imported constant, a "
+                f"module attribute, or a name bound to something other than a "
+                f"literal. {lead}")
+    return (f"its element `{spelled}` is an EXPRESSION and this build computes no "
+            f"word for it, which is one of three things and the element says "
+            f"which: a value outside the 64-bit range one word holds, an "
+            f"arithmetic with no value at all (`1 // 0`), or one that is not a "
+            f"number (a string, whose element would have to be the address of an "
+            f"interned literal this initializer does not hold). The build refuses "
+            f"rather than writing the low bits of something it cannot compute, "
+            f"which would be a plausible number rather than this one. {lead}")
+
+
 def global_value_refusal(name: str, fn_name: str, why: str,
                          slot=None) -> str:
     """The refusal for a module-level value this path cannot give an initializer.
@@ -47921,15 +48177,7 @@ def global_value_refusal(name: str, fn_name: str, why: str,
     rather than something derived here."""
     who = f"{fn_name}: " if fn_name else ""
     detail = {
-        "computed_element": (
-            "one of its elements is computed by a call, and a container is laid "
-            "out here as a run of words — so an element that is not a word has "
-            "nothing to put in the blob. An int element, a string element and a "
-            "NESTED container of those three all do (the string as a pointer the "
-            "initializer fills in, the nested container as a blob of its own with "
-            "one more fixup for the word that points at it); a call's result is "
-            "not known before the program runs, and no arrangement of `__DATA` "
-            "changes that"),
+        "computed_element": _computed_element_clause(slot),
         "computed": (
             "its module-level value is computed by a call, and a call's result "
             "is not known before the program runs. The storage is there and is "

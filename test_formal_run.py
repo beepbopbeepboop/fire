@@ -15532,16 +15532,28 @@ def run_stderr_case(name, source, want_exit, needles, tmpdir, verbose,
                            f"cannot see the run-time stop: {text.strip()[-300:]}")
         if not os.path.isfile(out):
             return False, f"--backend={backend} built but wrote no binary"
-        run = subprocess.run([out], capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT)
+        # BYTES, and decoded here rather than by `text=True`. A `write` length
+        # that counts characters cuts a multi-byte character in half, so the
+        # decode is part of what this row checks: `text=True` would have
+        # replaced the broken character with U+FFFD and every needle would
+        # still have matched. That is how a truncated diagnostic reads as a
+        # complete one.
+        run = subprocess.run([out], capture_output=True, timeout=RUN_TIMEOUT)
+        try:
+            stderr = run.stderr.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return False, (f"--backend={backend} wrote {len(run.stderr)} bytes to "
+                           f"stderr that are not valid UTF-8 (byte {exc.start}: "
+                           f"{run.stderr[exc.start:exc.start + 6]!r}), so the text "
+                           f"was cut inside a character rather than at its end")
         if run.returncode != want_exit:
             return False, (f"--backend={backend} exited {run.returncode}, "
                            f"expected {want_exit}; stderr: "
-                           f"{run.stderr.strip()[-200:]}")
-        missing = [n for n in needles if n not in run.stderr]
+                           f"{stderr.strip()[-200:]}")
+        missing = [n for n in needles if n not in stderr]
         if missing:
             return False, (f"--backend={backend} stopped without saying "
-                           f"{missing!r}; stderr: {run.stderr.strip()[-300:]!r}. "
+                           f"{missing!r}; stderr: {stderr.strip()[-300:]!r}. "
                            f"A bare exit with nothing on either stream is the "
                            f"defect this case exists for")
         if want_stdout is not None and run.stdout != want_stdout:

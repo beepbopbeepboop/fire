@@ -1,5 +1,14 @@
 # `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left
 
+**Status 2026-10-05 (`work/formal71-docs`): §2 and §3 are unchanged and both are
+projects, so this document is NOT closed — but the table of lowerings below had a
+row that published a construct this path refuses, and that is corrected and
+measured. `bool(x)` is not lowered (for ANY receiver, `Int` included — it is one
+of 38 names in `FRAME_VALUE_ONLY_CALLS`); what lowers is the conditional form,
+niche-aware. Everything else in the table measured today, on both architectures,
+and holds.** Read the correction before §2, whose "the two sound alternatives"
+does not depend on it.
+
 **Status 2026-10-05 (`formal25-4`): §4 is FIXED, and it was a WRONG ANSWER on
 both architectures rather than the limitation §4 called it — the gap was
 writable the moment the link line existed, and what it wrote was `Some(0)`
@@ -118,8 +127,40 @@ x or_else(d)       x == niche ? d : x
 x.value_or(d)      the same
 x.or(d)            the same
 x.unsafe_value()   x
-bool(x)            x != niche          (Mojo's Optional.__bool__ is "does it HAVE a value")
+if x  /  1 if x else 0     x != niche     (Optional.__bool__ is "does it HAVE a value")
 ```
+
+**The last row was `bool(x)` until 2026-10-05, and that spelling is REFUSED —
+the table published a lowering this path does not do.** Measured on this tree,
+both architectures, byte-identical:
+
+```console
+$ printf 'def main(n) -> Int:\n    var a: Optional[Bool] = None\n    printf("%d\n", bool(a))\n    return 0\n' > b.mojo
+$ python3 fire.py build --formal --no-prove --backend=arm64 -o b b.mojo
+build: `bool(...)` is not lowered on this path, and the reason is a property of
+the NAME rather than of the link line: `bool`: a compare against zero and a
+normalize — but the name is also in `FRAME_VALUE_ONLY_CALLS`, so the
+frame-address half of the answer is settled and the value half is not. …
+```
+
+and the refusal is **not an `Optional` question at all**: `bool(5)` on a plain
+`Int` is refused with the same words, and so are `abs`, `bin`, `chr`, `hex`,
+`int` and 31 others — `FRAME_VALUE_ONLY_CALLS` is 38 names and lowering any of
+them is a deliberate deferral about a CALL SPELLING, which is a different (and
+shared) piece of work from the niche table this document is about. **What lowers
+is the conditional form**, and it lowers NICHE-AWARE, which is the row's real
+content: `1 if a else 0` with `var a: Optional[Bool] = None` answers `0` on both
+architectures, and `test_formal_optional.py`'s `bool_truthiness_is_has_a_value`
+is the row that pins it (as a `FIXED_CASE`, because Mojo's `Optional.__bool__`
+disagrees with CPython's truthiness for `Some(False)` by design).
+
+The rest of the table measured today, both architectures, and every row holds:
+`Optional[String]` `is None` → `0 1`, `or_else("d")` → `d`, `value_or("d")` →
+`hi`, `unsafe_value()` → `hi`; `Optional[Int8]` `or_else(9)` → `9` and
+`unsafe_value()` → `5`; `Optional[List[Int]]` `is None` → `1`; and the refused
+list is refused AT THE USE rather than at the annotation — a bare
+`f(z: Optional[Float64])` with no comparison builds, while `if z is None:` in the
+same program is refused naming `OPTIONAL_TWO_WORD`.
 
 **Where the code is**: `formal/model.py` for the table and the readers,
 `formal/build.py::apply_optional_none_representation` for the ONE site that puts
