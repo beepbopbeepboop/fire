@@ -154,7 +154,11 @@ GREEN, and it changes what the class measures.
 moved one step further away, not closer. Three measurements, each a correction
 to the plan below:**
 
-1. **The fixture no longer produces a blind file — it REFUSES.** This document
+1. **The fixture no longer produces a blind file — it REFUSES.** *(STALE
+   2026-10-13: the `FormalBuildError` below no longer reproduces — the startup
+   stub's `getrlimit` moved below `func_offset`, so the image has only ONE
+   opaque call and the fixture generates a blind file again; see the Status at
+   the top.)* This document
    records the class dissecting a generated file that has 234 theorems, no
    `compiles_correctly_universal` and no `sorry`, so `tail` is empty and the
    trace is a no-op. Measured on this tree, `_symbolic_divisor_proof` now raises
@@ -172,8 +176,9 @@ to the plan below:**
    its failure is an `ERROR` in `setUpClass` rather than the three assertion
    failures this document records.
 
-2. **`info["compiler_traps"]` IS EMPTY ON ARM64, and that is a second defect on
-   this path.** `formal/arm64_codegen.py` declares `_compiler_trap_addrs` (line
+2. **`info["compiler_traps"]` WAS EMPTY ON ARM64, a second defect on this path —
+   FIXED 2026-10-13 (`_emit_trap_flush` now records each `BL fflush`; see the
+   Status at the top of this doc). The paragraph is kept as history.** `formal/arm64_codegen.py` declares `_compiler_trap_addrs` (line
    724) and publishes it as `info["compiler_traps"]` (line 1100), and its own
    comment says the set holds "the ADDRESSES of the `BL fflush` this backend
    emits inside its own bounded stops" — but **nothing ever adds to it** (the
