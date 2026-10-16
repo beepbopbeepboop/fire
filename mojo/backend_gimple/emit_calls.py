@@ -8461,10 +8461,11 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     if ot == 'int64_t':
         # A word of unknown kind -- NOT a pointer to step through: see
         # mojo_word_slice. The result is another such word.
-        _st64 = gen._new_val('int64_t', f"(int64_t){start_v}")
-        _sp64 = gen._new_val('int64_t', f"(int64_t){stop_v}")
-        t = gen._call_expr('int64_t', 'mojo_word_slice',
-                           [('int64_t', ov), ('int64_t', _st64), ('int64_t', _sp64)])
+        # Spelled inline like the `mojo_cstr_slice` arm: `stop_v` may be the
+        # MOJO_SLICE_STOP_OMITTED macro, which GIMPLE will not take as a cast
+        # operand in a separate statement.
+        _wl = gen._ensure_local('int64_t', ov)
+        t = gen._new_val('int64_t', f"mojo_word_slice ({_wl}, {start_v}, {stop_v})")
         gen._dyn_word_vals.add(t)
         return 'int64_t', t
 
