@@ -10548,7 +10548,6 @@ def _program_extern_calls(info: dict) -> list:
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                      extern_calls: list, externs: list, fn,
-                     func_entry: int = None,
                      admitted_model: bool = False,
                      admitted_names: list = None, arity: int = 1,
                      entry_values: list = None, scope=None,
@@ -11634,8 +11633,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             func_entry=info["labels"].get(func_name, base_addr),
             arity=arity, entry_values=evalues,
             admitted_model=_admitted_model,
-            admitted_names=_admitted_used_names, scope=_vscope,
-            func_entry=info["labels"].get(func_name, base_addr))
+            admitted_names=_admitted_used_names, scope=_vscope)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
                                   info["labels"].get(func_name, base_addr),

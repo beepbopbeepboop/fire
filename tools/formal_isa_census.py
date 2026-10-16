@@ -618,10 +618,6 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
-    "encode_call_r64": (
-        "FORMAL x86 64 instruction coverage backlog",
-        "`FF /2` with mod=11, the call through a function VALUE; the decoder "
-        "maps `FF` only to `FF 15`/`FF 25`"),
     # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-07: the
     # byte-wise `and`/`or` the floating compare needs, whose gap was a REX prefix
     # the tree's own encoder omitted for SPL/BPL/SIL/DIL. `_byte_rex_required`
