@@ -10067,6 +10067,27 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._vkinds_cache[name] = vk
         return vk
 
+    def _pointee_kind_for(self, fn):
+        """`pointee_kind` bound to `fn`, for `ValueKinds`.
+
+        arm64's hook over the same shared `model.pointee_kind_of`, so the two
+        machines cannot disagree about what `p.value()` over a `Pointer[Float64]`
+        yields — the kind is what makes `Int(p.value())` an `FCVTZS`/
+        `CVTTSD2SI` rather than a bit move, and a disagreement would be one
+        machine converting and the other moving.  The tables are BOUND for
+        `_declared_kind_for`'s reason: `_vkinds_cache` outlives the function
+        that was emitting when the hook was built.
+        """
+        structs = self._structs
+        fdefs = self._functions
+
+        def kind_of_deref(expr):
+            return M.pointee_kind_of(fn, expr, structs, fdefs,
+                                     int_names=TYPE_NAMES,
+                                     string_names=STRING_TYPE_NAMES,
+                                     float_names=FLOAT_TYPE_NAMES)
+        return kind_of_deref
+
     def _declared_is_dict_for(self, fn_name):
         """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.
 
@@ -11947,7 +11968,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # too, `strlen` walking the bytes at address 10.
             if name in M.STRING_TYPE_CTORS:
                 refusal = M.string_conversion_refusal(
-                    name, operands[0], self._expr_str_kind(operands[0]))
+                    name, operands[0], self._expr_str_kind(operands[0]),
+                    pointer_intent=M.string_conversion_pointer_intent(e.kwargs))
                 if refusal:
                     raise CodegenError(refusal)
             return

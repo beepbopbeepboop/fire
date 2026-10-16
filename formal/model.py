@@ -20730,6 +20730,49 @@ def deref_receiver(expr):
     return None
 
 
+def pointee_kind_of(fn, expr, decls: dict, functions: dict = None,
+                    int_names=(), string_names=(), float_names=()):
+    """The KIND a POINTER DEREFERENCE expression yields, or `None`.
+
+    The hook `ValueKinds` asks so a pointee's kind flows into the dereference
+    rather than being decided by the context around it.  This is the one reader
+    of that answer for both backends, for the reason `pointer_pointee` is one
+    reader of the WIDTH: two readers of "what does this dereference yield" is
+    two kinds, and a disagreement between the architectures over a `double`
+    would be `FCVTZS` on one and a bit move on the other.
+
+    The two dereference SPELLINGS the load half answers — `p.value()`/
+    `p.unsafe_value()`/`p.unsafe_load()` (via `deref_receiver`, the same
+    recogniser the store half uses) and `p[i]` (a subscript) — are both here,
+    and the subscript is not optional once a `Float64` pointee has a width:
+    `subscript_base_lowering` reads the same `POINTEE_WIDTHS`, so leaving `p[i]`
+    out would emit the load for it while `Int(p[i])` still bit-moved.
+
+    **`None` for every kind but an integer or a double**, and that scoping is
+    deliberate rather than an omission.  An integer pointee's kind was already
+    the default (`INT_KIND`), so returning it changes nothing and keeps the
+    answer general; a float pointee is the whole reason the hook exists.  A
+    STRUCT pointee's dereference is the frame ADDRESS, which the frame tables
+    own (`pointer_frame_pointee`) and which every `_expr_str_kind` consumer
+    already reads as a word — returning `FRAME_KIND` here would reclassify a
+    shape this hook is not about, on the strength of a declaration rather than
+    of the dereference.  A blob/string/type pointee does not reach here at all
+    (`dereference_lowering` refuses it), so `None` is the conservative direction
+    for everything the hook does not claim.
+    """
+    recv = deref_receiver(expr)
+    if recv is None and isinstance(expr, F.SubscriptExpr):
+        recv = expr.obj
+    if recv is None:
+        return None
+    inner, _why = pointer_pointee(fn, recv, decls, functions)
+    if inner is None:
+        return None
+    kind = declared_type_kind(inner, int_names, string_names, decls,
+                              float_names=float_names)
+    return kind if kind in (INT_KIND, FLOAT_KIND) else None
+
+
 def pointer_store_receiver(target):
     """The ADDRESS a store through a dereference writes to, or `None`.
 
@@ -26099,6 +26142,12 @@ class ValueKinds:
         of what those bits mean — the same argument `string_names` makes for
         `STR_KIND`.  Empty (the default) leaves every existing decision exactly
         where it was, which is why it is a hook and not a derivation.
+      * `pointee_kind(expr)` — the KIND a POINTER DEREFERENCE yields, so
+        `Int(p.value())` over a `Pointer[Float64]` is `FCVTZS` rather than a bit
+        move.  A dereference's kind table answer would otherwise be the "a word
+        is an integer" default, because a load is a word; the decision and the
+        one reader are `pointee_kind_of`'s, and a `None` leaves every existing
+        decision exactly where it was.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
@@ -26144,6 +26193,14 @@ class ValueKinds:
         self._declared_is_dict = declared_is_dict or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
             lambda struct_name, call, field: None)
+        # The pointee's kind, so a DEREFERENCE expression carries the kind of
+        # what it loads rather than the "a word is an integer" default.  The
+        # seventh hook, and the only one whose whole job is to let one value's
+        # kind flow: `Int(p.value())` over a `Pointer[Float64]` is `FCVTZS` and
+        # not a bit move, which is why the pointee stopped being refused by name.
+        # A `None` leaves every existing decision exactly where it was.  The
+        # decision is `pointee_kind_of`'s; the backend binds the tables it needs.
+        self._pointee_kind = pointee_kind or (lambda expr: None)
         # The SIXTH hook, and the one the KIND axis cannot express: whether a
         # call to a function of this module produces a DICT. A dict and a list
         # are the same word pointing at the same blob header on this path, so
@@ -27803,6 +27860,16 @@ class ValueKinds:
             # about a function the module never declared.
             return INT_KIND
         if isinstance(e, F.SubscriptExpr):
+            # `p[i]` over a POINTER is a DEREFERENCE, and the same hook the
+            # `p.value()` spelling asks answers it — the SUBSCRIPT half of the
+            # load, and it cannot be left out: `subscript_base_lowering` reads
+            # the same `POINTEE_WIDTHS`, so a `Pointer[Float64]` would load
+            # through `p[i]` while `Int(p[i])` still bit-moved.  `None` for
+            # every non-pointer base (a list, a dict, a string), so the
+            # container reading below is reached exactly as before.
+            pk = self._pointee_kind(e)
+            if pk is not None:
+                return pk
             if not isinstance(e.index, F.SliceExpr):
 # A dict subscript is a KEY SCAN, and its answer is a claim
                 # about ONE element word — a word that a store writes and
@@ -30513,7 +30580,33 @@ def narrow_float_ctor_refusal(callee_name: str) -> str:
         f"rather than this one. {tail}")
 
 
-def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
+#: The keyword names a `String` conversion uses to SAY its operand is a raw
+#: pointer — `String(unsafe_from_utf8_ptr=p)`, `std/os/env.mojo`'s own spelling.
+#:
+#: It matters because a named pointer's KIND on this path is the "a word is an
+#: integer" default (`external_call["getenv", _CPointer[UInt8, …]]` bound to a
+#: local classifies `int` — a call result is a fact about the callee and the
+#: model's conservative answer is a word), so `string_conversion_refusal`'s
+#: positive-evidence rule refuses a conversion whose operand is exactly what the
+#: keyword says it is.  The conversion is the IDENTITY when the operand is a
+#: pointer, so the keyword is the source's own statement that the identity is
+#: the right lowering, and the whole-table read of "which keyword means a
+#: pointer" is here rather than spelled into both backends.
+STRING_POINTER_CONVERSION_KWARGS = frozenset({"unsafe_from_utf8_ptr"})
+
+
+def string_conversion_pointer_intent(kwargs) -> bool:
+    """True when a conversion's operand is passed as a raw-POINTER keyword.
+
+    `kwargs` is the call's `[(name, value)]` list.  One reader so the two
+    backends cannot disagree about which spelling states a pointer, and so the
+    keyword name is a table row rather than a string in two emitters.
+    """
+    return any(n in STRING_POINTER_CONVERSION_KWARGS for n, _v in (kwargs or ()))
+
+
+def string_conversion_refusal(callee_name: str, operand, operand_kind,
+                              pointer_intent: bool = False) -> str:
     """Why `String(x)` / `str(x)` is refused when `x` is KNOWN not to be text.
 
     `IDENTITY_TYPE_CTORS` above makes `str(x)` the IDENTITY on the operand,
@@ -30563,6 +30656,20 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
     """
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
+        return None
+    if pointer_intent:
+        # …and a conversion the SOURCE spelled as a raw-pointer one is exempt:
+        # `String(unsafe_from_utf8_ptr=ptr)` names the operand's TYPE in the
+        # call, so the identity is the lowering the source asked for, whatever
+        # the operand's kind-table answer is.  A named pointer's kind is the "a
+        # word is an integer" DEFAULT rather than a classification of what it
+        # holds — `var ptr = external_call["getenv", _CPointer[UInt8, …]](…)` —
+        # so without this the same `int` default that the DEREFERENCE exemption
+        # below exists for refuses a conversion that is RIGHT.  Measured on both
+        # architectures: `std/os/env.mojo`'s whole round trip
+        # (`test_formal_external_call.py`'s `env_round_trip`) stopped building
+        # when the positive-evidence rule landed, because its `getenv` spells
+        # exactly this call with a NAMED pointer rather than a load.
         return None
     if deref_receiver(operand) is not None:
         # …and a DEREFERENCE is exempt, which is the one exemption and it is a

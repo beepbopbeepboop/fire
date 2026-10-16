@@ -4417,6 +4417,30 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._vkinds_cache[name] = vk
         return vk
 
+    def _pointee_kind_for(self, fn):
+        """`pointee_kind` bound to `fn`, for `ValueKinds`.
+
+        The seventh hook, and the one that lets a pointee's KIND flow into a
+        dereference: `Int(p.value())` over a `Pointer[Float64]` is `FCVTZS` and
+        `printf("%d", p.value())` is refused by name, rather than both treating
+        the loaded word as an integer.  The decision is `model.pointee_kind_of`'s
+        so x86-64 cannot answer it differently; this binds the two tables it
+        reads (`self._structs`/`self._functions`, fixed for the compile) and the
+        annotation vocabularies, and a `None` from it leaves every existing
+        decision exactly where it was.  The tables are BOUND for the reason
+        `_declared_kind_for`'s comment gives: `_vkinds_cache` outlives the
+        function that was emitting when the hook was built.
+        """
+        structs = self._structs
+        fdefs = self._functions
+
+        def kind_of_deref(expr):
+            return M.pointee_kind_of(fn, expr, structs, fdefs,
+                                     int_names=TYPE_NAMES,
+                                     string_names=STRING_TYPE_NAMES,
+                                     float_names=FLOAT_TYPE_NAMES)
+        return kind_of_deref
+
     def _declared_kind_for(self, fn_name):
         """`_declared_kind` bound to the function `fn_name`, for `ValueKinds`.
 
@@ -9654,7 +9678,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # distinction `STRING_TYPE_CTORS` exists to keep.
             if name in M.STRING_TYPE_CTORS:
                 refusal = M.string_conversion_refusal(
-                    name, operands[0], self._expr_str_kind(operands[0]))
+                    name, operands[0], self._expr_str_kind(operands[0]),
+                    pointer_intent=M.string_conversion_pointer_intent(e.kwargs))
                 if refusal:
                     raise CodegenError(refusal)
             return
