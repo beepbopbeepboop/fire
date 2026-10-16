@@ -62,7 +62,7 @@ import mojo.middle.coro as gimple_gen_coro
 # in the wrong direction. Same rule and same precedent as
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
-from mojo.middle.exprtypes import _walk_ast, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
@@ -3868,6 +3868,20 @@ def gen_module_impl(self, stmts):
                     imported_stmts.append(s)
                     already_in_stmts.add(id(s))
 
+    # No epoch bump here, and the absence is worth stating because it looks
+    # like the omission a reader would expect to correct. Every nested
+    # `_compile_imported_module` above ran a whole `gen_module_impl` of its
+    # own and mutated its OWN nodes — nodes this level has not walked and, at
+    # the point the recursion returns, cannot have walked, because
+    # `imported_stmts` is built here (line ~3340) and first walked after this
+    # block. A memo entry for a node is only reachable through the object it
+    # was keyed on, so a nested compile cannot make an entry of THIS level's
+    # stale. Bumping here instead was measured: it costs the entire win. The
+    # entries worth keeping are the per-function-body ones, and a function of
+    # module k is walked again at every ancestor level above k — so flushing
+    # at each module boundary puts the O(N^2) straight back (160-module chain:
+    # 194,684 node visits with no boundary bump, 5,405,540 with one).
+
     self.struct_field_types['Span'] = {
         '_data': 'char *',
         '_len': 'int64_t',
@@ -4700,6 +4714,7 @@ def gen_module_impl(self, stmts):
                 break
         if not _dsc_has:
             _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+            _walk_ast_invalidate(_s)
 
     # --- builtin `bytes` subclassing: `class _Extra(bytes)` (zipfile) ---
     # A user struct whose transitive base list bottoms out at the builtin
@@ -4756,6 +4771,7 @@ def gen_module_impl(self, stmts):
                 break
         if not _bsc_has:
             _s.fields.insert(0, VarDecl(name='_data', type_ann=None, value=None))
+            _walk_ast_invalidate(_s)
         _bsc_new = None
         for _m in _s.methods:
             if _as_str(getattr(_m, 'name', '')) == '__new__':
@@ -5637,6 +5653,7 @@ def gen_module_impl(self, stmts):
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
+                            _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
             # `int`, because that is what the field's ctype is, so
             # `print(b.get())` printed `1` where CPython prints `True`. Its
@@ -5727,6 +5744,7 @@ def gen_module_impl(self, stmts):
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
+                            _walk_ast_invalidate(s)
 
     _struct_by_name = {st.name: st for st in all_struct_defs
                         if isinstance(st, StructDef)
@@ -5922,6 +5940,7 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                    _walk_ast_invalidate(target_def)
 
     _scan_body_for_local_field_access(stmts, None)
     if self.do_imports or self.link_imports:
@@ -9942,6 +9961,7 @@ def gen_module_impl(self, stmts):
                 and id(s) not in _generator_fns):
             continue
         s.body = self._inline_single_use_task_composition(s.body)
+        _walk_ast_invalidate(s)
         # Hoist any `await` still nested inside a call's argument list
         # into statement position. The A3 stack-switch backend normalizes
         # the same shape from its own shared eligibility chokepoint
@@ -9994,6 +10014,7 @@ def gen_module_impl(self, stmts):
             if _gm_id in _nested_in_fn_ids:
                 continue  # nested-in-function — Step I/closure pass's job
             s.body = self._inline_single_use_task_composition(s.body)
+            _walk_ast_invalidate(s)
             gimple_gen_coro.hoist_awaits_from_call_args(s)
             self._normalize_await_kwargs(s.body)
             if not _async_quick_eligible(s, frozenset(self._async_api.keys())):

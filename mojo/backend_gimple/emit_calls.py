@@ -35,6 +35,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
 import gimple_codegen
@@ -7676,6 +7677,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         for _attr_name, _attr_val in node.attrs:
             if _attr_name == 'byte' and isinstance(_attr_val, gimple_ctypes.SliceExpr):
                 _attr_val.obj = node.obj
+                _walk_ast_invalidate(_attr_val)
                 return gen._lower_slice(_attr_val)
 
     # Regular slice subscript: node.index is a bare SliceExpr (obj=None)
@@ -7686,6 +7688,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # would return the raw address of the first element as int64_t.
     if isinstance(node.index, gimple_ctypes.SliceExpr):
         node.index.obj = node.obj
+        _walk_ast_invalidate(node.index)
         return gen._lower_slice(node.index)
 
     # Fixed-size-array struct field: `obj.field[idx]` (and, chained,
