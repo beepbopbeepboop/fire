@@ -60,6 +60,7 @@ import re
 
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.exprtypes import _walk_ast_invalidate
 from fire_compiler import (
     CallExpr, FloatLiteral, FunctionDef, IdentExpr, IntLiteral, Parser,
     StringLiteral, StructDef, SubscriptExpr, TupleExpr, py_tokenize,
@@ -775,6 +776,7 @@ def _rewrite_callees(work, stmts):
         mangled = work.alias.get((kind, base, tuple(args)))
         if mangled:
             n.func = IdentExpr(name=mangled)
+            _walk_ast_invalidate(n)
     _walk(stmts, visit)
     for rec in work.records.values():
         _walk(rec['parsed'], visit)

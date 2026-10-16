@@ -46,6 +46,67 @@ _RUNTIME_INC = os.path.join(_PROJECT_DIR, 'runtime')
 _PASS = 0
 _FAIL = 0
 
+# Every function that writes an AST node's dataclass field, and the
+# reason it does not have to call `_walk_ast_invalidate`. Keyed
+# "<path>::<enclosing function>"; a key that no longer matches a real
+# function is reported by the check below, so the table cannot rot
+# silently — it is an inventory, not a suppressions file.
+#
+# Three shapes cover every entry:
+#   * the written object is NOT an AST node — it is one of this
+#     compiler's own dataclasses, which happen to use field names
+#     (`name`, `value`, `items`, `fields`, `kind`, `params`, `methods`,
+#     `captures`, `index`, `extra`, `alias`) the AST also uses;
+#   * the field is a SCALAR — `StructDef.name`, `Comprehension.kind`,
+#     `body_fd.is_async`, and `for_target_single_name` peeling `'(a)'`
+#     to `'a'` — so the walk returns the same nodes either way;
+#   * the tree being written is one `gen_module` has not walked: it is
+#     rewritten inside `ast_rewriter.rewrite` / `gimple_gen_coro.lower`
+#     in `_run_pipeline`, or freshly synthesized, or is reached during
+#     `gen_module` only through `hoist_awaits_from_call_args`, which
+#     invalidates the enclosing `fn` once the rewrite is done.
+_WALK_AST_MUTATION_ALLOWLIST = {
+    "ast_rewriter.py::Lit.__init__": "the rewriter's own pattern dataclass, not an AST node",
+    "ast_rewriter.py::Node.__init__": "ditto",
+    "ast_rewriter.py::Optional_.__init__": "ditto",
+    "ast_rewriter.py::RewriteRule.__init__": "ditto",
+    "ast_rewriter.py::Seq.__init__": "ditto",
+    "ast_rewriter.py::Var.__init__": "ditto",
+    "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
+    "mojo/backend_gimple/elab_intu.py::_Work.__init__": "`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
+    "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
+    "mojo/backend_gimple/elab_intu.py::run": "ditto",
+    "mojo/backend_gimple/emit_exprs.py::_lower_comprehension": "`Comprehension.target` is a str and `for_target_single_name` returns a str — a scalar write",
+    "mojo/backend_gimple/emit_metal.py::MetalEmitter.__init__": "the MSL emitter's own dataclass",
+    "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
+    "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
+    "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
+    "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
+    "mojo/middle/closures.py::discover_closures": "ditto",
+    "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
+    "mojo/middle/coro.py::_append_box_arg": "appends to a call this same rewrite just built",
+    "mojo/middle/coro.py::_apply_nested_async_capture": "`lower()` only, before `gen_module` walks anything",
+    "mojo/middle/coro.py::_cap_rewrite_stmts": "ditto",
+    "mojo/middle/coro.py::_copy_call_with_replaced_arg": "builds a FRESH call, so nothing has walked its `args` yet",
+    "mojo/middle/coro.py::_hoist_nested_async": "`lower()` only",
+    "mojo/middle/coro.py::_hoist_stmt": "during `gen_module` reached only through `hoist_awaits_from_call_args`, which invalidates the enclosing `fn`",
+    "mojo/middle/coro.py::_lower_one": "`lower()` only",
+    "mojo/middle/coro.py::_lower_one_async": "ditto",
+    "mojo/middle/coro.py::_lower_one_async_gen": "ditto",
+    "mojo/middle/coro.py::_rewrite_async_gen_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_async_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_asyncio_run_stmts": "ditto",
+    "mojo/middle/coro.py::_rewrite_elif": "ditto",
+    "mojo/middle/coro.py::_rewrite_stmts": "ditto",
+    "mojo/middle/coro.py::_thread_box_through_siblings": "ditto",
+    "mojo/middle/coro.py::fix": "ditto",
+    "mojo/middle/coro.py::lower": "ditto",
+    "mojo/middle/offload.py::Offloadable.__init__": "the offload record's own dataclass",
+    "mojo/middle/solvers.py::ClosureInfo.__init__": "the solver's own record",
+    "mojo/middle/solvers.py::DispatchTable.__init__": "ditto",
+    "mojo/middle/solvers.py::DispatchTable.add_method": "ditto",
+}
+
 
 def _check_gcc():
     r = subprocess.run([GCC, '--version'], capture_output=True)
@@ -9636,6 +9697,483 @@ print("%r" % p)
         print(f"PASS  {case} ({n_calls} call sites, none mutating)")
         _PASS += 1
 
+    def _ref_walk_into(node, out, depth=0):
+        """The walk `_walk_ast` would do with NOTHING remembered: no memo, no
+        per-class caches, nothing. Written out rather than reached for so that
+        a change to the real walk cannot silently change the reference too —
+        this is the only definition of "correct" the memo is measured against.
+        """
+        import dataclasses as _dc
+        import mojo.middle.exprtypes as _ET
+        if node is None:
+            return
+        if depth > _ET._WALK_AST_MAX_DEPTH:
+            return
+        if isinstance(node, list) or isinstance(node, tuple):
+            for item in node:
+                _ref_walk_into(item, out, depth + 1)
+            return
+        out.append(node)
+        if isinstance(node, type):
+            return
+        if _dc.is_dataclass(node):
+            for f in _dc.fields(node):
+                child = getattr(node, f.name, None)
+                if child is node:
+                    continue
+                _ref_walk_into(child, out, depth + 1)
+            return
+
+    def test_walk_ast_memo_is_transparent_and_honours_invalidation():
+        """The memo must be indistinguishable from walking every time — and
+        must STOP being indistinguishable the moment a node is mutated.
+
+        `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+        (Phase 10). `_walk_ast` is now keyed on node identity, which is what
+        makes it stop re-descending the same subtrees once per consumer and
+        once per import level, and identity is exactly what cannot see a
+        mutation. So two things have to hold, and this checks both:
+
+          * CONTENT and ORDER are the reference walk's, node for node — the
+            same invariant `walk_ast_dataclass_cache_is_transparent` checks
+            for the per-class caches below it;
+          * a mutation actually costs the memo its answer — for the mutated
+            node AND for every node that contains it, which is the part a
+            per-node cache gets wrong and the part the parent edges exist
+            for.
+
+        And the two hazards the doc names directly: the entry holds the node
+        (so its address cannot be handed to a different node while the entry
+        lives), and a repeat call gets the SAME list object (which is what
+        makes the memo cheap — and is why `no_walk_ast_caller_mutates_what_
+        it_is_handed` exists)."""
+        global _PASS, _FAIL
+        name = "walk_ast_memo_is_transparent_and_honours_invalidation"
+        import mojo.middle.exprtypes as ET
+        from fire_compiler import py_tokenize, Parser, VarDecl, StructDef, \
+            FunctionDef, IdentExpr, IntLiteral
+        import ast_rewriter
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            src = ("class K:\n"
+                   "    A = 1\n"
+                   "    var D\n"
+                   "    def __init__(self, x):\n"
+                   "        self.A = x\n"
+                   "        self.D = x\n"
+                   "def f(a, b):\n"
+                   "    t = [x for x in range(3) if x]\n"
+                   "    for i in t:\n"
+                   "        print(i)\n"
+                   "    return {'k': t, 'j': [a, b]}\n")
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            # `stmts` and each statement in it, walked twice: the second
+            # answer must be the SAME list object (the memo) and must equal
+            # the reference walk.
+            memo_hits = 0
+            for root in [stmts] + list(stmts):
+                got = ET._walk_ast(root)
+                again = ET._walk_ast(root)
+                if again is not got:
+                    err = 'a repeat walk did not come from the memo'
+                    break
+                memo_hits += 1
+                ref = []
+                _ref_walk_into(root, ref)
+                if len(ref) != len(got):
+                    err = f'node count {len(ref)} != {len(got)}'
+                    break
+                for i, (r, g) in enumerate(zip(ref, got)):
+                    if r is not g:
+                        err = f'node {i}: {type(r)} is not {type(g)}'
+                        break
+                if err:
+                    break
+            # The entry holds the node itself — hazard 2 of the doc's two.
+            # A freed node's id could otherwise be handed to a different node
+            # and the memo would answer with the first one's nodes.
+            sd = stmts[0]
+            entry = ET._WALK_AST_MEMO.get(id(sd))
+            if entry is None or entry[0] is not sd:
+                err = 'the memo entry does not hold the node it is keyed on'
+            # ... and a mutation costs both the node and its container their
+            # memoized answer.
+            if not err:
+                before = ET._walk_ast(stmts)
+                added = VarDecl(name='late', type_ann=None,
+                                value=IntLiteral(value=7))
+                sd.fields.append(added)
+                ET._walk_ast_invalidate(sd)
+                after = ET._walk_ast(stmts)
+                # The property is CONTAINMENT, not a node count: the appended
+                # field and everything under it must be reachable from the
+                # container's walk NOW, and must not have been reachable
+                # before. A count would be the wrong shape to assert — a
+                # VarDecl brings its own subtree, and that IntLiteral brings
+                # its scalar.
+                if any(n is added for n in before):
+                    err = 'the appended field was already in the old walk'
+                elif not any(n is added for n in after):
+                    err = ('a struct that grew a field still walks to the '
+                           'nodes it had before the append')
+            # Same again for a body rewritten wholesale, which is the shape
+            # `_inline_single_use_task_composition` and `hoist_awaits_from_
+            # call_args` produce.
+            if not err:
+                fd = [s for s in stmts if isinstance(s, FunctionDef)][-1]
+                old_stmts = list(fd.body)
+                old_len = len(ET._walk_ast(fd))
+                repl = IntLiteral(value=3)
+                fd.body = [repl]
+                ET._walk_ast_invalidate(fd)
+                now = ET._walk_ast(fd)
+                if len(now) >= old_len:
+                    err = ('a body replaced wholesale still walks to its old '
+                           f'length ({len(now)} vs {old_len})')
+                elif not any(n is repl for n in now):
+                    err = 'the replacement statement is not in the walk'
+                elif any(n is old_stmts[0] for n in now):
+                    err = 'a statement from the replaced body is still there'
+            if not err and memo_hits < 2:
+                err = 'nothing was memoized, so this proved nothing'
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_walk_ast_memo_never_answers_stale_over_real_compiles():
+        """Every `_walk_ast` call, over real compiles, must return exactly
+        what an uncached walk would — INCLUDING after a mutation.
+
+        `walk_ast_memo_is_transparent_and_honours_invalidation` proves the
+        mechanism on hand-built shapes. This is the one that catches what a
+        hand-built shape cannot: a mutation site in the compiled path that
+        forgot to call `_walk_ast_invalidate`. The failure it would produce
+        in the field is a struct field, a struct method or a field type that
+        silently goes missing from generated C — a wrong artifact, not a
+        slow one — and no amount of reading the memo's own unit test finds
+        it, because the memo is working exactly as written; the WRITER is
+        what forgot.
+
+        So every call is checked against an independent reference walk while
+        a corpus of programs goes through `compile_to_gimple(do_imports=True)`
+        — deliberately including the shapes whose own codegen mutates the AST
+        (a class with `__init__` self-assigns, which grows `StructDef.fields`
+        from the assignments; a `dict` subclass, which inserts a `_data` field;
+        an `async def` and a generator, whose bodies get rewritten; a `for`
+        over a subscript, which the emitter rewrites in place).
+
+        The honest limit: this is evidence about the corpus below, not a
+        proof for every input. A mutation reachable only from a shape no
+        program here has is not covered, which is why the alternative — a
+        static census of every AST-field write — is the thing to add next if
+        a new mutation site is ever added and this stays green."""
+        global _PASS, _FAIL
+        name = "walk_ast_memo_never_answers_stale_over_real_compiles"
+        import mojo.middle.exprtypes as ET
+
+        corpus = [
+            ("class fields from __init__ self-assigns",
+             "class K:\n"
+             "    A = 1\n"
+             "    var D\n"
+             "    def __init__(self, x):\n"
+             "        self.A = x\n"
+             "        self.B = x + 1\n"
+             "        self.D = 0\n"
+             "    def m(self, y):\n"
+             "        self.A = y\n"
+             "        return self.B\n"
+             "def f(z):\n"
+             "    return K(z).m(z)\n"),
+            ("dict subclass inserts the hidden _data field",
+             "class D(dict):\n"
+             "    def __init__(self):\n"
+             "        self.n = 0\n"
+             "def f():\n"
+             "    d = D()\n"
+             "    d['a'] = 1\n"
+             "    return d\n"),
+            ("inheritance merge rewrites fields and methods in place",
+             "class B:\n"
+             "    A = 1\n"
+             "    def b(self):\n"
+             "        return self.A\n"
+             "class C(B):\n"
+             "    A = 2\n"
+             "    def c(self):\n"
+             "        return self.A\n"
+             "def f():\n"
+             "    return C().b() + C().c()\n"),
+            ("loops, comprehensions and a nested def",
+             "def f(xs):\n"
+             "    t = []\n"
+             "    for i in range(len(xs)):\n"
+             "        t.append(xs[i])\n"
+             "    def g(y):\n"
+             "        return [z * 2 for z in y]\n"
+             "    return g(t)\n"),
+            ("a generator and an async def (bodies get rewritten)",
+             "def gen(n):\n"
+             "    for i in range(n):\n"
+             "        yield i\n"
+             "async def work(n):\n"
+             "    return await gen(n)\n"
+             "def f():\n"
+             "    return gen(3)\n"),
+        ]
+        real_walk = ET._walk_ast
+        real_into = ET._walk_ast_into
+        state = {"calls": 0, "hits": 0, "bad": None}
+
+        def verifying(node):
+            state["calls"] += 1
+            out = []
+            # The reference walk, straight through `_walk_ast_into` with the
+            # memo unreachable (it is only consulted by `_walk_ast`).
+            real_into(node, out)
+            if id(node) in ET._WALK_AST_MEMO:
+                state["hits"] += 1
+                cached = real_walk(node)
+                if cached is not out and state["bad"] is None:
+                    for i, (a, b) in enumerate(zip(cached, out)):
+                        if a is not b:
+                            state["bad"] = (
+                                f'call {state["calls"]} on '
+                                f'{type(node).__name__}: node {i} differs')
+                            break
+                    if state["bad"] is None and len(cached) != len(out):
+                        state["bad"] = (
+                            f'call {state["calls"]} on '
+                            f'{type(node).__name__}: {len(cached)} cached '
+                            f'nodes vs {len(out)} walked')
+            return real_walk(node)
+
+        ET._walk_ast = verifying
+        # The middle/backend tiers hold `_walk_ast` by value, so patch those
+        # bindings too or the corpus would not go through the verifier.
+        import sys as _sys
+        for _m in list(_sys.modules.values()):
+            if _m is None:
+                continue
+            try:
+                if getattr(_m, "_walk_ast", None) is real_walk:
+                    _m._walk_ast = verifying
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            for label, src in corpus:
+                if state["bad"]:
+                    break
+                try:
+                    compile_to_gimple(src, do_imports=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"NOTE  {name}: {label} raised "
+                          f"{type(e).__name__} (still counts as walked)")
+        finally:
+            ET._walk_ast = real_walk
+            for _m in list(_sys.modules.values()):
+                if _m is None:
+                    continue
+                try:
+                    if getattr(_m, "_walk_ast", None) is verifying:
+                        _m._walk_ast = real_walk
+                except Exception:  # noqa: BLE001
+                    pass
+            ET._walk_ast_reset()
+        if state["bad"]:
+            print(f"FAIL  {name}: {state['bad']}")
+            _FAIL += 1
+            return
+        if state["calls"] < 100 or state["hits"] < 10:
+            print(f"FAIL  {name}: only {state['calls']} walks and "
+                  f"{state['hits']} memo hits — the corpus proved nothing")
+            _FAIL += 1
+            return
+        print(f"PASS  {name} ({state['calls']} walks, {state['hits']} of "
+              f"them answered from the memo, none stale)")
+        _PASS += 1
+
+    def test_every_ast_mutation_site_invalidates_the_walk_memo():
+        """A function that writes an AST node's field must invalidate the
+        `_walk_ast` memo — or say why it need not.
+
+        `walk_ast_memo_never_answers_stale_over_real_compiles` is the check
+        that CATCHES a missed site, and it is evidence rather than a proof:
+        it covers the shapes its corpus has, and a mutation reachable only
+        from a shape it does not have is silent. This is the other half —
+        the census the 2026-10-05 entry already wrote for the OTHER hazard
+        (`no_walk_ast_caller_mutates_what_it_is_handed`), turned on this
+        one, so the inventory is a named list rather than a habit.
+
+        The field names are not hard-coded: they are read out of every
+        dataclass in `fire_compiler.py` at run time, so a new AST node with
+        a new field is covered the day it is written. The predicate is the
+        set of shapes that can change what a walk of some node returns — an
+        attribute store, an in-place `append`/`extend`/`insert`/…, a store
+        into one of those — and each hit is attributed to the innermost
+        function containing it, which is where the invalidation has to be.
+
+        Two ways it can be wrong, both reported: an unclassified site (the
+        common one — add the call, or add the reason), and an allowlist key
+        that no longer names a real function (a rotted suppression is one
+        nobody re-reads).
+        """
+        global _PASS, _FAIL
+        name = "every_ast_mutation_site_invalidates_the_walk_memo"
+        import ast as _ast
+        import dataclasses as _dc
+        import inspect as _inspect
+        import fire_compiler as _fc
+
+        problems = []
+        n_sites = 0
+        try:
+            fields = set()
+            for _n in dir(_fc):
+                _o = getattr(_fc, _n)
+                if _inspect.isclass(_o) and _dc.is_dataclass(_o):
+                    for _f in _dc.fields(_o):
+                        fields.add(_f.name)
+            mutators = {"append", "extend", "insert", "pop", "remove",
+                        "clear", "sort", "reverse", "update", "add",
+                        "setdefault"}
+            paths = []
+            for _r in ("mojo", "gimple_codegen.py", "ast_rewriter.py"):
+                if os.path.isfile(_r):
+                    paths.append(_r)
+                    continue
+                for _dp, _dn, _ns in os.walk(_r):
+                    _dn[:] = [d for d in _dn if d != "__pycache__"]
+                    for _n2 in sorted(_ns):
+                        if _n2.endswith(".py"):
+                            paths.append(os.path.join(_dp, _n2))
+            allow = _WALK_AST_MUTATION_ALLOWLIST
+            found = {}
+
+            def calls_invalidate(fn):
+                for n in _ast.walk(fn):
+                    if not isinstance(n, _ast.Call):
+                        continue
+                    f = n.func
+                    nm = (f.id if isinstance(f, _ast.Name)
+                          else f.attr if isinstance(f, _ast.Attribute) else "")
+                    if nm in ("_walk_ast_invalidate", "_walk_ast_reset"):
+                        return True
+                return False
+
+            def writes(node):
+                """The AST-field writes ON THIS STATEMENT, if any."""
+                out = []
+                tgts = []
+                if isinstance(node, _ast.Assign):
+                    tgts = node.targets
+                elif isinstance(node, _ast.AnnAssign):
+                    tgts = [node.target]
+                elif isinstance(node, _ast.AugAssign):
+                    tgts = [node.target]
+                elif isinstance(node, _ast.Delete):
+                    tgts = list(node.targets)
+                for t in tgts:
+                    if isinstance(t, _ast.Attribute) and t.attr in fields:
+                        out.append("`" + t.attr + "`")
+                    elif (isinstance(t, _ast.Subscript)
+                          and isinstance(t.value, _ast.Attribute)
+                          and t.value.attr in fields):
+                        out.append("`" + t.value.attr + "[...]`")
+                if (isinstance(node, _ast.Call)
+                        and isinstance(node.func, _ast.Attribute)
+                        and node.func.attr in mutators
+                        and isinstance(node.func.value, _ast.Attribute)
+                        and node.func.value.attr in fields):
+                    out.append("`.%s` on `%s`"
+                               % (node.func.attr, node.func.value.attr))
+                return out
+
+            for p in paths:
+                rel = os.path.relpath(p, _PROJECT_DIR)
+                with open(p, errors="replace") as f:
+                    text = f.read()
+                try:
+                    tree = _ast.parse(text, filename=rel)
+                except SyntaxError:
+                    continue
+                funcs = [n for n in _ast.walk(tree)
+                         if isinstance(n, (_ast.FunctionDef,
+                                           _ast.AsyncFunctionDef))]
+
+                def qual(line, _funcs=funcs, _tree=tree):
+                    """The innermost function containing `line` — a write
+                    belongs to the function that performs it, which for a
+                    nested `def` is the inner one."""
+                    best = None
+                    for g in _funcs:
+                        if g.lineno <= line <= (g.end_lineno or 0):
+                            if best is None or g.lineno > best.lineno:
+                                best = g
+                    if best is None:
+                        return None
+                    owner = None
+                    for c in _ast.walk(_tree):
+                        if isinstance(c, _ast.ClassDef) and best in c.body:
+                            owner = c.name
+                    return (owner + "." if owner else "") + best.name
+
+                invalidating = set()
+                for g in funcs:
+                    if calls_invalidate(g):
+                        invalidating.add(qual(g.lineno))
+                for node in _ast.walk(tree):
+                    ws = writes(node)
+                    if not ws:
+                        continue
+                    owner = qual(node.lineno)
+                    if owner is None:
+                        continue        # module level: no walk has an entry
+                    key = rel + "::" + owner
+                    found.setdefault(key, []).append(
+                        (node.lineno, ", ".join(ws[:2])))
+                    n_sites += 1
+                for key in list(found):
+                    if not key.startswith(rel + "::"):
+                        continue
+                    owner = key[len(rel) + 2:]
+                    if owner in invalidating or key in allow:
+                        found[key] = []
+                        continue
+                    places = ", ".join("%d %s" % (ln, what)
+                                        for ln, what in found[key][:3])
+                    problems.append(
+                        "%s writes an AST node's field (%s) and never "
+                        "invalidates the memo - either call "
+                        "`_walk_ast_invalidate(<the node it wrote>)` there, "
+                        "or add the key to `_WALK_AST_MUTATION_ALLOWLIST` "
+                        "with the reason" % (key, places))
+            for key in sorted(allow):
+                if key not in found:
+                    problems.append(
+                        "_WALK_AST_MUTATION_ALLOWLIST has %s, which no longer "
+                        "names a function that writes an AST field" % key)
+        except Exception as e:  # noqa: BLE001
+            problems.append("%s: %s" % (type(e).__name__, e))
+        if problems:
+            print("FAIL  %s: %d problem(s):" % (name, len(problems)))
+            for q in problems[:12]:
+                print("  " + q)
+            _FAIL += 1
+            return
+        print("PASS  %s (%d write sites in %d functions, each invalidating "
+              "or classified)" % (name, n_sites, len(found)))
+        _PASS += 1
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -11870,6 +12408,9 @@ print(run('x/y.txt'))
     test_paren_name_vs_one_tuple_for_target_differ()
     test_walk_ast_dataclass_cache_is_transparent()
     test_no_walk_ast_caller_mutates_what_it_is_handed()
+    test_walk_ast_memo_is_transparent_and_honours_invalidation()
+    test_walk_ast_memo_never_answers_stale_over_real_compiles()
+    test_every_ast_mutation_site_invalidates_the_walk_memo()
     test_scalar_arity_min_max_params_are_not_containers()
     test_a_forwarded_string_argument_keeps_its_type()
     test_a_forwarded_container_argument_takes_the_callees_kind()
