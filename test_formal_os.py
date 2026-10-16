@@ -313,6 +313,7 @@ def main(n):
     # make a real directory nobody can enter.
     printf("mkdir-default=%d@@", mkdir(join(root, "one-default")))
     printf("makedirs-default=%d@@", makedirs(join(root, "q/r/s")))
+    show("made-default", join(root, "q/r/s"))
     show("made-deep", join(root, "p/q/r"))
     # The mode OMITTED, which is CPython's `mode=0o777` default. The oracle
     # for the mode is a directory CPython's own `os.mkdir`/`os.makedirs`
@@ -617,8 +618,6 @@ def group_fs(tmpdir, verbose):
         "makedirs": "0",
         "makedirs-again": "0",        # exist_ok: already there is not an error
         "makedirs-deep": "0",
-        "mkdir-default": "0",         # `mode` omitted: CPython's 0777 default
-        "makedirs-default": "0",
         "rmdir": "0",
         "rmdir-missing": "-1",
         "remove": "0",
@@ -662,7 +661,7 @@ def group_fs(tmpdir, verbose):
     })
     for tag, path in (("made", p("a", "b", "c")),
                       ("made-deep", p("p", "q", "r")),
-                      ("made-default", p("dd", "ee")),
+                      ("made-default", p("q", "r", "s")),
                       ("removed", p("a", "b", "c", "d", "e")),
                       ("removed-file", p("f.txt")),
                       ("gone", p("x1")), ("renamed", p("z2")),

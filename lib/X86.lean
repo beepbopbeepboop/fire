@@ -464,11 +464,6 @@ def x86_set_flag4 (s : X86State) (res : UInt64) (cf ofBit : Bool) : X86State :=
     call and the fact above does the work; `x86_set_flag4` is `{s with …}`
     outright. -/
 
-theorem x86_set_reg_narrow_mem (s : X86State) (i sz : Nat) (v : UInt64) :
-    (x86_set_reg_narrow s i sz v).mem = s.mem := by
-  unfold x86_set_reg_narrow
-  exact x86_set_reg_mem _ _ _
-
 theorem x86_set_flag4_mem (s : X86State) (res : UInt64) (cf ofBit : Bool) :
     (x86_set_flag4 s res cf ofBit).mem = s.mem := rfl
 
@@ -2294,9 +2289,7 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
     x86_step s code = some
       (x86_set_flag4
         { x86_set_reg s dst
-            (x86_split128
-              (x86_signed (x86_get_reg s dst)
-                * x86_signed (x86_get_reg s (rm + x86_rex_b rex)))).1
+            (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
           with rip := m + 4 }
         (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
         (x86_imul_ovf (x86_get_reg s dst) (x86_get_reg s (rm + x86_rex_b rex)))

@@ -1354,7 +1354,9 @@ AXIOM_CLOSURE = {
     # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
     # declaration added by one of the merged branches rests on a decide axiom.
     # The partition still closes (312 = 61 + 243 + 0 + 8).
-    "ProofLib": (312, 61, 243, 0, 8, 0),
+    # Re-pinned by the bulk merge of the formal-worker branches: one more theorem
+    # asked, four more kernel-checked clean, three fewer closure-only.
+    "ProofLib": (313, 61, 247, 0, 5, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
@@ -1372,7 +1374,9 @@ AXIOM_CLOSURE = {
     # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
     # reaches no decide axiom, so `asked` and `clean` both move by one. The
     # partition still closes (151 = 2 + 148 + 0 + 1).
-    "X86": (151, 2, 148, 0, 1, 0),
+    # Re-pinned by the bulk merge of the formal-worker branches: two more clean
+    # theorems (153 = 2 + 150 + 0 + 1).
+    "X86": (153, 2, 150, 0, 1, 0),
     "work": (19, 0, 17, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and

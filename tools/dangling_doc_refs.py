@@ -612,6 +612,7 @@ SAID_TO_STATUS = {
     'lean-rejected': 'lean-rejected',
     'refused': 'refused',
     'too-large': 'too-large',
+    'sorry': 'sorry',
 }
 
 
