@@ -1,6 +1,0 @@
-memcap: t -- ceiling 8.0 GB across the process tree
-  PASS  del_lowerings_use_no_allocator_register
-  FAIL  printf_float_operand_read_from_an_xmm_register: --backend=arm64 did not build: ` `x` printed 3.9's bit pattern as a decimal and `printf("[%.17g]", 7)` printed the integer as a denormal. Refused rather than converted, because the conversion is the source's decision and this path already has both of them: `Int(x)` truncates toward zero and `float(x)` rounds to the nearest double
-
-x86-64 formal parity: PASS=1 FAIL=1 (2 cases)
-memcap: done, peak 0.0 GB across up to 1 procs (ceiling 8.0 GB), child exit 1
