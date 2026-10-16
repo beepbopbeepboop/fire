@@ -44,6 +44,47 @@ Found 2026-10-04 while re-measuring
 `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose
 file used to be refused at the `**kw` spread and is now refused here instead.
 
+## What landed 2026-10-13 (`work/formal363-docs`): a field-less f-string is not a composition, and is no longer refused
+
+**The refusal was over-broad by exactly one shape: an interpolated literal with
+NO `{…}` field has no composition to do, and its own message said so — "This one
+has NO field at all … so its value is a CONSTANT and this refusal is over a
+missing buffer rather than a run-time value" — while refusing it anyway.** A
+constant string needs no buffer; it is interned into `__TEXT` like any other
+literal's bytes. So it is folded instead:
+
+* `formal/model.py::interpolated_literal_constant(node)` reads such a token into
+  its one spelling (`interpolated_literal_segments` already unescapes `{{`/`}}`
+  and leaves every backslash as written), or answers `None` for a literal that
+  HAS a field or that the reader cannot take apart;
+* `fold_constant_interpolated_literals(stmts)` rewrites each such node into the
+  plain `StringLiteral` it is — `is_raw` carried from the literal's own PREFIX
+  through `interpolated_literal_quote_start`, so `rf"\d+"` keeps its backslash
+  rather than being decoded into a newline;
+* `formal/build.py::_prepare_functions` runs the fold immediately in front of
+  `refuse_interpolated_literals`, so that refusal's subject is exactly the
+  INTERPOLATING literals it is for. A caller that skipped the fold would refuse
+  a correct program, never miscompile one — the fold is the fix and the refusal
+  is the backstop;
+* `interpolated_literal_refusal`'s "NO field at all" sentence is kept (it is a
+  pure function `test_refusal_taxonomy.py` still calls directly), but through
+  the pipeline it is now unreachable.
+
+**Measured on both architectures**, `f"hello"`, `f"a{{b}}"`, `rf"\d+"`,
+`f"x\ny"` and `t"hello"` all build, run and print CPython's text; pinned by
+`test_formal_run.py`'s `an_fstring_with_no_field_is_the_plain_string`,
+`a_raw_fstring_with_no_field_keeps_its_backslash` and
+`a_tstring_with_no_field_is_the_plain_string`, and the INTERPOLATING refusal
+rows beside them are unchanged.
+
+**What this does NOT move, and the doc above stands for it:** every one of
+`formal/x86_64_decode.py`'s 13 f-strings INTERPOLATES a run-time field, so all
+13 still take the buffer path and this file's first refusal is still the
+line-133 f-string, with the `**kw` spread still behind it. The interpolating
+case is untouched, and the buffer (§"What it would take") is still the whole of
+what this doc is about. This is the field-less half of the same subject, not the
+subject.
+
 ## What landed 2026-10-05 (`work/formal27-2`), and what is still missing
 
 **The advice the refusal gives was wrong, and following it produces a
