@@ -52,13 +52,54 @@ with this change reverse-applied.
 read §9a before §1**: §1a says §1's construct was unmeasurable until §9 was
 fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall,
 which was a third bug underneath it and is named there. What is left is §1a
-itself (a name resolution, and an ABI decision), §2 (a dotted application), §3
+itself (a name resolution, and an ABI decision), §2's dotted application, §3
 (comptime-valued parameters), §4 (a type declared in the consumer), §8 (trait
 bounds). The cross-module-library half — a LIBRARY that applies ANOTHER
 module's template — is FIXED (`build_module_dylib` now hands the imported
 templates' demap and declarations to `compile_formal_dylib`, beside §9a's own
 half; `test_formal_monomorph.py`'s "a library that applies another module's
 template instantiation").
+
+**Status 2026-10-12 (`work/formal310-docs`): §2's ALIASED half is FIXED, and it
+did NOT need the place-3 name-resolution decision the 2026-10-05 block below
+left as its finding.** `from pairlib import Pair as P` then `P[Int]()` now
+builds and RUNS on both architectures and agrees with CPython — a struct
+template with two `T`s, two instantiations (`Int` and `Bool`), a field write, a
+field read and a method call, all through the alias
+(`test_formal_monomorph.py::test_an_aliased_import_of_a_template_is_instantiated`);
+a `def twice[T]` imported as `t` and applied as `t[Int](21)` answers 42 too.
+
+The cause was the one the block measured: `all_instantiation_calls` keys a
+demand on the name AS SPELLED, so `P[Int]()` asked for a template called `P`
+that no module declares, the instantiation was never requested, and the call was
+refused by the bracketed-callee scan. **The fix is a NAME MAPPING in the two
+readers that already have to agree about the bracket, and it is not the tree
+rewrite the block proposed** — `formal/monomorph.py::_import_aliases` folds
+`model.import_bindings`' DEFINING name in front of `all_instantiation_calls`
+(so the demand is asked under `Pair`) AND in front of
+`rewrite_instantiation_calls` (so the call site is rewritten to the mangled
+name, including the single-instantiation `Base.<member>` read). Two readers of
+one bracket, one alias table, and the rewrite reaches the scan already spelled
+`Pair_1_T_3_Int()` — which is why the block's place 3,
+`collect_module_symbols` publishing the DEFINING name, was **not needed**: a
+tree rewrite placed beside `_substitute_module_constants` (which runs AFTER
+`_imported_structs`) could not reach the demand walk, which re-parses the source
+TEXT, so the demand stayed empty and only the spelling changed — exactly the
+measurement the block recorded. Doing the mapping in the demand walk and the
+rewrite instead makes the places the block named 1 and 2 sufficient, and it
+never touches the name-resolution table the block declined to change.
+
+`dotted_specialization_refusal`'s docstring is corrected with it (it claimed the
+aliased form does not work); the emitted sentence's "ALIASED form" clause is
+about the MODULE alias (`import … as L`), which is a different construct and is
+still refused.
+
+**What is still open is §2's DOTTED half** (`L.Pair[Int]()`), unchanged: the
+recogniser/ABI decision the section opens with, because
+`mojo/middle/comptime.specialization_name` answers `None` for a dotted base BY
+DESIGN. Verified: `test_formal_monomorph.py` 39/39 (one new row),
+`test_formal_specialization.py` 23/23, `test_formal_imports.py` 91/91,
+`test_formal_run.py` 1209/0, `test_refusal_taxonomy.py` 362/362.
 
 The mechanism itself is `formal/monomorph.py` and its two call sites in
 `formal/imports.py` (`instantiation_demands`, `imported_instantiations`); the
