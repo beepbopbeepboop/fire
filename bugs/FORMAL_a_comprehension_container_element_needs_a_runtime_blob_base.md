@@ -318,8 +318,13 @@ store. So relocating it means `res_offset` stops being a compile-time constant
 and becomes a **register holding a run-time address**, and every one of those
 recomputes has to read that register instead of calling `_emit_list_base`.
 
-**That is the whole of what is left, and it is not a patch.** Concretely, on
-each backend:
+**"What landed 2026-10-13" supersedes the third row of that table.** The nested
+comprehension did NOT need the relocation: its result is at the element
+footprint's start, so the copy reaches it. Steps 1-3 below are owed by the
+shapes whose element carries an inner blob's ADDRESS and so cannot be made
+independent by a byte copy — a list of lists, a slice, a constructor call, and a
+nested comprehension whose payload builds a container. **That is what is left,
+and it is not a patch.** Concretely, on each backend:
 
 1. `_emit_comprehension` must be able to say "my result lives at a slot of my
    parent's array" and then keep that address in a register for the whole walk,
@@ -342,7 +347,11 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
   disagree about a comprehension's result address;
 * the two rows it did fix are covered by the OTHER doc's table as cases a fix
   must not break, and they only pass *because* the nested row is broken in the
-  same build — so there is no partial landing that is a partial fix;
+  same build — so there is no partial landing that is a partial fix. **That
+  argument is superseded (2026-10-13): the nested row did not need this
+  relocation at all, and the per-iteration COPY already reaches it, so the
+  partial landing this bullet says is impossible has landed** (see "What landed
+  2026-10-13");
 * one real defect in it is worth recording: `_blob_est` counts **elements**, and
   every blob is `[count][element…]`, so a slot sized `8 * _blob_est(...)` is one
   word too small and the third iteration's count header overwrote the second
