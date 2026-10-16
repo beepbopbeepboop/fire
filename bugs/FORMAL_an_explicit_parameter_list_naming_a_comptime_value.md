@@ -182,7 +182,7 @@ not `FORMAL_generic_monomorph_scope.md` §1 (a type argument in a **non-call**
 position — an annotation, a field, a return type). It is a bracket that IS
 written, whose second element is not a type. Neither existing doc lists it;
 §8 of the monomorph doc's "what is not here, deliberately" does not mention it,
-which is where `FORMAL_std_os_io_round2_…` §3 looked for it.
+which is where the round-2 `std-os-io` audit's §3 looked for it.
 
 ## 3. Two messages in this neighbourhood are wrong about the source — BOTH FIXED
 
@@ -283,6 +283,6 @@ under the export row depending on which message fires, which is a fourth fact
 about it: **one construct, two rows in the ranking instrument, and neither row
 is about the construct.** The `sys/arg.mojo` instance is 1 of the 60 dependency
 refusals in `FORMAL_std_builtin_sys_time_slice_2026-10-03.md` §4 and 4 files
-behind it in `FORMAL_std_os_io_round2_…` §3, so the sweep's own numbers put it
+behind it in the round-2 `std-os-io` audit's §3, so the sweep's own numbers put it
 at 5 files and the round-2 doc's probe put it at 4; both are lower bounds,
 because a file whose own construct refuses first is not in either count.
