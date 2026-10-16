@@ -16589,6 +16589,40 @@ POINTER_DEREF_CASES = [
      "    t.b = 7\n"
      "    var u = give(t)\n"
      "    return Int(u.b)\n", 7, None),
+    # ── a BINARY64 pointee: the load is bit-exact and its KIND now flows ────
+    #
+    # `Pointer[Float64].value()` is eight bytes of IEEE binary64 loaded with the
+    # same instruction an `Int64` pointee uses, so the LOAD was never the
+    # problem; what was missing is that the loaded word's KIND has to come from
+    # the pointee's declaration, because a dereference is one word either way.
+    # `ValueKinds.pointer_pointee_kind` supplies it, and these two rows are the
+    # two directions that makes answerable at once: an integer CONVERSION must be
+    # `FCVTZS` rather than a bit move, and a floating FORMAT must place the
+    # double.  They are checked on BOTH backends by being two plain `run_case`
+    # rows in a group the both-architecture runner does not override (only the
+    # `deref_struct_pointee*` names are), and their stdout is the whole point:
+    # an exit code cannot tell a truncated double from its exponent field.
+    #
+    # 3.0's bits, as the eight bytes of a string a parameter reads as a
+    # `Pointer[Float64]`.  `int(3.0)` is 3, and a bit-move would print the
+    # pattern 0x4008000000000000 as a huge integer instead.
+    ("deref_float64_int_conversion_is_fcvtzs",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"\\x00\\x00\\x00\\x00\\x00\\x00\\x08\\x40\"\n"
+     "    printf(\"v=%d\", read_f(s))\n"
+     "    return 0\n", 0, "v=3"),
+    # The FLOATING format, and the loaded word is a double that is NOT a small
+    # integer: `%d` would have rendered 0x4847464544434241 as a decimal and this
+    # row pins the double CPython reads out of the same eight bytes.
+    ("deref_float64_load_prints_as_a_double",
+     "def read_f(p: Pointer[Float64]) -> Float64:\n"
+     "    return p.value()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    printf(\"[%.17g]\", read_f(s))\n"
+     "    return 0\n", 0, "[1.5839800103804824e+40]"),
 ]
 
 POINTER_DEREF_REFUSALS = [

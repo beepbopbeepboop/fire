@@ -26026,6 +26026,16 @@ class ValueKinds:
         self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
+        # The hook that answers what a DEREFERENCE yields, and it is the one
+        # kind question a load cannot answer from its own shape: a `p.value()`
+        # is one word whether the pointee is an `Int64` or a `Float64`, so the
+        # word's KIND has to come from the pointee's declaration.  It returns
+        # `FLOAT_KIND` for a float pointee and `None` for everything else, which
+        # is the direction that leaves every existing decision where it was:
+        # without it a deref falls to the "an extern returns a word" default and
+        # is an integer.  See `FLOAT_POINTEE_NAMES` and `POINTEE_WIDTHS`.
+        self._pointer_pointee_kind = pointer_pointee_kind or (
+            lambda expr: None)
         # The dict-ness twin of the line above, and consulted only where
         # `_dict_names` has nothing to say — see the hook's own paragraph.
         self._declared_is_dict = declared_is_dict or (lambda expr: None)
@@ -27665,6 +27675,16 @@ class ValueKinds:
             skind = self._string_method_kind(e)
             if skind is not None:
                 return skind
+            # A DEREFERENCE whose pointee is a DOUBLE: `p.value()` is one word,
+            # and its kind is the pointee's, not a shape of the call.  Asked here
+            # — after the string-method arm, before the "an extern returns a
+            # word" default below — because that default would otherwise answer
+            # `INT_KIND` for a load of a double and every consumer would then
+            # treat the bit pattern as an integer.  `None` (the common case, and
+            # every non-float pointee) leaves the default exactly where it was.
+            pk = self._pointer_pointee_kind(e)
+            if pk is not None:
+                return pk
             kind = _kind_of_call(callee, self._func_kind(callee))
             if kind is not None:
                 return kind
@@ -30241,7 +30261,9 @@ BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 #: with a message about a SYMBOL about a fact that is a TYPE's.
 #: `NARROW_FLOAT_TYPE_CTORS` below derives from THIS list for that reason, and
 #: `TYPE_VALUE_NAMES` derives from it too, so the two cannot disagree about
-#: which formats exist.
+#: which formats exist.  **`Float64` is deliberately NOT here**: it is the one
+#: float this path represents, so it is in neither the narrow list nor
+#: `POINTEES_REFUSED` — a `Pointer[Float64]` LOADS.
 NARROW_FLOAT_TYPE_NAMES = (
     "BFloat16",
     "Float16", "Float32",
