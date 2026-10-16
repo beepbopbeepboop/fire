@@ -494,7 +494,7 @@ in:**
    than a path), so they are shared work rather than this doc's alone.
 3. The eight memory arms, one encoding at a time, each with its `_STEP_CONDS`
    row, its `work_step_*` lemma and its `_step_rhs` row in the SAME commit.
-4. `CSEL` and `BLR` last, behind their own docs' blockers
+4. `CSEL` and `BLR` last, behind their own blockers
    (`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it`,
    `FORMAL_arm64_instruction_coverage`).
 5. Drop `CMN` and `TST` from the list, or wire them and then add the arms — the

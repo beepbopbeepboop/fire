@@ -298,7 +298,7 @@ is a conditional move with no memory access and no link register, so it is
 `csinc`-shaped and every input is already a word. §4's "the conditions themselves
 are covered indirectly, through NZCV and through `csel`/`cset`" was true when
 `cset` was also a NOSTEP and is now **false of `csel` specifically** — the
-conditions are covered through NZCV alone. **Not filed as a doc by this session**
+conditions are covered through NZCV alone. **Not filed as a doc by this session (STALE — it now has its own doc, see the Status at the end of this section)**
 (it is a `lib/ProofLib.lean` capability addition and another worker may hold the
 row); recorded here because §4's sentence is a claim about coverage that has
 become wrong, and a false coverage claim is what §2's `WRONG 0` discussion warns
