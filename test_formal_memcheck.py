@@ -497,6 +497,23 @@ def test_corpus():
           "%d examples" % len(ex))
 
 
+def _ledger_keys(corpus):
+    """The keys `--write-ledger` would write for a corpus of basenames.
+
+    The ledger is keyed `basename|backend` (`formal_memcheck.ledger_key`), so a
+    coverage check has to build the same namespace. Comparing a row COUNT
+    against a list of full paths only asks whether the totals agree, which is
+    true for any two equally-sized sets and false for a stale ledger that
+    happens to have the same number of rows as the corpus.
+    """
+    return {"%s|%s" % (name, backend)
+            for name in corpus for backend in BACKENDS}
+
+
+def _ledger_missing(rows, corpus):
+    return sorted(_ledger_keys(corpus) - set(rows))
+
+
 def test_ledger():
     """The committed ledger is well-formed and covers the corpus."""
     path = M.DEFAULT_LEDGER

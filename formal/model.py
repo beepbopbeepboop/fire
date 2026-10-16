@@ -48181,6 +48181,20 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                             rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
+    `rule` is the ONE rule `doc/ABI.md`'s export rule applied to this name,
+    computed by the caller from the DEFINING MODULE's own source
+    (`formal/build.py::export_rule_for`) because that is the only place the rule
+    can be stated truthfully. It is one of `reflect.EXCL_PRIVATE`/`_GENERIC`/
+    `_OVERLOADED`/`_CLIB`, or `reflect.EXCL_ABSENT` when the module declares no
+    name under this spelling at all — which is the fifth answer and is NOT an
+    exclusion. When it is None (a caller with no link line or no readable
+    source, and the module-level-store path in `formal/imports.py`) the sentence
+    falls back to enumerating the four candidate rules, which is what it did
+    before the rule could be read. The measured case for `EXCL_ABSENT` is
+    `runtime/stdlib_wrapper.mojo`'s `from time import now`: every one of the
+    four enumerated rules was false about `formal/hostmods/time.mojo`, which
+    declares no `now` at all.
+
     Distinct from `module_global_refusal` because the two are different facts,
     and the generic one is FALSE about this one. `f[x](...)` roots at a name,
     `check_module_symbols` sees a bare `IdentExpr` that is not a local, and the
