@@ -910,6 +910,24 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # ── a method through the alias, whose NAME a second struct declares ──────
+    # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
+    # the `with` wrote that down, which is the fact `_alias_receiver_target`
+    # dispatches on.  Both `Box` and `Rival` declare `use`, so name-only dispatch
+    # has two owners and used to refuse the call as ambiguous; the alias's struct
+    # settles it, exactly as CPython's own type dispatch does.  This is the
+    # ANSWERED half of the `RIVAL` refusal below.
+    ("a_method_through_the_alias_dispatches_to_the_managers_struct",
+     CTX_MOJO + RIVAL + "def main(n):\n"
+     "    with Box() as b:\n"
+     "        print('body', b.use())\n"
+     "    return 0\n",
+     (CTX_MOJO + RIVAL + "def main(n):\n"
+      "    with Box() as b:\n"
+      "        print('body', b.use())\n"
+      "    return 0\n").replace("    def __exit__(self):",
+                            "    def __exit__(self, exc_type, exc_val, tb):"),
+     3),
 ]
 
 

@@ -18694,7 +18694,9 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                               _this_unit_modules,
                               structs_by_name,
                               elems,
-                              fn, st, _functions_by_name, one_word)
+                              fn, st, _functions_by_name, one_word,
+                              alias_structs=getattr(fn, "_with_alias_structs",
+                                                    None))
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -19200,6 +19202,43 @@ def _subscript_receiver_target(call, elems: dict):
     if not any(m.name == func.member for m in M.struct_methods(st)):
         return None
     return st.name, func.member, recv
+
+
+def _alias_receiver_target(call, alias_structs, structs_by_name):
+    """`b.m(x)` → `(struct name, m, b)` when `b` is a `with` alias of a known struct.
+
+    A `with EXPR as b` alias is bound to `__enter__`'s result, and when that is
+    the receiver itself (`model.context_enter_returns_receiver`) the alias holds
+    the manager's struct — so a method called through it belongs to that struct
+    and not to whichever struct of this image happens to declare the name.  This
+    is the recogniser that dispatches on that fact; without it a name two structs
+    declare (`use`, in `test_formal_with.py`'s rival fixture) is refused as
+    ambiguous even though the `with` wrote the answer down.
+
+    It is asked only where the name-only dispatch (`_method_call_target`) has
+    already declined, and only ever answers a member the alias's OWN struct
+    declares — so it cannot redirect a call to a struct the alias does not hold,
+    which is the wrong answer `_check_method_receiver_types` exists to catch.
+
+    `_derived_overrides` is the same guard `_lift_one_word_field_method` applies
+    for a lift by declared type: a derived struct overriding `m` makes the base's
+    method the wrong callee, so the answer stays None and the pre-existing
+    refusal stands.
+    """
+    if not alias_structs:
+        return None
+    func = M.method_callee_base(call)
+    if not (isinstance(func, F.MemberExpr)
+            and isinstance(func.obj, F.IdentExpr)):
+        return None
+    st = alias_structs.get(func.obj.name)
+    if st is None:
+        return None
+    if not any(m.name == func.member for m in M.struct_methods(st)):
+        return None
+    if _derived_overrides(st, func.member, structs_by_name):
+        return None
+    return st.name, func.member, func.obj
 
 
 def _call_receiver_verdict(call, elems: dict, structs_by_name: dict,
@@ -20206,6 +20245,12 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
     exit_args = [F.IdentExpr(tmp)]
     if M.context_exit_arity(struct) == 4:
         exit_args += [F.IntLiteral(value=0, line=0, col=0, raw="")] * 3
+    # The alias holds `__enter__`'s RESULT, so it is the manager's struct exactly
+    # when `__enter__` returns the receiver (`context_enter_returns_receiver`).
+    # Publishing that here is what lets a method called through the alias
+    # dispatch to this struct rather than be refused by a name two structs share
+    # — `_rewrite_method_calls` reads the table this fills.
+    alias_struct = struct if M.context_enter_returns_receiver(struct) else None
     return _with_protocol(
         item, body,
         F.VarDecl(tmp, None, item.expr),
@@ -20217,10 +20262,11 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
             func=F.IdentExpr(M.method_function_name(struct.name,
                                                    M.CONTEXT_EXIT)),
             args=exit_args, kwargs=[]),
-        fn)
+        fn, alias_struct=alias_struct)
 
 
-def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
+def _with_protocol(item, body, opened_tmp, enter, exit_, fn,
+                   alias_struct=None):
     """`<tmp> = EXPR`, then `try: TARGET = enter(<tmp>); body finally: exit(<tmp>)`.
 
     The alias handling and the `try`/`finally` shape are here rather than in the
@@ -20229,6 +20275,13 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
     the descriptor itself, and the exit call runs on every way out of the body
     either way.  Two copies of this would be two places to forget the
     `finally`.
+
+    `alias_struct` is the struct the alias is known to hold, from
+    `_one_with_item`'s `context_enter_returns_receiver` test, or None when the
+    alias is a plain word.  It is recorded on `fn` so `_rewrite_method_calls` —
+    which runs later in the same per-function pass — can dispatch a method
+    called through the alias to the manager this `with` entered, instead of
+    refusing a name two structs declare.
     """
     # `WithItem.alias` is typed `object` and is a bare STRING on this front end
     # (and an `IdentExpr` where the self-hosted one boxes it), which is why
@@ -20246,6 +20299,12 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
     alias_name = M.with_alias_bare_name(item)
     if alias_name is not None:
         opened = F.VarDecl(alias_name, None, enter)
+        if alias_struct is not None:
+            table = getattr(fn, "_with_alias_structs", None)
+            if table is None:
+                table = {}
+                fn._with_alias_structs = table
+            table[alias_name] = alias_struct
     elif item.alias is None:
         opened = F.ExprStmt(enter)
     else:
@@ -20268,7 +20327,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None, fn_name: str = None,
                           imported=(), structs_by_name: dict = None,
                           elems: dict = None, fn=None, owner=None,
-                          functions=None, bound: dict = None) -> None:
+                          functions=None, bound: dict = None,
+                          alias_structs: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -20320,6 +20380,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
         target = _method_call_target(n, owners)
         if target is None:
             target = _subscript_receiver_target(n, elems)
+        if target is None:
+            target = _alias_receiver_target(n, alias_structs, structs_by_name)
         if target is None:
             target = _call_receiver_target(n, elems, structs_by_name,
                                            functions, fn, owner, bound,
