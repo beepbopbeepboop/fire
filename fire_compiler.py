@@ -2896,7 +2896,24 @@ def _inline_safe_outer_iterable(node, module_names: set, rebound_module: set) ->
     if isinstance(node, IdentExpr):
         return node.name in module_names and node.name not in rebound_module
     if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
-        return node.func.name in _PURE_ITER_CALLS
+        # The ARGUMENTS have to be inline-safe too: they are what the
+        # hoisted body re-evaluates, and the free names of the outermost
+        # iterable are not captured (see `desugar`). `enumerate(params)` over
+        # an enclosing LOCAL `params` was inlined with `params` unbound in
+        # the hoisted function -- a 0 the generator then iterated as empty
+        # (the self-hosted compiler's coroutine trampolines lost every
+        # start-function parameter that way).
+        if node.func.name not in _PURE_ITER_CALLS:
+            return False
+        for _a in node.args:
+            if not _inline_safe_outer_iterable(_a, module_names, rebound_module):
+                return False
+        for _kw in (node.kwargs or []):
+            if not _inline_safe_outer_iterable(_kw[1], module_names, rebound_module):
+                return False
+        return True
+    if isinstance(node, (IntLiteral, FloatLiteral, BoolLiteral, NoneLiteral)):
+        return True
     return False
 
 
@@ -2927,7 +2944,15 @@ def genexp_body(expr, outer_iterable) -> list:
         iterable = gen.iterable
         if i == 0:
             iterable = outer_iterable
-        body = [ForStmt(target=gen.target, iterable=iterable, body=inner,
+        # A comprehension clause spells a tuple target bare (`i, ct`); a
+        # `for` statement spells it parenthesised (`(i, ct)`), and that is
+        # the form every `for` lowering reads -- the enumerate one took the
+        # bare spelling for ONE name `i, ct` and left both targets unbound.
+        target = gen.target
+        if (isinstance(target, str) and for_target_is_tuple(target)
+                and _target_group_inner(target.strip()) is None):
+            target = '(' + target.strip() + ')'
+        body = [ForStmt(target=target, iterable=iterable, body=inner,
                         else_body=None, is_async=False,
                         line=gen.line, col=gen.col)]
         i = i - 1
@@ -3190,9 +3215,20 @@ class _GenexpDesugarer:
         typed_param = ''
         if isinstance(outer, IdentExpr) and fn_params:
             typed_param = _container_annotation(fn_params.get(outer.name))
+        # A pure iterable-building call over names of the ENCLOSING scope
+        # (`enumerate(params)`, `zip(a, b)`): the call is inlined like any
+        # inline-safe outer iterable, and the names it reads are captured
+        # as parameters like every other free name -- the value is bound
+        # when the generator is created, which is when Python evaluates the
+        # outermost iterable.
+        capture_outer = False
         if not typed_param and not _inline_safe_outer_iterable(
                 outer, self.module_names, self.rebound_module):
-            return node
+            if (isinstance(outer, CallExpr) and isinstance(outer.func, IdentExpr)
+                    and outer.func.name in _PURE_ITER_CALLS):
+                capture_outer = True
+            else:
+                return node
 
         bound: set = set()
         for gen in gens:
@@ -3210,6 +3246,10 @@ class _GenexpDesugarer:
                 _collect_free_names(gen.iterable, bound, free)
             for cond in gen.conditions:
                 _collect_free_names(cond, bound, free)
+        if capture_outer:
+            # Evaluated OUTSIDE the generator's own bindings: its loop
+            # targets do not shadow names in it.
+            _collect_free_names(outer, set(), free)
 
         captures: list = []
         rebound: list = []

@@ -1935,6 +1935,12 @@ def _gen_for_enumerate(gen, node):
                 gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
     elif not val_is_tuple:
         gen._declare_var(val_var, elem if elem else 'int64_t')
+        # An element of a sequence whose element kind nothing recorded is a
+        # word of unknown kind (see `_dyn_word_locals`): `f'{ct}'` over
+        # `enumerate(params)` of an untyped `params` has to ask the runtime
+        # whether `ct` is a string, or it renders the pointer's decimal.
+        if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
+            gen._dyn_word_locals.add(_as_str(val_var))
     # Writes go through _cname (a target named after a C keyword is
     # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
     # a fresh temp in the tuple case, so _cname is a no-op there.
