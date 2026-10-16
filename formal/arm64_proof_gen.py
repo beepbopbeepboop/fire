@@ -10172,7 +10172,8 @@ def _sign_extend_mask(idx: int) -> int:
     return bit if idx == 14 else bit << 5
 
 
-def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
+def _gen_step_result_lemmas(name: str, code: bytes, base: int,
+                            limit: int = None) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
     for i, (w, idx, rhs) in sorted(_step_result_plan(code, limit).items()):
