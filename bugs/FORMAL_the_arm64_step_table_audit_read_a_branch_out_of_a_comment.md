@@ -86,6 +86,18 @@ underlying bug is still that other doc's; what this pins is the honest split, an
 `test_the_owner_of_the_one_refusal_still_exists` will fail if the owning doc is
 deleted (i.e. when the fix lands), which is the cue to move `wdiff` back.
 
+**Status 2026-10-08 (`work/formal233-docs`): the census pin above was RED on
+`master` — it still listed `wdiff` in `GENERATE`, while the paragraph above
+(and the getrlimit doc) already said `wdiff` refuses.** So the class asserted a
+generation that had stopped and reported the getrlimit regression as "either the
+gap closed or it reopened". `wdiff` is now a `REFUSED` row with the needles its
+message carries (`unsupported edge to`, `no loop contract matches`) and its owner
+doc named in `REFUSED_OWNER`, so the census is **ten generate / two refuse** and
+cannot go stale in either direction: if the guard fix lands and `wdiff`
+generates again, the row fails and says to delete it.
+`test_formal_call_proof_gen.TestTheRecursionFamiliesStillGenerate` is
+**3 tests / OK**.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
 here:

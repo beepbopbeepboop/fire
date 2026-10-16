@@ -43,6 +43,17 @@ sentence now names the backend RULE that would remove it and the feature that
 holds it. It did not need `formal16-2` to land.** The items below are as
 `work/formal25-5` left them.
 
+**Status 2026-10-08 (`work/formal233-docs`): the §0.4 guard was RED on `master`
+(88 checks / 1 fail) — two branches reworded this same sentence, and the merge
+kept one branch's CODE while `test_formal_imports.py`'s guard kept asserting the
+other branch's PHRASE.** The test wanted `"BACKEND"` (c1f99d80's "a decision
+about the BACKEND") and `"nothing an importer could bind"`, and the merged code
+carried neither (it said "no address an importer could bind" and "a rule that…"
+with no mention of the backend). One fix at the root: `formal/build.py`'s
+constants-only branch now carries both halves, so neither reword's information
+is lost. `test_formal_imports.py` PASS=89 FAIL=0; `test_formal_monomorph.py`
+37/0 (the other guard on this sentence).
+
 **Status (2026-10-04, `work/formal25-5`): §6 item 3 is CLOSED — the stub step no
 longer stops the walk, and it was the stub step, not the chain.** The document's
 own reading of why was wrong by half and right by half: the shape it named (an
