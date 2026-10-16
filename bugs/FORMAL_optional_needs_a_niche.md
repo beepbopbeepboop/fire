@@ -259,6 +259,27 @@ list and not a project.
 
 ### 3. An UNSTATED payload type still folds to `== 0`, and that is a residual
 
+**Status 2026-10-13 (`work/formal361-docs`): the residue is a wrong ANSWER and
+not merely an unavailable one, and it is now pinned with that output.**
+Measured on this tree, both architectures:
+
+    def f(x) -> Int:
+        if x is None:
+            return 1
+        return 2
+
+    def main(n):
+        printf("%d\n%d\n", f(None), f(0))
+
+CPython prints `1` then `2`; the image prints `1` then `1`, because `f(0)`'s `0`
+IS the folded `None` word. `test_formal_optional.py`'s
+`unstated_payload_comparison_folds_0_as_none` pins `1\n1\n` and says in its own
+comment that CPython's second line is `2`, so the row goes red the day the
+inference below lands. This sharpens the paragraph below without changing its
+conclusion: the fold is deliberate, and the sentence "both are pinned in
+`test_formal_optional.py`" was true of the UNWRAP only — the comparison had no
+row of its own until now, which is how a wrong answer stayed invisible.
+
 `var z = None; if z is None:` still compares against 0, because the pass's
 obligation is discharged only where the SOURCE stated an `Optional[T]`.
 Refusing it would refuse every unannotated predicate in a corpus that annotates
