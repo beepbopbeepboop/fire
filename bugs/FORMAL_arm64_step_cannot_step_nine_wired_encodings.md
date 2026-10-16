@@ -2,6 +2,22 @@
 
 ## Status
 
+**2026-10-12 (`work/formal320-docs`): the two `WRONG` arms below are FIXED at the
+root, VERIFIED, and their documents are DELETED.** `lib/ProofLib.lean`'s
+`0xab000000` arm reads and writes `Rd` (`arm64_set_reg rd { s with nzcv := … }`)
+and all five `imm12` arms call `arm64_ext_imm12`, which decodes bits 21:10 AND the
+`sh` field at 23:22 — commit `0ad2ef33`, whose tree the CAS now serves a
+`ProofLib.olean` for. Both are pinned by
+`test_formal_call_proof_gen.py`'s
+`TestGeneratorSource::test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift`
+(the step table: `_regs_written` and `_step_rhs`) and
+`TestUnsignedOffsetAccess` (the CPU vs `arm64_step`), and both were re-run green
+on this tree before the deletions. So the two documents
+`FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` and
+`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` no longer exist,
+and the rows below were the only citation of them. The paragraphs that follow are
+kept as the record of how the defects were found.
+
 **RE-MEASURED 2026-10-05 (`work/formal52-docs`) and the "reachable set is empty"
 claim above is FALSIFIED. Two of the arms this file's §3 prescribed are WIRED and
 produced a state the machine never reached — `WRONG`, not `NOSTEP` — and both are
