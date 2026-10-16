@@ -1822,7 +1822,7 @@ def _new_bb(gen) -> str:
 class EmitFrame:
     """One protected region whose exits rewrite the lines emitted inside it.
 
-    `kind` is 'try' (an early `return` in the try body pops the exception
+    `frame_kind` is 'try' (an early `return` in the try body pops the exception
     stack and, with a `finally`, jumps to it instead of returning -- the
     value is kept for the deferred return) or 'with' (a `break`/`continue`
     out of the body pops the stack and runs the items' teardown first).
@@ -1836,7 +1836,7 @@ class EmitFrame:
     return. A frame stack that `_emit` itself consults is the same
     behaviour in both compilers."""
     def __init__(self, kind: str):
-        self.kind: str = kind
+        self.frame_kind: str = kind
         self.bb_finally: str = ''
         self.return_value: str = ''
         self.has_return_value: bool = False
@@ -1869,7 +1869,7 @@ def _emit_through(gen, line: str, level: int) -> None:
         return
     fr = gen._emit_frames[level]
     stripped = line.strip()
-    if fr.kind == 'try':
+    if fr.frame_kind == 'try':
         if stripped.startswith('return ') or stripped == 'return;':
             if stripped.startswith('return ') and stripped != 'return;':
                 fr.return_value = stripped[7:].rstrip(';').strip()
@@ -1892,7 +1892,7 @@ def _emit_through(gen, line: str, level: int) -> None:
             return
         _emit_through(gen, line, level - 1)
         return
-    if fr.kind == 'with':
+    if fr.frame_kind == 'with':
         if len(gen.loop_stack) > 0 and (
                 stripped == f"goto {gen._loop_continue_bb()};"
                 or stripped == f"goto {gen._loop_break_bb()};"):
