@@ -5336,6 +5336,8 @@ class GimpleGen:
         return ggc._lower_next_iter_cursor(self, node, rec, args)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
+    def _eval_const_bool_state(self, node) -> int:
+        return ginf._eval_const_bool_state(self, node)
     def _eval_const_bool(self, node) -> bool | None:
         return ginf._eval_const_bool(self, node)
     def _split_top_level_comma(self, s: str) -> list[str]:

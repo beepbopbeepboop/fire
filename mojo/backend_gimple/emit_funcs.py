@@ -727,20 +727,22 @@ def _gen_stmt_FromImportStmt(gen, node):
 
 
 def _gen_stmt_ComptimeIfStmt(gen, node):
-    val = gen._eval_const_bool(node.condition)
-    if val is True:
+    # The int tri-state, not `_eval_const_bool`'s `bool | None`: compiled, the
+    # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
+    val = gen._eval_const_bool_state(node.condition)
+    if val == 1:
         for s in node.then_body:
             gen.gen_stmt(s)
         return
-    if val is False:
+    if val == 0:
         # Try each elif branch before falling to else
         for elif_cond, elif_body in (getattr(node, 'elifs', None) or []):
-            elif_val = gen._eval_const_bool(elif_cond)
-            if elif_val is True:
+            elif_val = gen._eval_const_bool_state(elif_cond)
+            if elif_val == 1:
                 for s in elif_body:
                     gen.gen_stmt(s)
                 return
-            if elif_val is False:
+            if elif_val == 0:
                 continue
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)

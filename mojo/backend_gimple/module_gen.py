@@ -3215,18 +3215,18 @@ def gen_module_impl(self, stmts):
                 elif isinstance(_frame_stmt, IfStmt):
                     _resolved = False
                     _resolved_body = []
-                    _cond_val = self._eval_const_bool(_frame_stmt.condition)
-                    if _cond_val is True:
+                    _cond_val = self._eval_const_bool_state(_frame_stmt.condition)
+                    if _cond_val == 1:
                         _resolved = True
                         _resolved_body = _frame_stmt.then_body or []
-                    elif _cond_val is False:
+                    elif _cond_val == 0:
                         _resolved = True
                         for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
-                            _elif_val = self._eval_const_bool(_cond2)
-                            if _elif_val is True:
+                            _elif_val = self._eval_const_bool_state(_cond2)
+                            if _elif_val == 1:
                                 _resolved_body = _elif_body2 or []
                                 break
-                            if _elif_val is None:
+                            if _elif_val < 0:
                                 _resolved = False  # an unresolvable elif — fall back below
                                 break
                         else:
@@ -10839,18 +10839,18 @@ def gen_module_impl(self, stmts):
             if isinstance(_frame_stmt, IfStmt):
                 _resolved = False
                 _resolved_body = []
-                _cond_val = self._eval_const_bool(_frame_stmt.condition)
-                if _cond_val is True:
+                _cond_val = self._eval_const_bool_state(_frame_stmt.condition)
+                if _cond_val == 1:
                     _resolved = True
                     _resolved_body = _frame_stmt.then_body or []
-                elif _cond_val is False:
+                elif _cond_val == 0:
                     _resolved = True
                     for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
-                        _elif_val = self._eval_const_bool(_cond2)
-                        if _elif_val is True:
+                        _elif_val = self._eval_const_bool_state(_cond2)
+                        if _elif_val == 1:
                             _resolved_body = _elif_body2 or []
                             break
-                        if _elif_val is None:
+                        if _elif_val < 0:
                             _resolved = False
                             break
                     else:

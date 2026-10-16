@@ -6424,6 +6424,13 @@ def _eval_const_int(gen, node) -> int | None:
                                           _comptime_call_hook(gen))
 
 
+def _eval_const_bool_state(gen, node) -> int:
+    """comptime_eval.CONST_TRUE / CONST_FALSE / CONST_UNKNOWN -- the spelling
+    every branching caller uses, because `_eval_const_bool`'s `bool | None`
+    collapses None into False once compiled (see comptime.CONST_UNKNOWN)."""
+    return comptime_eval.eval_const_bool_state(node, gen._comptime_vals,
+                                               _comptime_call_hook(gen))
+
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""
     return comptime_eval.eval_const_bool(node, gen._comptime_vals,
