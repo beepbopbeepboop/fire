@@ -4396,8 +4396,8 @@ def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
 def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
     """`{source_path: stmts}` for `compile_formal_dylib`, or `{}`.
 
-    The module's own top-level statements with its own instantiation CALL SITES
-    rewritten to the mangled names — the call-site half of
+    The module's own top-level statements with its own instantiation USES
+    rewritten to the mangled names — the use-site half of
     `_instantiated_sources`, which publishes the declaration half. Neither is
     useful alone and the pair is what "the declaration and the rewrite stay one
     table" means: a declaration with no rewrite is a module that publishes
@@ -4429,7 +4429,7 @@ def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
     from formal import monomorph as MM            # lazy — pulls the middle tier
     from formal.build import parse_module         # lazy — cycle
     stmts = parse_module(module_source_text(source_path), filename=source_path)
-    MM.rewrite_instantiation_calls(stmts, demap)
+    MM.rewrite_instantiation_uses(stmts, demap)
     return {source_path: stmts}
 
 
@@ -4437,8 +4437,9 @@ def imported_instantiations(source_path: str, stmts: list,
                             project_root: str = None,
                             linked_paths=()) -> dict:
     """`{mangled name: StructDef}` for every generic template this file
-    instantiates out of a module it reaches — and REWRITES the call sites that
-    asked, in `stmts`.
+    instantiates out of a module it reaches — and REWRITES the USES that asked,
+    in `stmts`: the `Pair[Int]()` call sites and the `Pair.<attr>`
+    class-attribute reads alike.
 
     **The declaration and the rewrite come from ONE table, and that is the whole
     design.**  An importer writes `Pair[Int]()`; the boundary symbol it has to
@@ -4480,7 +4481,7 @@ def imported_instantiations(source_path: str, stmts: list,
     out.update(_own_instantiations(module_source_text(source_path), source_path,
                                    demap, project_root or source_path, stmts))
     if demap:
-        MM.rewrite_instantiation_calls(stmts, demap)
+        MM.rewrite_instantiation_uses(stmts, demap)
     return out
 
 
@@ -4609,7 +4610,7 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
 
     So the same derivation the imported half runs, with `own=()` and this file's
     own templates, and it goes through `instantiate_all` and
-    `rewrite_instantiation_calls` exactly as the imported half does — the
+    `rewrite_instantiation_uses` exactly as the imported half does — the
     declaration and the rewrite are still one table, which is the property
     `imported_instantiations` is built around.
 

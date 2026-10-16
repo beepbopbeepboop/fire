@@ -13190,6 +13190,39 @@ def blob_reserved_slots(node) -> int:
     return 0
 
 
+def blob_bytes_reserved(node, list_caps=None, dict_caps=None):
+    """How many BYTES `node`'s own construction reserves, or None.
+
+    **None means "not a shape this function sizes", and the one shape it is is a
+    nested COMPREHENSION** — because a comprehension's reservation is
+    `cap × element size` and `cap` is each backend's own `_compr_cap`, which the
+    two architectures compute by different routes (arm64 from the generator's
+    literal `range` arguments, x86-64 from its `_blob_est`) and which are NOT
+    interchangeable. So the caller asks its own for that one shape and this
+    function is the answer for the rest; `None` is the signal, not a zero, and a
+    zero would be indistinguishable from an empty blob.
+
+    Both caps tables are passed rather than read from the emitter because both
+    are per-FUNCTION state (`_scan_list_caps`'s append-site reservations), and
+    the answer has to be an UPPER BOUND: a reservation smaller than the blob it
+    is for would make the per-iteration copy below overwrite its neighbour.
+
+    The blob layouts are the emitters' own and are the whole of why this is a
+    question at all: `[count:i64][element…]` for a list/set/tuple and
+    `[count:i64][key][value]…` for a dict, so a dict literal's bytes are
+    `8 × (1 + 2 × pairs)` and not `8 × (1 + pairs)`.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        slots = max(list_literal_reserved_slots(node),
+                    (list_caps or {}).get(id(node), 0))
+        return 8 * (1 + slots)
+    if isinstance(node, F.DictExpr):
+        pairs = max(dict_literal_static_pairs(node),
+                    (dict_caps or {}).get(id(node), 0))
+        return 8 * (1 + 2 * pairs)
+    return None
+
+
 def blob_nodes_bound_to(fn, name: str) -> list:
     """Every blob-constructing node in `fn` that binds `name`.
 

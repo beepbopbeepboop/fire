@@ -1597,16 +1597,29 @@ def _imported_structs(source_path: str, stmts: list, arch: str,
     # the same name by definition, and a local definition shadowing an import is
     # the precedence `imported_struct_defs` states.
     #
-    # This call also REWRITES the `Pair[Int]()` call sites in `stmts` to the
-    # mangled spelling, from the same table it returns its declarations out of;
-    # see `formal/imports.py::imported_instantiations` for why those two are one
+    # This call also REWRITES the `Pair[Int]()` call sites — and the
+    # `Pair.<attr>` class-attribute reads — in `stmts` to the mangled spelling,
+    # from the same table it returns its declarations out of; see
+    # `formal/imports.py::imported_instantiations` for why those two are one
     # table and not two computations.  It mutates `stmts`, which is why it runs
     # here and not inside `imported_struct_defs`: every reader of the
     # declarations should get the rewrite's table, and exactly one place should
     # perform it.
-    for name, st in imported_instantiations(
+    #
+    # A REFUSAL out of it is a clean compile error rather than a traceback, and
+    # the conversion is the same one `compile_formal` applies to the
+    # `ImportBuildError` from `_resolve_imports` below: the rewrite is asked
+    # here, before the function pipeline's own parked-refusal handling exists,
+    # so `CodegenError` raised inside it would reach `fire.py`'s catch-all and
+    # print the sentence AND a stack. The refusal it carries is about one
+    # construct in this file, and the reader is sent a sentence.
+    try:
+        instantiated = imported_instantiations(
             source_path, stmts, project_root=source_path,
-            linked_paths=linked_paths).items():
+            linked_paths=linked_paths)
+    except CodegenError as e:
+        raise FormalBuildError(str(e)) from None
+    for name, st in instantiated.items():
         if name in seen:
             continue
         seen.add(name)
@@ -2788,7 +2801,7 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     `stmts` REPLACES the parse, and it exists for one caller: a module that
     applies its own generic template needs its instantiation call sites rewritten
     to the mangled names before this runs, and the rewrite is on the AST
-    (`formal/monomorph.py::rewrite_instantiation_calls`), so there is nothing to
+    (`formal/monomorph.py::rewrite_instantiation_uses`), so there is nothing to
     hand over except statements — a text rewrite would have to re-implement the
     tokenizer's knowledge to leave a comment or an `` `…` `` literal alone.
     `formal/imports.py::build_module_dylib` parses and rewrites exactly once and
@@ -14299,7 +14312,7 @@ def _srem_expression(a, b, line: int, col: int):
     the measurement behind it lives. Every node carries the ORIGINAL call's
     position, because `fire_compiler`'s expression walk reports position and a
     three-node replacement whose tail sat at line 0 would send a reader to the
-    top of the file — the same reason `rewrite_instantiation_calls` copies the
+    top of the file — the same reason `rewrite_instantiation_uses` copies the
     base's line onto its `IdentExpr`.
 
     `a` appears TWICE, which is the identity and also its cost: a
@@ -22509,7 +22522,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     for what this function would otherwise parse out of the file, and it exists
     for ONE construct: a module that applies its OWN generic template needs its
     `Pair[Int]` call sites rewritten to the mangled names before the code is
-    emitted (`formal/monomorph.py::rewrite_instantiation_calls`), and the rewrite
+    emitted (`formal/monomorph.py::rewrite_instantiation_uses`), and the rewrite
     is on the AST, so the caller hands the rewritten statements over rather than
     the caller publishing a rewritten FILE — a generated copy would have to
     reproduce the module's own prefix, its line numbers and its error text, and

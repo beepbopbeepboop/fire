@@ -1341,6 +1341,7 @@ class X86_64Codegen:
             self._functions.values(), self._return_types)
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
+        self._materialised = {}
         # Blocks for CONTAINERS this function RECEIVES from a callee that
         # returns one, and the COPY after each such call that fills them.  The
         # third kind of block in the same region as the constructor frames and
@@ -3880,8 +3881,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # reserves the way `xs = []; xs.append(1)` does.
         extra = self._list_caps.get(id(node), 0) if node is not None \
             else 0
-        offset = self._reserve_blob(
-            M.BLOB_HEADER_BYTES + (count + extra) * stride, what)
+        nbytes = M.BLOB_HEADER_BYTES + (count + extra) * stride
+        offset = self._reserve_blob(nbytes, what)
+        if node is not None:
+            self._materialised[id(node)] = (offset, nbytes)
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, count)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -3923,6 +3926,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
         offset = self._reserve_blob(8 * (1 + cap), "a list literal")
+        self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -3958,6 +3962,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                        M.literal_splat_operand_is_static)
         cap = max(cap, self._list_caps.get(id(expr), 0))
         offset = self._reserve_blob(8 * (1 + cap), "list unpack")
+        self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, 0)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -6942,6 +6947,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # arrangement and the same reason (`model.dict_store_capacity`).
         reserved = self._dict_caps.get(id(expr), n)
         offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
+        self._materialised[id(expr)] = (offset, 8 + 16 * reserved)
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -9409,6 +9415,7 @@ preference.
         elem_size = 16 if is_dict else 8
         if not gens:
             offset = self._reserve_blob(8, "a comprehension")
+            self._materialised[id(expr)] = (offset, 8)
             self._emit_blob_base(offset, Reg.RAX)
             self._emit_mov_imm(Reg.R11, 0)
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
@@ -9416,6 +9423,10 @@ preference.
             return
 
         cap = self._compr_cap(expr)
+        # The per-iteration ELEMENT storage, reserved BESIDE the result array and
+        # not inside it — `_compr_element_blob`, which is arm64's method of the
+        # same name and argues why a copy is the answer rather than a relocation.
+        elem_blob = self._compr_element_blob(expr, is_dict, cap)
         avail = self._blob_available() - self._blob_used()
         if avail < 8:
             raise CodegenError(M.frame_blob_refusal(
@@ -9423,6 +9434,11 @@ preference.
         max_cap = (avail - 8) // elem_size
         cap = max(0, min(cap, max_cap))
         offset = self._reserve_blob(8 + elem_size * cap, "a comprehension")
+        self._materialised[id(expr)] = (offset, 8 + elem_size * cap)
+        if elem_blob is not None:
+            left = self._blob_available() - self._blob_used()
+            elem_blob = self._reserve_compr_element_blob(
+                min(elem_blob[1] * cap, left), elem_blob[1])
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, 0)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -9442,14 +9458,70 @@ preference.
         saved_ctx = self._container_ctx
         self._container_ctx = 0
         try:
-            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
+            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0, elem_blob)
         finally:
             self._container_ctx = saved_ctx
             self._compr_depth = d0
         self._emit_blob_base(offset, Reg.RAX)
 
+    def _compr_element_blob(self, expr, is_dict: bool, cap: int):
+        """`(None, stride)` — the per-iteration storage this comprehension
+        needs for its ELEMENT, or None when it needs none.
+
+        The x86-64 twin of arm64's method of the same name, over the same
+        `model.blob_bytes_reserved` and the same three arguments, and the whole
+        argument is there: a comprehension's element is rebuilt every iteration
+        while the blob a CONSTRUCTION builds is one compile-time offset, so
+        without a per-iteration copy every element of the result is the SAME
+        object. Measured on both architectures before it,
+        `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` printed 93 where
+        CPython prints 63.
+
+        What differs is only the arithmetic behind it — `_compr_cap` is this
+        backend's own for the nested-comprehension case (arm64 computes it from
+        the generator's literal `range` arguments and this one from its
+        `_blob_est`), which is why `blob_bytes_reserved` declines that shape
+        rather than guessing a cap both machines could disagree about.
+        """
+        node = expr.key if is_dict else expr.element
+        if node is None:
+            return None
+        nbytes = M.blob_bytes_reserved(node, self._list_caps, self._dict_caps)
+        if nbytes is None and isinstance(node, F.Comprehension):
+            inner_stride = 16 if getattr(node, "kind", "list") == "dict" else 8
+            nbytes = 8 + inner_stride * self._compr_cap(node)
+        return None if not nbytes else (0, nbytes)
+
+    def _reserve_compr_element_blob(self, nbytes: int, stride: int):
+        """Reserve the element region and answer its `(base, stride)`.
+
+        A region narrower than ONE slot is no region, and saying so is the
+        difference between a refusal that names the frame and a copy that runs
+        past the end of its own storage on the first append."""
+        stride = max(stride, 8)
+        if nbytes < stride:
+            nbytes = stride
+        base = self._reserve_blob(nbytes, "a comprehension's element")
+        return (base, stride)
+
+    def _take_element_copy(self, node, region):
+        """`(src offset, nbytes, dst region base, dst stride)` for the append,
+        or None when this element needs no storage of its own.
+
+        The x86-64 twin of arm64's, for arm64's reasons: the record is what the
+        element's own emission reserved and the region is what the prediction
+        sized, so a blob one of them saw and the other did not is a refusal
+        rather than the aliasing bug the region exists to remove."""
+        made = self._materialised.pop(id(node), None)
+        if made is None:
+            return None
+        if region is None:
+            raise CodegenError(M.comprehension_element_not_sized(
+                M.spelled(node)))
+        return (made[0], made[1], region[0], region[1])
+
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int, res_offset: int,
-                        is_dict: bool, cap: int, d0: int) -> None:
+                        is_dict: bool, cap: int, d0: int, elem_blob=None) -> None:
         """Recursive generator walk: gen[gi] … gen[-1], then append.
 
         THE SCOPE STACK IS PUSHED AFTER THE TARGET STORE, and that placement is
@@ -9567,7 +9639,8 @@ preference.
                     self._record_cond_branch()
                     self._emit_jcc(COND_E, step_label)
 
-                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0,
+                                     elem_blob)
             finally:
                 self._compr_scopes.pop()
 
@@ -9682,7 +9755,13 @@ preference.
         address. RDI rather than R11 because `_emit_elem_addr` builds the
         destination FROM the index first, so the base register has to survive
         that first move — passing the same register for both computes
-        base+8*base."""
+        base+8*base.
+
+        `copy` is None for every element that is not a fresh blob, and then the
+        instructions below are byte for byte the ones this emitted before the
+        element region existed — which is the point: a comprehension of integers
+        produces exactly the code it always did.
+        """
         self._push_slot(Reg.RAX)                     # the element
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count

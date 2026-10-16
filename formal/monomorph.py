@@ -1181,12 +1181,33 @@ def instantiate_all(module_src: str, wanted: dict) -> tuple:
     return made, failed
 
 
-def rewrite_instantiation_calls(stmts, demap: dict) -> int:
-    """Rewrite `Base[Args](…)` call sites to the mangled `Base_Args`, in place.
+def instantiations_by_base(demap: dict) -> dict:
+    """`{base name: {mangled name, …}}` — the instantiations `demap` holds for
+    each template, which is what "how many instantiations does this unit apply
+    of THAT template" is.
+
+    One reader for both arms of the class-attribute rule
+    (`rewrite_instantiation_uses`): a read named `Template.<attr>` carries no
+    bracket and so names no instantiation of its own, which makes the COUNT the
+    whole of the answer — one instantiation and the read has exactly one
+    instantiation it could mean, two or more and it names none of them in
+    particular. Keyed by the demap rather than recomputed from the source,
+    because the demap is the table the declarations came out of and a count taken
+    anywhere else is a second answer to "what was instantiated" that can disagree
+    with the ones on the link line."""
+    out: dict = {}
+    for (base, _args), mangled in demap.items():
+        out.setdefault(base, set()).add(mangled)
+    return out
+
+
+def rewrite_instantiation_uses(stmts, demap: dict) -> int:
+    """Rewrite every USE of a generic template to the mangled instantiation, in
+    place: `Base[Args](…)` and `Base.<attr>` alike.
 
     `demap` is `{(base, (arg, …)): mangled name}` — the same key
     `all_instantiation_calls` produces, and the same table the exporting side
-    compiled from, so a call site rewritten here names a definition the library
+    compiled from, so a use rewritten here names a definition the library
     on the link line actually has.  Returns the number of call sites rewritten,
     which is what the caller asserts on: a demand that produced a declaration and
     no rewrite (or the reverse) is a bug in the table, and the count is how that

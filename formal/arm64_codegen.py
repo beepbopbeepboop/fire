@@ -784,6 +784,11 @@ dylib_exports: list = None, globals_base: int = None,
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
+        # `{id(node): (offset, nbytes)}` — the blob a node's OWN emission just
+        # materialised in this function's frame. Read by the comprehension
+        # append path to give a per-iteration ELEMENT its own storage; see
+        # `_compr_element_blob` and `_take_element_copy`.
+        self._materialised = {}
         # Nesting depth of for-in (non-range) loops currently being emitted.
         # Selects _fi{d}/_fb{d} temps; reset per function.
         self._for_list_depth = 0
@@ -1418,6 +1423,7 @@ dylib_exports: list = None, globals_base: int = None,
         # on one.
         self._list_cursor = (self._frame_recv_bytes + self._ret_frame_bytes
                             + self._ret_blob_bytes)
+        self._materialised = {}
         self._for_list_depth = 0
         self._compr_depth = 0
         self._container_ctx = 0
@@ -5347,6 +5353,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 "a dict literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
+        self._materialised[id(expr)] = (offset, size)
 
         # Materialize splats first (may clobber X9/X0) so static stores
         # below run with a clean base recompute per store.
@@ -8016,6 +8023,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 what, self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
+        if node is not None:
+            self._materialised[id(node)] = (offset, size)
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", count)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
@@ -8107,6 +8116,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 "a list literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
+        self._materialised[id(expr)] = (offset, size)
 
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", n)
@@ -11393,6 +11403,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not gens:
             nbytes = 16 if is_dict else 8
             offset = self._reserve_blob(nbytes, "comprehension")
+            self._materialised[id(expr)] = (offset, nbytes)
             self._emit_list_base(offset)
             self._emit_mov_imm("X10", 0)
             self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
@@ -11401,6 +11412,13 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         cap = self._compr_cap(expr)
         elem_size = 16 if is_dict else 8
+        # The per-iteration ELEMENT storage, reserved BESIDE the result array and
+        # not inside it — see `_compr_element_blob`. Reserving it here, before the
+        # walk, is what lets the append address a slot by the result count with
+        # one multiply and nothing else: both the region's base and its stride
+        # are compile-time constants, so no run-time address has to survive the
+        # element's own emission (`_compr_append_elem`'s copy arm).
+        elem_blob = self._compr_element_blob(expr, is_dict, cap)
         avail = self._blob_cap - self._list_cursor
         if avail < 8:
             raise CodegenError(
@@ -11413,6 +11431,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             cap = 0
         nbytes = (8 + 16 * cap) if is_dict else (8 + 8 * cap)
         offset = self._reserve_blob(nbytes, "comprehension")
+        self._materialised[id(expr)] = (offset, nbytes)
+        if elem_blob is not None:
+            # The ELEMENT region is re-clamped against what is left, because the
+            # estimate above was made before the result array took its own
+            # bytes. Clamping only ever SHRINKS the region, and the copy is
+            # bounded by the element's real size, so a narrower region is a
+            # refusal at the append rather than a write past it — which is the
+            # same bargain the result array's own cap makes.
+            want = elem_blob[1] * cap
+            elem_blob = self._reserve_compr_element_blob(
+                min(want, self._blob_cap - self._list_cursor), elem_blob[1])
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", 0)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
@@ -11432,7 +11461,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         saved_ctx = self._container_ctx
         self._container_ctx = 0
         try:
-            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
+            self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0, elem_blob)
         finally:
             self._container_ctx = saved_ctx
             self._compr_depth = d0
@@ -11440,9 +11469,97 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    def _compr_element_blob(self, expr, is_dict: bool, cap: int):
+        """`(None, stride)` — the per-iteration storage a comprehension needs
+        for its ELEMENT, or None when it needs none.
+
+        **A comprehension's element is rebuilt on every iteration and the blob a
+        CONSTRUCTION builds is a compile-time offset, so without this every
+        element of the result is the SAME object** — the last iteration's.
+        Measured on both architectures before it,
+        `[[x + y for x in [1, 2]] for y in [10, 20, 30]]` printed 93 where
+        CPython prints 63, because all three elements were one list `[3, 4]`.
+        `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`
+        has the table; the fix is here rather than there because the machinery
+        the earlier note was looking for is not missing, it is one register
+        discipline away.
+
+        The region is `(base, stride)` with `stride` the element blob's own size,
+        reserved for `cap` slots and indexed by the result count at the append.
+        Three things make that enough, and each is why the obvious alternatives
+        are not:
+
+          * **the copy, not a relocation.** A nested comprehension's result
+            address is not a compile-time constant the element's lowering can
+            index — it is `res_offset`, handed down by `_emit_compr_gen`. So the
+            element is still built at ITS compile-time offset and COPIED into the
+            slot, which needs two constants and one multiply. Building in place
+            would need a register holding `result + count·stride` to survive the
+            whole element emission, through `_emit_list`'s own per-store base
+            recomputes and every call the element contains;
+          * **beside the result array, not inside it.** A list result's slot is
+            one word that POINTS at the element blob, so the blob can live
+            anywhere in the frame. That is what keeps the result array's stride at
+            8 (16 for a dict pair) and every reader of a result blob —
+            `M.walk_stride`, `LEN_FROM_BLOB_FIELD` — unchanged;
+          * **a dict comprehension's VALUE, not its key.** The parser swap puts
+            the key in `.element` and the value in `.key`, and the key is the one
+            position a container cannot occupy at all (it is compared
+            element-wise and never materialised, which is a refusal elsewhere),
+            so the value is the word that needs storage of its own.
+
+        None for a comprehension whose element holds no fresh blob — an integer,
+        a string, a name bound to a blob the loop does not rebuild. Those are
+        CORRECT to share: `[ys for x in a]` is one list N times in CPython too,
+        and it is a name rather than a construction, which is exactly the
+        distinction `_materialised` records."""
+        node = expr.key if is_dict else expr.element
+        if node is None:
+            return None
+        nbytes = M.blob_bytes_reserved(node, self._list_caps, self._dict_caps)
+        if nbytes is None and isinstance(node, F.Comprehension):
+            # The one shape `blob_bytes_reserved` declines, because a nested
+            # comprehension's cap is this backend's own `_compr_cap` and the two
+            # architectures compute it by different routes. UNCLAMPED here, which
+            # is the direction that is safe: the inner clamp can only shrink it,
+            # and the copy is bounded by the size the inner actually reserved.
+            inner_stride = 16 if getattr(node, "kind", "list") == "dict" else 8
+            nbytes = 8 + inner_stride * self._compr_cap(node)
+        return None if not nbytes else (0, nbytes)
+
+    def _reserve_compr_element_blob(self, nbytes: int, stride: int):
+        """Reserve the element region and answer its `(base, stride)`.
+
+        A region narrower than ONE slot is no region: there is nowhere to put the
+        first element, so `_reserve_blob`'s refusal is raised rather than a
+        region whose copy would run past its own end on the first append."""
+        stride = max(stride, 8)
+        if nbytes < stride:
+            nbytes = stride
+        base = self._reserve_blob(nbytes, "a comprehension's element")
+        return (base, stride)
+
+    def _take_element_copy(self, node, region):
+        """`(src offset, nbytes, dst region base, dst stride)` for the append,
+        or None when this element needs no storage of its own.
+
+        `region` is `_compr_element_blob`'s answer and the RECORD is what the
+        element's own emission left behind, so a blob the prediction did not see
+        is a refusal rather than a silent aliasing bug: `blob_bytes_reserved` and
+        the emitters that call `self._materialised[...]` are two readers of one
+        layout, and a program that disagrees between them must not get a wrong
+        answer."""
+        made = self._materialised.pop(id(node), None)
+        if made is None:
+            return None
+        if region is None:
+            raise CodegenError(M.comprehension_element_not_sized(
+                M.spelled(node)))
+        return (made[0], made[1], region[0], region[1])
+
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int,
                         res_offset: int, is_dict: bool, cap: int,
-                        d0: int) -> None:
+                        d0: int, elem_blob=None) -> None:
         """Recursive generator walk: gen[gi] … gen[-1], then append element.
 
         THE SCOPE STACK IS PUSHED AFTER THE TARGET STORE, and that placement is
@@ -11592,7 +11709,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                         self.asm.emit(encode_cbz_xn(0, 0))
                         self.asm.emit_label_rel(step_label, here_offset=-4)
 
-                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap, d0)
+                self._emit_compr_gen(expr, gi + 1, res_offset, is_dict, cap,
+                                     d0, elem_blob)
             finally:
                 self._compr_scopes.pop()
 
@@ -11750,8 +11868,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_compr_element_copy(copies[0], copies[1], 0)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        if copy is None:
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+        else:
+            self._emit_compr_element_copy(copy)
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
+        if copy is not None:
+            # X9 is the SOURCE after the copy; the count goes back into the
+            # RESULT's header, which is the one thing above that still needs it.
+            self._emit_list_base(res_offset)
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -11807,8 +11932,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
+        if copy is None:
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
+        else:
+            self._emit_compr_element_copy(copy)
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
+        if copy is not None:
+            self._emit_list_base(res_offset)
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -11830,6 +11960,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         cap = M.dynamic_splat_capacity(expr.elements,
                                        M.literal_splat_operand_is_static)
         offset = self._reserve_blob(8 + 8 * cap, "list unpack")
+        self._materialised[id(expr)] = (offset, 8 + 8 * cap)
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", 0)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))

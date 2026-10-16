@@ -1816,7 +1816,7 @@ def test_a_value_typed_bracket_is_not_read_as_a_type(tmpdir):
             "    var xs = [1, 2]\n"
             "    print(a.get_first(), xs[0])\n")
     stmts = parse_module(prog)
-    n = MM.rewrite_instantiation_calls(stmts, {("Pair", ("Int",)): "Pair_Int"})
+    n = MM.rewrite_instantiation_uses(stmts, {("Pair", ("Int",)): "Pair_Int"})
     check(n == 1,
           f"exactly one call site is a constructor — `xs[0]` is a subscript on "
           f"a VALUE and `Pair[Int]` in the comment and the docstring is not a "
@@ -3437,6 +3437,14 @@ TESTS = [
      test_the_template_attribute_read_works_in_one_file),
     ("the same read works in one file",
      test_the_same_read_works_in_one_file),
+    ("a class attribute through the template's name answers one instantiation",
+     test_a_class_attribute_through_the_templates_name_answers_one_instantiation),
+    ("…and the class-attribute read is the rewrite in one file too",
+     test_the_class_attribute_read_is_the_rewrite_in_one_file_too),
+    ("a class attribute through two instantiations is refused",
+     test_a_class_attribute_through_two_instantiations_is_refused),
+    ("a local of a template's name is not rewritten",
+     test_a_local_of_a_templates_name_is_not_rewritten),
     ("a function template's body is still compiled",
      test_a_function_templates_body_is_still_compiled),
     ("a phantom struct template is kept",
