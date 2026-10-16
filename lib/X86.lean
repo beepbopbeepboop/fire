@@ -367,6 +367,21 @@ def x86_rm_read (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
 def x86_set_reg_narrow (s : X86State) (i sz : Nat) (v : UInt64) : X86State :=
   x86_set_reg s i ((x86_get_reg s i &&& ~~~x86_mask sz) ||| (v &&& x86_mask sz))
 
+/-- …and a narrow write leaves memory alone too, like every other one.
+
+    It is stated here rather than beside `x86_set_reg_mem` because it is about
+    this `def`, and it is stated at all because `formal/x86_64_endtoend_test.py`'s
+    successor table now quotes `x86_set_reg_narrow` (for `setcc r/m8`, which
+    writes one byte — see `_SUCCS`), and without this fact the closing read's
+    term stops at the first `setcc` on the path and the evaluation `native_decide`
+    is asked to do is REFUSED rather than wrong.  That is the same silent
+    degradation the other five are here to prevent: the proof would still
+    elaborate, with the hole admitted, and the report would say "proved with a
+    `sorry`" about a read that is computable. -/
+theorem x86_set_reg_narrow_mem (s : X86State) (i sz : Nat) (v : UInt64) :
+    (x86_set_reg_narrow s i sz v).mem = s.mem :=
+  x86_set_reg_mem s _ _
+
 def x86_rm_write (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
     (atp endAddr : Nat) (sz : Nat) (v : UInt64) : Option X86State :=
   if (modrm.toNat >>> 6) = 3 then
@@ -448,11 +463,6 @@ def x86_set_flag4 (s : X86State) (res : UInt64) (cf ofBit : Bool) : X86State :=
     `x86_set_reg_narrow` is `rfl` after unfolding, since it is a `x86_set_reg`
     call and the fact above does the work; `x86_set_flag4` is `{s with …}`
     outright. -/
-
-theorem x86_set_reg_narrow_mem (s : X86State) (i sz : Nat) (v : UInt64) :
-    (x86_set_reg_narrow s i sz v).mem = s.mem := by
-  unfold x86_set_reg_narrow
-  exact x86_set_reg_mem _ _ _
 
 theorem x86_set_flag4_mem (s : X86State) (res : UInt64) (cf ofBit : Bool) :
     (x86_set_flag4 s res cf ofBit).mem = s.mem := rfl
@@ -1318,7 +1328,8 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     -- the codegen's own contract makes it mandatory rather than optional: an
     -- expression leaves its value in a GPR, so a `double`-valued expression
     -- ends with this.  A run whose model cannot take this step stops at it, and
-    -- a stopped run reads as result 0 (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`).
+    -- a stopped run reads as result 0 (the x86-64 ISA census's SSE2 gap, closed
+    -- 2026-10-13; the census's ratchet is `test_formal_isa_census.py`).
     --
     -- The ModRM halves are the OPPOSITE of `0F 6E`'s and that is the instruction,
     -- not a naming preference: `0F 7E` is `MOVQ r/m64, xmm` — the XMM is the
@@ -1397,7 +1408,7 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     Below the bound the mantissa (with its implicit leading one) is shifted
     into an integer and the sign applied by two's complement.  Truncation
     toward zero, not flooring: `int(-2.9)` is `-2` and this is the `T` in
-    `CVTTSD2SI` (`bugs/FORMAL_x86_64_instruction_coverage_backlog.md`). -/
+    `CVTTSD2SI` (the x86-64 ISA census's SSE2 gap, closed 2026-10-13). -/
 def x86_cvttsd (a : UInt64) : UInt64 :=
   let sign := (a >>> 63) != 0
   let exp := (a >>> 52) &&& 0x7ff
@@ -2250,9 +2261,19 @@ theorem x86_step_jcc_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat)
     read from -- so the operation is `reg := reg * rm` rather than `rm :=
     reg op rm`, and the byte order is 0F AF not 01 /r.
 
-    `imul` sets no flags, so the successor is just the register and the rip.
-    It is worth a lemma of its own because the backend emits it for 8 of the 43
-    examples, and without one those 8 have no path tree at all.
+    It sets all four flags: ZF and SF from the low 64 bits of the product, and
+    CF and OF to "the SIGNED 128-bit product did not fit", which is what the
+    `let (lo, hi) := x86_split128 (x86_signed a * x86_signed b)` in the arm
+    computes. It is worth a lemma of its own because the backend emits it for 8
+    of the 43 examples, and without one those 8 have no path tree at all.
+
+    **The overflow test is the HIGH HALF, and stating it any other way states a
+    different instruction.** It read `lo != x86_sign_extend64 lo` — "the low
+    half is non-negative" — which is not what CF and OF are defined to be, and
+    which is wrong in both directions: `2 * 3` fits and it said SET, and
+    `0x8000…0000 * 2` does not and it said CLEAR. See the arm's comment and
+    `formal/x86_64_model_coverage_test.py::multiply_cases`, which is where the
+    three rows are measured.
 
     `dst` is the CONCRETE destination register, for the same reason the
     `rbp + disp8` load takes one: `x86_set_reg` is a `match` on its index and
@@ -2268,7 +2289,8 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some
       (x86_set_flag4
-        { x86_set_reg s dst (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
+        { x86_set_reg s dst
+            (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
           with rip := m + 4 }
         (x86_get_reg s dst * x86_get_reg s (rm + x86_rex_b rex))
         (x86_imul_ovf (x86_get_reg s dst) (x86_get_reg s (rm + x86_rex_b rex)))
@@ -2283,6 +2305,82 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_op2, h_rex, h_w, h_mod, h_reg, h_rm,
+        h_dst, h_dst_lt]
+
+/-- `not r/m64` (REX.W F7 /2, mod=3): bitwise complement, no flags.
+
+    One of the TWO forms the model has always stepped and the end-to-end prover
+    had no row for, so the six corpus examples that use `not` or `neg` had no
+    path tree at all and reported `no step lemma wired for` — a REFUSAL, which is
+    this file's way of being honest, and also a statement that the form is not
+    wired when the arithmetic is already here.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`'s
+    "three shapes" does not include this one, which is the reason it survived:
+    the decoder named the form and the ISA census counted it covered, so the
+    only thing that could see the gap was asking `_FORMS`.
+
+    `not` sets no flag (Intel SDM: `NOT` affects no flags), so the successor is
+    the register and the rip and nothing else. -/
+theorem x86_step_not_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xf7)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 2)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : rm + x86_rex_b rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      { x86_set_reg s dst
+          (x86_get_reg s dst ^^^ 0xffffffffffffffff)
+        with rip := m + 3 } := by
+  -- `h_digit` is the ONLY exclusion this needs, and that is the arm's own
+  -- shape: `F7` is a chain of `if digit = …` and `not` is the FIRST test, so
+  -- `digit = 2` settles the rest without naming the other six.  That is the
+  -- difference from `x86_step_setcc_r8`, whose four hypotheses are all
+  -- exclusions, and it is why this is a five-minute lemma and that one was not.
+  -- `x86_rex_b` is DELIBERATELY ABSENT, and that cost one iteration to find:
+  -- naming it unfolds it to `if rex.toNat % 2 = 1 then 8 else 0`, and by then
+  -- `h_dst`'s `rm + x86_rex_b rex` no longer matches anything, so the model's own
+  -- register index is left as a `match` on an unreduced sum.  Left out, `h_dst`
+  -- rewrites the index to `dst` first and both sides carry the same variable.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm,
+        h_dst, h_dst_lt]
+
+/-- `neg r/m64` (REX.W F7 /3, mod=3): two's-complement negation, four flags.
+
+    The same shape as `not` with the flags `x86_flags_sub s 0 a res` computes —
+    `0 - a`, which is what the arm does and what makes CF "a is not zero" and OF
+    "a is `-2^63`".  The flags are quoted through `x86_flags_sub` rather than
+    spread over the record for the reason every other row does it: the field
+    values come out of one function, so one source and one spelling. -/
+theorem x86_step_neg_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (reg rm dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0xf7)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 3)
+    (h_ndigit2 : ¬ ((modrm.toNat >>> 3) &&& 7 = 2))
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_dst : rm + x86_rex_b rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some
+      { x86_set_reg s dst ((0 : UInt64) - x86_get_reg s dst) with
+        rip := m + 3,
+        zf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).zf,
+        sf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).sf,
+        cf := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).cf,
+        of_ := (x86_flags_sub s (0 : UInt64) (x86_get_reg s dst)
+          ((0 : UInt64) - x86_get_reg s dst)).of_ } := by
+  -- `h_ndigit2` is the price of being the SECOND test in the chain rather than
+  -- the first, and it is the whole reason `neg` is not the same five minutes
+  -- `not` was: the simplifier evaluates the chain top down, so it has to be
+  -- told the first arm did not run before it will take the second.
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_flags_sub,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_ndigit2, h_rm,
         h_dst, h_dst_lt]
 
 /-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/

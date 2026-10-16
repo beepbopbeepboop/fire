@@ -808,9 +808,8 @@ missing value — the last of those because its bracket carries two values this 
 COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
 
 Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
-other three sit behind other modules' refusals
-(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
-so they move one refusal along rather than out — which is §2.0's "the next
+other three sit behind other modules' refusals (the round-1 `std-os-io` scope
+chain), so they move one refusal along rather than out — which is §2.0's "the next
 terminal is a different construct" again, and the reason the census above is
 corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
 halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that
@@ -918,7 +917,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 687
+standing in for a shape, and the shape answers the same question for all 693
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -929,17 +928,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 687 |
-| every type crossing the boundary is one word | **276** |
-| a box in an argument or the return | 411 |
-| of the 276, refused only for want of a linked library | 276 |
+| entry points declared | 693 |
+| every type crossing the boundary is one word | **279** |
+| a box in an argument or the return | 414 |
+| of the 279, refused only for want of a linked library | 279 |
 
-**276 of 687 is what a link line converts into working code with no backend
+**279 of 693 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 687
-entry points, 276 word-shaped, 411 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 693
+entry points, 279 word-shaped, 414 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -955,7 +954,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 687 / 514 / 173 by return type alone, and 276
+1. **455 / 352 / 101.** I measure 693 / 520 / 173 by return type alone, and 279
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -1001,10 +1000,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 276 are refused *for want of a
+library on its link line at all. So today the 279 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 276 and working code.
+registry; it is the only thing between the 279 and working code.
 
 ---
 

@@ -596,6 +596,70 @@ frame must not have its `longjmp` cross ordinary live C frames — the header's
 own comment on the set explains why in terms of a suspended frame no longer
 existing (`runtime/fire_runtime.h:579-604`).
 
+### A `*rest` parameter: a fixed-arity SPECIALIZATION per call site, and no
+### new calling convention
+
+**Decided 2026-10-05 (`work/formal59-docs`), for the formal dylib path.**
+`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 1 asks for this
+decision to be written here before any emitter moves, and this is it.
+
+**The decision: `def f(head, *rest)` called with N extras becomes an ordinary
+fixed-arity function `f_<N>(head, r0, …, r<N-1>)`, one per distinct N, produced
+by the SAME demand mechanism `Generics` below already uses for a type argument.**
+No calling convention changes, no frame changes, no `lib/ProofLib.lean` change,
+and therefore no ABI break: a specialized function is a function, and everything
+downstream of this document — both emitters, the frame analysis, the contract
+ladder, the value-flow model — already knows what a function is.
+
+**Why not the other two shapes the bug doc lists.** A *packed heap block the
+callee owns* needs somewhere to put a count and a base, which is two words where
+the value model has one, plus a free/entry discipline at every `return`, plus the
+block's layout in the value model — so it is the one shape that costs an ABI row
+AND a memory argument. *Refusing at the declaration* is what the tree does today
+and it loses the seven files the bug doc measured, five of which are
+`std/algorithm/backend/tile.mojo`'s two `tile(…)` overloads iterating
+`*tile_size_list` and indexing `*primary_tile_size_list[i]`.
+
+**Why this shape and not the other one that needs no ABI change.** Because the
+demand mechanism is already the answer to the problem that makes this hard, and
+that problem is not "how do I pass a variable number of arguments" — it is "the
+count is knowable only per CALL SITE, and one function is reached from many call
+sites". `Generics` below already carries a specialization key from an importer
+across the dylib boundary into the *defining* module's own build
+(`build_module_dylib`'s `demands`), already keys the resulting artifact's
+identity on it so two specializations are two artifacts, and already forbids
+exporting a specialization under its base name. An arity is one more key on that
+machinery. The alternative — passing the count in a register — is exactly what
+the bug doc rules out, and it is what would need a value-model change.
+
+Five properties are load-bearing, and the failure mode in each is a program that
+builds and computes the wrong answer rather than one that fails:
+
+* **The BODY is rewritten, not just re-declared.** A read of `*rest` is a read
+  of the sequence the extras form, so `len(rest)` becomes a constant, `rest[i]`
+  becomes the named parameter, and `rest[0]` on an empty specialization is a
+  refusal rather than a subscript into nothing. Re-declaring the parameters while
+  leaving the body reading a name that no longer exists is the miscompile.
+* **An arity that is not statically known cannot be specialized and is refused
+  by name.** A call through a function value, and `f(*args)` forwarding another
+  function's extras, are the two shapes; both already have a refusal and both
+  keep it.
+* **`**kwargs` is NOT this.** A keyword collection's KEYS are not knowable at
+  the call site, so there is no arity to specialize on; `**kwargs` stays refused
+  (`bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`), and the two
+  refusers are separate for that reason.
+* **The mangling is `monomorphize.mangle`'s, not a new spelling.** It is
+  INJECTIVE, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_
+  the_mangler_produces` reads every `doc/` and `bugs/` file for a stated
+  mangled spelling — so this section states no spelling of its own, on purpose.
+* **A specialization is never exported under its base name.** The trie rule
+  below says why for a template; an arity specialization is the same statement.
+
+**What this does not decide, and it is not small:** a `*rest` whose extras must
+be passed ON to another `*rest` (the forwarding case above), and the byte
+identity of the demand key — `demands_key` currently digests type arguments, and
+an arity has to join that digest rather than sit beside it.
+
 ## Generics
 
 A generic is not a single symbol; each instantiation is. The boundary symbol for

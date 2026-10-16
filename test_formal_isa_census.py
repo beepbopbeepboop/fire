@@ -120,6 +120,55 @@ class TestEmittedFormCoverage(unittest.TestCase):
                              "sample: %s" % (arch, broken))
 
 
+class TestTheInstrument(unittest.TestCase):
+    """The columns whose input is a fact about the emitter, not a text match.
+
+    Each of these pins a place where the census could read the repository's
+    PROSE as a fact about the code, which is worse than a wrong count: it makes
+    a form nothing emits look like a row with three missing columns.
+    """
+
+    def test_a_docstring_mention_is_not_a_call_site(self):
+        """EMITTED is a call site, not a spelling.
+
+        `encode_cmov_r64_r64` is named exactly once, in
+        `formal/x86_64_codegen.py`'s prose explaining why this emitter does NOT
+        use it (`lib/X86.lean` has no `cmov` arm, so the clamp is two
+        branches). A regex over the file's TEXT counted that sentence as
+        emission, so the census carried a row for an instruction no image can
+        contain, reported `NO NO NO`, and named an unexplained gap that was
+        really a mention. The column now reads AST `Name`/`Attribute` nodes, the
+        same rule the FUZZ and AS columns already use.
+        """
+        names = C.encoder_names("x86_64")
+        self.assertIn("encode_cmov_r64_r64", names,
+                      "encode_cmov_r64_r64 is no longer even in the encoder "
+                      "table, so this pin no longer has a subject")
+        self.assertEqual(
+            [], C.call_sites("x86_64").get("encode_cmov_r64_r64"),
+            "encode_cmov_r64_r64 reads as EMITTED, but it is named only in a "
+            "docstring in formal/x86_64_codegen.py; a sentence about an "
+            "instruction is not a call site")
+
+    def test_no_x86_64_form_is_left_on_the_backlog(self):
+        """The x86-64 backlog is empty: every form is covered or a limit.
+
+        The last three rows were the call-through-a-register (now a
+        `HARNESS_LIMITS` entry: the target is outside the harness's one
+        `MAP_FIXED` region) and the byte-wise `and`/`or` (removed: the
+        REX-prefix omission that kept them red was this tree's own encoder bug,
+        fixed by `_byte_rex_required`). This is the anti-rot direction of
+        `test_every_backlog_entry_still_describes_a_gap`: it stops a NEW x86-64
+        row from landing on the backlog as a way to make the coverage test
+        pass.
+        """
+        x86 = {r.encoder for r in _ROWS["x86_64"]}
+        still = sorted(x86 & set(C.BACKLOG))
+        self.assertEqual([], still,
+                         "these x86-64 forms are still on the BACKLOG: %s"
+                         % still)
+
+
 class TestExemptions(unittest.TestCase):
     """Every exemption is honest, and an exemption cannot outlive its reason."""
 
@@ -184,14 +233,50 @@ class TestExemptions(unittest.TestCase):
         self.assertEqual(
             [], [r.encoder for r in rows if r.missing() and not r.excluded])
 
+    def test_the_x86_64_backend_has_no_backlog_row_left(self):
+        """The x86-64 backlog is CLOSED, and no row may rejoin it by default.
+
+        `work/formal201-docs` removed the last three x86-64 `BACKLOG` entries on
+        2026-10-08, each for a measured reason: `encode_and_r8_r8` and
+        `encode_or_r8_r8` read `yes yes yes` once `_byte_rex_required` fixed the
+        byte-wise ALU encodings' missing REX prefix, and `encode_call_r64`'s
+        remaining FUZZ gap is a property of the HARNESS (it jumps to a register's
+        CONTENTS, outside the one `MAP_FIXED` region the fuzzer installs), so it
+        is a `HARNESS_LIMITS` entry and not work nobody has done.
+
+        The pin is in both directions: no x86-64 row may be exempted by a
+        `BACKLOG` entry (that is where a new gap would go by default, and the doc
+        it would have to name is no longer the home for this), and the one entry
+        that moved must still be a harness limit — otherwise the row falls
+        straight back into the unexplained-gap list above.
+        """
+        x86_backlog = sorted(n for n in C.BACKLOG
+                             if n in {r.encoder for r in _ROWS["x86_64"]})
+        self.assertEqual(
+            [], x86_backlog,
+            "the x86-64 backend has a BACKLOG entry again: %s. The x86-64 "
+            "backlog was closed 2026-10-08; a real harness limit belongs in "
+            "HARNESS_LIMITS with its own reason, and a real gap needs a doc "
+            "that says what the work is" % x86_backlog)
+        self.assertIn(
+            "encode_call_r64", C.HARNESS_LIMITS,
+            "encode_call_r64's FUZZ gap is a property of the harness (it jumps "
+            "to a register's contents, which no case value can install), not "
+            "work; without its HARNESS_LIMITS entry the row falls back into the "
+            "unexplained-gap list")
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    ok = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
-                       exit=False).result.wasSuccessful()
-    return 0 if ok else 1
+    result = unittest.main(argv=[__file__, "-v"] if args.verbose else [__file__],
+                           exit=False).result
+    # `wasSuccessful() and 0 or 1` is 1 either way (`0` is falsy, so the `or`
+    # always wins): the script printed OK and exited 1, so a shell — or
+    # `tools/memslot.py`, which reports the child's exit — read a passing census
+    # as a failure. Every other `test_formal_*.py` uses the conditional below.
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":

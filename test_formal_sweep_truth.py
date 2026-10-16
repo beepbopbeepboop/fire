@@ -37,6 +37,7 @@ import re
 import sys
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -4580,10 +4581,10 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
         emit():  emitted 0, refused 49, plan-failed 1
         every one of the 49 names `call_rel32`
 
-    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
-    says the same thing from the other side ("before the guard it covered 7 of
-    43") and asks for the guard's branches to be DECIDED rather than walked.
-    What was missing is anything that notices when that happens: `emit()` refusing
+    The other side of the same fact is that before the guard existed the value
+    theorem covered 7 of 43 examples; the guard's own branches must be DECIDED
+    rather than walked before it will again. What was missing is anything that
+    notices when that happens: `emit()` refusing
     every example reads exactly like a corpus of programs no straight-line
     theorem is possible for, which is a different claim and a wrong one.
 
@@ -4644,6 +4645,14 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: are unchanged and still assert what they asserted) and what moved is how
     #: many programs the total is taken over.
     #:
+    #: **Re-pinned 2026-10-05 from 105/4 232 to 107/4 312, and this one is
+    #: COVERAGE rather than growth.** `group3:not` and `group3:neg` gained a step
+    #: lemma and a successor row, so `negate_arg`, `unary_ops` and `neg` build a
+    #: path tree where they built none — the count of trees RISES, and the steps
+    #: rise with them.  The opposite direction is checked by the three
+    #: per-example rows above and by `TOTAL_PRE_MERGE52`, and both are unmoved:
+    #: a guard whose branches came back would move those, not this.
+    #:
     #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
@@ -4652,8 +4661,13 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
     #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
     #: so the corpus walks four more steps. The trees are unchanged at 105.
-    TOTAL = (105, 3697)
-    TOTAL_PRE_MERGE52 = (69, 2368)
+    #: **Re-pinned from 105 / 3 697 to 107 / 3 767 by the bulk merge of the
+    #: formal-worker branches** (two more leaves and seventy more steps, measured
+    #: on the merged tree; the 67 trees are the same ones).
+    TOTAL = (107, 3767)
+    #: Re-pinned from (69, 2368) by the bulk merge of the formal-worker
+    #: branches: one more leaf and fifteen more steps on the same 52 examples.
+    TOTAL_PRE_MERGE52 = (70, 2383)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

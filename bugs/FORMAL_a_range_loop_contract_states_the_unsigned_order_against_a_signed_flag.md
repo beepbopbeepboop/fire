@@ -193,9 +193,10 @@ which is the one thing that changed about this list.
    ```
 
    `bv_decide` over the four cases (`hr`/`hb` each true or false) is the shape
-   that closes it; a `Nat`-ordered form will not, for the reason
-   `bugs/FORMAL_contract_ladder_reach.md` §4 records about `omega` over
-   `UInt64`.
+   that closes it; a `Nat`-ordered form will not, because `Lean.UInt64` is
+   `Fin (2^64)` and `omega` has no arithmetic over that order — which is why
+   `formal/contracts.py::_ORDER_BRIDGE` carries the two `UInt64.*_iff_toNat_*`
+   bridges into `Nat` before `omega` runs.
 2. **Then land the generator half** from `work/formal-proofs-health-r2-r2`
    (`git show 4584c49a -- formal/arm64_proof_gen.py`), re-based: the helper is
    `loop_body_flag` on master, not `loop_cond_flag`, and its state chain is

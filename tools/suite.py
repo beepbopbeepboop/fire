@@ -502,6 +502,7 @@ MEASURED_PEAK_GB = {
     'formal-module-attr':  (0.07, 'measured'),
     'llm-reference':       (0.07, 'measured'),   # 31 cases of pure CPython
     'formal-dataclasses':  (0.10, 'measured'),
+    'formal-namedtuple':   (0.10, 'measured'),
     # Five that were registered and in NO BUCKET, so nothing ran them; each was
     # measured once, alone, the same way, before being given a class and a
     # bucket. The two at 0.01 are under what a 0.5 s poll resolves across a
@@ -3286,6 +3287,15 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
             'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='@dataclass as a compile-time transform, against CPython')
+# `typing.NamedTuple` on both architectures, each execution case run under
+# CPython and both images and required to agree; refusals pinned by message.
+# 57 checks, 11.8 s.
+test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_namedtuple_formal.py', 'formal/dataclass_transform.py',
+            'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
+            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='typing.NamedTuple on the formal backend, against CPython')
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
 # that must stay refused, each with a message that names its own reason, and the
@@ -3774,6 +3784,11 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
+# `deps=['preflight', 'prooflib']`: one assertion,
+# `test_library_state_agrees_with_the_question_it_asks`, requires all six
+# `lib/*.olean` to be present (it is what says a cache report is not reporting
+# about a missing library), so the job must not start before the shared library
+# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
@@ -3816,7 +3831,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],
@@ -4318,7 +4333,7 @@ BUCKETS = {
                # the whole formal picture in one bucket, which is what a reader
                # of this list is asking. Expansion schedules each test once per
                # run, so being in `check` too costs nothing.
-               'formal-dataclasses', 'formal-module-attr',
+               'formal-dataclasses', 'formal-namedtuple', 'formal-module-attr',
                'formal-os-backing',
                # …and the two that arrived with master's formal20 batches on
                # 2026-10-04 unregistered, registered above with their

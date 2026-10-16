@@ -1,4 +1,4 @@
-# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source
+# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
@@ -51,6 +51,78 @@ half of `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
 (claimed elsewhere), not this one. So this doc stays open with §4.1's literal
 half closed.
 
+**What changed 2026-10-08, and what did not.** §2 row 4's construct,
+`Tagged[Int, 0]()` — a generic applied with a type argument and a comptime VALUE —
+was measured on the IMPORTED spelling (where `imported_struct_defs` puts `Tagged`
+in `structs_by_name`), so the row recorded the correct
+`compile-time explicit-parameter list` message. **The SAME construct in the file
+that DECLARES the template fell through to §2's tuple-index sentence instead**,
+which is false about the source: `Tagged[Int, 0]` names two compile-time
+parameters and no container. Root cause: `monomorph.without_template_bodies`
+removes each template DECLARATION before `structs_by_name` is built (a template
+body has no instantiation in scope, so analysing it is a `len(Self.keys)`
+refusal), leaving `model.subscript_index_is_a_comptime_parameter_list` — whose
+docstring claimed `structs_by_name` "covers a module's OWN generics" — unable to
+classify it, so `multi_index_kind` answered `MULTI_INDEX_DATA`.
+`formal/build.py::_own_template_structs` now hands the unit's own template
+struct names to that classifier separately, and
+`test_formal_monomorph.py::test_an_own_struct_template_with_a_comptime_value_is_
+diagnosed_as_one` pins both directions on both architectures. **This is a
+diagnosis fix and not the wall**: `type_arg_text` still answers `""` for a
+top-level literal, so no demand is computed, nothing is instantiated, and the
+construct is still refused — it is now refused with the true sentence.
+
+**One shape is deliberately NOT covered, so nobody re-derives it.**
+`tagged.Tagged[Int, 0]()` — the DOTTED spelling of the same construct — still
+reaches the tuple-index sentence, and that is the classifier's stated boundary
+rather than an oversight: `formal/model.py::_base_name` answers `None` for a
+`MemberExpr`, and §`subscript_index_is_a_comptime_parameter_list`'s docstring
+says every dotted base keeps today's answer, because deciding one needs the
+IMPORTED module's declarations (`formal/imports.py`'s question) and guessing is
+the one direction that could turn a refusal into a wrong image. The type-only
+dotted shape (`mylib.Box[Int]()`) has its own answer
+(`dotted_specialization_refusal`, §3 row 5); the comptime-value dotted shape is
+a gap left for whoever makes a dotted base classifiable, and the fix above does
+not reach it.
+
+**2026-10-13 (`work/formal350-docs`): the wall is open in general and PART of
+it is now closed — a SCALAR LITERAL value argument on a STRUCT template is a
+demand and builds.** §4.1's "value substitution" was assumed to need a value
+model, and for a literal it does not: `monomorphize.monomorphize_source` already
+substitutes a bracket argument's TEXT whole-word, so a literal's own text IS the
+value. What was missing was the READER — `type_arg_text` refuses a top-level
+literal (for `tile[2, 3]`'s reason, correctly), so `Tagged[Int, 0]` never became
+a demand and the call site kept its brackets and hit the explicit-parameter-list
+refusal measured in §1.
+
+The fix is a SECOND half of the demand walk,
+`formal/monomorph.py::value_arg_demands`, which reads the DECLARATION to find
+which bracket positions are SCALAR value parameters — `origin: Int` is one, a
+type parameter `T` and a container `keys: List[T]` are not — and accepts a
+literal only at one of those, and only on a STRUCT template (a FUNCTION template
+with a bracket is the local-specialization machinery's, and demanding a boundary
+symbol for `tile[2, 3]` would publish a second copy of a body the build already
+emits). Its `bracketed_callees` walk is the same call site walk
+`all_instantiation_calls` uses, so the two halves cannot disagree about which
+sites have a bracket. It is wired into `formal/imports.py::instantiation_demands`
+and `formal/monomorph.py::own_demands`, and `rewrite_instantiation_calls` reads a
+value element too — so the call site is rewritten to the mangled symbol and the
+refusal is bypassed by construction rather than by loosening it. Pinned by
+`test_formal_monomorph.py::test_a_scalar_value_literal_is_a_demand_at_a_declared_value_parameter`,
+which builds `struct Tagged[T, origin: Int]` with a method returning `origin`
+and requires `Tagged[Int, 0]()` and `Tagged[Int, 5]()` to print `0` and `5` on
+BOTH architectures.
+
+**What is STILL open, and it is the rest of §4.1**, so the doc stays: a value
+that is a NAME or a computed expression (`ImmStaticOrigin`, `origin_of(self)`); a
+scalar value at a FUNCTION template's parameter; a value whose declared type is
+a comptime type this path has no word for (`target: CompilationTarget`,
+`origin: Origin[mut=mut]`); and §1's standing instance
+`Span[StaticString, ImmStaticOrigin]`, whose second element is a `comptime` ALIAS
+whose initializer does not fold — so even a formed demand fails to instantiate
+for a reason that lives in another module. The landed subset is exactly the one
+whose substitution is a literal the mangler can already carry.
+
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
 
@@ -70,18 +142,65 @@ the source, and both are now about it:
   which also runs the recommended spelling against CPython on both architectures
   so the advice is a fact rather than a claim.
 
-**The wall is unchanged and is NOT a message.** `unbox[Int](b)` cannot be
-instantiated because `unbox`'s declaration has no bracket parameter to
-substitute: `formal/monomorph.py::instantiate` refuses it by name ("its
-declaration has no type parameter, so there is nothing to substitute"), and
-`template_names` reads the export rule's `EXCL_GENERIC` set, which a `def
-name(t: Box[T])` is not in. So §4.1 (substitute a comptime VALUE argument, and
-teach the demand walk to read the bracket) is untouched, and the two-message
-item §4.2 is closed.
+**The wall is PARTLY LANDED and PARTLY OPEN, and the message half is closed.**
+The same-module half of §4.1 landed 2026-10-12 (`work/formal308-docs`), and a
+THIRD false sentence that had appeared since §3 is fixed with it; §1's imported
+`Span[...]` instance and the imported struct case are still the wall. Read the
+next paragraph before the older one below, which it corrects in one place.
+
+**What landed 2026-10-12 (`work/formal308-docs`).** Three real defects, and the
+one capability at the root of two of them:
+
+* **A module-declared generic STRUCT template applied with a comptime VALUE now
+  instantiates.** `formal/monomorph.py::own_demands` reads a bare literal at the
+  top level of a STRUCT template's bracket (`Tagged[Int, 7]`), scoped to the
+  struct half because a FUNCTION template's value specialisation is the LOCAL
+  machinery's (`tile[2, 3](…)`). The substitution itself already worked —
+  `monomorphize.monomorphize_source` substitutes a value as readily as a type —
+  so what was missing was the READ. Pinned by
+  `test_formal_run.py::sub_declared_struct_template_with_a_value_parameter_builds`
+  (exit 7, and `origin` is read in the body, so a value substituted into the
+  wrong position answers something other than 7 rather than merely failing to
+  build).
+* **The literal is accepted ONLY where the declaration annotates the parameter
+  as a comptime VALUE** (`_undeclared_literal_arg` and the conservative
+  `_VALUE_PARAM_ANNOTATION_BASES` allowlist). This is the safety half and it is
+  load-bearing rather than defensive: `Pair[2]` on `struct Pair[T]` substituted
+  the literal into the TYPE parameter and **built, ran and answered 0** — a
+  `var first: 2` field is accepted by this backend — so a literal on a type
+  parameter is DROPPED, not substituted, and the call site keeps its brackets.
+  Measured: `Tagged[0, 5]` still refuses, with the construct's own sentence.
+* **The false sentence is gone.** `Tagged[Int, 0]` (and `Tagged[0, 5]`) were
+  refused as "a subscript whose index is a tuple" — a container lookup that never
+  happens. The module's own struct templates are now read from the SOURCE
+  (`formal/monomorph.py::template_struct_names`, the only place a template
+  dropped from the image survives) and handed to `check_module_symbols`, so the
+  sentence names the construct. Pinned by a new `SUBSCRIPT_CASES` row and by the
+  rewritten
+  `comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal`
+  (its old words were the false sentence; the sentence that is true of a variadic
+  comptime parameter list is the one it now expects).
+
+**Still the wall, and NOT landed, stated so nobody re-derives it:** §1's
+standing instance `Span[StaticString, ImmStaticOrigin]` is an IMPORTED type
+constructor whose second element is a `comptime` ALIAS that does not fold, so no
+read of the bracket helps it; the IMPORTED struct case is unchanged too
+(`demands` keeps literals OFF, so a consumer that imports a struct template
+taking a value gets no instantiation of it — `own_demands` is the module's own
+half only); and a value parameter whose annotation is not in the allowlist stays
+refused, which is the safe direction the previous paragraph states.
+
+**The older statement of the wall, kept for the shape it names.**
+`unbox[Int](b)` cannot be instantiated because `unbox`'s declaration has no
+bracket parameter to substitute: `formal/monomorph.py::instantiate` refuses it
+by name ("its declaration has no type parameter, so there is nothing to
+substitute"), and `template_names` reads the export rule's `EXCL_GENERIC` set,
+which a `def name(t: Box[T])` is not in. That half of §4.1 is still open, and the
+two-message item §4.2 is closed.
 
 **Why it is filed rather than mentioned:** two of the sweep-scope docs asked for
 exactly this and could not do it themselves, because the shape is in neither of
-their scopes. `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §3
+their scopes. The round-2 `std-os-io` scope audit's §3
 link 2: *"Link 2 has NO bug doc and no claim … It is filed nowhere of its own,
 and 4 files of this scope sit behind it, so it is worth a doc rather than a
 mention."* `bugs/FORMAL_std_builtin_sys_time_slice_2026-10-04.md` §3 row 12
@@ -137,9 +256,13 @@ built with `fire.py build --formal --no-prove` and RUN where they build:
 Row 1 is `formal/monomorph.py`'s demand walk working: an explicit type argument
 on a constructor produces the instantiation and the mangled boundary symbol.
 Row 4 differs from row 1 by exactly one thing — the second element of the
-bracket is `0`, a **value**, and there is no parameter of a kind this path can
+bracket is `0`, a **value**, and there was no parameter of a kind this path could
 substitute. `formal/monomorph.py::type_arg_text` answers `""` for an argument
-that is not a type, by design, and the mangler then has nothing to mangle from.
+that is not a type, by design, and the mangler then had nothing to mangle from.
+**That is fixed for a struct template on both routes** (see the Status): the
+literal is read by `_bracket_arg_text`'s value fallback, scoped to a STRUCT
+template, and `instantiate_all`'s gate substitutes it only where the declaration
+annotates the parameter as a comptime VALUE.
 
 **That is why the two docs' "the same monomorphisation wall" was the right
 instinct and the wrong shape**: it is not the bare-call inference row
@@ -148,7 +271,7 @@ not `FORMAL_generic_monomorph_scope.md` §1 (a type argument in a **non-call**
 position — an annotation, a field, a return type). It is a bracket that IS
 written, whose second element is not a type. Neither existing doc lists it;
 §8 of the monomorph doc's "what is not here, deliberately" does not mention it,
-which is where `FORMAL_std_os_io_round2_…` §3 looked for it.
+which is where the round-2 `std-os-io` audit's §3 looked for it.
 
 ## 3. Two messages in this neighbourhood are wrong about the source — BOTH FIXED
 
@@ -249,6 +372,6 @@ under the export row depending on which message fires, which is a fourth fact
 about it: **one construct, two rows in the ranking instrument, and neither row
 is about the construct.** The `sys/arg.mojo` instance is 1 of the 60 dependency
 refusals in `FORMAL_std_builtin_sys_time_slice_2026-10-03.md` §4 and 4 files
-behind it in `FORMAL_std_os_io_round2_…` §3, so the sweep's own numbers put it
+behind it in the round-2 `std-os-io` audit's §3, so the sweep's own numbers put it
 at 5 files and the round-2 doc's probe put it at 4; both are lower bounds,
 because a file whose own construct refuses first is not in either count.

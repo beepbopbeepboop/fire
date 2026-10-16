@@ -862,19 +862,20 @@ def raise_from_field(message: str) -> None:
     raise CodegenError(message)
 
 
-def rewrite_equality(fn, holders: set, by_name: dict, classes: dict) -> None:
-    """Desugar `a == b` between two values of the same `@dataclass`.
+def rewrite_equality(fn, holders: set, by_name: dict, classes: dict,
+                     decls: dict = None) -> None:
+    """Desugar `a == b` / `a < b` between two values of the same value TYPE.
 
     Called from inside `_frame_receivers`, because that is where a name's STRUCT
     is known: a local's struct is settled by the holder fixpoint and a
     parameter's by the interprocedural edge in the same pass. This function is
-    HANDED that answer rather than re-deriving it, which is the same reason the
-    pass publishes `fn._frame_candidates` for `model.struct_construction_plan`:
+    HANDED that answer rather than re-deriving it, which is the same reason
+    the pass publishes `fn._frame_candidates` for `model.struct_construction_plan`:
     two recognitions of "is this name a dataclass value" is exactly the pair
     that agrees until the day it does not.
 
-    It fires only when BOTH sides are known holders of the SAME dataclass
-    struct, and the cases it declines are all cases where declining is right:
+    It fires only when BOTH sides are known holders of the SAME struct, and the
+    cases it declines are all cases where declining is right:
 
       * a different struct on the right — `A(1) == B(1)` is False in CPython
         for distinct dataclass types, and an address compare also says False;
@@ -887,7 +888,20 @@ def rewrite_equality(fn, holders: set, by_name: dict, classes: dict) -> None:
     into already lowers correctly: `a.x == b.x and a.y == b.y` through a
     function boundary on a frame receiver is measured to build and print
     `1 0` where CPython prints `1 0` (`.tmp/dc/x1.py`, `y1.py`), and `not` over
-    a comparison is measured too (`z1.py`)."""
+    a comparison is measured too (`z1.py`).
+
+    **The FOUR ordering operators ride the same loop, and they are here rather
+    than in a second rewrite because they need the same `typed` table** — the
+    only thing that makes `a < b` decidable is knowing both operands hold the
+    same struct, which is one fact and one fixpoint. They are rewritten only
+    for a `NamedTuple`, and NOT for a dataclass: CPython gives a dataclass an
+    ordering only under `order=True`, which `check_dataclass_classes` refuses by
+    name (a refusal this module must not route around), while a `NamedTuple` IS
+    a `tuple` and every namedtuple is ordered. `_ordering_chain` is the seam
+    that would carry `order=True` when the option stops being refused — one
+    dispatch on `op` is all the difference, and it is a dispatch rather than a
+    flag because the operator is read ONCE per node, before this loop mutates
+    it."""
     M = _model()
     if not classes or not holders:
         return
@@ -905,42 +919,320 @@ def rewrite_equality(fn, holders: set, by_name: dict, classes: dict) -> None:
             continue
         st = cands[0]
         info = classes.get(getattr(st, "name", None))
-        if info is None or info["own_eq"] or info["eq_false"]:
+        if info is None or info.get("own_eq") or info.get("eq_false"):
             continue
         typed[name] = (st, M.struct_field_names(st))
     if not typed:
         return
     for node in M.iter_nodes(fn.body):
-        if not isinstance(node, F.BinaryOp) or node.op not in ("==", "!="):
+        if not isinstance(node, F.BinaryOp):
             continue
-        left = _typed_dataclass(node.left, typed)
+        # `op` is read ONCE, before anything is written to this node, and that
+        # is load-bearing: the chain for an ordering operator has an `or` at its
+        # ROOT, so re-reading `node.op` after writing one would see `or` — not
+        # an operator this loop handles, which is the benign case, but a chain
+        # written by a LATER iteration over a node this loop already rewrote is
+        # not. `_ordering_chain`'s docstring has the shape that provokes it.
+        op = node.op
+        if op not in ("==", "!=") and op not in _ORDER_FROM_STRICT:
+            continue
+        left = _typed_dataclass(node.left, typed, decls)
         if left is None:
             continue
-        right = _typed_dataclass(node.right, typed)
+        right = _typed_dataclass(node.right, typed, decls)
         if right is None or right[0] is not left[0]:
             continue
         if not left[1]:
             continue
-        # `==` is "every field matches" and `!=` is De Morgan's "some field
-        # differs". The node is mutated IN PLACE — `iter_nodes` yields no
-        # parent, so there is nothing to re-point a replacement through — which
-        # is why both arms are `BinaryOp`s and neither is a `not` over the other.
-        field_op, join_op = ("==", "and") if node.op == "==" else ("!=", "or")
-        chain = comparison_chain(field_op, join_op, node.left, node.right,
-                                 left[1])
+        line, col = getattr(node, "line", 0), getattr(node, "col", 0)
+        if op in ("==", "!="):
+            # `==` is "every field matches" and `!=` is De Morgan's "some field
+            # differs". The node is mutated IN PLACE — `iter_nodes` yields no
+            # parent, so there is nothing to re-point a replacement through —
+            # which is why both arms are `BinaryOp`s and neither is a `not` over
+            # the other.
+            field_op, join_op = ("==", "and") if op == "==" else ("!=", "or")
+            chain = comparison_chain(field_op, join_op, node.left, node.right,
+                                     left[1])
+        else:
+            chain = _ordering_chain(op, node.left, node.right, left[1], line,
+                                    col)
+            if chain is None:
+                continue
         node.op, node.left, node.right = chain.op, chain.left, chain.right
 
 
-def _typed_dataclass(expr, typed):
-    """`(struct, fields)` when `expr` is a bare name this function typed.
+def _ordering_chain(op: str, left, right, fields, line: int, col: int):
+    """The chain for ONE ordering operator, or None when there is nothing to say.
 
-    A bare name and nothing else: `a.x == b.y` is not a dataclass comparison,
-    it is two field reads, and rewriting it would change what the source says.
-    A parenthesised name is the same node here — the parser does not keep the
-    parentheses — which is correct, because `(a) == b` IS `a == b`."""
-    if not isinstance(expr, F.IdentExpr):
+    `tuple`'s four, in CPython's own terms rather than as four separate
+    derivations:
+
+      * `<`   `a.x < b.x or (a.x == b.x and a.y < b.y) or …` — the chain
+        `lexicographic_chain` builds;
+      * `<=`  `a < b or a == b`;
+      * `>`   `b < a` — the `<` chain with the operands SWAPPED, which is why
+        `>` needs no `not` and no comparison inversion;
+      * `>=`  `b < a or a == b`.
+
+    Split out of `rewrite_equality`'s loop rather than inlined into it because
+    the loop MUTATES each node in place and `M.iter_nodes` yields no parent: an
+    inline table keyed on `node.op` would re-read the operator AFTER a previous
+    iteration had already replaced a node's `op`, and would desugar the chain it
+    had just written as though the source had contained it. Capturing `op` once
+    per node, before anything is written, is what makes the two rewrites
+    composable in one walk — and `lexicographic_chain` returning a chain whose
+    ROOT is `or` is exactly the shape that provokes it.
+    """
+    if len(fields) < 2:
+        # A ONE-field namedtuple's ordering is the field's own ordering, so the
+        # compare is already right and a chain over one field would add a
+        # redundant `or`. Skipped rather than refused because it IS the answer —
+        # the same reasoning as a one-field dataclass's `==`.
         return None
-    return typed.get(expr.name)
+    if op == "<":
+        return lexicographic_chain("<", left, right, fields)
+    if op == ">":
+        return lexicographic_chain("<", right, left, fields)
+    # `<=` and `>=`: the strict chain plus the all-fields tie, which is what
+    # `tuple` defines them to be. `>=` reads the strict chain from the swapped
+    # side because `a >= b` is `b <= a`, i.e. `b < a or a == b`.
+    if op == "<=":
+        lt = lexicographic_chain("<", left, right, fields)
+    else:
+        lt = lexicographic_chain("<", right, left, fields)
+    if lt is None:
+        return None
+    eq_chain = comparison_chain("==", "and", left, right, fields)
+    return F.BinaryOp("or", lt, eq_chain, line, col)
+
+
+def _typed_dataclass(expr, typed, decls: dict = None):
+    """`(struct, fields)` when `expr` is a value this function typed.
+
+    Two shapes, and the second is what makes the answer agree with CPython:
+
+      * a BARE NAME in `typed` — the holder analysis's answer, the shape every
+        consumer of this pass has always asked about;
+      * a CONSTRUCTION of a struct in `decls` that is in `typed` — `P(1, 2)`,
+        whose type is written in the source and needs no analysis at all.
+
+    **The construction arm is not a convenience, it is a wrong answer without
+    it.** With a bare name only, `p == P(1, 2)` and `P(1, 2) == P(1, 2)` fell
+    through to the codegen, which compares two FRAME ADDRESSES — measured 0 on
+    both architectures, exit 0, where CPython says 1. A silently wrong `==` is
+    the worst outcome this backend has, and it is the whole reason this
+    function is worth widening rather than narrowing.
+
+    What is still declined is everything else, and the reason is the one the
+    original docstring gives: `a.x == b.y` is not a value comparison, it is two
+    field reads, and rewriting it would change what the source says. A
+    subscript, a call, an arithmetic expression — none of them is a name this
+    pass can type, and guessing would be exactly the second recognition of "is
+    this a value of class P" that `rewrite_equality`'s own docstring warns
+    about.
+
+    A parenthesised name or construction is the same node here — the parser does
+    not keep the parentheses — which is correct, because `(a) == b` IS `a == b`.
+    """
+    if isinstance(expr, F.IdentExpr):
+        return typed.get(expr.name)
+    if (decls and isinstance(expr, F.CallExpr)
+            and isinstance(expr.func, F.IdentExpr)):
+        st = decls.get(expr.func.name)
+        if st is not None:
+            hit = typed.get(st.name)
+            # The struct must be the SAME one the name side resolved to, and it
+            # must be one this pass is rewriting: a construction of some other
+            # class is not a comparison between two values of one type.
+            if hit is not None and hit[0] is st:
+                return hit
+    return None
+
+
+# ── `typing.NamedTuple`: the OTHER value type, and the same comparison ─────
+#
+# A `class P(NamedTuple)` body is a field list, and CPython's `NamedTuple` is a
+# subclass of `tuple` whose `__eq__`/`__ne__`/`__lt__`/… are TUPLE's — which are
+# lexicographic over the elements in order. On this path a multi-field struct's
+# receiver is the ADDRESS of a frame, so every one of those six operators reaches
+# a compare of two addresses, and the measurement is:
+#
+#     def eq(a, b):
+#         if a == b: return 1
+#         return 0
+#     eq(P(1, 2), P(1, 2))      ->  0   on BOTH architectures, exit 0
+#
+# where CPython says 1. A silent wrong answer, and the same one `@dataclass`
+# had before `rewrite_equality` above existed — which is why this is a SIBLING
+# of that function reusing its `comparison_chain` rather than a second
+# implementation of it. `a.x == b.x and a.y == b.y` is a tuple's `==` for a
+# two-field named tuple, and it is measured to lower correctly through a
+# function boundary on a frame receiver.
+#
+# **What this is NOT: a general tuple.** `p[0]`, `len(p)`, `a, b = p` and
+# `for v in p` are also tuple operations and none of them is desugared here —
+# they are a SUBSCRIPT, a `len`, an unpack and an iteration, each of which the
+# container family reads off the frame's first word, and each of which is now
+# refused by name rather than answered (`formal/model.py`'s
+# `frame_container_operand_refusal` and `frame_unpack_operand_refusal`, whose
+# measurements are the ones that made the refusals necessary). Lowering them
+# would need a field-list-indexed read rather than a blob read, which is a
+# different change with a different blast radius; what is here is the
+# comparison, which is the half that was silently WRONG rather than loudly
+# refused.
+#
+# `NamedTuple` is a BASE, not a decorator: `class P(NamedTuple)`. It is
+# recognised here rather than in `formal/hostmods/typing.mojo` because the
+# machinery that answers for it is a source-to-source rewrite in the shared
+# front end — `formal/hostmods/typing.mojo` says exactly this about every other
+# name it does not export, and `NamedTuple` is not an addition to that
+# argument: the base is erased here, the way an enum's is.
+
+NAMEDTUPLE_BASES = frozenset(("NamedTuple", "namedtuple"))
+
+
+def is_namedtuple_struct(struct_def) -> bool:
+    """True when `struct_def`'s base list names `NamedTuple`.
+
+    The one recognition of the value type, and it is deliberately a NAME test on
+    `bases` rather than a scan of the class body: `typing.NamedTuple` is
+    erased as an annotation by this path, so `class P(NamedTuple)` arrives with
+    its bases intact and its fields as `VarDecl`s, and the two together are the
+    whole of what CPython's `NamedTuple` contributes at this level.
+
+    `namedtuple` is in the set because `collections.namedtuple(...)` is the
+    same value type with the fields written at the call site instead of in a
+    class body, and this path cannot answer that spelling (there is no class
+    body to read a field list from), so recognising the name here is harmless
+    and gives the refusal a base to name rather than leaving the class a bare
+    struct with no explanation. `FORMAL collections namedtuple is a call`
+    is where the `collections` half is written down.
+    """
+    return any(b in NAMEDTUPLE_BASES
+               for b in (getattr(struct_def, "bases", None) or []))
+
+
+def namedtuple_classes(structs: list) -> dict:
+    """`{name: {"struct", "own_eq", "own_order"}}` for each NamedTuple here.
+
+    The `@dataclass` table's exact shape, deliberately: `rewrite_equality`'s
+    `typed` map and `_own_eq_dunder` are written against `["struct"]`,
+    `["own_eq"]` and the field list, and a second table with a second set of key
+    names would be a second set of questions with the same answers. The one
+    extra key is `own_order`, because a `NamedTuple` may declare its own
+    ordering methods where a dataclass cannot (`order=True` is refused, and a
+    user-declared `__lt__` is honoured).
+
+    **Methods that CPython's `NamedTuple` puts on the class are not fields.**
+    A body that writes `def __eq__(self, other): …` declares a method, and
+    `M.struct_field_names` already excludes methods, so the field list read here
+    is the same one the layout uses — which is the whole of what the comparison
+    chain needs and the reason a user-declared dunder cannot be silently
+    overwritten (`own_eq`).
+    """
+    M = _model()
+    out = {}
+    for st in structs or []:
+        if not is_namedtuple_struct(st):
+            continue
+        out[st.name] = {
+            "struct": st,
+            "own_eq": any(getattr(m, "name", None) == "__eq__"
+                          for m in M.struct_methods(st)),
+            "own_order": any(getattr(m, "name", None) in _TUPLE_ORDER_DUNDERS
+                             for m in M.struct_methods(st)),
+        }
+    return out
+
+
+# The FOUR ordering operators `tuple` gives every namedtuple, as a SET rather
+# than a dispatch table. `_ordering_chain` is the dispatch and it reads the
+# operator itself; this is only the question "is this operator one of the four",
+# asked by the walk before it knows anything about the operands. A tuple is not
+# a table mapping each operator to its strict form because two of the four share
+# the strict chain from OPPOSITE sides (`a <= b` is `a < b or a == b` and
+# `a > b` is `b < a`), so a "reduce to strict" column would have to record which
+# side to read — which is the dispatch, spelled as data.
+_ORDER_FROM_STRICT = frozenset(("<", "<=", ">", ">="))
+
+
+# `tuple`'s six ordering dunders, as NAMES because the question is whether the
+# class DECLARES one (a source-written method wins over the generated one) and
+# not whether it is called with them.
+_TUPLE_ORDER_DUNDERS = ("__lt__", "__le__", "__gt__", "__ge__")
+
+
+def lexicographic_chain(strict_op: str, left, right, fields) -> object:
+    """`a <op> b` over `fields` as a LEXICOGRAPHIC chain, in declaration order.
+
+    `tuple`'s comparison, spelled out: the first field decides unless it ties, and
+    a tie defers to the next field. So for `x, y` and `<`:
+
+        a.x < b.x or (a.x == b.x and a.y < b.y)
+
+    which is a RIGHT-NESTED `or` whose last element is an `and` of every field
+    before it. Built right-to-left rather than left-to-right because each step
+    needs the chain of the fields before it, and that is the accumulation.
+
+    **Why the caller wraps the non-strict operators rather than this function
+    deriving them.** `a <= b` is `a < b or a == b` and `a > b` is `b < a` in
+    CPython's own definition of `tuple`, so all four operators reduce to THIS
+    chain plus an `==` half, and `_ordering_chain` is where that reduction lives
+    — one place, four operators, and the `>=` case's reversed reading is stated
+    where it is decided rather than implied by a table here.
+
+    `strict_op` is always `<`, because "this field is the first that differs" is
+    a `<` whatever the operator the source wrote was: `a > b` reads this chain
+    with the operands swapped. A field's own operator is never the `>` or `>=`,
+    which is the whole difference from `comparison_chain` — that one is right for
+    `@dataclass`, where `order=True` would be a conjunction of per-field
+    comparisons, and wrong here, where a tuple's ordering is the first
+    difference.
+    """
+    line = getattr(left, "line", 0)
+    col = getattr(left, "col", 0)
+
+    def le(a: str, b: str):
+        return F.MemberExpr(a, b, line, col)
+
+    # `ties[i]` is "fields `0..i` are ALL equal" — the deferral condition for
+    # field `i+1`. Built by accumulation so every one of them is in DECLARATION
+    # order, which is the order CPython compares in and the order they occupy in
+    # the frame. `ties[-1]` is the all-fields tie, which is a namedtuple's `==`.
+    ties = []
+    tie = None
+    for name in fields:
+        eq_one = F.BinaryOp("==", le(left, name), le(right, name), line, col)
+        tie = eq_one if tie is None else F.BinaryOp("and", tie, eq_one, line, col)
+        ties.append(tie)
+    if tie is None:
+        return None
+    # The chain is assembled RIGHT to LEFT — from the LAST field to the first —
+    # because each field's element is `this comparison OR (tie AND the rest)`,
+    # and "the rest" is only known once the later fields are done. `acc` at
+    # field `i` is therefore "the comparison over fields `i+1..n`", and the tie
+    # that defers to it is over the fields BEFORE `i`, which is `ties[i - 1]`.
+    # For the FIRST field (`i == 0`) there is no such tie and its element is the
+    # bare comparison, which is why the loop peels the last field separately
+    # rather than testing `i` inside it.
+    #
+    # **The tie index is `i - 1` and getting it backwards is the whole bug this
+    # comment exists for.** Field `i` defers to the rest only when fields
+    # `0..i-1` all tie. Measured with the index off by one: `P(1, 9) < P(2, 0)`
+    # came out as `a.x < b.x or a.y < b.y`, which drops the tie entirely, so
+    # `P(2, 0) < P(1, 9)` answered 1 on both architectures where CPython answers
+    # 0 — the `y` comparison deciding a question `x` had already settled.
+    tail = fields[-1]
+    acc = F.BinaryOp(strict_op, le(left, tail), le(right, tail), line, col)
+    for i in range(len(fields) - 2, -1, -1):
+        name = fields[i]
+        cmp_one = F.BinaryOp(strict_op, le(left, name),
+                             le(right, name), line, col)
+        acc = F.BinaryOp(
+            "or", cmp_one,
+            F.BinaryOp("and", ties[i], acc, line, col), line, col)
+    return acc
 
 
 def check_reflection_calls(functions: list, module_names: set) -> None:

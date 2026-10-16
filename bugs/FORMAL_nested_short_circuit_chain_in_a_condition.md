@@ -1,8 +1,83 @@
 # FORMAL_nested_short_circuit_chain_in_a_condition: `((a or b) or c)` is still unproved
 
+**Status 2026-10-05 (`work/formal71-docs`): NOT FIXED, and the reason is the
+2026-10-04 section's — the area is not VERIFIABLE on this tree — but the
+measurement behind that reason is WIDER than this document records, and the file
+that would have caught the change was ERRORING.** Two things a next session
+should not re-derive, both measured today:
+
+* **`test_formal_short_circuit_cond.py` had been failing with an ERROR rather
+  than running, since 2026-10-03** (`eeea79f0` gave `_cond_nodes` an `env`
+  parameter of its own and `test_cond_nodes_agrees_with_collect_conds` kept
+  passing `{}` in that position, where the walk reads it as "nothing is bound").
+  Every example then raised the generator's own refusal out of `_cmp_go` —
+  `model: `n` is read here and this generator binds it to nothing` — so the row
+  that exists to prove the condition walk and its renderer agree had stopped
+  checking that, and read as a failing test rather than as a dead one. Both sides
+  are now asked in the same environment and the group is green (5 rows).
+  **It went unnoticed because this file is in no bucket and in no
+  `test_suite.py`'s `UNREGISTERED` entry**, which is a hole in the estate check
+  and not in this file: the check walks `**/test_*.py` and this one is not named
+  anywhere, so nothing said so. That is `tools/suite.py` / `test_suite.py`'s
+  subject and not this branch's (its task says not to touch the registry).
+* **The premise holds, and it holds for MORE than this document says.** Measured
+  through `formal/lean.py::check_proof_cached` on this tree, arm64, Lean
+  4.32.2, `lib/*.olean` current: **all four** proofs this file generates fail the
+  same way, not the two `formal/examples/` ones —
+
+      both:       both_proof.lean:2684:8: error: (kernel) excessive memory consumption detected
+      either:     either_proof.lean:2684:8: (the same line, the same error)
+      short_and:  short_and_proof.lean:2684:8: (the same)
+      short_or:   short_or_proof.lean:2684:8: (the same)
+      → peak 7.0 GB across 2 processes, 907 s for the four
+
+  — so the two hand-written two-line PROGRAMS are unproved too, and the canary
+  this document keeps naming is not proving anything on this tree. The line has
+  moved from the 2600 the 2026-10-04 section recorded (the generator grew), and
+  the cost is at the kernel's own ceiling rather than at the guard's.
+
+**So the conclusion the 2026-10-04 section reached is confirmed and not acted
+on**, for the reason it gives: a generator change in `formal/arm64_proof_gen.py`
+or in `_cond_pairs` cannot be checked while every proof it emits is refused by
+the kernel, and the project's own rule names a generator that emits statements
+which look right and are not proved as the worst outcome. The subject of the
+memory ceiling is `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_
+rejected.md`, which is claimed by another branch; the `_cond_pairs` recording
+this document asks for — one entry per CHAIN rather than one per condition — is
+unchanged and is still the next step once that ceiling is under it.
+
 `if a or b:` and `if a and b:` as a whole condition are **proved** (the
 per-path entry statement they needed is in `formal/arm64_proof_gen.py`).
 A chain NESTED inside a chain is not, and this says why and what closes it.
+
+**Status 2026-10-08 (`work/formal247-docs`): the canaries emit a REACHABILITY
+theorem instead of the model theorem, measured, and the non-Lean half of this
+file's own test is red for it — but the CAUSE is the prologue stack guard, which
+is another worker's area, so this is a finding rather than a fix.** The doc's
+`either`/`both` are the canaries it says "must keep proving"; today NEITHER
+proves the model. Read off the generated arm64 proofs (the architecture this
+file's `TestShortCircuitProofs` compiles), `either` and `both` each carry
+exactly one universal theorem and it is
+
+    theorem both_reaches_call_at_0x10000041c (n : UInt64) … :
+      (match arm64_exec_go_exit … with | some s => True | none => False)
+
+— a claim that the run HALTS, with no `x0 = mojo n` anywhere in the file. The
+model theorem is not emitted, so `test_formal_short_circuit_cond.py`'s
+`test_the_terminal_leaves_see_a_source_condition_fact` fails (its
+`-- terminal value flow:` marker is absent because `_flow` is False on the
+`halt_only` path), and it fails on `either` too — `both` is only the first
+alphabetically. **This is not this document's subject and not this worker's to
+fix**: the halt the generator picks is the `getrlimit` BL the stack-floor guard
+puts in EVERY arm64 prologue, `_reached_without_a_condition` accepts it as the
+halt boundary when it is reached before any source conditional, and that area is
+`FORMAL the stack guards getrlimit is counted as a program call`
+(measured 2026-10-06) plus `formal245-docs`'s
+`FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function` /
+`FORMAL_arm64_known_proof_gaps`. What this round contributes is the measurement
+that the getrlimit halt-boundary choice silently DROPS the model theorem for a
+program whose own logic sits after the guard, which is the "a proof about
+nothing" outcome the project treats as worst.
 
 **Status 2026-10-05 (`work/formal23-4`): the MODEL half is FIXED on both
 architectures, and the doc's premise that the whole failure is the machine half

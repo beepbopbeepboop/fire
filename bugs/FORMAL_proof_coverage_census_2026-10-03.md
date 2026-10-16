@@ -1,11 +1,11 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
-**§0.9c is new (2026-10-07, `work/formal119-docs`): the INSTRUMENT's own test
-`test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` is
-RED on this tree, and it is a generator regression rather than a defect in the
+**§0.9c (2026-10-07, `work/formal119-docs`) recorded the INSTRUMENT's own test
+`test_formal_proof_breadth.py::test_a_census_that_does_not_ask_lean_says_so` as
+RED on that tree, and it was a generator regression rather than a defect in the
 census.** The fixture is `def main(x): y = x * 3; print(y); return y`, which the
-test expects to report `proof-emitted` under `--no-check`; it now reports
-`proof-refused` because the program carries TWO opaque calls where it used to
+test expects to report `proof-emitted` under `--no-check`; it then reported
+`proof-refused` because the program carried TWO opaque calls where it used to
 carry one — the stack-floor guard's `getrlimit` (not recorded as a
 `compiler_trap`) plus the program's `printf` — so the two-call rule fires. The
 same regression is why
@@ -917,12 +917,11 @@ checked.
 | `too-large` | **2** | Lean's own `-M` refused the proof — **not a verdict** | `formal/lean.py`'s `LEAN_MEMORY_MB` |
 
 **The three `lean-rejected` families, by the site they stop at** (each row is a
-`Counter` over the committed baseline, and every one of these is one subject
-with a doc of its own):
+`Counter` over the committed baseline, and every one of these is one subject):
 
 | n | the site | whose |
 |---:|---|---|
-| 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
+| 5 | `<stem>_proof.lean:2880:16` / `:2587:16` / `:3250:16: Tactic 'rfl' failed` on the epilogue's `x30` read through a materialised address | `count` and `pow2` — declared in `test_formal.py::EXPECTED_FAILURES` with the address as the reason, and pinned by `test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`; the fix is the frame-address canonicalisation the `x30`-reload and dylib-frame-bounds work owns |
 | 5 | `⊢ (if sKey a ≤ sKey b then 1 else 0) = …` or a `t32s (t8s n) = n` round trip, all at `:2332:41` / `:2212:41` / `:61:57` | **was** `FORMAL_arm64_a_narrow_typed_parameter_makes_the_universal_contract_false.md` — now **fixed and its document deleted**: the universal theorem carries `nw : n < 128` and the truncation discharges against it, so `sgt8`/`sle8`/`ug8`/`n8` are `PASS` with 0 admitted `sorry` (re-measured 2026-10-05, `PASS=4 KNOWN-GAP=0 FAIL=0`). The `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` half of this row is its `Still open 3`, which is about the loop MODELS and was never this obligation |
 | 2 | a frame-condition read: `fib`'s tree-recursion `FrameOk` window and `sum_range`'s conditions-operand slot | each has its own doc, both linked from `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
 
@@ -1115,7 +1114,7 @@ is a `Counter` over the ledger.
 |---|---|---|---|
 | **20** | arm64 `proof-refused` | **a call to a second function in the same image** — `universal theorem: the call at 0x… targets 0x…, a second function in the same image. The machine model follows it -- every byte is present, and the callee's `ret` returns through x30 -- but the CFG walk is per-function` | `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` (filed here) |
 | **16** | both `codegen-refused` | **a string VALUE**: `'+'` on two strings, `'%'`/`<=`/`==` with a string operand, `join()`, `strip()`, `replace`, an f-string reaching `print()` | `FORMAL_string_value_model.md` (formal16-7) |
-| **7** | both `codegen-refused` | **a field access through a value** (`x.y`), which the path has no way to type | `FORMAL_pointer_value_model.md` (formal13-5) |
+| **7** | both `codegen-refused` | **a field access through a value** (`x.y`), which the path has no way to type — **CORRECTED 2026-10-05 (§0.10): all 7 are the HARNESS's integer, not a gap in the value model.** `_entry_call` passes the startup stub's integer to every parameter, so each base is a parameter of the function it wrapped and the refusal is about that call. They are now filed `refused-harness-call` | **none of the three named docs has this row.** It is the receiver/value model — `FORMAL_wide_receiver_by_reference.md` (`formal68-docs`) and the frame-receiver handoff (doc deleted with its fix) — and this table's `FORMAL_pointer_value_model.md` was an attribution nothing carried |
 | **6** | both `codegen-refused` | **a call this path does not lower**, refused by the LINK AUDIT rather than by name — `list`, `enumerate`, `max`, `min`, `REPORT.append`, `_DISPATCH_TABLE_GLOBAL_CTYPES.get` | `the link audit's naming of an unlowered callee.md` |
 | **4** | arm64 `proof-refused` | **a container literal with no value in the model** — `model: a ListExpr has no value in the semantic model`, and its Tuple/Dict/Ternary arms | the representation work; §6 |
 | **4** | arm64 `proof-refused` | **a call with no model** — `model: call to \`str\` has no model in this image`, `…to \`int\`…` | the same, one layer out |

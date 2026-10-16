@@ -1,8 +1,11 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on BOTH backends
+(`&`, `^`, `-` between two sets; x86-64 landed 2026-10-12, see §"2026-10-12");
+items 1 (container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice
+store) are unchanged.** The one gap item 3 still has is `|` on x86-64, which is
+a SEPARATE pre-existing emitter (`set_union_refusal`) and not item 3's three
+operators. `test_formal_container_methods.py` measures the whole surface
 against CPython on both architectures and is green; this doc is about the rows
 in it that are green *as refusals*, which is a different thing from green as
 answers. The set-algebra rows are answers on arm64 now (six of them — five
@@ -101,13 +104,45 @@ them through `_maybe_emit_set_binop`, which is asked by BOTH the binary and the
 augmented emitter — the augmented one used to reach the shared gate first, and
 `s -= {2}` and `s = s - {2}` are the same operator and must not get two answers.
 
+**2026-10-13 (`formal326-docs`): the three set operators AND the union are
+lowered on x86-64, so item 3 is complete on BOTH backends.**
+`formal/x86_64_codegen.py` grew `_emit_set_op`, `_emit_set_filter_pass`,
+`_emit_set_union` and `_maybe_emit_set_binop` as the twins of arm64's, with the
+same capacity rules (a union or a symmetric difference reserves `nL + nR`, a
+difference or intersection `nL`) and the same shared
+`_emit_blob_growth_guard`. The register discipline is `_emit_list_concat`'s
+rather than a second one: the left and right operands are the bases, the source
+is walked with a countdown, and the result count word is re-stored on every
+append (the difference pass returned an EMPTY set the first time it ran because
+the count word was written once, as zero, and never again — that is the one
+defect the CPython differential caught, and it is why the union's count word is
+written after its left-copy rather than before).
+
+Measured, both architectures, `test_formal_container_methods.py set` and
+`operator`: **the `set` group is 13 answers / 9 refusals on EACH backend**
+(x86-64 was 4 answers), and the `operator` group is **11 answers on each**
+instead of 11/6. Every set row left `BACKEND_ONLY` — `s_union`,
+`s_union_elems`, `s_union_str`, `s_union_ior`, `s_intersection_r`,
+`s_difference_r`, `s_symdiff_r`, `s_sub_r`, `s_andassign_r`, `o_xor`, `o_and`
+— and the table's own rule, "a backend that grows one has to delete its row",
+is what that deletion is.
+
+**The `s_symdiff_r`/`o_xor` cases were strengthened in the same commit, and
+they were a real gap**: both were `s = {1, 2}`; `t = s ^ {2}`, whose right
+operand holds NOTHING the left does not, so the second half of the symmetric
+difference — the elements only the right holds — never appended and a
+half-implemented `^` passed. They are `s ^ {2, 3}` now (sum 4, len 2, and `3`
+is the right-only element), which is the case that reads both passes. The
+difference between the two is the difference between a test that pins the
+lowering and one that pins half of it.
+
 **The gate did NOT narrow the way §"What to do, in order" item 1 prescribed, and
 the reason is a correction worth keeping.** Item 1 said to drop `&`/`^`/`-` from
 `model.CONTAINER_GATED_OPS` and move the rows to probes. That table is SHARED by
-both backends, so dropping an operator there would have made x86-64 — which has
-no set emitter at all — fall through to the integer ALU on two addresses, which
-is exactly the wrong answer the gate was widened for. Instead arm64 intercepts
-the two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
+both backends, so dropping an operator there would have made a backend without
+the emitter fall through to the integer ALU on two addresses, which is exactly
+the wrong answer the gate was widened for. Instead each backend intercepts the
+two-set shape in `_emit_binop` (and the augmented emitter) BEFORE
 `string_binary_refusal`, and the shared gate is untouched: it still refuses
 `[1] - [2]` (CPython's `TypeError`) and still refuses all three for x86-64, which
 is the same split `|` already had (`_emit_set_union` vs `set_union_refusal`).
@@ -119,9 +154,31 @@ structural half is pinned by three new `_BLOB_GROWTH_PROBES` rows (`sin`, `sdf`,
 `ssd`), one for each set-algebra site, so each new site has to keep emitting its
 capacity guard.
 
-Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
-number below is measured on that branch, on both `arm64` and `x86-64`, and each
-has a named row in `test_formal_container_methods.py`.
+## The set algebra as landed (`_emit_set_algebra`)
+
+The one algorithm item 3 named — "copy the left, then for each right-hand
+element scan the result and append it if it is absent" — is now written as a
+generic `_emit_set_filter(offset, src, scount, other, ocount, keep_found)` on
+each backend: the outer loop walks the source blob, the inner loop scans the
+other blob for the element, and `keep_found` picks INTERSECTION (keep the
+present ones) from DIFFERENCE (keep the absent ones).  Symmetric difference is
+the two differences appended to one result blob.  The result starts EMPTY and
+grows one append at a time, unlike `_emit_set_union`, which starts by copying
+the left operand; the reservation is `nL + nR` for all three (a symmetric
+difference can hold every element of both sides) and goes through the same
+`_emit_blob_growth_guard` the union, concatenation and repetition sites use.
+
+**Elements are compared as words**, so a set of `char *` compares addresses
+exactly as `_emit_set_union`'s dedup does — the divergence
+`bugs/FORMAL_set_value_model.md` already documents, not a new one, and the
+reason the landed cases use integer elements.  A recursive/content compare is
+item 1's value-model question, not this one's.
+
+**Measured, both architectures, against CPython**
+(`test_formal_container_methods.py set` and `operator`, green; `s = {1, 2}`):
+`s & {2}` → sum 2 len 1, `s - {2}` → sum 1 len 1, `s ^ {2}` → sum 1 len 1,
+`s -= {2}` → sum 1 len 1, `s &= {2}` → sum 2 len 1.  The 2026-10-06 "before"
+table below is unchanged history.
 
 ## What landed 2026-10-08: set algebra on arm64 (item 3)
 
@@ -148,6 +205,57 @@ did not get to. The arm64 gate is `model.SET_ALGEBRA_OPS`, asked in
 through to `container_operator_refusal`, because `[1] - [2]` is a CPython
 `TypeError` and not address arithmetic.
 
+## What landed 2026-10-08 (`work/formal242-docs`): item 3, set algebra, both backends
+
+The cheapest of the four lowerings, done exactly as §"What to do" item 3
+prescribes, on arm64 and then ported to x86-64 in the same session.
+
+* **The gate split in two, and the split is the point.** `&`, `-` and `^` left
+  `model.CONTAINER_GATED_OPS` — this gate's subject is "a blob is an ADDRESS, so
+  no element is compared", and for two sets an element IS compared now — and
+  `model.container_set_algebra_refusal` is the new decision: it returns `None`
+  only when BOTH operands are established sets, and otherwise refuses with the
+  operator's CPython meaning (`[1, 2] & [2]` is a `TypeError`, so there is no
+  correct program on the far side).  Both backends ask it at the same site in
+  their `_emit_binop`, so the two cannot disagree about which programs are
+  legal.
+* **The lowering is one element-wise pass, shared by all three, on each
+  backend.** `formal/arm64_codegen.py::_emit_set_algebra` and
+  `formal/x86_64_codegen.py::_emit_set_algebra` reserve `nL + nR` (the worst
+  case, which `^` reaches and `&`/`-` over-reserve), emit the shared
+  `_emit_blob_growth_guard`, and run `_emit_set_keep` once for `&`/`-` and twice
+  for `^`.  `_emit_set_keep(..., keep_found=)` appends each source element whose
+  membership in the other blob matches — intersection is `keep_found=True` from
+  the left, difference is `False` from the left, symmetric difference is `False`
+  from each side into the same result.  The count word is written from the
+  append loop's own counter, not from an operand length: that is the union's old
+  `nL + nR` bug and a set operation has the same failure mode.  The x86-64 port
+  keeps its output count in a stack slot, because the nested scan and the append
+  need more caller-saved registers than the nine this backend has and RSP is the
+  only place a value survives an expression evaluation.
+* **Set-ness now propagates through the new operators.**
+  `_expr_is_set_like` on both backends treats `a & b`/`a - b`/`a ^ b` as a set
+  when BOTH sides are (unlike `+`/`|`, which are set-preserving when either
+  side is), so `u = s & t; v = u | w` keeps working.
+* **The test moved the rows, and re-pointed two rather than deleting them.**
+  `s_intersection_r`, `s_difference_r`, `s_symdiff_r`, `s_sub_r` and
+  `s_andassign_r` became `s_intersection`, `s_difference`, `s_symdiff`, `s_sub`
+  and `s_andassign` with `sum+len` probes (a length alone cannot see a wrong
+  result of the right length).  The `operator` group's `o_and`/`o_xor` rows were
+  re-pointed at two LISTS — still a `TypeError`, still refused on both backends
+  — because their set-set forms now answer; the `o_xor` operand is a NAME,
+  because `a ^ [2]` misparses (`^` binds as unary invert before the `[`), which
+  cost one build to find.  Two `_BLOB_GROWTH_PROBES` rows (`arm64/set` and
+  `x86_64/set`) pin the new sites' guards.
+
+Measured on this tree, 2026-10-08: `test_formal_container_methods.py` is 6/6
+groups green on both backends (the `set` group now reports 22 answers, up from
+17), and `check_blob_growth_guards` is 7/7 (including both new rows). **What is
+still open is items 1, 2 and 4** — element-wise `==`/`!=`, ordering, and the
+length-changing slice store.  The `s_union` family is still arm64-only and still
+listed in `BACKEND_ONLY`: x86-64 has no set-UNION emitter, which is a separate
+absence from the three operators landed here.
+
 ## What was wrong, and what landed instead
 
 Before this branch, ten container operators reached either the flag-setting
@@ -169,7 +277,7 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 | `[1, 2] \| [3]` | `3` | `TypeError` | answering a program CPython rejects |
 | `[1] in [[1], [2]]` | `1` on arm64, `0` on x86-64 | `1` | the two architectures disagreeing |
 | `b = [1]; b in [[1], [2]]` | `0` on both | `1` | wrong number |
-| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop |
+| `a[0:1] = [9, 9, 9]` | exit 1, no output, no message | `[9, 9, 9, 1, 2]` | silent stop — **FIXED on arm64 2026-10-13** (item 4) |
 | `t = (1,2,3); t[0] = 9` | `t0=9 len=3` | `TypeError` | wrong *mutation* |
 | `for k in d: del d[k]` | `1` | `RuntimeError` | wrong number |
 | `for k in d: d["z"] = 5` | `2` | `RuntimeError` | wrong number |
@@ -177,6 +285,75 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 
 All of those are refused, or stopped with a diagnostic that names the rule. The
 table is not where the remaining work is.
+
+## Item 1 landed (2026-10-13): `==`/`!=` between two blobs of WORDS, both backends
+
+Item 1 was filed as "compare lengths, then compare element by element at the
+element's stride", and the stride is the whole of the fear (§"The obstacle"
+below): a string element is a `char *`, so a word compare answers by interning
+order, and a nested container's element is another blob's ADDRESS, so the
+compare is recursive. The landing is therefore scoped to the element kind where
+that fear is absent — an INTEGER element, whose value IS the word — and every
+other shape keeps the shared `container_operator_refusal`.
+
+**The predicate is shared; the class is flow-sensitive.** `model.blob_equality_
+word_comparable` says whether *both* operands are blobs whose element kind is a
+word (`BLOB_EQUALITY_WORD_KINDS` is `{int}`). Set-ness and dict-ness cannot live
+there — a set lowers as a list, so the KIND cannot tell them apart — so each
+backend's `_equality_blob_class` asks its own `_set_vars`/`_dict_vars` and, for a
+LIST-versus-TUPLE question the value model has never kept, a new positive
+`_list_vars` beside `_tuples_vars`. Both classes must be KNOWN and EQUAL, because
+`[1] == (1,)` is False in CPython whatever the elements: answering it off "not a
+tuple" would call a call's return value a list and print 1 where CPython prints
+0. A known-but-different pair is answered directly (CPython: never equal);
+anything unknown refuses.
+
+**Measured, both architectures, `test_formal_container_methods.py`:**
+`operator` 20 → 30 answers (10 → 15 per backend), `tuple` 16 → 18 (8 → 9 per
+backend), `PASS=6 FAIL=0`. The moved rows are:
+
+| row | was | now |
+|---|---|---|
+| `o_eq` (`a == [3, 1, 2]`) | refusal (answered 0 before the gate) | `1` |
+| `o_ne` | refusal | `0` |
+| `t_eq_r` (`(1,2,3) == (1,2,3)`) | refusal | `1` |
+| `o_eq_diff_elem` (same length, one element differs) | — (new) | `0` |
+| `o_eq_diff_len` (different lengths) | — (new) | `0` |
+| `o_eq_mixed` (`[1] == (1,)`) | — (new) | `0` |
+
+The two new element rows exist because a length-only or address-only lowering
+would pass `o_eq` by accident; `o_eq_diff_elem` is the row that requires a real
+per-element compare, and `o_eq_mixed` is the row that requires the class.
+
+**What still refuses, and each is a new pinned row rather than a hole:** a
+`char *` element (`o_eq_str_r`), a nested blob (`o_eq_nested_r`), a set
+(`o_eq_set_r`, order-independent) and a dict (`o_eq_dict_r`, pair stride). So
+`model.CONTAINER_GATED_OPS` is NOT narrowed — dropping `==` there would send
+x86-64 into the integer ALU on two addresses for exactly those shapes — and the
+emitters intercept before the shared gate the same way `|` already splits
+`_emit_set_union` from `set_union_refusal`.
+
+The arm64 flag path needed one extra hook: `_emit_branch_unless` branches on
+`CMP` flags rather than materializing a boolean, so `if a == b:` would have
+reached the refusal while `r = a == b` answered. It now falls through to the
+truthiness path when `_blob_equality_plan` accepts the pair. x86-64 has one
+comparison hook (`_emit_binop`), so it needed nothing extra.
+
+**A THIRD entry point, and it was a pre-existing SILENT WRONG ANSWER: the
+compare CHAIN.** `a == b == c` is one `F.CompareChain` and neither backend's
+`_emit_compare_chain` ever went through `_emit_binop`, so no gate reached it and
+each link was a raw word compare of two blob ADDRESSES. Measured on both
+backends before the fix: `a == b == c` for three equal lists answered **0 where
+CPython answers 1**, exit 0 — the wrong-answer class this whole document exists
+to prevent, reached by a spelling nobody had looked at. The chain emitter now
+asks the same `_blob_equality_plan` for each `==`/`!=` link: an accepted pair is
+lowered from the bases the chain has ALREADY evaluated (it must not re-evaluate
+a call operand — `_emit_blob_word_equality_bases` is the register-level body the
+binary spelling wraps) and ANDed into the running result; a blob link the
+lowering does not accept raises the shared refusal; a blob against a scalar
+falls through, because the address compare below is CPython's own answer there.
+Pinned by `o_chain_eq`, `o_chain_eq_false`, `o_chain_mixed`, `o_chain_ne` and
+`o_chain_eq_str_r` in `test_formal_container_methods.py`, on both backends.
 
 ## The obstacle, stated once
 
@@ -195,18 +372,17 @@ with the element's own width known only at run time
    docstring.
 3. **Set algebra** — `&`, `^`, `-` between two sets: a per-element membership
    scan per element of the right-hand side. arm64's `_emit_set_union` ALREADY
-   does exactly that shape for `|` (copy the left, then for each right-hand
-   element scan the result and append it if it is absent), so the ALGORITHM is
-   written and three emitters are not: `_emit_set_intersection`,
-   `_emit_set_difference`, `_emit_set_symmetric_difference`, each as the same
-   two nested loops with a different keep/drop predicate. This is the cheapest
-   of the four by a wide margin and it is the one to do next.
+   did exactly that shape for `|`, so the ALGORITHM was written and three
+   emitters were not. **LANDED on arm64 2026-10-08 as `_emit_set_op`, one
+   generic implementation of all four; x86-64 remains (see §"What to do").**
 4. **A length-changing slice store** — `xs[a:b] = v` where `len(v) != b - a`:
-   a memmove of the tail by `len(v) - (b - a)` elements and a count bump. The
-   primitives are both already here: `_emit_del_list_range` memmoves a tail and
-   shrinks the count, and `_emit_list_append` grows it past the count into
-   reserved capacity. arm64's `_emit_slice_store` is a same-length copy loop and
-   x86-64 has no slice store at all.
+   a memmove of the tail and a count bump. The primitives are both already
+   here: `_emit_del_list_range` memmoves a tail and shrinks the count, and
+   `_emit_list_append` grows it past the count into reserved capacity. arm64's
+   `_emit_slice_store` is the same-length copy loop, x86-64 has no slice store
+   at all. **2026-10-11: the `len(v) < b - a` half is LANDED on arm64** (the
+   tail moves DOWN, which needs no extra room); `len(v) > b - a` is still
+   refused/stopped because it needs the reservation half.
 
 The stride is the whole of it, and it is not free: `model.blob_elem_stride`
 already answers it for `list:int`, `list:str` and a dict's `list:<value-elem>`
@@ -240,18 +416,30 @@ the second reason this is a project rather than a rewrite.
    different exit.
 4. **A length-changing slice store** (item 4). arm64 first (it is the backend
    that has the store), and only then x86-64, which needs a slice to stop being
-   a materialized copy before the store can mean anything.
+   a materialized copy before the store can mean anything. **The SHORTER half
+   landed 2026-10-11** (`l_slice_store_shrink_empty`/`_mid`, and the growing
+   stop is pinned by `l_slice_store_grow_r`); the GROWING half is the
+   reservation work: a literal receiver that is the target of a
+   length-changing slice store must reserve `count + (vlen - slice_len)` slots,
+   which is `_scan_list_caps`'s job, and the `slice_store_static_length_refusal`
+   gate must drop the growing case only when a backend can actually lower it.
 
 ## The rows that must not be "fixed" by deleting the case
 
 `test_formal_container_methods.py` asserts a refusal by matching a phrase from a
 shared table, so removing a row when its lowering lands would hide the change
-rather than record it. **The landing order for each is: drop the operator from
-`model.CONTAINER_GATED_OPS`, move the case from `probe=None` to a probe, and
-delete nothing.** The docstring of the gate is where the measurement lives, and
-it has to be re-measured when the answer is right: "measured answering 0 where
-CPython answers 1" is a claim about the pre-fix tree and becomes a false
-statement about this one the moment it stops being true.
+rather than record it. **The landing order for each is: narrow the gate, move
+the case from `probe=None` to a probe, and delete nothing.** Item 3 did exactly
+that: the five `s_*_r` rows became `s_intersection`/`s_difference`/`s_symdiff`/
+`s_sub`/`s_andassign` (answers, `arm64`-only via `BACKEND_ONLY`), a new
+`s_difference_str` row covers the `char *` case, and the `operator` group's
+`o_and`/`o_xor` were re-pointed at LIST operands so they still pin the
+non-set-blob refusal on BOTH backends. The docstring of the gate is where the
+measurement lives, and it has to be re-measured when the answer is right:
+"measured answering 0 where CPython answers 1" is a claim about the pre-fix tree
+and becomes a false statement about this one the moment it stops being true —
+which is why `container_operator_refusal`'s set examples were moved out into
+`set_operator_operand_refusal`.
 
 Three rows in that table are claims about what this path is NOT, and each has a
 document saying so: `bugs/FORMAL_set_value_model.md` (a set lowers as a list, so

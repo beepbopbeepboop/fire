@@ -1,9 +1,10 @@
 # FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time: `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table
 
 **Status: item 1 LANDED (2026-10-02, `work/formal8-1`) and item 2 is ALREADY
-IMPLEMENTED — measured on both architectures 2026-10-05 and now pinned by a row
-that did not exist; item 3 (the reflection table) is still open and is the whole
-of what is left.** Item 2 was recorded here for six weeks as "one capability with
+IMPLEMENTED — measured on both architectures 2026-10-05, independently re-measured
+that same day by `work/formal59-docs`, and now pinned by a row that did not
+exist; item 3 (the reflection table) is still open and is the whole of what is
+left.** Item 2 was recorded here for six weeks as "one capability with
 an owner named, and neither is a light change", and that was wrong: the copy
 construction lowering is in both emitters and answers CPython. What was MISSING
 was not the lowering but the test that could tell a copy from an alias — see
@@ -199,21 +200,55 @@ reachable by the same step.
    it is the difference between a reader who knows what to do and a reader who
    files the next bug doc about `collections`.
 2. ~~**`copy.copy` for a compile-time-known struct**~~ **DONE, and it was
-   already done — measured on both architectures 2026-10-05, and the missing
-   half was the test, not the lowering.** See "What item 2 turned out to be"
-   above: `S(x)` is a fresh block and a field-by-field copy in BOTH backends,
-   answers CPython, copies a `List[Int]` field as a reference, and is now pinned
-   by `test_formal_returned_frame.py`'s
+   already done — measured on both architectures 2026-10-05, and independently
+   re-measured that same day by `work/formal59-docs`, which is what corrects
+   this list.** See "What item 2 turned out to be" above: `S(x)` is a fresh
+   block and a field-by-field copy in BOTH backends, answers CPython, copies a
+   `List[Int]` field as a reference, and is now pinned by
+   `test_formal_returned_frame.py`'s
    `a_copy_construction_is_a_fresh_block_not_an_alias` — the row that can tell a
    copy from an alias, which the row it joins could not. `formal/model.py`'s
-   `_frame_source_structs` is the recognition it rests on and its own docstring
-   already states the refusal that keeps an unrecognised frame from being copied
-   as eight bytes of unrelated memory.
-   **What is still NOT answered here, and is the reason this doc exists**:
-   `import copy` itself is a HOST module (`formal/hostmods/` has no
-   `copy.mojo`, and cannot: `deepcopy` walks an arbitrary object graph), so a
-   caller that writes `copy.copy(node)` still stops at the import. That is §1's
-   advice sentence doing its job, not a gap in the copy construction.
+   `struct_construction_plan` is the one place both backends and the build pass
+   read the answer from, and it recognises the copy BEFORE the arity rule —
+   which is the order that matters, because `R(r)` on a two-field `R` is not a
+   one-field construction, it is a copy of a two-field object, and an arity
+   check first reports it as a construction with a missing argument. It returns
+   `CONSTRUCTION_COPY`, and the representation rule is the one this step named:
+   a clone of a framed struct is a FRESH FRAME. `_frame_source_structs` is the
+   recognition it rests on and its own docstring already states the refusal that
+   keeps an unrecognised frame from being copied as eight bytes of unrelated
+   memory.
+
+   Measured here, both architectures, against CPython's own `copy.copy` on the
+   same object graph:
+
+       struct Rec: a, b, c: Int          # framed (>1 field, by-reference receiver)
+       r = Rec(); r.a, r.b, r.c = 1, 2, 3
+       s = Rec(r); s.a = 9
+       # both backends: r=1,2,3 s=9,2,3      CPython: identical
+
+   so the copy is field-wise, the references are shared rather than re-derived,
+   and mutating the clone does not touch the original. It is also pinned by
+   `test_formal_run.py`'s `constr_copy_of_a_nested_frame_shares_it`,
+   `constr_copy_of_a_parameter_frame`, and the two refusals that keep the
+   recognition honest — `constr_refuse_copy_of_another_struct` and
+   `constr_refuse_copy_of_an_unrecognised_word`, so `S(x)` where `x` is a plain
+   word is refused rather than read as a copy of something.
+
+   **What did NOT come with it, and it is the rest of this document:** `S(x)`
+   where `S` is a struct of ONE WORD (`struct_is_one_field`, and any struct
+   under `WIDE_RECEIVER_BY_REFERENCE=0`) is still an arity error rather than a
+   copy, because there is no frame to be fresh. `Pair(a, b)` — two `Int`
+   fields, constructed from another `Pair` — is refused with
+   "constructing Pair with 1 positional argument(s) leaves 'y' unfilled",
+   measured here on both architectures. That is item 3's half, not this step's:
+   a one-word struct's clone is a word, and deciding that a word IS the clone
+   needs to know which struct the word is a value of, which is the reflection
+   table's question and not a lowering question. And `import copy` itself is a
+   HOST module (`formal/hostmods/` has no `copy.mojo`, and cannot: `deepcopy`
+   walks an arbitrary object graph), so a caller that writes `copy.copy(node)`
+   still stops at the import. That is §1's advice sentence doing its job, not a
+   gap in the copy construction.
 3. **The reflection table** — a runtime-readable type descriptor and
    construction from it — which is what `namedtuple` at run time and
    `deepcopy` over an arbitrary graph both need, and which is the actual root

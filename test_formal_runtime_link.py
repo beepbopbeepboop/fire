@@ -594,9 +594,8 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
     shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+    half a megabyte each; the third instance of the same shape — the whole
+    stdlib build's `mojostdlib_*` workdir — has its own case below.
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
@@ -616,6 +615,49 @@ def test_a_cold_runtime_build_leaves_no_staging_directory():
                       glob.glob(os.path.join(tmp, 'mojo_archprobe_*')))
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
+              str(left))
+
+
+# ── 4c. a cold stdlib build leaves no work directory ────────────────────────
+
+def test_a_cold_stdlib_build_leaves_no_work_directory():
+    """`build()` stages every module's generated C and object in a
+    `mojostdlib_*` work directory under `$TMPDIR` (created unconditionally at
+    the top, whatever the CAS does) and links the dylib inside it; the
+    directory has to go with the build, on every exit path including a
+    refusal or a failed link.
+
+    Measured on a COLD cas with its own `GMOJO_HOME` and `TMPDIR` — the same
+    reason as the case above: a warm build still runs the pre-pass and the
+    link tail, so it is the cold path that makes the leak observable and the
+    isolated `TMPDIR` that keeps this from perturbing the shared cas. A
+    one-module build is ~0.3 MB of `mojostdlib_*`, so the assertion is `absent`
+    rather than a size. The whole-stdlib build is 664 modules plus the
+    reflection table; this pins the cleanup for one module, which is the same
+    `finally`.
+    """
+    for arch in ('arm64', 'x86_64'):
+        home = tempfile.mkdtemp(prefix='stdlibstage_home_')
+        tmp = tempfile.mkdtemp(prefix='stdlibstage_tmp_')
+        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+        out = os.path.join(tmp, 'one.dylib')
+        code = ('from build_stdlib_dylib import build, stdlib_modules\n'
+                "mods = [x for x in stdlib_modules() if x.endswith('floatable.mojo')]\n"
+                "assert mods, 'floatable.mojo is not in the stdlib scope'\n"
+                f'build([mods[0]], {out!r}, use_cache=False, link_runtime=False,\n'
+                f'      jobs=1, track_local_deps=False, arch={arch!r})\n'
+                "print('built')\n")
+        proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                              capture_output=True, text=True)
+        check(proc.returncode == 0,
+              f'{arch}: a cold one-module stdlib build succeeds',
+              (proc.stderr or proc.stdout)[-400:])
+        check('built' in proc.stdout,
+              f'{arch}: …and it produced the dylib', proc.stdout[-200:])
+        left = sorted(os.path.basename(p)
+                      for p in glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+        check(not left,
+              f'{arch}: no work directory is left behind in $TMPDIR',
               str(left))
 
 
@@ -1026,6 +1068,7 @@ def main():
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
     test_a_cold_runtime_build_leaves_no_staging_directory()
+    test_a_cold_stdlib_build_leaves_no_work_directory()
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()

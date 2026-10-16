@@ -8,14 +8,30 @@ use for. The file stays a survey, for the reason below.** One ENCODING CLASS was
 added to the model's vocabulary on 2026-10-04, and §"The one class the census
 cannot see" says which and why it is not a mnemonic row.
 
+**Status, 2026-10-13: one claim in the tail was FALSE and is corrected.**
+"none of which this backend has a use for on a target that is int-only"
+(§"The six encoders of 2026-10-02 are still six", below) is not true of arm64:
+`formal/arm64_codegen.py` emits ten scalar binary64 encoders, the same ten
+`FORMAL_arm64_ieee754_has_no_step_arms.md` counts and the ten the ISA census
+reports `LEAN: no` for.  The genuinely-uncovered FP rows are the forms this
+backend does NOT emit, which is a different claim from "it emits no FP".  No
+number in this file is changed by that correction, and none is updated here:
+the audit's disassembly corpus moved between readings (4 026 231 instructions
+over 420 distinct mnemonics then, 4 129 102 over 411 now), so a fresh table
+would be over a different corpus and is deliberately not written down as a
+delta.
+
 Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
 answer is not guessable and the tooling to re-derive it should not be written
 twice. Bugs found *by* this work have their own documents — see
 `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` for the spill-displacement sign
-and the loop-exit bugs, `FORMAL_arm64_known_proof_gaps.md` for the three
-unproved examples, and `FORMAL_arm64_bit_test_branch_is_not_provable.md` for the
-one gap the TBZ/TBNZ wiring left behind.
+and the loop-exit bugs, and `FORMAL_arm64_known_proof_gaps.md` for the unproved
+examples. The one gap the `TBZ`/`TBNZ` wiring left behind — a bit-test
+condition that compiled and ran but could not be PROVED — was closed after this
+survey's measurements: `formal/examples/bittest.mojo` proves, and
+`test_formal_call_proof_gen.py::TestBitTestBranches` pins the emitted `hcond` as
+the bit test rather than the whole register.
 
 ## Re-measured 2026-10-05 (later), and the "modelled, unwired" pair is now
 ## WIRED: `TST` and `CMN`
@@ -383,22 +399,33 @@ instruction:
    `work_step_*` theorems that negate every branch before their own, and
    `lib/ProofLib.lean` did not typecheck until all 18 had them.
 
-**What is NOT done, and it is one arm.** An `if` whose condition is a bit test
-**compiles, runs, and answers CPython**, and cannot be *proved*: the generator
-derives a branch's source-level proposition out of the cset that wrote the tested
-register, and TBZ/TBNZ write no register and set no flags. The generator refuses
-rather than emitting an `hcond` about the wrong thing, which is the correct
-failure. `“An `if` whose condition is a BIT TEST cannot be PROVED”` has the
-measurement, the site, and the next step — and it is why
-`formal/examples/bittest.mojo` is not committed with this: the example fails
-today and a failing example with no `EXPECTED_FAILURES` entry is the wrong shape.
+**What was NOT done at this measurement, and has since been closed: the one
+arm.** An `if` whose condition is a bit test **compiled, ran, and answered
+CPython**, but could not be *proved*: the generator derived a branch's
+source-level proposition out of the cset that wrote the tested register, and
+`TBZ`/`TBNZ` write no register and set no flags, so the generator refused rather
+than emitting an `hcond` about the wrong thing. The way out was not to keep
+refusing — the branch's own condition IS the proposition, one bit of one
+register — and it is landed: the generator emits that bit test as the `hcond`,
+`formal/examples/bittest.mojo` proves, and
+`test_formal_call_proof_gen.py::TestBitTestBranches` pins the emitted proposition
+as `((arm64_reg r s >>> bit) &&& 1)` rather than the whole register.
 
 **The six encoders of 2026-10-02 are still six.** The genuinely-uncovered list
-is still dominated by NEON, FP and the cryptographic extensions, none of which
-this backend has a use for on a target that is int-only (`formal/types.py` is the
-authority on that). **Not a bug and no bug doc: this file is the survey, and it
-stays because the answer is not guessable** — more so now, since the answer has
-moved twice already (the 2026-10-03 method change, and the TBZ/TBNZ wiring).
+is still dominated by NEON/vector, the wider FP forms this backend does not
+emit, and the cryptographic extensions. **The int-only gloss that used to
+stand here is FALSE for arm64 and is corrected rather than left to mislead:**
+`formal/arm64_codegen.py` emits ten scalar binary64 encoders
+(`fadd`/`fsub`/`fmul`/`fdiv`/`fneg`/`fcmp`/`fmov` both ways/`scvtf`/`fcvtzs`),
+so floating-point arithmetic IS emitted, and the genuinely-uncovered FP rows
+above (`fcvt`, `ucvtf`, `fcsel`, `movi.2d`) are the forms it does NOT emit —
+not evidence that it emits none.  `formal/types.py`'s int-only reading is a
+statement about when the survey was written.  The model half of that gap is
+`FORMAL_arm64_ieee754_has_no_step_arms.md`: the encoders exist and are
+byte-exact, and `arm64_step` has no arm for any of them. **Not a bug and no bug
+doc: this file is the survey, and it stays because the answer is not guessable**
+— more so now, since the answer has moved twice already (the 2026-10-03 method
+change, and the TBZ/TBNZ wiring).
 
 ## The one class the census cannot see: the EXTENDED-register `ADD`/`SUB`
 
@@ -488,7 +515,13 @@ was one of them until 2026-10-03 and no longer is; `CSEL`'s three neighbours
 - **`LDUR` / `STUR`** (~45k) — unscaled access, which in practice means the
   NEGATIVE displacement a scaled-offset load cannot express. This is the
   instruction whose emission carried a real bug; the sign writeup is in the
-  companion doc.
+  companion doc. **WIRED as of 2026-10-05**, with the other ten narrower and
+  unscaled memory forms and the two flag-setting compares
+  (`formal/arm64_proof_gen.py`'s `_STEP_CONDS` rows 64/65,
+  `lib/ProofLib.lean`'s `work_step_ldur` / `work_step_stur`), so a spilled
+  function now GENERATES an arm64 proof that steps both — the re-measurement
+  `test_formal_eval_eq_mojo_bridge.py`'s
+  `a_spill_is_not_attributed_to_the_conditional_expression` pins.
 - **`TST` / `CMN`** (~27k) — a flag-setting test of two WORDS with no result:
   `if x & y:` and `(x + y) == 0`. **BOTH EMITTED as of 2026-10-05** — the † is
   gone, and §"Re-measured 2026-10-05 (later)" above is what replaced it: the

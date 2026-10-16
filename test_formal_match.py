@@ -962,15 +962,18 @@ KNOWN_DEFECT_ROWS = []
 #     48 s (arm64) per program on this tree, and the arm64 numbers are why this
 #     section checks ONE pair by default (`--all-proofs` for both).
 #
-# **The two-case pair is the one that carries the operand-order claim.**
-# `formal/build.py::_lower_one_case` emits `SUBJECT == PATTERN` rather than the
-# reference's `pattern == subject`, and that is not cosmetic: measured through
-# `check_proof_cached`, `if n == 0:` elaborates on arm64 and `if 0 == n:` does
-# not (`Application type mismatch` on the `B.cond` block's `hcond` obligation —
-# `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
-# elaborate.md`). A `match` whose compare had the literal on the left would
-# therefore be unprovable while the `if` it lowers to is provable, and this pair
-# is what catches a swap.
+# **The two-case pair carried the operand-order claim, and that claim is now
+# HISTORICAL.** `formal/build.py::_lower_one_case` emits `SUBJECT == PATTERN`
+# rather than the reference's `pattern == subject`. That order used to matter to
+# arm64: measured through `check_proof_cached`, `if n == 0:` elaborated and
+# `if 0 == n:` did not (`Application type mismatch` on the `B.cond` block's
+# `hcond` obligation), because the generator's codegen-internal dead-arm
+# reasoning read a `B.cond`'s condition field as a register number. That defect
+# is fixed (the dead-arm reasoning is restricted to a real `CBZ`, the only
+# branch form that tests a register against zero), and
+# `test_formal_call_proof_gen.py::TestTheConditionOperandOrderDoesNotReachTheProof`
+# pins both spellings elaborating — so this pair now checks PARITY of the two
+# spellings rather than catching a swap by failing to elaborate.
 #
 # **The three-case pair fails on arm64 and so does its `if`.** That is stated
 # here rather than left to be discovered: it is a pre-existing gap in arm64's

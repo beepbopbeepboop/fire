@@ -403,7 +403,8 @@ from mojo.middle.solvers import (
     FunctionCompilability, TypePromotionSolver, ClosureInfo,
 )
 from mojo.middle.exprtypes import (
-    _walk_ast, _UnsupportedGeneratorShape, _UnsupportedAsyncShape,
+    _walk_ast, _walk_ast_invalidate, _walk_ast_reset,
+    _UnsupportedGeneratorShape, _UnsupportedAsyncShape,
     _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _async_quick_eligible,
     _generator_quick_eligible, _async_gen_quick_eligible, _await_call_ctype,
     _is_async_call_to_known_fn, _local_literal_ctype, _receiver_key,
@@ -761,6 +762,11 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
         inherited = [m for name, m in merged_methods.items() if name not in own_names]
         s.fields = merged_fields + s.fields
         s.methods = inherited + s.methods
+        # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
+        # identity, and therefore blind to "this node now reaches more
+        # children than when it was last walked" — must not be able to answer
+        # for `s`, or for any node that contains it, again.
+        _walk_ast_invalidate(s)
 
     for s in all_struct_defs:
         if isinstance(s, StructDef):
@@ -4846,6 +4852,11 @@ class GimpleGen:
         return fn.body
     def _set_fn_body(self, fn, body) -> None:
         fn.body = body
+        # Replaces a retained FunctionDef's whole body, which IS an in-place
+        # AST mutation as far as `_walk_ast`'s memo is concerned — it keys on
+        # the FunctionDef's identity and cannot see that the node now reaches a
+        # different set of children.
+        _walk_ast_invalidate(fn)
 
     # ---- delegates: gimple_gen_stmts.py ----
     def gen_stmt(self, node):
@@ -5912,6 +5923,16 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # here, while still deduping correctly *within* one call across every
     # nested GimpleGen instance recursive import-inlining creates (shared
     # by reference — see `_compile_imported_module`'s sharing block).
+    #
+    # `_walk_ast_reset()` joins it for the same reason and with the same
+    # scope: the shared whole-AST traversal memo is keyed on node identity, so
+    # it is scoped to exactly one whole-program compile. One call here IS one
+    # independent artifact, which is the whole interval over which that memo
+    # has reuse to offer — every level of the import recursion is inside this
+    # one call — and dropping it here is also what stops a process that
+    # compiles many modules in a row (`compile_stdlib.py`, the test runners)
+    # from pinning every AST it ever walked.
+    _walk_ast_reset()
     gfn._selfhost_begin_compile()
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()

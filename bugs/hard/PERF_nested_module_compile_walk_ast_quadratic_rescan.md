@@ -1,5 +1,204 @@
 # HARD BUG (performance): `_walk_ast` re-scan blowup for large transitive-import graphs
 
+## Status (2026-10-16, Phase 10 — the memo is in; `_walk_ast` node visits are LINEAR in tree size)
+
+**The doc's stated blocker is closed, and the memo it was blocking has landed.**
+`_walk_ast` (`mojo/middle/exprtypes.py`) is memoized on node identity, the
+same object is handed to every caller (the property the 2026-10-05 entry
+turned into a check stays a check — 69 call sites, none mutating), and both
+hazards the 2026-10-02 entry named are closed. Measured on the doc's own
+benchmark shape (a synthetic struct chain — a `class` with class attrs,
+`__init__` self-assigns, a method and a libc call per module — through
+`compile_to_gimple(do_imports=True)`):
+
+| n | `_walk_ast_into` node visits before | after | ratio before | ratio after | wall before | wall after |
+|---|---|---|---|---|---|---|
+| 20 | 410,528 | 31,232 | | | 0.25s | 0.18s |
+| 40 | 1,399,588 | 62,512 | 3.41x | **2.00x** | 0.74s | 0.51s |
+| 80 | 5,112,908 | 125,072 | 3.65x | **2.00x** | 2.61s | 1.74s |
+| 160 | 19,480,348 | **250,192** | 3.81x | **2.00x** | 10.40s | 6.95s |
+
+**−98.7% of the node visits, and the per-doubling ratio is 2.00 at every size
+— the rescan is gone rather than shrunk.** The absolute figures are not the
+2026-10-02 entry's, because the benchmark's shape has drifted since; the ratio
+column is the claim, and the ratio is the claim that moved.
+
+**The bug this doc is named for is fixed. The doc STAYS, and the reason is not
+the headline.** Its "Remaining work" list from 2026-08-25 tracks three
+consumers besides `_walk_ast`, and one of them is still open on its own Phase-9
+measurement: `_collect_self_assigns`/`_collect_self_reads`, 26,080 calls and
+1.75s of a 23.3s profiled run (7.5%), "still untouchable for the reason Phase 3
+gives — it mutates struct ASTs directly (`s.fields.append(...)`), so memoizing
+it means caching raw syntactic shape and re-deriving the type from three live
+pieces of state on every call". This pass gives it the invalidation hook the
+mutating half of that argument needs, and does nothing about the cost. Deleting
+the doc would delete that item from the queue, and this doc has already carried
+a CLOSED banner it did not earn once (2026-09-26, withdrawn).
+
+### What is in the code
+
+Three pieces, all in `mojo/middle/exprtypes.py`:
+
+* **`_WALK_AST_MEMO: dict`** — `id(node)` -> `(node, out)`. The value holds
+  the node itself, which is **hazard 2** closed by a strong reference rather
+  than by a `weakref`: the key is an address, so a freed node's id could
+  otherwise be handed to a different node and the memo would answer with the
+  first one's nodes — a wrong artifact, silently. `weakref` is not in the
+  self-host subset (nothing under `mojo/` imports it), so the strong ref is
+  both the available and the cheaper-to-reason-about answer. A one-node result
+  is not memoized: a leaf has nothing to reuse, and caching it would pin every
+  distinct scalar ever walked.
+
+* **`_WALK_AST_PARENTS: dict`** and **`_walk_ast_invalidate(node)`** —
+  **hazard 1**, closed by dropping the mutated node's entry *and every entry
+  that could contain it*, found by the parent edges the walk records as it
+  descends. A container records its own edge too, because the items of
+  `fn.body` are held by the LIST and only the list is held by `fn`. The
+  entry and the edges describing it are written by the same call, so they
+  cannot disagree. **17 call sites in 7 files** call it — `module_gen.py`'s
+  two `_s.fields.insert`, two `s.fields.append`,
+  `_scan_body_for_local_field_access`'s `target_def.fields.append` and two
+  `s.body =`; `gimple_codegen.py`'s `_merge_struct_inheritance` and
+  `GimpleGen._set_fn_body`; `coro.hoist_awaits_from_call_args`;
+  `emit_calls._lower_subscript`'s two; `cpp_core`'s two; `cpp_async`'s two;
+  `elab_intu`'s one.
+
+* **`_walk_ast_reset()`**, called once from `_run_pipeline` — the single
+  driver behind every public compile entry point. One call there is one
+  independent output artifact, which is exactly the interval over which the
+  memo has reuse to offer (every level of the import recursion is inside one
+  call), and it is also where the previous compile's pinned nodes are
+  released.
+
+### The one design decision that differs from this doc's prescription, and why
+
+The 2026-10-02 entry's "exact next step" item 1 asks for **a generation
+counter included in the memo key**. That was implemented, measured, and
+REJECTED on the measurement: a counter invalidates everything, and this
+compiler appends to a `StructDef`'s field list **twice per module**, so a
+counter at every mutation site puts back the per-level rescan the memo exists
+to remove.
+
+| invalidation | node visits, n=160 |
+|---|---|
+| none (unsound, for reference) | 194,684 |
+| **per-node `_walk_ast_invalidate` (what landed)** | **250,192** |
+| a generation counter at every mutation site | 2,848,778 |
+| a generation counter at every site AND at each module boundary | 5,405,540 |
+| baseline (no memo) | 19,480,348 |
+
+Per-node is linear and a counter is not, for one structural reason: the AST
+is shared by reference across the passes — one statement is an element of
+`stmts`, of `imported_stmts` at every ancestor level, of `all_functions`, of
+`all_structs_for_methods` — so the edges *out of* a node fan out to all of
+those at once, while the edges *into* it are the handful of containers that
+existed when it was last walked. Only the second kind can be walked cheaply,
+and a flush has to drop the first kind with it.
+
+**The absence of a boundary bump is worth stating, because it reads like the
+omission a future reader would expect to correct.** Every nested
+`_compile_imported_module` ran a whole `gen_module_impl` of its own and
+mutated its OWN nodes; a memo entry is only reachable through the object it
+was keyed on, so a nested compile cannot make an entry of the *parent's* level
+stale, and `imported_stmts` is built inside that same Phase-0 block and first
+walked after it. Adding the bump anyway is the "module boundary" row above,
+and it costs 21x the node visits to protect against nothing.
+
+### Equivalence evidence
+
+* **Byte-identical generated C**, `cmp`-clean, on the 160-module chain
+  (2,871,847 bytes, md5 `3c41f8bdd56fe09a48fb66e89dbaf3aa` on both sides) and
+  at n=40 and n=80; and on real files from the CPython 3.14.6 tree at
+  `/Users/mrs/net/Python-3.14.6` — `Lib/socket.py` (373,815 bytes),
+  `Lib/asyncio/__init__.py` (74,945 bytes), and `Lib/contextlib.py`, which
+  fails at this tree's documented async-codegen point and produces the same
+  502 bytes of refusal text on both sides. The before/after artifacts were
+  produced by two trees of the SAME repo (`git archive HEAD~1` into a
+  scratch directory, versus the working tree), from the same fixed module
+  directory, so the `#line` directives are stable across the pair.
+* **`python3 test_gimple.py` 396 passed / 0 failed**, including three new
+  checks: `walk_ast_memo_is_transparent_and_honours_invalidation` (content
+  and order equal an independently written reference walk — no memo, no
+  per-class caches; a repeat call is the SAME list object; the entry holds
+  its node; and a struct that grows a field and a body replaced wholesale
+  each cost the memo its answer, for the node AND for every node containing
+  it) and `walk_ast_memo_never_answers_stale_over_real_compiles` (every
+  `_walk_ast` call, over five real compiles, compared against a fresh
+  reference walk) and `every_ast_mutation_site_invalidates_the_walk_memo`
+  (the census, below).
+* **The new tests bite, and the corpus one bites on a MISSED SITE, which is
+  what it is for.** Emptying `_walk_ast_invalidate`'s body turns both the
+  transparency test and the corpus test red. Dropping ONE
+  `_walk_ast_invalidate(s)` at the `_collect_self_assigns` field-append turns
+  only the corpus one red — `call 18 on list: node 18 differs` — i.e. the
+  shape of failure this memo could have had in the field: a struct field
+  silently missing from generated C. The census check's two failure modes
+  are verified separately, below.
+* `test_selfhost.py` 3 passed / 0 failed (it builds and links the
+  self-hosted compiler and runs the produced binary on a two-line program),
+  `test_gimple_runner.py` 461/0, `test_module_cache.py` 163/0,
+  `test_link_mode.py` 17/0, `test_silent_noop_iter.py` 27/0.
+
+### What remains, named
+
+1. ~~A static census of the mutation sites, as a check.~~ **LANDED, later
+   the same day.** `test_gimple.py`'s
+   `every_ast_mutation_site_invalidates_the_walk_memo` reads the field names
+   out of every dataclass in `fire_compiler.py` at run time, finds every
+   write that can change what a walk of some node returns, and attributes
+   each to the innermost function containing it; that function must either
+   call `_walk_ast_invalidate` or be on `_WALK_AST_MUTATION_ALLOWLIST` with a
+   reason. **82 write sites in 50 functions**: 11 invalidate, 39 are
+   classified into the three shapes the allowlist's own comment names — the
+   object is one of this compiler's own dataclasses (whose field names
+   collide with the AST's: `name`, `value`, `items`, `fields`, `kind`,
+   `params`, `methods`, `captures`, `index`, `extra`, `alias`), the field is
+   a SCALAR so the walk returns the same nodes either way (`StructDef.name`,
+   `Comprehension.kind`, `body_fd.is_async`, and `for_target_single_name`
+   peeling `'(a)'` to `'a'`), or the tree is one `gen_module` has not walked
+   (rewritten inside `ast_rewriter.rewrite` / `gimple_gen_coro.lower` in
+   `_run_pipeline`, freshly synthesized, or reached during `gen_module` only
+   through `hoist_awaits_from_call_args`, which invalidates the enclosing
+   `fn`). It is the census shape the 2026-10-05 entry wrote for the OTHER
+   hazard (`no_walk_ast_caller_mutates_what_it_is_handed`), turned on this
+   one. Both of its failure modes are verified to bite: a new never-called
+   `node.args.append(None)` in `emit_stmts.py` turns it red with the file,
+   function, line and field named, and an allowlist key naming no real
+   function turns it red too.
+
+   What it does NOT cover, and the reason the corpus test above still earns
+   its place: an in-place mutation reached through a LOCAL ALIAS
+   (`b = s.body` then `b.append(x)`), which no attribute-name predicate can
+   see. The census run for this pass found 307 aliasing assignments
+   (`x = <expr>.<ast field>`) across `mojo/`, and none of the hooked sites
+   uses one — but that is a reading of this tree, not a property of it.
+2. **Memory.** The memo and its parent edges are per-compile and cleared at
+   each `_run_pipeline`. Measured where measured: n=160 chain, 1,279 memo
+   entries / 23,212 parent edges at the end of the compile;
+   `Lib/socket.py`, 149 / 5,342. NOT measured on a whole-closure self-host
+   compile, which is the shape that would show it if it were large — and that
+   is exactly the run this pass is not permitted to do.
+3. **Wall clock is still superlinear** (0.18 / 0.51 / 1.74 / 6.95s at
+   n=20/40/80/160, ratios 2.8x / 3.4x / 4.0x), because what is left of the
+   per-level cost is over GENERATED C TEXT rather than over AST nodes — the
+   same finding Phase 8 recorded for `_dedup_variadic_externs`, and the same
+   inherent one: a module's emitted `parts` genuinely contain its whole import
+   closure, so producing them costs one join per level no matter what. The
+   node-visit column is the one this doc measures, and it is linear now.
+
+**Gate (worker pass only, every job under `tools/memslot.py --gb 8`)**
+`test_gimple.py` 396/0, `test_selfhost.py` 3/0, `test_gimple_runner.py` 461/0,
+`test_module_cache.py` 163/0, `test_link_mode.py` 17/0,
+`test_silent_noop_iter.py` 27/0.
+
+**NOT RUN, and owed by the integrator** — this change is inside the compiled
+closure, so the checks that can only see the self-hosted binary's own lowering
+of it are exactly the ones still owed: `mojoc` builds, the three `stage*`
+self-host steps, `stdlib-dylib`'s `skip <module>:` count vs baseline (must not
+increase), `stdlib-syntax`'s unexpected-failure count vs baseline (must not
+increase), and `make gate`. `tools/audit_selfhost_ast.py` over the eight
+changed files reports nothing new (every finding is pre-existing, in code this
+pass did not touch).
 ## Status (2026-10-02, this pass — the doc's stated BLOCKER is measured away; what remains is two hazards, both named with their sites)
 
 The 2026-10-02 Phase 9 entry below ends with the reason `_walk_ast` is the

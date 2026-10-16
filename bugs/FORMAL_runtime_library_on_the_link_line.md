@@ -1,5 +1,41 @@
 # FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open
 
+**Status 2026-10-12 (`work/formal284-docs`): the published triple was stale by
+ONE again, and the check that was supposed to catch it was itself the second
+copy.** `mojo_str_register` (`void mojo_str_register(char *s)`, added by
+`38d19a52` so codegen can register its `__rodata` literal pool) is word-shaped,
+exported and reachable with no heap handle, so the tree measures **273 / 217 /
+177** where `FORMAL.md` §6 phase 2 still published **272 / 216 / 176**.
+`test_formal_runtime_link.py` (6 checks, three per architecture) and
+`test_formal_doc_truth.py` (2 checks) were both RED on exactly that.
+
+**`test_formal_doc_truth.py` did not catch the drift because it HARDCODED the
+figure it claimed to read.** Its check was `check(len(word) == 272, "…,
+FORMAL.md §6 phase 2 publishes 272")` — a literal, whose message only *said* it
+was reading the document, so the one figure a cheap job could have verified
+rotted with the doc instead of flagging it. That check now parses §6's own
+word-shaped row (this file's first rule: "the DOCUMENT is the single copy"), so
+the next entry point added to `runtime/` moves the figure the check compares
+against rather than silently failing it.
+
+**What landed.** `FORMAL.md` §6 phase 2's triple is 273 / 217 / 177; the block
+that enumerates the gap-closing entry points is now eleven names (the eleventh is
+`mojo_str_register`); §6's arithmetic (`273 − 217 = 56`, `217 − 177 = 40`) and
+§7's `273 of 684 … 177` are re-derived from the same census; §1's
+`runtime/fire_runtime.c` size is corrected 524 → 528 KB, which
+`test_formal_doc_truth.py` also reads out of the document. Measured, both
+architectures byte-identical: `test_formal_runtime_link.py` **189 passed, 0
+failed**; `test_formal_doc_truth.py` **434 passed, 0 failed**;
+`test_runtime_header_scan.py` **72 passed** (§2.2 already read 273/684 — the
+`--fix` instrument had kept that half honest while §6 went stale).
+
+**This moves no ceiling.** It is figure drift and the check that permitted it,
+not a capability change: the three ceilings below (56 word-shaped entry points
+`runtime_dylib` does not export, 4 no header declares, 40 that need a `void *`
+handle the path cannot obtain) are unchanged, and so is the phase-6 dependency
+that closes the third. The `38d19a52` entry also raised the reachable surface by
+exactly the one name — the same shape as every re-measurement in this document.
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`): a FOURTH defect
 was found and fixed here, and it is the one the document itself recorded and
 did not chase — a `void`-RETURNING entry point whose result was bound.**
@@ -727,7 +763,47 @@ change and not a separate cleanup. 219 → 207.
   another branch's work, which is what made the old sentence wrong.
 
 
-## Reproducing
+## Status 2026-10-13: the triple moved by one again and the §6 phase-2 pin is RED
+
+A runtime declaration added a word-shaped entry point after the 2026-10-05 sweep,
+and neither this document's table nor `FORMAL.md` §6 phase 2 moved with it:
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label rtl -- python3 test_formal_runtime_link.py
+      arm64: 273 word-shaped, 217 exported, 177 reachable (40 need a handle)
+FAIL  arm64: 273 word-shaped entry points in `runtime_abi()`, FORMAL.md §6
+            phase 2 publishes 272
+FAIL  arm64: 217 word-shaped entry points exported, … publishes 216
+FAIL  arm64: 177 reachable with no heap handle, … publishes 176
+      x86_64: identical triple, identical three failures
+…
+185 passed, 6 failed, 191 checks
+```
+
+The cause is one declaration, not a code defect:
+
+```console
+$ git show 38d19a52 -- runtime/fire_runtime.h
++void mojo_str_register(char *s);
+```
+
+`38d19a52` ("runtime: make mojo_boxed_is_str sound…", 2026-10-10) added
+`mojo_str_register(char *)` — a `void` return with a one-word parameter, so it
+is `word: True`, exported by the core runtime dylib, and needs no heap handle.
+That is **+1 in all three columns**: 272→273, 216→217, 176→177, and the
+subtractions stay 56 and 40 because they moved together.
+
+**§2.2 already carries the right figure** (`273 of 684`, and
+`test_runtime_header_scan.py` is green at 72/72), so this is the §6 phase 2
+table and the prose that quotes it, not a second reading of the surface. The
+rows to move are `FORMAL.md` lines 527–529 plus the sentences at 531, 533, 536,
+539, 574, 760 and 1234, and this document's own table above (272/216/176 →
+273/217/177). **Then `test_formal_runtime_link.py` is 191/191.** The reproduction
+block below still names the older `206`/`166` figures and is stale in the same
+way; the live numbers are the ones in this section.
+
+
 
 Everything in the 2026-10-05 Status is one pure-Python census — the export trie
 and `model.runtime_abi()`, no build and no Lean — plus the one test that pins

@@ -28,7 +28,98 @@ _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 _WALK_DATACLASS_CACHE: dict[type, bool] = {}
 _WALK_AST_MAX_DEPTH = 900
 
-def _walk_ast_into(node, out, _depth=0):
+# ── the `_walk_ast` memo ──────────────────────────────────────────────────────
+# The per-class caches above make ONE visit cheaper; they do not make the
+# SECOND visit of the same subtree cheaper, and the second visit is the whole
+# problem. A consumer re-walks the same tree at every level of an import
+# chain: on the 160-module struct chain this bug doc measures, `_walk_ast` is
+# entered 164,662 times and `_walk_ast_into` visits 19.5M nodes for an AST
+# with ~50k of them, because each of the ~1,000 whole-subtree walks a module
+# performs is re-descending statements an earlier one already descended. That
+# is the per-level rescan of the cumulative tree this bug exists to kill, and
+# it is why the fix belongs HERE rather than in one more consumer: every one
+# of them calls this one function.
+#
+# Keyed on `id(node)` — the identity the Phase-2..4 per-statement caches in
+# this compiler already key on. The VALUE holds the node itself: that is
+# hazard 2 of the doc's own two, closed by a strong reference rather than by a
+# `weakref`. The key is an address, so a freed node's id could otherwise be
+# handed to a different node and the memo would answer with the first one's
+# nodes — a wrong artifact, silently. Holding the node pins its id for as long
+# as the entry lives, so reuse cannot happen while the entry does.
+# (`weakref.ref` would also close it at no extra cost, but `weakref` is not in
+# the self-host subset this file is compiled by — nothing under `mojo/`
+# imports it — so the strong ref is both the available and the
+# cheaper-to-reason-about answer. It is not free in memory: the entry keeps
+# the subtree's node list alive, which is why `_walk_ast_reset()` drops the
+# whole memo at each compile boundary.)
+#
+# Hazard 1 — a node mutated after it was walked — is closed by
+# `_walk_ast_invalidate`, which drops the entry for that node AND every entry
+# that could contain it, found by walking the parent edges the walk itself
+# records. It is deliberately NOT a global generation counter, and the
+# measurement is why: a counter invalidates everything, and this compiler
+# mutates a `StructDef`'s field list twice per module, so a counter at every
+# mutation site puts back exactly the per-level rescan the memo exists to
+# remove — 160-module chain, 250,192 node visits with per-node invalidation
+# against 2,848,778 with a counter at every site and 5,405,540 with a counter
+# at each module boundary as well (baseline: 19,480,348).
+_WALK_AST_MEMO: dict = {}
+_WALK_AST_PARENTS: dict = {}
+
+
+def _walk_ast_invalidate(node) -> None:
+    """Drop every memo entry that could contain `node`'s pre-mutation walk.
+
+    The entry for `node` itself is obviously stale, and so is the entry for
+    anything that CONTAINS it — a function body whose `for` target was
+    rewritten, a module's statement list once one of its statements grew a
+    field. The walk records the parent edge of every node it descends
+    (`_WALK_AST_PARENTS`, filled at the same time as the entry it belongs to,
+    so an entry's contents and the edges that describe them can never
+    disagree), and this walks those edges up to their roots.
+
+    Upward, not downward, and that is what keeps it linear: the AST is shared
+    by reference across the passes — one statement is an element of `stmts`,
+    of `imported_stmts` at every ancestor level, of `all_functions`, of
+    `all_structs_for_methods` — so the edges out of a node fan out to all of
+    them at once, while the edges into it are the handful of containers that
+    existed when it was last walked. Measured on the 160-module chain: two
+    invalidations per module, each touching a few hundred keys.
+
+    Cycles are possible in a walked graph (the walk itself is depth-capped,
+    so it survives one), hence the `seen` set rather than a plain loop."""
+    stack = [id(node)]
+    seen = set()
+    while stack:
+        k = stack.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        if k in _WALK_AST_MEMO:
+            del _WALK_AST_MEMO[k]
+        par = _WALK_AST_PARENTS.get(k)
+        if par is not None:
+            for p in par:
+                if p not in seen:
+                    stack.append(p)
+
+
+def _walk_ast_reset() -> None:
+    """Drop the whole memo at a compile boundary.
+
+    `_run_pipeline` is the single driver behind every public compile entry
+    point, and one call there is one independent output artifact — so this
+    is both the natural scope for the memo (all of the reuse it exists for is
+    within one whole-program compile) and the point at which the previous
+    compile's pinned nodes, and the parent edges that keep them findable, are
+    released. Without it a process that compiles many modules in sequence
+    (`compile_stdlib.py`, the test runners) would retain every AST it ever
+    walked."""
+    _WALK_AST_MEMO.clear()
+    _WALK_AST_PARENTS.clear()
+
+def _walk_ast_into(node, out, _depth=0, _from=0):
     """Append to `out` every AST node `_walk_ast(node)` would return, in
     exactly its order — the same pre-order generic walk, minus the
     intermediate per-subtree lists (`result.extend(_walk_ast(child))`
@@ -46,15 +137,38 @@ def _walk_ast_into(node, out, _depth=0):
     of the process, so it is computed once per class via the real
     `dataclasses.fields()` (exact semantics — including fields()' own
     ClassVar exclusion — no private-API replication) and cached;
-    traversal order/content is byte-identical by construction."""
+    traversal order/content is byte-identical by construction.
+
+    `_from` is the id of the value this one was reached from, 0 at the root,
+    and the ONLY thing it changes is the parent edge it records on the way
+    down — the traversal itself is untouched. It is recorded here, inside the
+    walk, rather than derived afterwards because a walk is the only thing
+    that knows the shape: the memo's entries are exactly these descents, so
+    an entry and the edges describing it are written by the same call and
+    cannot disagree, and `_walk_ast_invalidate` can then find every entry
+    that could contain a mutated node. A container records its edge too (the
+    list/tuple branch below, before it returns), because the items of
+    `fn.body` are held by the LIST and only the list is held by `fn`."""
     if node is None:
         return
+    if _from:
+        _nk = id(node)
+        _par = _WALK_AST_PARENTS.get(_nk)
+        if _par is None:
+            _WALK_AST_PARENTS[_nk] = [_from]
+        elif _par[-1] != _from:
+            # One dict write per descended node, which the memo is what makes
+            # affordable: a descent only happens on a cache MISS, so this is
+            # once per node per compile and not once per visit.
+            _par.append(_from)
     if _depth > _WALK_AST_MAX_DEPTH:
         return
     if isinstance(node, list) or isinstance(node, tuple):
+        _lk = id(node)
         for item in node:
-            _walk_ast_into(item, out, _depth + 1)
+            _walk_ast_into(item, out, _depth + 1, _lk)
         return
+    _self_id = id(node)
     out.append(node)
     if isinstance(node, type):
         return
@@ -87,7 +201,7 @@ def _walk_ast_into(node, out, _depth=0):
             _child = getattr(node, fname, None)
             if _child is node:
                 continue
-            _walk_ast_into(_child, out, _depth + 1)
+            _walk_ast_into(_child, out, _depth + 1, _self_id)
         return
     if isinstance(node, str) or isinstance(node, int) or isinstance(node, float) or isinstance(node, bool) or (node is None):
         return
@@ -105,9 +219,34 @@ def _walk_ast(node):
     attribute names and silently missed the rest, which is exactly how fields
     assigned only inside e.g. a `try:`/`except:` or `elif:` branch went
     unregistered and produced 'no member named ...' errors from the C
-    compiler on the generated struct."""
+    compiler on the generated struct.
+
+    MEMOIZED (Phase 10 of the same bug doc). This is the whole traversal
+    utility every struct-field scan, Pass 1.2's self-assign collector,
+    `gen_func` and the closure/async pre-passes share, and on a large
+    transitive-import graph it was re-descending the same subtrees once per
+    consumer and once per import level — the per-level rescan of the
+    cumulative tree, in one place.
+
+    Returning the SAME list to every caller is what makes the memo cheap, and
+    it is what the doc's stated blocker objected to: a caller that mutated
+    the list would corrupt every later reader. It cannot, and that is now
+    checked rather than believed — `test_gimple.py`'s
+    `no_walk_ast_caller_mutates_what_it_is_handed` walks every `.py` under
+    `mojo/` and `formal/` with `ast` and fails on any call site that binds
+    the result whole and then mutates it (`.append`/`.extend`/`.sort`, an
+    index store, `+=`, `del`). 67 sites, none of them mutating.
+
+    A one-node result is not memoized: it is a leaf, so there is nothing to
+    reuse, and caching it would pin every distinct scalar ever walked."""
+    key = id(node)
+    hit = _WALK_AST_MEMO.get(key)
+    if hit is not None:
+        return hit[1]
     out = []
     _walk_ast_into(node, out)
+    if len(out) > 1:
+        _WALK_AST_MEMO[key] = (node, out)
     return out
 
 class _UnsupportedGeneratorShape(Exception):

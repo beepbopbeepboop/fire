@@ -1,13 +1,28 @@
 # A context manager's `__exit__` cannot take CPython's own three exception
 # words, so every context manager written the way CPython writes one is refused
 
+**Status 2026-10-12 (`work/formal318-docs`): the SECOND spelling of the ignoring
+shape is now accepted too — `__exit__(self, *exc)` whose body never reads `exc`
+lowers, because the catch-all was being refused for a reason that was never
+true: `_dunder_receiver_params` read the star from `getattr(method, "vararg",
+None)`, and no `FunctionDef` on this front end has that attribute (the parser
+keeps the star IN the parameter name, `("*args", …)`), so the shape came out as
+arity 2 and the variadic branch of `with_context_manager_defect` was dead code.
+`function_param_shape` is now the reader, `context_exit_variadic_ignores` is the
+predicate (`**kw` alone and `(self, exc_type, *rest)` stay refused for a
+STRUCTURAL reason — CPython never calls either with the receiver alone — and a
+read of the catch-all is refused by name, the variadic spelling of the read
+refusal below). `test_formal_with.py` is **395 checks, PASS=395** (was 378): two
+new ANSWERED rows run the same `*args` text on both engines, plus four
+in-process gate checks and a re-worded refusal row.**
+
 **Status 2026-10-07 (`work/formal104-docs`): the COMMON CASE is FIXED — a
 `__exit__(self, exc_type, exc_val, tb)` whose body IGNORES the three words is
 now a context manager this path lowers, so the most common `with` in real code
 compiles verbatim. What remains is the narrow half that genuinely needs the
-unwinder: a `__exit__` that READS any of the three words is still refused, by
-name, because there is no exception value to pass and a fabricated one would be
-a lie the method then acted on.**
+unwinder: a `__exit__` that READS any of the three words (fixed or variadic) is
+still refused, by name, because there is no exception value to pass and a
+fabricated one would be a lie the method then acted on.**
 
 **2026-10-08 (`work/formal258-docs`): §4 item 3 — the alias-dispatched method
 whose NAME a second struct also declares — is FIXED, and fixed for BOTH
@@ -124,6 +139,7 @@ document is named for, when the body does not read the words:
 | construct | evidence |
 |---|---|
 | `__exit__(self, exc_type, exc_val, tb)` that ignores them | no read of any of the three parameter names in the body |
+| `__exit__(self, *exc)` that ignores `exc` | no read of the catch-all name in the body (2026-10-12) |
 
 **REFUSED, and this is what is left** — the same signature when the body READS
 a word:
@@ -131,6 +147,7 @@ a word:
 | construct | the refusal |
 |---|---|
 | `__exit__(self, exc_type, exc_val, tb)` whose body reads `exc_type`/`exc_val`/`tb` | "its `__exit__` takes CPython's three exception words and READS them … there is no exception value, no traceback and no type word to pass, so any value this path supplied would be a lie the method then acted on" |
+| `__exit__(self, *exc)` whose body reads `exc` | the same sentence through the variadic spelling: "takes CPython's three exception words through a variadic `*exc` and READS it … there is no exception value, no traceback and no type word to pass" (2026-10-12) |
 
 The wording is itself part of what this branch fixed: until 2026-10-05 the same
 program was told "**it declares no `__enter__`**", which is FALSE about a class
