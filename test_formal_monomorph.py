@@ -3418,6 +3418,19 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
           "parenthesised expression is not a tuple and `len((1))` is a type "
           "error the reader would have to decode")
 
+    # …and the call-site brackets ARE a demand, which is the half that used to
+    # be dropped: `type_arg_text` answers "" for a literal, so
+    # `Pair[Int, 1, 2, 3]()` was not an instantiation at all and the call site
+    # kept its brackets. A bracket that names a TYPE beside its values is an
+    # explicit-parameter list; an all-value bracket (`tile[2, 3](…)`) is still
+    # a comptime specialization and not a demand.
+    callers = MM.all_instantiation_calls(
+        "def main():\n"
+        "    var a = Pair[Int, 1, 2, 3]()\n"
+        "    var b = tile[2, 3](7)\n")
+    check(callers.get("Pair") == [("Int", "1", "2", "3")],
+          f"`Pair[Int, 1, 2, 3]` is a demand and `tile[2, 3]` is not: {callers}")
+
     # THE REFUSAL THAT SURVIVES, because a rule that reads `*` as an exemption
     # from the arity check would take the check with it: too FEW arguments binds
     # a declaration the bracket does not supply, whatever the declaration says.
