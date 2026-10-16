@@ -4769,7 +4769,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _emit_pointer_store(self, target, value) -> None:
         obj = target.func.obj
         how, why = M.pointer_store_lowering(
-            self._cur_fn, target, self._structs, self._functions, self._structs)
+            self._cur_fn, target, self._structs, self._functions, self._structs,
+            value=value, class_of=self._printf_arg_conversion_class)
         if how is None:
             raise CodegenError(M.pointer_store_refusal(
                 target.func.member, why

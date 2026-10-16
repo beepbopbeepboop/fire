@@ -118,6 +118,51 @@ def _string_composition_messages():
 
 _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
+
+# The `%d` of a CONTAINER, which is the one direction of `printf`'s conversion
+# table that had no row anywhere until 2026-10-05 — a `%s` of a number was
+# refused by name and a `%d` of a container was not, so the corpus's largest
+# printf family was the one shape of it that got a wrong answer instead of a
+# diagnostic.
+#
+# **BUILT, not copied**, for the reason the pair above is: this file's own
+# docstring, point 2, says a hand-copied sample cannot catch a reword, because
+# the marker still matches the stale copy while the backend has moved on. So the
+# sample is the message `formal/model.py` emits when asked about a list at a
+# `%d`, and the node it is asked about is built too — a hand-built node would
+# not be the shape the emitters hand the function, and a refusal's spelling of
+# its operand comes from `model.spelled`.
+#
+# The refusal needs a `container_of` hook because that is its one evidence
+# reader, and the hook handed here is `model.printf_arg_container_evidence`
+# reading the kind off the node — which is the whole of the rule, and is why
+# this sample exercises the message rather than a transcription of it.
+def _printf_container_message():
+    """The `%d`-of-a-container refusal, built by asking for it."""
+    container = F.ListExpr(elements=[F.IntLiteral(1)])
+    msg = FM.printf_container_conversion_refusal(
+        "printf", "v=%d", [container],
+        lambda e: FM.printf_arg_container_evidence(
+            e, kind_of=lambda _e: FM.list_kind(FM.INT_KIND)))
+    if msg is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses a container at a number "
+            "conversion, so the family and cause rows below would classify "
+            "a message the backend cannot produce — a sample that can only "
+            "rot (this file's docstring, point 3). The row goes with the "
+            "refusal rather than outliving it.")
+    return msg
+
+
+_PRINTF_CONTAINER_REFUSAL = _printf_container_message()
+
+#: The family, in `formal_sweep._REFUSAL_FAMILIES`, and the cause, in
+#: `formal_sweep_causes.CAUSES`. Spelled independently in each file, which is
+#: the same duplication every other row of this table has and the reason the
+#: pair is asserted by value here rather than imported from either.
+PRINTF_CONTAINER_FAMILY = "a printf conversion of a container"
+PRINTF_CONTAINER_CAUSE = "a printf conversion of a container"
+
 def _frame_slot_message():
     """The FRAME-SLOT container refusal, built not copied.
 
@@ -666,6 +711,14 @@ SAMPLES = [
     # dead-marker failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
+    # The `%d` of a CONTAINER, from the message BUILT above. Its own family
+    # because the fix is in a different place from every other printf row: the
+    # `%s`-of-a-number row above is a missing `own_shape_kind` answer, the float
+    # axis has no row at all, and this one is a container KIND that both backends
+    # already held and nobody asked — so a planner who read it as "a printf
+    # conversion problem" would go to the conversion table rather than to the
+    # vararg placement, which is where the defect was.
+    (PRINTF_CONTAINER_FAMILY, _PRINTF_CONTAINER_REFUSAL),
     # A symbol this image BINDS and nothing provides, where the symbol is a
     # METHOD OF A STRUCT IN THE FILE THAT REFUSED. Its own family because the
     # fix is on this side of the boundary: the definition was never emitted into
@@ -1231,6 +1284,13 @@ CAUSE_SAMPLES = [
     # failure this file exists for.
     (NON_ASCII_FAMILY, _NON_ASCII_ELEMENT_REFUSAL),
     (NON_ASCII_FAMILY, _NON_ASCII_QUANTITY_REFUSAL),
+    # The same BUILT message as its family row above, in the PLANNER's table —
+    # for the reason that row gives: the two tables are keyed on different
+    # things, so a construct one can name and the other cannot is a construct a
+    # planner cannot prioritise. `PRINTF_CONTAINER_CAUSE` is spelled
+    # independently in `formal_sweep_causes.py::CAUSES`, and this row is what
+    # proves the two spellings still agree.
+    (PRINTF_CONTAINER_CAUSE, _PRINTF_CONTAINER_REFUSAL),
     # The `try`-around-a-raise refusal, in the PLANNER's table as well as the
     # family's: its marker is the clause `formal/model.py` writes for it and
     # the arm refusal's message cannot contain, so the two rows cannot shadow

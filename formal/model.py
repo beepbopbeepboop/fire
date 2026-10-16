@@ -9929,6 +9929,78 @@ PRINTF_32_BIT_INTEGER_CONVERSIONS = {
     "d": "lld", "i": "lli", "u": "llu", "o": "llo", "x": "llx", "X": "llX",
 }
 
+#: Every conversion that reads its vararg as a NUMBER — the integer set above,
+#: the floating set, and the two that are a number read in another role. It is
+#: DERIVED from the two tables rather than written out, because a third
+#: hand-maintained list of conversion characters is a third thing that can fall
+#: out of step with the two that decide how the operand is placed, and the
+#: question this set answers ("does this conversion want a number?") is exactly
+#: the question the other two answer one at a time.
+#:
+#: `c` is here and NOT in `PRINTF_32_BIT_INTEGER_CONVERSIONS` for the reason
+#: that table gives: `%c` converts an `int` to `unsigned char`, so it reads the
+#: word as a number and renders eight bits of it. Measured on both
+#: architectures, `printf("[%c]", xs)` over a list printed `[?]`, which is the
+#: low byte of the blob's own address.
+#:
+#: `*` is here because C says a `*` width reads an `int` — the argument behind
+#: it is a number by the same rule every other row of this table follows, and
+#: `printf("%*d", xs, 3)` over a list printed a field of thousands of spaces on
+#: both architectures, which is the address read as a field width.
+#:
+#: **`a` and `A` are DELIBERATELY ABSENT, and CPython is why.** In C they are
+#: the hexadecimal-float conversions and belong with `PRINTF_FLOAT_CONVERSIONS`
+#: on the placement side. In CPython's `%`-formatting `%a` is `repr()` and
+#: `%A` is `ascii()`, so `"%a" % [1, 2, 3]` is `'[1, 2, 3]'` — measured, not
+#: remembered — and a program that writes it is CORRECT and is refused here for
+#: a direction CPython does not refuse in. This set is therefore not
+#: `PRINTF_FLOAT_CONVERSIONS` and the difference is a naming fact about two
+#: languages rather than an omission; `%A` does not even exist in CPython
+#: (`ValueError: unsupported format character 'A'`).
+PRINTF_NUMBER_CONVERSIONS = (frozenset(PRINTF_32_BIT_INTEGER_CONVERSIONS)
+                             | (PRINTF_FLOAT_CONVERSIONS - frozenset("aA"))
+                             | frozenset("c*"))
+
+#: CPython's OWN sentence for a NUMBER conversion of a container, per
+#: conversion character, and it is a table because CPython's phrasing is not
+#: uniform — measured over every member of `PRINTF_NUMBER_CONVERSIONS` on this
+#: interpreter rather than taken from one example and generalised:
+#:
+#:     %-3d % [1,2,3]   TypeError: %d format: a real number is required, not list
+#:     %-3o % [1,2,3]   TypeError: %o format: an integer is required, not list
+#:     %-3c % [1,2,3]   TypeError: %c requires an int or a unicode character, not list
+#:     %-3e % [1,2,3]   TypeError: must be real number, not list
+#:     "%*d" % ([1,2],3)   TypeError: * wants int
+#:
+#: **It exists so the refusal can quote the interpreter rather than paraphrase
+#: it**, which is the whole reason the doc that asked for this row said CPython's
+#: message "is the model to mirror … and it is checkable". A paraphrase would be
+#: a sentence this repository invented about what Python does, and the next
+#: reader would have no way to tell it from a measured one.
+#:
+#: `%c` and `*` are worded as they are rather than folded into the `%d` shape
+#: because those two are not "a number is required": `%c` also accepts a
+#: one-character `str`, and `*` names the width argument instead of the
+#: conversion. Both are the interpreter's own wording and quoting anything else
+#: would be the "a list is required, not int" mistake this table exists to
+#: avoid.
+PRINTF_CPYTHON_NUMBER_REFUSALS = {
+    "d": "%d format: a real number is required, not {t}",
+    "i": "%i format: a real number is required, not {t}",
+    "u": "%u format: a real number is required, not {t}",
+    "o": "%o format: an integer is required, not {t}",
+    "x": "%x format: an integer is required, not {t}",
+    "X": "%X format: an integer is required, not {t}",
+    "c": "%c requires an int or a unicode character, not {t}",
+    "e": "must be real number, not {t}",
+    "f": "must be real number, not {t}",
+    "g": "must be real number, not {t}",
+    "E": "must be real number, not {t}",
+    "F": "must be real number, not {t}",
+    "G": "must be real number, not {t}",
+    "*": "* wants int",
+}
+
 
 def _printf_length_modifier(spec: str) -> str:
     """The LENGTH MODIFIER of one matched conversion specification, or "".
@@ -16796,6 +16868,19 @@ POINTEE_WIDTHS = {
     "UInt": (4, False),
     "Int64": (8, True), "UInt64": (8, False), "c_long": (8, True),
     "c_ulong": (8, False), "NoneType": (8, False),
+    # IEEE binary64 is EIGHT BYTES and the load is bit-exact — one `LDR` of the
+    # bit pattern, the same instruction an `Int64` pointee uses — so the width
+    # was never the question. It is in this table rather than in
+    # `POINTEES_REFUSED` because the refusal that was there was about the
+    # CONTEXT (nothing carried the pointee's KIND out of the dereference, so
+    # `Int(p.value())` read the exponent field) and that hole is closed:
+    # `pointee_kind` below is the channel, `ValueKinds.kind_of`'s dereference
+    # arm is where it is asked, and the two consumers a `Float64` could reach —
+    # a call argument and a `return` under an integer annotation — are refused
+    # by name. The signedness is `True` and is not consulted for an eight-byte
+    # load (nothing narrows it); it is written down rather than left as a
+    # default so a reader does not have to infer it.
+    "Float64": (8, True),
     # A pointer-to-pointer is a load of an ADDRESS, so the pointee here is
     # another pointer and the width is the pointer's own.  This is the one
     # recursive entry, and it terminates because a pointer to a pointer to a
@@ -16803,6 +16888,39 @@ POINTEE_WIDTHS = {
     # once it is a pointer, only whether the value is itself dereferenceable.
     "Pointer": (8, False), "UnsafePointer": (8, False), "_CPointer": (8, False),
 }
+
+
+def pointee_kind(pointee) -> str | None:
+    """The KIND a load of this pointee produces, or None when it is not stated.
+
+    **The channel `POINTEES_REFUSED`'s `Float64` row was standing in front of.**
+    That row said the load "yields a word whose KIND is decided by the context
+    it lands in", which was true of the tree it was written on and stopped being
+    true the moment a KIND could flow: a `Pointer[Float64]` load is one word
+    holding the bit pattern, and the question is no longer what the word IS but
+    what each consumer is told it is. This function is the answer to the first
+    question, and `ValueKinds.kind_of`'s dereference arm is where it is asked,
+    so every consumer of a kind — the `printf` conversion check, the
+    call-argument check, the return-annotation check, `Int(…)`'s own
+    `FLOAT_TO_INT` arm — inherits it rather than each emitter re-deriving it.
+
+    **One row, and `None` is the answer for everything else, which is the
+    permissive direction and not an omission.** Every other pointee in
+    `POINTEE_WIDTHS` is a one-word INTEGER, and `INT_KIND` is what this model
+    already answers for a word, so a row saying `int` would change nothing; the
+    other pointees in `POINTEES_REFUSED` (a `Float32`, a wide `SIMD`, a blob, a
+    struct) have no kind on this path at all and never reach a load. Writing the
+    integer rows out would be a second table to keep in step with
+    `POINTEE_WIDTHS` for a claim that changes no answer.
+
+    `Float64` and NOT `Float32` is not a preference: a `Float32` is four bytes
+    of IEEE binary32 and this path has no kind that holds one, so its load is
+    still refused by `POINTEES_REFUSED` and this function is never asked about
+    it. A `BFloat16` is the same answer for the same reason.
+    """
+    if pointee == "Float64":
+        return FLOAT_KIND
+    return None
 
 # The reverse of `POINTEE_WIDTHS` for the four widths it establishes: the pointee
 # that IS that width, so a refusal can NAME the declaration which would answer it
@@ -19336,7 +19454,8 @@ def pointer_store_receiver(target):
 
 
 def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
-                           structs_by_name: dict = None):
+                           structs_by_name: dict = None, value=None,
+                           class_of=None):
     """`("store", width, signed)` | `None` — with a refusal.  The store mirror
     of `dereference_lowering`, and asked for the same reason.
 
@@ -19345,11 +19464,37 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     and the shape is what tells a store from an identity.  `signed` is the
     POINTEE's declared signedness and is carried for that symmetry only — a
     store has no result to sign-extend, and the width is what it truncates to.
+
+    **`value` and `class_of` are the KIND CHECK, and they are the third consumer
+    that `POINTEES_REFUSED`'s `Float64` row was standing in front of.** The row
+    was deleted when the pointee's kind started flowing out of a dereference
+    (`pointee_kind`), and deleting it opened a hole the document that asked for
+    the deletion did not name: with a `Float64` pointee no longer refused here,
+    `p.value() = 1` stores the INTEGER 1 into a slot a double is read back from
+    (measured, both architectures, green build, exit 0 — reading it back gives
+    4.9e-324), and `p.value() = 2.5` into a `Pointer[Int64]` stores the double's
+    BIT PATTERN as an integer. Both are silent wrong answers and both were
+    refusals a moment before.
+
+    So the rule is the same one `call_argument_kind_refusal` and
+    `printf_kind_conversion_refusal` state at the other two boundaries — the
+    stored value's KIND must agree with the pointee's — asked with the SAME
+    three-way evidence (`printf_arg_float_evidence`, which each backend already
+    hands its `printf` refusal) and with the SAME permissive direction: **None
+    never refuses**, so an unannotated parameter, a name bound from a call this
+    build cannot classify, and a value of a kind it has no spelling for are all
+    stored as before. Only a stated disagreement is reported, and it can only be
+    stated where the source says one thing and the declaration says another.
     """
     obj = pointer_store_receiver(target)
     inner, why = pointer_pointee(fn, obj, decls, functions)
     if inner is None:
         return (None, why)
+    if class_of is not None and value is not None:
+        disagreement = pointer_store_kind_disagreement(
+            inner, value, class_of)
+        if disagreement is not None:
+            return (None, disagreement)
     if inner in POINTEES_REFUSED:
         # The table's own words, not a second copy of them.  They are written
         # for the LOAD — "the load would put float bits in a register" — and
@@ -19395,6 +19540,67 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
                   f"1-byte pointee overwrites seven bytes the program never "
                   f"wrote, and that is silent corruption rather than a fault. "
                   f"{_declared_note(why)}")
+
+
+def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
+    """Why this stored VALUE's kind contradicts the pointee's, or None.
+
+    One rule at one boundary, and it is the third boundary: a `printf`
+    conversion says how C will READ the word it is handed
+    (`printf_kind_conversion_refusal`), a parameter annotation says how the
+    CALLEE will (`call_argument_kind_refusal`), and a pointee says how a
+    dereference's STORE will be read back. All three are the same claim about
+    one word, and until this one existed a `Pointer[Float64]` was a boundary
+    with no rule on it.
+
+    **Both directions, because one direction is just as wrong as the other.**
+    An integer into a double slot reads back as 4.9e-324 for the integer 1; a
+    double into an integer slot reads back as the bit pattern, which is a
+    plausible large number. Measured on BOTH architectures from green builds
+    with this rule lifted, both exit 0.
+
+    `class_of` is `printf_arg_float_evidence` and its answer is THREE-WAY for
+    the reason every other consumer of it is: a `"float"` into an integer
+    pointee and an `"int"` into a double pointee are both disagreements, and
+    `None` — which is what an unannotated parameter, a name bound from an
+    unclassified call and a kind this model has no spelling for all answer —
+    is silence. The permissive direction is what makes the rule safe to add
+    beside 664 stdlib files: it can only fire where the source contradicts
+    itself.
+
+    The advice is the source's own decision in both directions, and it is the
+    conversion this path already has: `float(x)` is `SCVTF` and `Int(x)` is
+    `FCVTZS`, so a reader told to write one of them is being told to write a
+    construct that answers rather than to annotate their way out of it.
+    """
+    pointee_is_float = pointee_kind(pointee) == FLOAT_KIND
+    got = class_of(value)
+    if got is None:
+        return None
+    if pointee_is_float and got == "float":
+        return None
+    if not pointee_is_float and got == "int":
+        return None
+    where = ("into a `Float64` pointee, and the value is an IEEE double" if
+             pointee_is_float else
+             f"into a `{pointee}` pointee, and the value is a number this "
+             f"function bound to an integer")
+    want = ("a double is what that slot is read back as" if pointee_is_float
+            else "an integer is what that slot is read back as")
+    return (
+        f"the pointee is `{pointee}` and this store writes {where}. "
+        f"{spelled(value)} is a different kind of word from the one the "
+        f"declaration says is there, and a store has no way to say so: it moves "
+        f"one 64-bit word, so {want} and the number that comes back is the "
+        f"other kind's bits. Measured on BOTH architectures from a green build "
+        f"with this check lifted: `p.value() = 1` into a `Pointer[Float64]` "
+        f"reads back as 4.9e-324 rather than 1.0, and `p.value() = 2.5` into a "
+        f"`Pointer[Int64]` reads back as 4612811918334230528 — the double's "
+        f"BIT PATTERN, a plausible large integer. Refused rather than "
+        f"converted, because the conversion is the source's decision and this "
+        f"path already has both of them: write `float(x)` for a double into an "
+        f"integer pointee and `Int(x)` for an integer into a `Float64` one"
+    )
 
 
 def pointer_store_refusal(method: str, why: str) -> str:
@@ -28968,7 +29174,7 @@ def _is_statement_node(node) -> bool:
         and type(node).__name__.endswith("Stmt")
 
 
-def iter_statement_nodes(node):
+def iter_statement_nodes(node, *, enter_nested_defs=True):
     """Every STATEMENT in a statement tree, and nothing else.
 
     The descent is through LIST- and TUPLE-valued fields, through statement
@@ -28982,6 +29188,17 @@ def iter_statement_nodes(node):
     of the expressions, and the two walks agree by construction rather than by
     luck.
 
+    **`enter_nested_defs=False` stops at a nested `def`, which is a FRAME
+    boundary and not a shape.** `formal/build.py::_flatten_closures` turns a
+    nested `def` into a lifted function of its own, so its body is a separate
+    function's body with its own parameters, its own stores and its own
+    `nonlocal` declarations — and a question asked of the ENCLOSING function
+    about "does this body store `x`" gets the nested function's stores as its
+    own. `nonlocal_write_refusal` is the caller that needs the boundary, and the
+    flag is here rather than a second walker because the descent rules above are
+    the whole of what makes this walk correct over 712 corpus files, and a copy
+    would be a second thing to keep true of them.
+
     **The precondition is a corpus result and the differential is what keeps it
     one.** Over the 712 `.py`/`.mojo` files of this repository and the stdlib:
     every sub-statement is reached through a list field of a statement or of a
@@ -28991,7 +29208,7 @@ def iter_statement_nodes(node):
     one thing that needs the tuple above edited, and the differential says so
     rather than a field quietly disappearing from a struct.
 
-    This is the third caller's complaint about `struct_receiver_stores`, at 2.05 s
+    **This is the third caller's complaint about `struct_receiver_stores`, at 2.05 s
     of the 3.4 s left in a `myinterpreter.py` build: that derivation visits
     6 160 632 nodes to find the few thousand assignments it exists for, and it is
     asked once per (struct, question), so the walk multiplies by every struct in
@@ -28999,7 +29216,7 @@ def iter_statement_nodes(node):
     """
     if isinstance(node, (list, tuple)):
         for x in node:
-            yield from iter_statement_nodes(x)
+            yield from iter_statement_nodes(x, enter_nested_defs=enter_nested_defs)
         return
     names = _node_subtree_fields(node) if hasattr(node, "__dataclass_fields__") \
         else None
@@ -29007,12 +29224,28 @@ def iter_statement_nodes(node):
         return
     if _is_statement_node(node):
         yield node
+        if not enter_nested_defs and _is_function_def(node):
+            return
     elif not isinstance(node, _STATEMENT_CONTAINERS):
         return
     for name in names:
         value = getattr(node, name, None)
         if isinstance(value, (list, tuple)):
-            yield from iter_statement_nodes(value)
+            yield from iter_statement_nodes(value,
+                                            enter_nested_defs=enter_nested_defs)
+
+
+def _is_function_def(node) -> bool:
+    """Whether `node` is a nested `def` — the one FRAME boundary in a body.
+
+    A name rather than `isinstance(node, F.FunctionDef)` because the statement
+    walk is reached from tables that hold nodes by class NAME (this file's own
+    `type(node).__name__ != "NonlocalStmt"` arms do the same, for the same
+    reason: the AST classes are re-created by every importer, so an
+    `isinstance` against one module's copy is an identity test that a re-parsed
+    module fails).
+    """
+    return type(node).__name__ == "FunctionDef"
 
 
 def struct_receiver_stores(struct_def, receivers) -> set:
@@ -45091,21 +45324,74 @@ def nonlocal_write_refusal(functions) -> str:
     the function that declares them, not by whether the enclosing frame has an
     assignment: `nonlocal c` followed by `c = c + 1` inside the nested function
     is the case, and a `nonlocal` with no assignment to any of its names is the
-    read-only spelling that must keep building. `model.read_before_store`'s
-    `_names_bound_in` is the walk that answers the question for a body, and it
-    is asked per function here so the declaration and the assignment have to be
-    in the SAME frame to count.
+    read-only spelling that must keep building.
+
+    **The reader is `callee_is_a_bound_value`, and it was `_names_bound_in` until
+    2026-10-05 — which does not exist in this file and never did.**
+    `_names_bound_in` is `formal/build.py`'s, and a `nonlocal` that WRITES
+    reached this line and raised `NameError: name '_names_bound_in' is not
+    defined`, so the whole refusal was unreachable and the construct left the
+    build as a Python traceback through `fire.py` rather than as a diagnostic.
+    Measured on both architectures:
+
+        def main(n: Int) -> Int:
+            def bump():
+                nonlocal x
+                x = x + 1
+                return x
+            var x = 0
+            bump()
+            print(x)
+            return 0
+
+        build: name '_names_bound_in' is not defined
+        Traceback (most recent call last):
+          File "fire.py", line 413, in _formal_executable
+          …
+          File "formal/model.py", line 41587, in nonlocal_write_refusal
+            stored = _names_bound_in(fn) | {
+        NameError: name '_names_bound_in' is not defined
+
+    `callee_is_a_bound_value` is the reader THIS FILE already has for "is this
+    name a local of this frame", and its own docstring is the argument for
+    using it rather than adding a walk: "asking a second walk 'does this body
+    bind this name' would be a second answer to a question `_collect_var_names`
+    has already answered for the register file, and the two would disagree on
+    exactly the shapes that disagree". What is asked here is the narrower
+    question the sentence above is about — is the name STORED — and it is
+    `assignment_target_names` over `iter_statement_nodes(..., enter_nested_defs=
+    False)`, which is the reader `formal/model.py` already has for one
+    assignment's targets and the walk that reaches them. **The frame boundary is
+    what makes the read-only case answerable at all**, and it is why the two
+    programs below come out differently:
+
+        def main():                    def main():
+            var c = 5                      var x = 0
+            def read():                   def bump():
+                nonlocal c                     nonlocal x
+                return c                        x = x + 1
+            print(read())                     return x
+            return 0                     bump(); print(x)
+                                        return 0
+
+    The first has no store of `c` in the frame that declares the `nonlocal` and
+    must keep building (CPython prints 5); the second has one and is refused.
+    A reader that asked the ENCLOSING function — which is what `iter_nodes` does,
+    because it descends into a nested `def`'s body — cannot tell them apart: both
+    names are locals of `main`.
     """
     for fn in (functions or []):
-        for node in iter_nodes(getattr(fn, "body", None)):
+        frame = list(iter_statement_nodes(getattr(fn, "body", None) or [],
+                                         enter_nested_defs=False))
+        if not any(type(node).__name__ == "NonlocalStmt" for node in frame):
+            continue
+        stored = {name for node in frame for name in assignment_target_names(node)}
+        for node in frame:
             if type(node).__name__ != "NonlocalStmt":
                 continue
             names = list(getattr(node, "names", None) or ())
             if not names:
                 continue
-            stored = _names_bound_in(fn) | {
-                p[0] if isinstance(p, (tuple, list)) and p else p
-                for p in (getattr(fn, "params", None) or ())}
             written = [n for n in names if n in stored]
             if not written:
                 continue

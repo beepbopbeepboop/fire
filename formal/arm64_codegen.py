@@ -6900,7 +6900,8 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_pointer_store(self, target: F.CallExpr, value) -> None:
         obj = target.func.obj
         how, why = M.pointer_store_lowering(
-            self._cur_fn, target, self._structs, self._functions, self._structs)
+            self._cur_fn, target, self._structs, self._functions, self._structs,
+            value=value, class_of=self._printf_arg_conversion_class)
         if how is None:
             raise CodegenError(M.pointer_store_refusal(
                 target.func.member, why

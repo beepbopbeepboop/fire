@@ -928,6 +928,21 @@ CAUSES = (
      (("is refused: on this path it would answer in BYTES where CPython "
        "answers in CHARACTERS",),
       ("is refused on a string whose text is not ASCII",))),
+    # A CONTAINER at a NUMBER conversion (`formal/model.py::
+    # printf_container_conversion_refusal`), and the PLANNER's row for a
+    # construct that is a refusal on every backend and a silent heap address
+    # without it: measured, `printf("v=%d", xs)` for `xs = [1, 2, 3]` printed
+    # 6137343680 on arm64 and 13051747960 on x86-64, and CPython raises
+    # `TypeError: %d format: a real number is required, not list`.
+    #
+    # It is its own cause and not a row under the string-encoding block above
+    # because that block's clearing condition is about the IMAGE and this one's
+    # is about the OPERAND's kind: nothing about the image's literals can make
+    # a `%d` of a container right. The marker is the clause only this message
+    # carries — its `%s` sibling and its float sibling both open with a
+    # different one, which is why a broader marker here would collect them.
+    ("a printf conversion of a container",
+     (("reads its argument as a NUMBER",),)),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
     # the callee has to hand the receiver back somehow. Four wordings and one
     # cause, because one convention covers the receiver and what is refused is

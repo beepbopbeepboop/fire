@@ -960,6 +960,20 @@ _REFUSAL_FAMILIES = (
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
     ("is refused on a string whose text is not ASCII",
      "a non-ASCII string: BYTES where CPython has CHARACTERS"),
+    # A CONTAINER at a NUMBER conversion (`formal/model.py::
+    # printf_container_conversion_refusal`), and the row that makes the printf
+    # conversion table a family rather than three unrelated sentences. Its
+    # siblings are all in this table already — a `%s` of a number is claimed
+    # above by "is a value this function bound to an integer" (a pre-existing
+    # mis-filing, kept rather than fixed here: that message's clause is about
+    # the OPERAND and this row's is about the CONVERSION) — and the FLOAT axis
+    # (`printf_kind_conversion_refusal`) still has no row, so it files as
+    # `other refusal`.
+    #
+    # The marker is the clause only this message carries, for the reason the
+    # four container-operand rows above give: first match wins, so a marker
+    # that any sibling also contains would empty one of the rows.
+    ("reads its argument as a NUMBER", "a printf conversion of a container"),
     # A CPython BUILTIN this target does not lower, refused BY NAME before any
     # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
     # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
