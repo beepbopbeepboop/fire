@@ -106,12 +106,16 @@ about which elements are representable; the message stays
 | `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
 | `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
 
-**Why the shallow copy is sound exactly here, and only here.** The copy carries
-the element blob's WORDS; a nested container would be carried as its ADDRESS, so
+**Why the shallow copy is sound here and not for the rest.** The copy carries
+the element blob's WORDS; a nested container is carried as its ADDRESS, so
 every iteration's outer container would point at one inner object — the same
 defect one level down. A NAME is deliberately not a container: `[a, b]` over two
 outer lists copies the outer list and shares `a`/`b`, which is what CPython does.
 That is why the predicate recurses rather than keying on the element's node type.
+The 2026-10-13 section at the top extends this the same way: a nested
+comprehension whose own emitted values are plain words carries words, not an
+address, so it joins the copy; one whose own element builds a container emits
+the addresses of its per-iteration array and does not.
 
 **Pinned in `test_formal_run.py`** (`COMPREHENSION_ELEMENT_CASES`): three
 literal build-and-run rows that read `r[i][j]` (the CONTENT, not `len`, because
