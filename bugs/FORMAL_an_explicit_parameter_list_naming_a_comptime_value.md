@@ -104,14 +104,61 @@ the source, and both are now about it:
   which also runs the recommended spelling against CPython on both architectures
   so the advice is a fact rather than a claim.
 
-**The wall is unchanged and is NOT a message.** `unbox[Int](b)` cannot be
-instantiated because `unbox`'s declaration has no bracket parameter to
-substitute: `formal/monomorph.py::instantiate` refuses it by name ("its
-declaration has no type parameter, so there is nothing to substitute"), and
-`template_names` reads the export rule's `EXCL_GENERIC` set, which a `def
-name(t: Box[T])` is not in. So §4.1 (substitute a comptime VALUE argument, and
-teach the demand walk to read the bracket) is untouched, and the two-message
-item §4.2 is closed.
+**The wall is PARTLY LANDED and PARTLY OPEN, and the message half is closed.**
+The same-module half of §4.1 landed 2026-10-12 (`work/formal308-docs`), and a
+THIRD false sentence that had appeared since §3 is fixed with it; §1's imported
+`Span[...]` instance and the imported struct case are still the wall. Read the
+next paragraph before the older one below, which it corrects in one place.
+
+**What landed 2026-10-12 (`work/formal308-docs`).** Three real defects, and the
+one capability at the root of two of them:
+
+* **A module-declared generic STRUCT template applied with a comptime VALUE now
+  instantiates.** `formal/monomorph.py::own_demands` reads a bare literal at the
+  top level of a STRUCT template's bracket (`Tagged[Int, 7]`), scoped to the
+  struct half because a FUNCTION template's value specialisation is the LOCAL
+  machinery's (`tile[2, 3](…)`). The substitution itself already worked —
+  `monomorphize.monomorphize_source` substitutes a value as readily as a type —
+  so what was missing was the READ. Pinned by
+  `test_formal_run.py::sub_declared_struct_template_with_a_value_parameter_builds`
+  (exit 7, and `origin` is read in the body, so a value substituted into the
+  wrong position answers something other than 7 rather than merely failing to
+  build).
+* **The literal is accepted ONLY where the declaration annotates the parameter
+  as a comptime VALUE** (`_undeclared_literal_arg` and the conservative
+  `_VALUE_PARAM_ANNOTATION_BASES` allowlist). This is the safety half and it is
+  load-bearing rather than defensive: `Pair[2]` on `struct Pair[T]` substituted
+  the literal into the TYPE parameter and **built, ran and answered 0** — a
+  `var first: 2` field is accepted by this backend — so a literal on a type
+  parameter is DROPPED, not substituted, and the call site keeps its brackets.
+  Measured: `Tagged[0, 5]` still refuses, with the construct's own sentence.
+* **The false sentence is gone.** `Tagged[Int, 0]` (and `Tagged[0, 5]`) were
+  refused as "a subscript whose index is a tuple" — a container lookup that never
+  happens. The module's own struct templates are now read from the SOURCE
+  (`formal/monomorph.py::template_struct_names`, the only place a template
+  dropped from the image survives) and handed to `check_module_symbols`, so the
+  sentence names the construct. Pinned by a new `SUBSCRIPT_CASES` row and by the
+  rewritten
+  `comptime_binding_reading_a_variadic_parameter_is_unreachable_behind_the_tuple_index_refusal`
+  (its old words were the false sentence; the sentence that is true of a variadic
+  comptime parameter list is the one it now expects).
+
+**Still the wall, and NOT landed, stated so nobody re-derives it:** §1's
+standing instance `Span[StaticString, ImmStaticOrigin]` is an IMPORTED type
+constructor whose second element is a `comptime` ALIAS that does not fold, so no
+read of the bracket helps it; the IMPORTED struct case is unchanged too
+(`demands` keeps literals OFF, so a consumer that imports a struct template
+taking a value gets no instantiation of it — `own_demands` is the module's own
+half only); and a value parameter whose annotation is not in the allowlist stays
+refused, which is the safe direction the previous paragraph states.
+
+**The older statement of the wall, kept for the shape it names.**
+`unbox[Int](b)` cannot be instantiated because `unbox`'s declaration has no
+bracket parameter to substitute: `formal/monomorph.py::instantiate` refuses it
+by name ("its declaration has no type parameter, so there is nothing to
+substitute"), and `template_names` reads the export rule's `EXCL_GENERIC` set,
+which a `def name(t: Box[T])` is not in. That half of §4.1 is still open, and the
+two-message item §4.2 is closed.
 
 **Why it is filed rather than mentioned:** two of the sweep-scope docs asked for
 exactly this and could not do it themselves, because the shape is in neither of
