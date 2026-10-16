@@ -7738,6 +7738,19 @@ def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: s
     return True
 
 
+def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
+    """`d[k]` read through the int view of a dict whose VALUE type was
+    never recorded is a word of unknown kind -- the measured case is the
+    self-hosted compiler's own `api = gen._generator_api[name]` record
+    (`{'base': str, 'params': list, ...}`), whose `f"{api['base']}_start"`
+    formatted the name's ADDRESS as a decimal and called
+    `519088207808_start`. Recorded as such, a stringification asks the
+    runtime (`mojo_cstr_or_int_str`), which renders an integer as its
+    decimal and a string as itself."""
+    if dict_val not in gen._dict_val_types:
+        gen._dyn_word_vals.add(t)
+
+
 def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # Keyword-parametrized slice, e.g. `x[byte=:-1]` (slice by byte offset).
     # The parser stashes the real SliceExpr in node.attrs (obj=None, since
@@ -8008,6 +8021,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 gen._dict_val_types[t] = _nd
             return val_ctype, t
         t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
+        _mark_unknown_dict_value(gen, ov, t)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast
@@ -8077,6 +8091,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
                 return 'char *', t
             t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+            _mark_unknown_dict_value(gen, dp, t)
             return 'int64_t', t
         # Otherwise treat as MojoList* stored as int; cast and subscript
         lp = gen._coerce_to_type(ot, 'MojoList *', gen._ensure_local(ot, ov))
@@ -8442,6 +8457,16 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # ever happens. See mojo_cstr_slice in runtime/fire_runtime.c.
         t = gen._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
         return 'char *', t
+
+    if ot == 'int64_t':
+        # A word of unknown kind -- NOT a pointer to step through: see
+        # mojo_word_slice. The result is another such word.
+        _st64 = gen._new_val('int64_t', f"(int64_t){start_v}")
+        _sp64 = gen._new_val('int64_t', f"(int64_t){stop_v}")
+        t = gen._call_expr('int64_t', 'mojo_word_slice',
+                           [('int64_t', ov), ('int64_t', _st64), ('int64_t', _sp64)])
+        gen._dyn_word_vals.add(t)
+        return 'int64_t', t
 
     # Plain pointer: return pointer to start (no bounds check)
     # GIMPLE: no pointer+integer; cast pointer through int64_t; both operands

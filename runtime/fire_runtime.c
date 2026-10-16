@@ -6894,6 +6894,28 @@ static int _value_kind(int64_t v)
  * whatever each word turns out to be. Identity first; two strings by content;
  * containers by `mojo_value_eq`'s structural compare; anything else (ints,
  * struct handles) by identity, which the first test already answered. */
+/* `w[start:stop]` where the codegen holds `w` as an `int64_t` it could not
+ * type (an attribute read off an untyped AST node: `target = node.target;
+ * target[1:-1]`). The slice lowering used to fall through to its
+ * plain-pointer arm and ADD `start` to the word -- for a string that is the
+ * right tail by accident and never honours `stop`, and the result is an
+ * interior pointer that no provenance test recognises as a string, so the
+ * self-hosted compiler formatted its own loop-variable names as decimal
+ * addresses (`int64_t 501046356609;`). Dispatch on the value instead, with
+ * the same registries every other word-of-unknown-kind helper uses; a word
+ * that is none of the three slices as an empty list, which is what an
+ * empty sequence slices to. */
+int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
+{
+    if (mojo_is_registered_list(w))
+        return (int64_t)(intptr_t)mojo_list_slice((MojoList *)(intptr_t)w, start, stop);
+    if (mojo_is_registered_bytes(w))
+        return (int64_t)(intptr_t)mojo_bytes_slice((MojoBytes *)(intptr_t)w, start, stop, 1);
+    if (mojo_boxed_is_str(w))
+        return (int64_t)(intptr_t)mojo_cstr_slice((char *)(intptr_t)w, start, stop);
+    return (int64_t)(intptr_t)mojo_list_new();
+}
+
 int mojo_word_eq(int64_t a, int64_t b)
 {
     if (a == b) return 1;
