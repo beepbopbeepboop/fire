@@ -311,7 +311,18 @@ and, class by class, the ones this doc is about:
   `same_image_leaf_proof.lean`.
 * `TestNestedConditionFactSharing.test_the_fact_count_grows_with_the_paths_and_not_with_the_branches`
   — 2 -> 3 conditions grew the `hprior_` facts by x2.33 (9 -> 21) where the test
-  bounds it at x2.2 ("the per-path memo makes this x2").
+  bounds it at x2.2 ("the per-path memo makes this x2"). **FIXED 2026-10-13
+  (`work/formal374-docs`):** the `hprior_` count is emitted by
+  `formal/arm64_proof_gen.py` with `check=False` and is therefore Lean-FREE —
+  **no `lib/ProofLib.lean` change can move it**, so the `arm64_ext_imm12` cause
+  below cannot be this row's. The count is exactly `3·2**k − 3` (9 / 21 / 45)
+  because each branch LEVEL contributes `3·2**(j−1)` facts — a perfect geometric
+  series with a first term — so the ratio of two TOTALS carries ~2.33 at the
+  first step while the memo shares correctly. Measured directly: with the memo
+  disabled, each scope proves every prior block and the facts per scope are
+  2.5 / 3.6 / 4.9 (growing with depth); with it, **1.5 at every depth**. The test
+  now bounds facts-per-scope at 2.0 (and still fails the pre-memo emission, at
+  k=2), instead of the ratio of totals.
 * `TestANarrowTypedParameterGetsItsRange.test_lean_accepts_the_three_examples`
   (`sgt8`) — a `rewrite` that no longer finds its pattern; the test's own
   message says `sgt8` "did not typecheck before this fix either", so this one is
