@@ -286,6 +286,75 @@ compare or the integer ALU holding a blob's **ADDRESS**, and answered. Measured:
 All of those are refused, or stopped with a diagnostic that names the rule. The
 table is not where the remaining work is.
 
+## Item 1 landed (2026-10-13): `==`/`!=` between two blobs of WORDS, both backends
+
+Item 1 was filed as "compare lengths, then compare element by element at the
+element's stride", and the stride is the whole of the fear (§"The obstacle"
+below): a string element is a `char *`, so a word compare answers by interning
+order, and a nested container's element is another blob's ADDRESS, so the
+compare is recursive. The landing is therefore scoped to the element kind where
+that fear is absent — an INTEGER element, whose value IS the word — and every
+other shape keeps the shared `container_operator_refusal`.
+
+**The predicate is shared; the class is flow-sensitive.** `model.blob_equality_
+word_comparable` says whether *both* operands are blobs whose element kind is a
+word (`BLOB_EQUALITY_WORD_KINDS` is `{int}`). Set-ness and dict-ness cannot live
+there — a set lowers as a list, so the KIND cannot tell them apart — so each
+backend's `_equality_blob_class` asks its own `_set_vars`/`_dict_vars` and, for a
+LIST-versus-TUPLE question the value model has never kept, a new positive
+`_list_vars` beside `_tuples_vars`. Both classes must be KNOWN and EQUAL, because
+`[1] == (1,)` is False in CPython whatever the elements: answering it off "not a
+tuple" would call a call's return value a list and print 1 where CPython prints
+0. A known-but-different pair is answered directly (CPython: never equal);
+anything unknown refuses.
+
+**Measured, both architectures, `test_formal_container_methods.py`:**
+`operator` 20 → 30 answers (10 → 15 per backend), `tuple` 16 → 18 (8 → 9 per
+backend), `PASS=6 FAIL=0`. The moved rows are:
+
+| row | was | now |
+|---|---|---|
+| `o_eq` (`a == [3, 1, 2]`) | refusal (answered 0 before the gate) | `1` |
+| `o_ne` | refusal | `0` |
+| `t_eq_r` (`(1,2,3) == (1,2,3)`) | refusal | `1` |
+| `o_eq_diff_elem` (same length, one element differs) | — (new) | `0` |
+| `o_eq_diff_len` (different lengths) | — (new) | `0` |
+| `o_eq_mixed` (`[1] == (1,)`) | — (new) | `0` |
+
+The two new element rows exist because a length-only or address-only lowering
+would pass `o_eq` by accident; `o_eq_diff_elem` is the row that requires a real
+per-element compare, and `o_eq_mixed` is the row that requires the class.
+
+**What still refuses, and each is a new pinned row rather than a hole:** a
+`char *` element (`o_eq_str_r`), a nested blob (`o_eq_nested_r`), a set
+(`o_eq_set_r`, order-independent) and a dict (`o_eq_dict_r`, pair stride). So
+`model.CONTAINER_GATED_OPS` is NOT narrowed — dropping `==` there would send
+x86-64 into the integer ALU on two addresses for exactly those shapes — and the
+emitters intercept before the shared gate the same way `|` already splits
+`_emit_set_union` from `set_union_refusal`.
+
+The arm64 flag path needed one extra hook: `_emit_branch_unless` branches on
+`CMP` flags rather than materializing a boolean, so `if a == b:` would have
+reached the refusal while `r = a == b` answered. It now falls through to the
+truthiness path when `_blob_equality_plan` accepts the pair. x86-64 has one
+comparison hook (`_emit_binop`), so it needed nothing extra.
+
+**A THIRD entry point, and it was a pre-existing SILENT WRONG ANSWER: the
+compare CHAIN.** `a == b == c` is one `F.CompareChain` and neither backend's
+`_emit_compare_chain` ever went through `_emit_binop`, so no gate reached it and
+each link was a raw word compare of two blob ADDRESSES. Measured on both
+backends before the fix: `a == b == c` for three equal lists answered **0 where
+CPython answers 1**, exit 0 — the wrong-answer class this whole document exists
+to prevent, reached by a spelling nobody had looked at. The chain emitter now
+asks the same `_blob_equality_plan` for each `==`/`!=` link: an accepted pair is
+lowered from the bases the chain has ALREADY evaluated (it must not re-evaluate
+a call operand — `_emit_blob_word_equality_bases` is the register-level body the
+binary spelling wraps) and ANDed into the running result; a blob link the
+lowering does not accept raises the shared refusal; a blob against a scalar
+falls through, because the address compare below is CPython's own answer there.
+Pinned by `o_chain_eq`, `o_chain_eq_false`, `o_chain_mixed`, `o_chain_ne` and
+`o_chain_eq_str_r` in `test_formal_container_methods.py`, on both backends.
+
 ## The obstacle, stated once
 
 Every answer CPython gives for these is **element-wise over a per-element
