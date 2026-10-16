@@ -34,7 +34,8 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
-                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
+                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES,
+                          BOOL_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import collections
@@ -4251,50 +4252,69 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _print_call(self, args: list):
         """`(format, operands)` for a `print` of `args`.
 
-        A literal operand contributes a fragment to the format and NO operand
-        to the call; a value contributes a conversion and one operand. Passing
-        the literals as well is the mistake this shape exists to prevent: the
-        format would ask printf for fewer arguments than it was handed, and
-        everything after the first literal would be read one slot late.
+        TWO LINES OF DELEGATION, and `model.print_call_spelling` is where the
+        decision and every reason for it live: which operand is a fragment and
+        which is a value, that a `bool` is `True`/`False` rather than the word's
+        own `1`/`0`, that `None` is the four characters rather than a `0`, that a
+        `bytes` literal is CPython's `repr()` of it, and the four shapes this
+        path refuses with a sentence that says what CPython prints. This method
+        was the whole of that once, and `arm64_codegen.py` had the same method
+        again — which is the argument for one copy rather than two, and before
+        the move both printed `1` for `True` and `ab` for `b"ab"`.
 
-        The int conversion follows the operand's own type. The model's default
-        integer is UNSIGNED, and `%lld` on a UInt64 whose top bit is set would
-        print a negative number, so signedness decides; the width does not, a
-        narrow int already sign/zero-extends to the word it is stored in."""
-        frags, operands = [], []
-        for a in args:
-            if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a))
-                continue
-            # A value this path cannot carry is refused HERE rather than
-            # rendered: `print(g(1, 2))` for a `g` with no `return` printed
-            # whatever `g`'s epilogue left in the return register (measured `0`
-            # on BOTH architectures, where CPython printed `None`), and a printed
-            # `None` is the shape this path has no representation for. The
-            # decision is `ValueKinds.no_value_callee_of` and the words are
-            # `model.returnless_value_refusal`, both shared with arm64.
-            callee = self._vkinds.no_value_callee_of(a)
-            if callee is not None:
-                raise CodegenError(M.returnless_value_refusal(callee))
-            kind = self._expr_str_kind(a)
-            if M.string_operand_is_string(kind):
-                frags.append("%s")
-            elif M.is_number_kind(kind):
-                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
-                # so `print(t)` for `t = bool` prints the tag, which is what it
-                # printed before `TYPE_KIND` existed (`t` was then an `int` by
-                # `_value_kind`'s default). Asking `== INT_KIND` here would make
-                # the construct's own positive case a refusal.
-                frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
-            else:
-                raise CodegenError(
-                    f"print() cannot tell whether {type(a).__name__} is a "
-                    f"string or a number on the formal x86-64 path, and "
-                    f"guessing would print an address as if it were text (or "
-                    f"a number as if it were text). Annotate the name, or "
-                    f"print a literal, or bind it to a literal first")
-            operands.append(a)
-        return frags, operands
+        The int conversion follows the operand's own type, and the model asks
+        for that through a hook because it is this backend's `_ttype` and the
+        model's default integer is UNSIGNED: `%lld` on a `UInt64` whose top bit
+        is set prints a negative number, so signedness decides and the width
+        does not (a narrow int already sign/zero-extends to the word it is
+        stored in)."""
+        return M.print_call_spelling(
+            args,
+            no_value_callee=self._vkinds.no_value_callee_of,
+            kind_of=self._expr_str_kind,
+            is_signed=lambda a: cmp_signed(self._ttype(a)),
+            is_bool=self._print_operand_is_bool,
+            is_none=self._vkinds.is_none_value,
+            is_bytes=self._vkinds.is_bytes_value,
+            backend="x86-64")
+
+    def _print_operand_is_bool(self, e) -> bool:
+        """Whether `print` must render `e` as `True`/`False`.
+
+        `model.bool_valued_shape` covers the three shapes that are bools
+        whatever any declaration says (a literal, a comparison, a `not`), and
+        `ValueKinds.is_bool_value` covers a NAME a signature or a statement of
+        this function declared `Bool`. Two shapes are left, and both need the
+        EMITTER's tables rather than the model's — which is why they are here
+        and not in `is_bool_value`: a CALL's declared return type
+        (`self._functions`, which holds the flat names `formal/build.py` lifted
+        methods to) and a FIELD's declared type (`self._frame_candidates` and
+        `self._structs`, the same tables `_declared_kind_for` reads).
+
+        The two backends' copies of this are the same method with the same three
+        lines, which is the point: they read the same shared readers with the
+        same vocabularies, so a `Bool` this path renders as `True` on arm64 is a
+        `Bool` it renders as `True` on x86-64."""
+        if M.bool_valued_shape(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return bool(self._vkinds.is_bool_value(e))
+        if isinstance(e, F.CallExpr):
+            fn = self._functions.get(M._flat_callee(e) or "")
+            if fn is None:
+                return False
+            return M.annotation_is_bool(getattr(fn, "return_type", None),
+                                        BOOL_TYPE_NAMES)
+        if isinstance(e, F.MemberExpr):
+            root = e.obj
+            if not isinstance(root, F.IdentExpr):
+                return False
+            cands = self._frame_candidates.get(root.name) or []
+            if not cands:
+                return False
+            return M.frame_slot_field_is_bool(cands, e.member,
+                                             BOOL_TYPE_NAMES)
+        return False
 
     def _refuse_frame_order_operand(self, op: str, operand) -> None:
         """Raise if `operand` is a bare name this function holds as a FRAME.
@@ -9762,12 +9782,15 @@ preference.
             int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES,
             float_names=FLOAT_TYPE_NAMES,
+            bool_names=BOOL_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
             declared_is_dict=self._declared_is_dict_for(name),
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
+                callee, stack | {name}),
+            callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
@@ -10261,6 +10284,36 @@ ctor_field_value=self._ctor_field_value_for(name),
         if ann in TYPE_NAMES:
             return M.INT_KIND
         return vk.return_kind
+
+    def _callee_is_bool(self, name, stack):
+        """Whether a call to this unit's function `name` produces a BOOL.
+
+        `_callee_is_dict`'s twin on the bool axis, and it is the same method for
+        the same reason: a `Bool` result is `INT_KIND` here (a word holding 0 or
+        1), so the KIND cannot say it, and what is observable about it is that
+        CPython prints `True`/`False` where `is_number_kind` says `%lld` — so
+        `b = flag(); print(b)` printed `1` where CPython prints `True`, on both
+        architectures.
+
+        Only the DECLARED return type is read, where `_callee_is_dict` also
+        consults the RETURN STATEMENTS: `return_is_bool` would be a third
+        `return_*` axis on `ValueKinds` for a second spelling of the same fact,
+        and the declared type is what `_print_operand_is_bool` reads for the
+        same question at the same call site. A callee that returns `True`
+        without saying `-> Bool` claims nothing, which is the conservative
+        direction and leaves `print` with the number it printed.
+
+        The stack is `_callee_kind`'s, for the reason `_callee_is_dict`'s is: a
+        `def a(): return b()` / `def b(): return a()` cycle must stop rather
+        than recurse.
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.annotation_is_bool(getattr(fn, "return_type", None),
+                                BOOL_TYPE_NAMES):
+            return True
+        return None
 
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
         """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
