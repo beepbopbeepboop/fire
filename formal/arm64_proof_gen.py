@@ -5031,6 +5031,63 @@ def _cbz_reg_const(block, words: dict, r: int):
     return known.get(r)
 
 
+def _block_state_defs(S: str, n: int):
+    """The generated composed-state `def`s a block's first `n` steps go through.
+
+    A run's state after step `k` is `{name}_{tag}_qS{k}` and after that step's
+    effect `{name}_{tag}_qT{k}`, each defined in terms of the one before it, so
+    the chain is what has to be unfolded to see any single field — and only the
+    chain up to the step being asked about, because `simp only` over the WHOLE
+    block would flatten the innermost step effect too and leave a goal about the
+    raw record update.
+    """
+    return ([f"{S}_qS{k}" for k in range(n)]
+            + [f"{S}_qT{k}" for k in range(n)])
+
+
+#: The two record helpers a composed `qT` body can put BETWEEN the state and the
+#: field being asked about: a step's effect is often `{ (arm64_set_reg 31 …) with
+#: nzcv := … }`, and `arm64_set_reg 31` is the identity only because the `match`
+#: is reduced.  Unfolding them is textual, so it costs what a rewrite costs.
+_STATE_HELPERS = ["arm64_reg", "arm64_set_reg"]
+
+
+def _block_state_unfold(S: str, n: int):
+    """`_block_state_defs` plus the record helpers, for a `simp only [...]`."""
+    return _STATE_HELPERS + _block_state_defs(S, n)
+
+
+def _state_proof(names, paren: bool = False):
+    """A side condition over a generated composed state, proved by UNFOLDING.
+
+    **Why not `rfl`.** `rfl` discharges `({S}_qS2 st).pc = <pc>` by asking Lean
+    to `whnf` the composed state, and that whnf is not free: `Lean.Meta.whnf`
+    on a `def` whose body carries a `UInt64.ofNat` of a LARGE literal re-reduces
+    the `UInt64` numeral from inside the state, and the reduction walks
+    `Nat.mod_lt`'s own `Nat.decLe` evidence, whose `Nat.ble` is a structural
+    recursion. The cost therefore grows with the immediate, not with the proof:
+    measured on the arm64 model after the `sh`-field fix, an `ADD sp, sp, #32,
+    lsl #12` (`+131072`) made one side condition need more than `maxRecDepth
+    100000`, while `#0`, `#16`, `#1024` and `#+4096` all stayed cheap, and
+    `#32 <<< 12` reached it while `#+16384` did not. The whole proof takes 40 s
+    once the limit is raised, so nothing about it is TRUE-only-at-depth — it is
+    a reduction the generated file should not be asking for.
+
+    `simp only` unfolds the named `def`s TEXTUALLY and never forces that
+    reduction, so the same side condition is discharged in milliseconds. It is
+    also the more honest proof: it says which definitions are being unfolded,
+    where `rfl` leaves it to whatever the elaborator decides to reduce.
+
+    `paren` wraps the proof in parentheses, which is what a rewrite rule's side
+    condition needs inside `rw [rule (proof), …]` — `rw` parses its arguments
+    as terms, so a bare `by` there is a syntax error.
+    """
+    if not names:
+        return "rfl"
+    proof = "by simp only [" + ", ".join(names) + "]"
+    return f"({proof})" if paren else proof
+
+
 def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st: str = "st",
                     hname: str = None):
     """Emit a per-instruction `arm64_reg r` chain over a block run.
@@ -5050,7 +5107,8 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
         wr = _regs_written(w, idx)
         if k + 1 < m:
             A(f"have hS{k + 1} : arm64_reg {r} ({S}_qS{k + 1} {st}) = "
-              f"arm64_reg {r} ({S}_qT{k} {st}) := rfl")
+              f"arm64_reg {r} ({S}_qT{k} {st}) := "
+              + _state_proof(_block_state_unfold(S, k + 2)))
         if wr is not None and r in wr and rhs is not None:
             expr = _written_expr(rhs, r)
             if expr is not None:
@@ -5065,7 +5123,8 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
           f"arm64_reg {r} ({S}_qS{k} {st}) := by")
         A(f"  simp only [{S}_qT{k}, arm64_reg, arm64_set_reg]")
     if wpos is None:
-        A(f"have hS0 : arm64_reg {r} ({S}_qS0 {st}) = arm64_reg {r} {st} := rfl")
+        A(f"have hS0 : arm64_reg {r} ({S}_qS0 {st}) = arm64_reg {r} {st} := "
+          + _state_proof(_STATE_HELPERS + [f"{S}_qS0"]))
         chain = "hT0.trans hS0"
         for k in range(1, m):
             chain = f"hT{k}.trans (hS{k}.trans ({chain}))"
@@ -5133,11 +5192,19 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A(f"def {S}_qS{k + 1} (st : Arm64State) : Arm64State := "
               f"{{ {S}_qT{k} st with pc := {run_pcs[k + 1]} }}")
     # pc facts (shared by self_k / runs / mid)
+    #
+    # `hpc{k}` is the side condition `runs_cons_seq`/`runs_cons_jump` wants, and
+    # it is stated over the COMPOSED state, so it is discharged by unfolding the
+    # block's own `def`s rather than by `rfl` — see `_state_proof` for the
+    # reduction `rfl` asks for and why it is not free.  Each `k` unfolds only
+    # the chain up to itself, which is all its own projection needs.
+    defs_unfold = _block_state_unfold(S, m)
     pc_facts = []
     pc_facts.append(f"  have hpc0 : ({S}_qS0 st).pc = {run_pcs[0]} := by")
     pc_facts.append(f"    simp [{S}_qS0, hpc]")
     for k in range(1, m):
-        pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := rfl")
+        pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := "
+                        + _state_proof(_block_state_unfold(S, k + 1)))
     step_facts = []
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
@@ -5152,14 +5219,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(step_facts[:k]))
         if k == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
             A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
             A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
-              f"{code_name} 0 hs{k - 1} rfl,")
+              f"{code_name} 0 hs{k - 1} "
+              f"{_state_proof(_block_state_unfold(S, k), paren=True)},")
             A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
               f"from by rw [hpc{k - 1}]]")
             A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
@@ -5182,15 +5251,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(step_facts))
         if m == 1:
             A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
-            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat from rfl]; exact hjump)]")
+            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
+              f"from {_state_proof(_block_state_unfold(S, 1))}]; exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
               f"{code_name} 0 hs{m - 1}")
-            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat from rfl]; "
-              f"exact hjump)]")
+            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
+              f"from {_state_proof(defs_unfold)}]; exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         exit_expr = f"({S}_qT{m - 1} st)"
     else:
@@ -5199,14 +5269,15 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts))
         A("\n".join(step_facts))
         if m == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{code_name} 0 hs{m - 1} rfl,")
+              f"{code_name} 0 hs{m - 1} {_state_proof(defs_unfold, paren=True)},")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
             A(f"  exact runs_zero {code_name} "
@@ -13079,12 +13150,16 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                       "    rfl"]
             else:
                 # The library's own runner equation, with `hseq` discharged by
-                # `rfl`: a step whose effect is a record update on `sp` (or an
-                # `arm64_set_reg`) does not mention `pc` at all, so the two
-                # sides of the bump condition are the same term.
+                # UNFOLDING `st{i}`: a step whose effect is a record update on
+                # `sp` (or an `arm64_set_reg`) does not mention `pc` at all, so
+                # the two sides of the bump condition are the same term — but
+                # `st{i}` is a `def` over the step's effect, and `rfl` there
+                # asks Lean to `whnf` it, which re-reduces a `UInt64` immediate
+                # in the record and costs O(immediate).  `_state_proof`.
                 L += [f"    exact runs_cons_seq ({prev}) (st{i} ({prev})) "
                       f"dylib_code {k - i - 1}",
-                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) (by rfl)"]
+                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) "
+                      f"{_state_proof(_STATE_HELPERS + [f'st{i}'], paren=True)}"]
         L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
         L.append("  rfl")
         out.append("\n".join(L))

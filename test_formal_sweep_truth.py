@@ -737,16 +737,12 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # point, and a genuinely new dead-import row now fails it instead of waiting for
 # somebody to remember to widen a tuple.
 #
-# `abc` is the one name that is in the derived set and is NOT expected to have a
-# reader, so it is named with its reason rather than left to look like a bug in
-# the derivation: `fire_compiler.py:62`'s `from abc import abstractmethod` is
-# read by nothing, because line 8401 emits the TEXT `@abstractmethod` into
-# GENERATED source. That dead import is the tree's only one and is deliberately
-# not fixed here — the file is the AST source of truth and deleting the line
-# belongs to whoever owns it, which `test_formal_host_import_shapes.py::
-# test_the_whole_tree_has_one_dead_host_import_and_it_is_named` already records
-# with the same reason.
-_ROWS_WITH_A_NAMED_DEAD_IMPORT = ("abc",)
+# The tuple is EMPTY: fire_compiler.py's dead `from abc import abstractmethod`
+# was the tree's only dead host import (the text `@abstractmethod` is emitted into
+# GENERATED source, so the import itself was read by nothing) and it is gone, as
+# test_formal_host_import_shapes.py records. A name goes back here with its reason
+# if a dead import is ever left in on purpose.
+_ROWS_WITH_A_NAMED_DEAD_IMPORT = ()
 
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
               "stage3", "formal_sweep_cache", "__pycache__"}
