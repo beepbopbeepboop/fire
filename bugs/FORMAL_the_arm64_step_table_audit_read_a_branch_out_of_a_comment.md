@@ -47,12 +47,12 @@ The class is green now. So "all twelve generate" below was true of the ten
 recursive examples and false of `wdiff` at the time of that measurement;
 `sum_range` refuses by design (the signed-loop contract, its `REFUSED` row).
 
-**Status 2026-10-07 (`work/formal119-docs`): the PIN below is RED, and it is
-not this doc's fix that regressed.** The census this doc pins — "all twelve
-generate" — is measured green when written, and on this tree
-`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` is 12
+**Status 2026-10-07 (`work/formal119-docs`): the PIN below was RED, and it was
+not this doc's fix that regressed; it is GREEN again.** The census this doc pins
+— "all twelve generate" — is measured green when written, and on that tree
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate` was 12
 failures: `count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`,
-`both`, `either` and `wdiff` now REFUSE at
+`both`, `either` and `wdiff` refused at
 `formal/arm64_proof_gen.py::_reached_without_a_condition` (the
 conditional-halt-address refusal added 2026-10-05 by `2b7e5ec8`), and
 `sum_range` refuses there instead of at its owned loop-contract refusal. The
