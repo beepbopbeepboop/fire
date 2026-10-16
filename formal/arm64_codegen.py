@@ -5739,7 +5739,7 @@ ctor_field_value=self._ctor_field_value_for(name),
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
-        """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
+        """X0 = &obj[index]. Blob path bounds-checks, loudly (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
         (`_emit_subscript_store_reg`) and an augmented assignment
