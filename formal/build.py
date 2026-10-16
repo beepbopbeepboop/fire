@@ -21811,9 +21811,8 @@ def no_public_api_reason(source_paths: list) -> str:
         binds" is a rule rather than a declaration. The message now names
         those two and says they do not exist yet, because a reader who is
         told there is nothing to add stops, and 6 of one stdlib scope's 46
-        files and 56 of the corpus sit behind this sentence
-        (`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6
-        item 2, which is where the fix was asked for). The same sentence
+        files and 56 of the corpus sit behind this sentence (the constants-only
+        refusal is where the fix was asked for). The same sentence
         also claimed the constants "are inlined at their use site", which
         is not true of a module this path refuses: nothing is inlined,
         because the library is never built.

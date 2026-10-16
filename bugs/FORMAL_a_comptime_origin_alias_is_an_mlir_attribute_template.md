@@ -140,8 +140,8 @@ row is the load-bearing half: a change that appended the clause everywhere would
 pass the four positive rows and fail it.
 
 Filed 2026-10-04 on `work/formal25-5` because two bug docs said this construct had
-no doc of its own — `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`
-§3 ("Link 2 has NO bug doc and no claim … it is filed nowhere of its own, and 4
+no doc of its own — the round-2 `std-os-io` scope audit's §3 ("Link 2 has NO bug
+doc and no claim … it is filed nowhere of its own, and 4
 files of this scope sit behind it, so it is worth a doc rather than a mention")
 and `bugs/FORMAL_std_builtin_sys_time_slice_2026-10-04.md` §3 row 12, which
 filed it under monomorphisation. **Both of those attributions are wrong, and this

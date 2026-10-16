@@ -1552,9 +1552,9 @@ own resolver spells it: `std.format._utils`, `std.math`, `..fstat`, `.path`.
 
 ONE reader, because two tools now want it and a second spelling rule would be a
 second thing to keep right: `tools/formal_sweep_causes.py` (whose `uses:`
-column could not be measured for that row until it existed — see
-`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6.1) and
-`tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is this same pattern.
+column read NOT MEASURED on 21 of 22 groups of the round-2 `std-os-io` scope
+until it existed) and `tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is
+this same pattern.
 """
 
 
