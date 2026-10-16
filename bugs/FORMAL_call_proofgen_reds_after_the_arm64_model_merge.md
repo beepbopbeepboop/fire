@@ -1,5 +1,31 @@
 # `test_formal_call_proof_gen.py`'s remaining reds after merging the oct-7 formal branches
 
+**Status 2026-10-13 (`work/formal336-docs`): the `maximum recursion depth` cluster
+is a LIMIT, not an infinite loop, and it is NOT avoidable from the generator side
+by the two things measured here — so the fix is the ProofLib statement change
+below or a raised limit, and nothing smaller.** What was measured, all on
+`formal/examples`-sized proofs and the `same_image_leaf` fixture:
+
+* `same_image_leaf_proof.lean` FAILS at the generated `set_option maxRecDepth
+  100000` and PASSES with 0 sorries at `maxRecDepth 1000000` (measured: rc=0,
+  ~1m34s, 3.9 GB) and at `10000000` (~1m32s) — so the depth needed is between
+  1e5 and 1e6 and the reduction is finite.
+* The failing line is the `rw [runs_cons_seq st (<block>_qT0 st) …]` of a
+  `*_b3_selfN` run certificate (`leafout_proof.lean:3890`), i.e. the run lemma's
+  UNIFIER on a concrete run-exit state, and `set_option diagnostics true` names
+  `List.get?Internal` / `List.rec` / `Nat.rec` — the reduction of `main_code`'s
+  `main_code_list.getD` under that unifier, not `arm64_ext_imm12` (which is the
+  §"most likely cause" hypothesis above, and is NOT where the depth is).
+* Two candidate generator-side fixes were tried and NEITHER works:
+  `let`-binding the run-exit state before the `rw` (the idiom the loop path uses
+  at `formal/arm64_proof_gen.py:6177`) moves the error by one column and does
+  not remove it; and a generator-emitted `@[simp] arm64_ext_imm12 w = …` lemma
+  changes nothing (the depth is in a defeq, which `[simp]` does not reach).
+
+So a taker has the same two options the section below names, and the
+`maxRecDepth` one is a real fix rather than a hammer only if the depth is
+bounded — measured: it is.
+
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py` and
 `lib/ProofLib.lean`'s `arm64_step` arms. **Status: the two recursion reds and
 the fact-count red are CLOSED; the four `TestTheZeroDivisorGuardAgainstLean`
