@@ -6620,8 +6620,8 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _refuse_return_annotation_kind_mismatch(self, value) -> None:
         """Raise when this function returns a double under an integer annotation.
 
-        The SECOND consumer `POINTEES_REFUSED`'s `Float64` row names, and the one
-        that makes the kind hook load-bearing rather than cosmetic: `func_kind`
+        The SECOND consumer of a `Float64` in integer position, and the one that
+        makes the kind hook load-bearing rather than cosmetic: `func_kind`
         reads a callee's DECLARED return type first, so `def f() -> Int:
         return h()` looks like an integer producer to every consumer of the
         call and is holding a bit pattern. Measured on both architectures it

@@ -18282,6 +18282,15 @@ def pointee_kind(pointee) -> str | None:
 # the signedness, and every row's unsigned twin is in `POINTEE_WIDTHS` beside it.
 WIDTH_POINTEES = {1: "Int8", 2: "Int16", 4: "Int32", 8: "Int64"}
 
+# The pointee widths whose value is a FLOAT this path can hold, and the reason
+# it is a separate name rather than a second entry in `POINTEE_WIDTHS`: a width
+# is not a kind, and every reader of a dereference needs to tell a `Float64`
+# load from an eight-byte integer load.  `pointer_dereference_kind` is the one
+# reader that does, and `ValueKinds.kind_of` inherits it through the
+# `pointee_kind` hook so both backends answer from here rather than each
+# re-deriving "which pointees are doubles".
+FLOAT_POINTEE_WIDTHS = {"Float64": 8}
+
 # Pointee base names that are refused BY NAME, with the reason, rather than
 # merely absent from POINTEE_WIDTHS.  A refusal that says "the pointee is not a
 # width I know" is true but unhelpful when the answer is a specific fact, and
@@ -19472,7 +19481,8 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     if inner in ("SIMD", "Scalar"):
         args = pointee_args(_rhs_declared_text(fn, expr, decls, functions) or "")
         n = args[1] if len(args) > 1 else None
-        if n == "1" and args and args[0] in POINTEE_WIDTHS:
+        if (n == "1" and args and args[0] in POINTEE_WIDTHS
+                and args[0] not in FLOAT_POINTEE_WIDTHS):
             width, signed = POINTEE_WIDTHS[args[0]]
             return (("load", width, signed),
                     f"the pointee is {inner}[{args[0]}, 1], which is one word "
