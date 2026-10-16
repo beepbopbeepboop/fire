@@ -54263,3 +54263,190 @@ def dotted_struct_construction(func, structs: dict, import_aliases: dict) -> boo
         return False
     base = getattr(func, "obj", None)
     return isinstance(base, F.IdentExpr) and base.name in (import_aliases or {})
+
+
+def context_enter_returns_receiver(struct_def) -> bool:
+    """True when this struct's `__enter__` hands its own receiver back.
+
+    The `with` alias is bound to `__enter__`'s RESULT, so the alias is the struct
+    exactly when `__enter__` returns the receiver — `def __enter__(self): return
+    self`, the spelling whose whole purpose is to let the body call the manager's
+    own methods.  `formal/build.py::_one_with_item` publishes the alias's struct
+    from this predicate, so a method called through the alias dispatches to the
+    manager the `with` actually entered rather than being refused by name.
+
+    **Every return must yield the receiver, and there must be one.**  A path that
+    returns a word (`return self.tag`, the `Ctx` fixture) makes the alias a word
+    on that path, and naming the struct from the other paths would lift a method
+    call to a struct the alias may not hold.  A method that falls off its end has
+    no return at all and is the same hazard, so it answers False.
+
+    The receiver name comes from `method_receiver_name`, so a manager that spells
+    its receiver `this` is accepted on the same evidence as one that spells it
+    `self`.  A parenthesised `return (self)` is the same node after the front end
+    folds the parentheses, so it needs no separate arm.
+    """
+    enter = None
+    for m in struct_methods(struct_def):
+        if getattr(m, "name", None) == CONTEXT_ENTER:
+            enter = m
+            break
+    if enter is None:
+        return False
+    recv = method_receiver_name(enter)
+    if not isinstance(recv, str):
+        return False
+    returns = [n for n in iter_nodes(getattr(enter, "body", None) or ())
+               if isinstance(n, F.ReturnStmt)]
+    if not returns:
+        return False
+    for node in returns:
+        value = getattr(node, "value", None)
+        if not (isinstance(value, F.IdentExpr)
+                and getattr(value, "name", None) == recv):
+            return False
+    return True
+
+
+def context_exit_suppression_at_site(struct_def, expr):
+    """The FIELD `__exit__` returns that THIS construction site makes truthy, or None.
+
+    `context_exit_returns_truthy` decides the case where `__exit__`'s return
+    VALUE is a literal, at the DECLARATION.  This is the other half of the same
+    wrong answer, and it is the case that gate cannot see: `__exit__` returns a
+    FIELD, so whether CPython would suppress depends on the value the field was
+    given at the site that CONSTRUCTED the manager — `nullcontext` returns its
+    own `exit_result`, and the doc's `Suppressor` returns `self.quiet`.  The
+    declaration alone cannot answer it; the construction site can, when the
+    argument is a foldable value.
+
+    **What is read, and why that is the whole of it.**  The manager is built by
+    an expression this build already recognises as a CONSTRUCTION — `S(...)` or
+    `mod.S(...)`, the same spelling `with_expr_struct` resolves through — and the
+    argument the field takes is the positional argument at the field's
+    declaration slot, or the keyword naming it.  Only the IMPLICIT field-init
+    constructor is read: a struct that declares `__init__` binds its parameters
+    to fields in a body this reader does not follow, and following it would be
+    the cross-FIELD flow `context_exit_returns_truthy`'s docstring names as the
+    remaining limit.  A struct without `__init__` has no such gap — position `i`
+    of the argument list IS field `i`.
+
+    **A `None` means "not decided" and is read as "leave it alone"**, exactly as
+    `_literal_return_truthiness`'s is: a non-construction expression, a computed
+    argument, a field with no argument at this site (its default stands), and a
+    truthiness none of the folded kinds answers all return None and the program
+    is built as before.  The direction is the ONE-SIDED one the gate above is
+    deliberately in: only a provably-true value is reported.
+
+    The caller pairs this with "the body can actually RAISE", because a truthy
+    `__exit__` is only consulted when the body leaves by an exception; on the
+    fall-through path CPython discards the return value too, so refusing a
+    non-raising body would refuse a program that is already correct.
+    """
+    if struct_def is None or expr is None:
+        return None
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    exit_ = methods.get(CONTEXT_EXIT)
+    if exit_ is None or "__init__" in methods:
+        return None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    # The construction has to NAME the struct.  `with make_suppressor() as v:`
+    # is a call to a function whose declared return type happens to be this
+    # struct, and its arguments are the function's, not the fields' — reading
+    # them by position would invent a field value the source never wrote.
+    spelled = getattr(callee, "name", None) or getattr(callee, "member", None)
+    if not isinstance(spelled, str) or spelled != getattr(struct_def, "name", None):
+        return None
+    fields = struct_field_names(struct_def)
+    args = list(getattr(expr, "args", None) or [])
+    kwargs = list(getattr(expr, "kwargs", None) or [])
+    exit_params = _param_names(getattr(exit_, "params", None))
+    self_name = exit_params[0] if exit_params else None
+    if self_name is None:
+        return None
+    for node in iter_nodes(getattr(exit_, "body", None) or ()):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        value = getattr(node, "value", None)
+        if not (isinstance(value, F.MemberExpr)
+                and isinstance(value.obj, F.IdentExpr)
+                and value.obj.name == self_name):
+            continue
+        name = value.member
+        if name not in fields:
+            continue
+        argument = _constructor_argument_for(fields, name, args, kwargs)
+        # `_literal_return_truthiness` is the ONE reader of "what would CPython
+        # read this as", float arm included, so the site-level and the
+        # declaration-level gates cannot disagree about what "true" means.
+        if argument is not None and _literal_return_truthiness(argument):
+            return name
+    return None
+
+
+def is_list_expr(e) -> bool:
+    """True when `e` builds a LIST literal or a list comprehension.
+
+    The third of the container-constructor predicates beside `is_dict_expr`,
+    `is_set_expr` and `is_tuple_expr`, and the one the value model never needed
+    until `==`/`!=` between two containers was lowered: a list, a set and a
+    tuple all classify as `list:<elem>` (`is_set_expr`'s docstring says why), so
+    nothing but a predicate of this shape can say which of the three an
+    expression builds — and CPython's `==` differs between them (`[1] == (1,)`
+    is False while `[1] == [1]` is True, and a set is order-independent where
+    both others are not).
+
+    `is_tuple_expr` is its twin and carries the measurement for the same
+    conflation; this is the LIST half. A list comprehension is a
+    `Comprehension` whose `kind` is `"list"` (or absent, the parser's default),
+    exactly as the other three spellings are `"set"`/`"dict"`/`"tuple"`.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.ListExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "list")
+
+
+def comprehension_element_not_sized(node_text: str) -> str:
+    """The compiler-internal refusal for an element blob the per-iteration
+    region was not sized for.
+
+    `blob_bytes_reserved` sizes the region and the emitters that build the blob
+    record what they actually reserved, and those are two readers of ONE
+    layout. A program that got an answer from one and not the other would get
+    the aliasing bug the region exists to remove — every element of the result
+    pointing at one object — so the disagreement is stopped here instead.
+    Reaching it is a compiler bug rather than a program error, and the sentence
+    says so rather than blaming the source."""
+    return (f"a comprehension's element (`{node_text}`) reserved a container "
+            f"that the per-iteration element region was not sized for. The "
+            f"region's size and the blob's own reservation are two readers of "
+            f"one blob layout (`model.blob_bytes_reserved` and the emitter's "
+            f"record of what it reserved), and this build got different "
+            f"answers from them — which is a compiler bug, not a program error")
+
+
+def _constructor_argument_for(fields, name, args, kwargs):
+    """The argument this construction gives field `name`, or None.
+
+    Keyword first — a construction may spell the field either way, and the
+    keyword is the one spelling that cannot be confused with a different field —
+    then the positional argument at the field's declaration slot.  An argument
+    list shorter than the slot is a field taking its DEFAULT, which this reader
+    does not fold and reports as not-decided.
+    """
+    for entry in kwargs:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            continue
+        if entry[0] == name:
+            return entry[1]
+    try:
+        index = fields.index(name)
+    except ValueError:
+        return None
+    if index < len(args):
+        return args[index]
+    return None
