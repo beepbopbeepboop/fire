@@ -5299,8 +5299,15 @@ def _range_is_nonempty(args, consts=None) -> bool:
     Folding here rather than in a new reader is deliberate: this is the ONE
     question in the file about "what integers does this `range` have", and
     `_cfg_int_literal` stays what its own docstring says it is.
+
+    **An ARGUMENT COUNT outside 1-3 is `None`, not a crash.**  `range()` with no
+    arguments is CPython's own `TypeError` and `_cfg_int_value` has no value to
+    read, so the guard is `not in (1, 2, 3)` rather than `> 3`; the old `> 3`
+    guard fell through to the three-way unpack and a `for i in range():` raised
+    `ValueError: not enough values to unpack` OUT of the model and into the
+    build, which reports as a backend crash rather than as a refusal.
     """
-    if len(args) > 3:
+    if len(args) not in (1, 2, 3):
         return None
     vals = []
     for a in args:
@@ -41056,20 +41063,42 @@ def literal_dict_items(expr):
     those are the two a struct field name can be spelled as in a dict display
     that this parser produces (`{'a': 1}` is a keyword; `{"a": 1}` is a
     string).
+
+    **A duplicate key inside the literal is COLLAPSED, last value wins**, which
+    is CPython's own dict-display rule and the difference between `{'b': 2, 'b':
+    3}` (one key, value 3) and a keyword given twice.  The collapse is here
+    because it is the literal's semantics; a duplicate ACROSS the call site (an
+    explicit keyword against a spread) is still the ordinary duplicate check's.
     """
     if not isinstance(expr, F.DictExpr):
         return None
     out = []
+    index = {}
     for pair in (getattr(expr, "pairs", None) or ()):
         key = pair[0] if isinstance(pair, (list, tuple)) and pair else None
         value = pair[1] if isinstance(pair, (list, tuple)) and len(pair) > 1 \
             else None
         if isinstance(key, F.StringLiteral):
-            out.append((key.value, value))
+            name = key.value
         elif isinstance(key, F.IntLiteral):
-            out.append((str(key.value), value))
+            name = str(key.value)
         else:
             return None
+        if name in index:
+            # A dict LITERAL's later duplicate key OVERWRITES the earlier one —
+            # CPython's own rule, so `{'b': 2, 'b': 3}` is `{'b': 3}` and
+            # `f(a=1, **{'b': 2, 'b': 3})` is `f(a=1, b=3)`, not a duplicate
+            # keyword.  Collapsing here keeps the literal's semantics: the
+            # duplicate check downstream is about a keyword given twice AT THE
+            # CALL SITE (an explicit keyword against a spread, or a key two
+            # spreads both carry), and a literal's own duplicate is neither.
+            # Without this the un-spread handed the check both pairs and a
+            # program CPython runs was refused with "got multiple values for
+            # argument 'b'".
+            out[index[name]] = (name, value)
+        else:
+            index[name] = len(out)
+            out.append((name, value))
     return out
 
 

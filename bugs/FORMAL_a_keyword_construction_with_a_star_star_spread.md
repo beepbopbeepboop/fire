@@ -94,6 +94,20 @@ The duplicate check then applies UNCHANGED, which is what keeps
 `S(a=1, **{'a': 2})` refused with CPython's own `TypeError` rather than with
 something this path invented.
 
+**2b. A duplicate key INSIDE the literal collapses, last value wins, and that
+is the literal's own rule rather than the call's (2026-10-08).** `{'b': 2, 'b':
+3}` is CPython's `{'b': 3}`, so `f(a=1, **{'b': 2, 'b': 3})` is `f(a=1, b=3)`
+and it RUNS on both machines (`1 3` — the row
+`a_dict_literal_spread_collapses_its_own_duplicate_keys`). Before this the
+un-spread handed the keyword check both pairs, so that ordinary program was
+refused with "got multiple values for argument 'b'" — a sentence FALSE about the
+source, and the same class as item 1's. `literal_dict_items` collapses its own
+duplicate keys now (`out[index[name]] = …`, first position with the last value),
+which is exactly a dict display's semantics; the call-site duplicate it must NOT
+swallow is still caught, because `a=1` against a collapsed `a=3` is two
+keywords (`a_collapsed_literal_still_duplicates_an_explicit_keyword`), as is a
+key two spreads both carry.
+
 **3. Any other spread is refused BY NAME**, naming the operand and saying the
 keys are not knowable at the construction site — which for
 `formal/x86_64_decode.py` reads `constructing Insn spreads `kw` with `**`` where
