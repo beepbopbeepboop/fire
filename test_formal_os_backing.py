@@ -755,6 +755,19 @@ def main(n):
 # CPython's own `os.stat` in this process. The shapes are the point: a layout
 # that is right for a regular file is right for all of them, and a case set
 # with only a regular file in it would not know that.
+#
+# `st_dev` is compared as the 64-bit WORD it is and not as the Python integer
+# CPython happens to store, and that is a fact about the FIELD rather than a
+# preference: `st_dev` is `dev_t`, an `int32` on macOS, and CPython exposes
+# `os.stat().st_dev` as that field sign-extended into the `unsigned long long`
+# of its `stat_result` — so a device with bit 31 set is a number ABOVE `2**63`
+# (`/dev/null` on the machine this was measured on is `18446744072249612928`,
+# `0xffff_ffff_a8fb_1a80`). A formal value is one 64-bit word and `%d` is its
+# signed rendering, so the ORACLE folds CPython's value into signed-64
+# (`_as_word64`) and both sides then print the same bits. Without the fold a
+# signed `%d` renders `-1459938688` where CPython reports
+# `18446744072249612928`, and the disagreement shows up exactly when bit 31 of
+# the device is set, which is why it went unseen until such a machine.
 STAT_PROGRAM = '''\
 from os.path import isfile, isdir, islink, lexists, exists, getsize
 from os.path import stat_mode, stat_size, stat_ino, stat_dev, stat_nlink
@@ -777,6 +790,20 @@ def main(n):
     show("@@PATH@@")
     return 0
 '''
+
+
+def _as_word64(v):
+    """`v` folded into the 64-bit two's-complement word a formal value is.
+
+    `os.stat().st_dev` is a non-negative Python int — CPython stores the field
+    in an `unsigned long long` — while the formal path's `stat_dev` holds the
+    same BITS in one 64-bit word, which `%d` renders signed. Folding CPython's
+    value to signed-64 makes the two the same number rather than one number
+    and its two's complement. `-1`, the "no struct here" sentinel every field
+    of a missing path is answered with, is already in range and unchanged.
+    """
+    v &= (1 << 64) - 1
+    return v - (1 << 64) if v >= (1 << 63) else v
 
 
 def _stat_oracle(p):
