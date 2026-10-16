@@ -99,6 +99,37 @@ generates again, the row fails and says to delete it.
 `test_formal_call_proof_gen.TestTheRecursionFamiliesStillGenerate` is
 **3 tests / OK**.
 
+**CORRECTED 2026-10-12 (`work/formal313-docs`): that doc's §1 fix has LANDED,
+so the PIN is GREEN and this doc's last Status is superseded — nothing is RED
+here.** `_reached_without_a_condition` now carries `(block, crossed)` per path
+and answers True for a block that CONTAINS `pc` with no source conditional
+crossed, which is the question its own docstring asks, rather than returning
+False on the first source conditional merely REACHED. Measured on this tree:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- \
+      python3 -m unittest test_formal_call_proof_gen.TestTheRecursionFamiliesStillGenerate
+Ran 3 tests in 0.975s
+OK
+```
+
+so eleven of the twelve again reach a proof file: the `GENERATE` rows
+(`count`, `fact`, `pow2`, `sqsum`, `sum`, `sgt8`, `sle8`, `ug8`, `both`,
+`either`, `wdiff`) each generate a `_compiles_correctly_universal`, and
+`sum_range` is the one `REFUSED` row. **`sum_range`'s refusal is its OWNED
+loop-contract refusal and not the
+generator `ValueError` §4's table and §5's row 4 record**: the census test pins
+the three actionable needles (`SIGNED condition code 11`,
+`arm64_flag_lt_s`, `while_lt_exit_contract_bottom`) and names its owner,
+`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md`,
+so §4's "sum_range is the last refuser and its refusal is another worker's
+claim" and §5's row 4 are both history. **Nothing else in the doc changes:**
+§4.1's question — whether Lean ACCEPTS each of the twelve — is still
+unmeasured and is still a sequence of bounded Lean runs for the integrator, and
+the remaining per-family obligations of §5 are still the other docs' (family 1
+is `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`, family 3 is the arm64
+kernel-memory class of `BLOW.md` §0).
+
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix
 here:

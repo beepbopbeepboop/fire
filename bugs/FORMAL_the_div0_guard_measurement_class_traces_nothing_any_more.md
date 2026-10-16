@@ -410,3 +410,63 @@ still succeeds — is superseded by that regression.** The step-1 check is what
 made the difference visible; the class stays red until the emitter (formal115)
 and walk (the conditional-halt doc's owner) land, and no part of that is this
 branch's to change.
+
+## Status 2026-10-12 (`work/formal313-docs`): the regression is GONE, and the
+## class is blind again in its ORIGINAL shape — the `FormalBuildError` above is
+## superseded, and the class's own `blind` message is the correct one now
+
+**The `FormalBuildError` this doc's last two Status blocks record no longer
+happens.** The two independent changes both landed: `formal/arm64_codegen.py`
+records its own trap `fflush` again (`_emit_trap_flush` →
+`info["compiler_traps"]`), and the stack-floor guard's `getrlimit` moved into
+the startup stub (`_emit_stack_floor_init`) **below `func_offset`**, so
+`_program_extern_calls` subtracts both and the walk's range
+`[func_entry, func_end)` no longer contains `getrlimit` at all. Measured,
+`prove=False`:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 -c "
+import formal.build as fb
+r = fb.compile_formal('.tmp/symdiv.mojo', arch='arm64', output='.tmp/symdiv.aout',
+                      prove=False, check=False)['info']
+print('extern_calls', r['extern_calls']); print('compiler_traps', r['compiler_traps']);
+print('func_offset', r['func_offset'])"
+extern_calls [{'sym': 'getrlimit', 'addr': 4294968288}, {'sym': 'fflush', 'addr': 4294968580}]
+compiler_traps [4294968580]
+func_offset 4294968408
+```
+
+`getrlimit` is below `func_offset` and `fflush` is in `compiler_traps`, so
+`_program_extern_calls` is `[]` and there is no "2 calls" refusal. **What the
+class sees instead is the ORIGINAL blindness of this doc's very first section,
+one layer down:** generation SUCCEEDS, and the generated file has no
+`q_compiles_correctly_universal` and no `_ADMIT` — its only universal theorem is
+a reachability statement for the compiler's own flush:
+
+```console
+$ python3 … compile_formal('.tmp/symdiv.mojo', prove=True, check=False) …
+theorems matching universal/reaches: ['q_reaches_call_at_0x100000504']
+'_ADMIT' present in the file: False
+```
+
+`0x100000504` is the `BL fflush` in `_emit_div_shift_pow`'s divide-by-zero arm
+— a COMPILER call, on an arm a non-zero divisor never takes — and
+`_unfollowable_calls` does not subtract `info["compiler_traps"]`, so the walk
+still halts the universal theorem at it. `setUpClass` therefore sets
+`blind['as_emitted']` to the *"generates no `q_compiles_correctly_universal`
+carrying `_ADMIT`"* message (not the `FormalBuildError` one), and
+`test_the_measurement_class_can_still_see_what_it_measures` fails on it BY NAME
+— which is step 1 working as designed. **This doc's `FormalBuildError` Status
+blocks are history; the measured state is the one this doc was filed about.**
+
+**Nothing else changes.** Step 2's two options are the same and neither is this
+doc's to take: option 1 ("subtract `compiler_traps` in `_unfollowable_calls`")
+still reaches the conditional-call refusal rather than the `⊢ 1 =` goal
+(`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`), and
+option 2 (a literal-divisor fixture) still changes what the class measures. The
+class stays red until the walk keeps a terminal for a compiler call, which is
+that doc's `lib/ProofLib.lean` project. The correction worth having is that the
+walk fix is now the ONLY thing standing in the way — the emitter half and the
+`getrlimit` half are both landed and pinned
+(`test_formal_call_proof_gen.py::TestCompilerTrapIsNotAProgramCall`, 10 tests,
+0.289 s, OK).

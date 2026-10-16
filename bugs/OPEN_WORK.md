@@ -254,7 +254,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_x86_64_the_successor_table_is_compared_against_the_model_on_six_forms.md` | **unclaimed** | `formal/x86_64_model_coverage_test.py` compares the emitter's SUCCESSOR against the model on 6 of the 43 forms (8 since the pass that filed this added two more), and every row that was stale was among the other 35 |
 
-### `formal/x86_64_model_fuzz` — 1 document, 0 claimed
+### `formal/x86_64_model_fuzz` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
