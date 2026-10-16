@@ -326,7 +326,14 @@ cross-path sharing would be unsound: `s_{pb}` is REBOUND per path, so a fact
 about `s_8` proved on one path is about that path's `s_8`.
 `test_formal_call_proof_gen.py`'s `TestNestedConditionFactSharing` holds the memo
 to that — one check fails if a fact is proved twice in a scope, one if a fact is
-USED where it was not proved, one if the growth goes above ×2.2 again.
+USED where it was not proved, one if the growth goes above ×2.2 again. **That
+third check was red on master on 2026-10-13 and is fixed**: it bounded the *total*
+fact count's ratio, which for the test's programs is `3·(2^k − 1)` (3 / 9 / 21 /
+45) and whose ratio is 3.00 / 2.33 / 2.14 — the additive `−3` reads as
+super-linear growth at two conditions even though the count is exactly linear in
+the path count. It now measures the per-condition **increment** (6 / 12 / 24,
+×2.0 exactly; ×2.67 with the memo disabled), which is the quantity the layout
+does not shift and the one the memo fixes.
 
 **So the open question is exactly one sentence, and it is a measurement nobody
 has taken:** *does the sharing let a three-branch export build a proof at all?*

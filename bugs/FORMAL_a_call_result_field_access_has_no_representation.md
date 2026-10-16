@@ -379,3 +379,39 @@ lowers and the read does not" looks like from the outside.
 permanent facts about the target — most of them are not, and §4 says which are.
 It claims they are not reachable by writing a `formal/hostmods/` module, which
 is a much narrower claim and the one that decides what to work on next.
+
+## 6. 2026-10-13: the `--dead` ratchet and the `importlib.util` row were RED, and both are restored
+
+`test_formal_host_import_shapes.py` was **red on master**, on the two cases that
+read the tree as it is now rather than a snapshot of a number — so §3's claim
+that the `--dead` walk "ratches its output to exactly one file" was, for a
+while, false, and the row it pins had grown a name. Both are instrument facts
+rather than corpus questions, and each had a measured cause:
+
+* **`--dead` had grown from one file to three.** Two `.py` files imported a
+  host module and read nothing through it:
+  `tools/formal_doc_index.py`'s `import subprocess` (added with the doc index
+  itself and used by nothing in it) and `tools/formal_metamorph.py`'s
+  `import subprocess  # noqa: F401 — re-exported for callers that shim this
+  module`, whose comment was false: nothing in the tree shims that attribute
+  (`grep` for `metamorph.subprocess`, `M.subprocess` and every `.subprocess =`
+  in the tree finds only `test_module_cache.py`'s `mm`, which is
+  `monomorphize`, and `test_formal_sweep.py`'s own class attribute). Both
+  imports are deleted, which is the repair the ratchet's own message
+  ("Delete the import, or say here why it stays") names, and the walk is back
+  to the one justified file — `fire_compiler.py`'s dead
+  `from abc import abstractmethod`, which stays for the reason §3 gives.
+* **the `importlib.util` row gained `importlib.util.find_spec`.** It is a real
+  use: `test_formal_imports.py`'s
+  `test_the_find_spec_decided_names_are_unreachable` asks CPython's own
+  `find_spec` which stdlib modules are unreachable, and that file is in the
+  sweep. So the row is now blocked on the three names that make up the
+  path-loading API (`find_spec`, `module_from_spec`, `spec_from_file_location`)
+  rather than two, and the case is updated to say so rather than the use being
+  removed — the test is the corpus's reader and the corpus moved, which is the
+  one direction a reader's pin is allowed to move.
+
+**Neither is the capability this doc is about, and both are the same instrument
+rotting**, which is the failure `CLAUDE.md` calls a hole in coverage: the file
+is registered in NO bucket, so no gate ran it and both went red unobserved. §5's
+next step is unchanged.
