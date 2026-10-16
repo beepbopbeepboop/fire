@@ -29,8 +29,7 @@ wrong way. `return ""`, `return 0.0`, `return 0`, `return False` and `return
 None` all still lower. Pinned by `test_formal_with.py`'s truthy-string and
 truthy-float REFUSAL rows and their falsy siblings
 (`an_exit_returning_an_empty_string_still_runs_the_protocol`,
-`an_exit_returning_zero_point_zero_still_runs_the_protocol`). **§2's computed
-case is untouched and is still the whole of what is left.**
+`an_exit_returning_zero_point_zero_still_runs_the_protocol`).
 
 **Update 2026-10-13 (`work/formal335-docs`): the FOLDABLE half had a SECOND
 incomplete edge, and it is now closed.** The 2026-10-07 update below was right
@@ -62,6 +61,29 @@ seven refusal rows and their five falsy siblings (450 checks, up from 378).
 rather than a fold.
 
 
+Measured, both architectures, on §2's own program with `Suppressor(1)`: it used
+to BUILD, print `body 7`, never print `after` and exit 1 where CPython exits 0.
+It is now refused, naming the field and the construction. Pinned by
+`test_formal_with.py`:
+`a_computed_exit_the_site_makes_truthy_is_refused_by_name`,
+`a_computed_exit_made_truthy_by_a_keyword_is_refused_the_same_way`, and the two
+ANSWERED boundaries the refusal must not cross —
+`a_computed_exit_the_site_makes_falsy_still_runs_the_protocol` (`Quiet(0)`, so
+CPython does not suppress and the exception still propagates) and
+`a_computed_truthy_exit_still_lowers_when_the_body_cannot_raise`.
+
+**What is STILL open, and it is the true root cause rather than a wider fold.**
+The reader only decides a field whose slot THIS construction fills with a
+FOLDABLE value, and it reads the construction INLINE (`with Quiet(1) as v:`): a
+manager whose `__exit__` returns a field bound from a CALL, from a parameter,
+from a default, from another field, or from a `q = Quiet(1)` binding the `with`
+only names still builds and still suppresses silently, and a struct that
+declares `__init__` is not read at all —
+binding a parameter to a field in a body the reader does not follow is how a
+plausible constant gets invented, which is the fabrication this tree refuses
+everywhere. Honouring the suppression rather than refusing the decidable case is
+still §4's status word plus resume edge, and it is still the last step. §2's
+computed case is therefore decided one increment further out and is not closed.
 
 **Read this before planning the work.** This is a limit of the EVIDENCE, not of
 the gate: `model.context_exit_returns_truthy` asks "does some `return` in
