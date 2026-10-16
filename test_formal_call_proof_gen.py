@@ -928,6 +928,58 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertIn("(insn &&& 0x1f)", arm.group(1),
                       "the model's arm does not read `Rd`")
 
+    def test_every_sp_tracker_scales_an_add_sub_immediate_by_its_sh_bit(self):
+        """The ADD/SUB (immediate) `sh` bit is the difference between
+        `sp - 32` and `sp - 131072`, and FOUR `sp` trackers read the field alone.
+
+        `_SCRATCH` is `32 << 12`, which `_emit_imm_shift12` writes as ONE
+        scaled immediate (`sub sp, sp, #32, lsl #12`). `lib/ProofLib.lean`'s
+        `arm64_ext_imm12` applies the `sh` bit and `_step_rhs` spells the answer
+        as that helper, so the model's goal reads `sp - 131072` — but
+        `_frame_ldp_addrs`, `_frame_read_addrs`, `_hcond_mem_rws` and
+        `_sp_stores` unpacked the 12-bit field by hand and produced `sp - 32`.
+        Measured: `formal/examples/condassign2.mojo`'s branch-condition proof
+        rewrote a slot the emitted goal does not name, so its `rw` matched
+        nothing and the example was one of `test_formal.py`'s undeclared reds.
+        The row pins the shared reader and each consumer, so a revert in any one
+        of them fails here rather than at the proof.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+
+        def word(fn, *args):
+            return int.from_bytes(fn(*args), "little")
+
+        scaled = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
+        plain = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 0)
+        shifted_add = word(A.encode_add_xd_xn_imm_sh, 31, 31, 20, 1)
+        self.assertEqual(G._imm12_scaled(scaled), 32 << 12,
+                         "a scaled ADD/SUB immediate is not multiplied by 4096")
+        self.assertEqual(G._imm12_scaled(plain), 32,
+                         "an unscaled ADD/SUB immediate was scaled")
+        self.assertEqual(G._imm12_scaled(shifted_add), 20 << 12,
+                         "the sh bit is not read for an ADD immediate")
+
+        stp = word(A.encode_stp_sp_pre, 29, 30, 16)
+        ldp = word(A.encode_ldp_sp_post, 29, 30, 16)
+        words = {0: scaled, 4: stp, 8: ldp}
+        block = {"instrs": [0, 4, 8]}
+        self.assertEqual(G._sp_stores(words, [0], 0, []), -(32 << 12),
+                         "`_sp_stores` did not apply the sh bit, so a BL's "
+                         "frame-slot offsets are 4096x too small")
+        for name, addrs in (("_frame_read_addrs",
+                             G._frame_read_addrs(block, words, "s")),
+                            ("_frame_ldp_addrs",
+                             G._frame_ldp_addrs([block], words, "s")),
+                            ("_hcond_mem_rws",
+                             G._hcond_mem_rws([0, 4, 8], [8], words, "s"))):
+            with self.subTest(tracker=name):
+                self.assertTrue(addrs, f"{name} produced no address")
+                self.assertIn(f"UInt64.ofNat {32 << 12}", addrs[-1],
+                              f"{name} did not scale the prologue's `sub sp` by "
+                              f"its sh bit; its address is a slot the emitted "
+                              f"goal does not contain")
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`
@@ -4869,6 +4921,15 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     Lean-free by construction: it reads the GENERATED proof's text and
     `test_formal.py`'s table, and it builds both programs with proof generation
     OFF to establish that the gap is in the PROOF layer and not in codegen.
+
+    **Update 2026-10-12 (`work/formal270-docs-r2`): `pow2` is no longer a
+    marker.** The `formal/arm64_proof_gen.py` sp-tracker fix (`_imm12_scaled`,
+    the ADD/SUB immediate's `sh` bit) computes the frame slot's address
+    correctly, so `pow2`'s generated proof now TYPECHECKS — with ONE admitted
+    `sorry` at this same `runs-ret-frame-ok-window` leaf — where it used to
+    hard-fail at the `rfl`. `count` moves too but stays hard-red (at `maximum
+    recursion depth` now). So `MARKED` is `("count",)`; the read-off-the-text
+    rows still cover both proofs, which is what says the x30 gap has not moved.
     """
 
     #: The two shapes the generated proof must carry for this doc's failure to be
@@ -4881,6 +4942,15 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     ADRP = "arm64_set_reg 17"
 
     STEMS = ("count", "pow2")
+
+    #: Of `STEMS`, the ones still declared in `test_formal.py::EXPECTED_FAILURES`.
+    #: `pow2` left the table on 2026-10-12: the sp-tracker fix (`_imm12_scaled`)
+    #: corrected the frame slot's address, so its generated proof now TYPECHECKS
+    #: with one admitted `sorry` at the `runs-ret-frame-ok-window` leaf instead of
+    #: hard-failing at the `rfl` below, and `test_formal.py`'s stale-entry check
+    #: would reject a marker for it.  `count` is still a hard red (at `maximum
+    #: recursion depth` now), and the other two tests still cover BOTH proofs.
+    MARKED = ("count",)
 
     @classmethod
     def setUpClass(cls):
@@ -4909,9 +4979,9 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_both_are_marked_with_the_address_in_the_reason(self):
+    def test_the_still_declared_stem_is_marked_with_the_address_in_the_reason(self):
         import test_formal as T
-        for stem in self.STEMS:
+        for stem in self.MARKED:
             self.assertIn(stem, T.EXPECTED_FAILURES,
                           "%s is an UNMARKED failure of the `formal` suite job: "
                           "the next session reads the marker list, does not "
