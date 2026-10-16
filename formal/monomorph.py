@@ -256,8 +256,11 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     a decision to make from this row.
     """
     import fire_compiler as F                        # lazy — the AST classes
+    bare, bracketed = _template_call_shapes(src)
     drop = {n for n in template_names(src)
-            if template_kind(src, n) == KIND_STRUCT} - set(keep or ())
+            if template_kind(src, n) == KIND_STRUCT
+            and not (n in bare and n not in bracketed
+                     and _layout_independent_struct(src, n))} - set(keep or ())
     if not drop:
         return stmts
     return [s for s in stmts
