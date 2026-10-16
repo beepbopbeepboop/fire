@@ -3263,20 +3263,26 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
     return out
 
 
-_STMT_TYPES = tuple(
-    getattr(N, nm) for nm in (
-        'AssignStmt', 'AugAssignStmt', 'MultiAssignStmt', 'VarDecl', 'ExprStmt',
-        'ReturnStmt', 'RaiseStmt', 'BreakStmt', 'ContinueStmt', 'PassStmt',
-        'AssertStmt', 'IfStmt', 'WhileStmt', 'ForStmt', 'WithStmt', 'TryStmt',
-        'MatchStmt', 'FunctionDef', 'ImportStmt', 'FromImportStmt', 'GlobalStmt',
-        'NonlocalStmt',
-        'DelStmt', 'StructDef',
-    ) if hasattr(N, nm)
-)
+def _is_stmt_node(x) -> bool:
+    """One statement node? A LITERAL tuple of classes, inline: the old
+    module-level `_STMT_TYPES = tuple(getattr(N, nm) for nm in ...)` was
+    built at import time out of names, which the compiled compiler cannot
+    evaluate -- `isinstance(x, _STMT_TYPES)` lowered to
+    `mojo_isinstance_p(x, 0)`, False for everything, so no coroutine rewrite
+    in the stage2 binary ever recognised a statement list."""
+    return isinstance(x, (
+        N.AssignStmt, N.AugAssignStmt, N.MultiAssignStmt, N.VarDecl, N.ExprStmt,
+        N.ReturnStmt, N.RaiseStmt, N.BreakStmt, N.ContinueStmt, N.PassStmt,
+        N.AssertStmt, N.IfStmt, N.WhileStmt, N.ForStmt, N.WithStmt, N.TryStmt,
+        N.MatchStmt, N.FunctionDef, N.ImportStmt, N.FromImportStmt,
+        N.GlobalStmt, N.NonlocalStmt, N.DelStmt, N.StructDef))
 
 
 def _looks_like_stmt_list(v: list) -> bool:
-    return all(isinstance(x, _STMT_TYPES) for x in v)
+    for x in v:
+        if not _is_stmt_node(x):
+            return False
+    return True
 
 
 def _declares_its_own_scope(s) -> bool:
@@ -3286,7 +3292,7 @@ def _declares_its_own_scope(s) -> bool:
     Every `_rewrite_*_stmts` in this file recurses into a statement's
     attributes looking for nested statement lists, and the test it uses —
     "is this a list of statements?" — is answered by `_looks_like_stmt_list`,
-    whose `_STMT_TYPES` includes BOTH `FunctionDef` and `StructDef`. So a
+    whose `_is_stmt_node` includes BOTH `FunctionDef` and `StructDef`. So a
     nested `def`'s body and a nested `class`'s `methods` list were rewritten
     with the ENCLOSING coroutine's context variable: their `return e` became
     `__mojo_gen_set_return(__c, e); return`, and their `yield e` /

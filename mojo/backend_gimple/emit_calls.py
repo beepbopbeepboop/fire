@@ -2238,6 +2238,22 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # that has no such field. Probe the real generated dispatch under the
     # nothrow flag instead (same mechanism the 3-arg getattr default uses):
     # a miss sets `_mojo_getattr_missed`, so `missed == 0` is the answer.
+    # `hasattr(x, '__dict__')` is the question "is this an object with
+    # fields?" -- the generic AST walkers (mojo/middle/coro.py's `vars(node)`
+    # rewrites) ask it before recursing. No struct has a FIELD named
+    # `__dict__`, so the probe below answered False for every node and each of
+    # those walkers was a no-op in the compiled compiler: the stage2 binary's
+    # generator bodies kept their raw `yield` (`/* TODO: unknown expr
+    # YieldExpr */`). A reflected struct instance is exactly what has a
+    # `vars()` view (`_mojo_dispatch_asdict`), so that is the answer.
+    if (fname_raw == 'hasattr' and len(node.args) == 2
+            and not gen._locally_binds_name('hasattr')
+            and isinstance(node.args[1], gimple_ctypes.StringLiteral)
+            and _as_str(node.args[1].value) == '__dict__'):
+        ot, ov = gen.lower_expr(node.args[0])
+        vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
+        _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
+        return '_Bool', gen._new_val('_Bool', f'{_isdc} != 0')
     if (fname_raw == 'hasattr' and len(node.args) == 2
             and not gen._locally_binds_name('hasattr')):
         ot, ov = gen.lower_expr(node.args[0])
@@ -2336,6 +2352,34 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # through the typedef. _mojo_dispatch_getattr returns 0 for a
         # missing/unknown field, so a provided default (the codegen's own
         # defensive `getattr(s, 'elifs', [])` pattern) is substituted.
+        # `getattr(x, '__dict__', None)`: `vars(x)` for an object with
+        # fields, the default otherwise -- see the `hasattr(x, '__dict__')`
+        # note above; no struct has a field of that name to probe.
+        if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
+                and _as_str(node.args[1].value) == '__dict__'
+                and len(node.args) == 3):
+            ot, ov = gen.lower_expr(node.args[0])
+            vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
+            gen._asdict_dispatch_needed.add(1)
+            _res = gen._new_temp('MojoDict *')
+            _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
+            _bb_y = gen._new_bb(); _bb_n = gen._new_bb(); _bb_e = gen._new_bb()
+            gen._emit(f'  if ({_isdc}) goto {_bb_y}; else goto {_bb_n};')
+            gen._emit_label(_bb_y)
+            _d = gen._call_expr('MojoDict *', '_mojo_dispatch_asdict', [('void *', vp)])
+            gen._emit(f'  {_res} = {_d};')
+            gen._emit(f'  goto {_bb_e};')
+            gen._emit_label(_bb_n)
+            _dt, _dv = gen.lower_expr(node.args[2])
+            if _dt == 'MojoDict *':
+                gen._emit(f'  {_res} = {_dv};')
+            else:
+                _dvw = gen._to_int64(_dt, _dv)
+                _dvp = gen._new_val('void *', f'(void *){_dvw}')
+                gen._emit(f'  {_res} = (MojoDict *){_dvp};')
+            gen._emit(f'  goto {_bb_e};')
+            gen._emit_label(_bb_e)
+            return 'MojoDict *', _res
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
                 and len(node.args) in (2, 3)):
             # `_as_str`: `node.args[1]` is a boxed MojoList element, so the
