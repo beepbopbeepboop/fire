@@ -1430,6 +1430,13 @@ dylib_exports: list = None, globals_base: int = None,
         self._materialised = {}
         self._for_list_depth = 0
         self._compr_depth = 0
+        # The RESULT blob size of the most recently emitted comprehension, so a
+        # comprehension used as another comprehension's ELEMENT can be byte-
+        # copied per iteration (`_materialize_compr_element`). The element's own
+        # top-level comprehension finishes LAST of the comprehensions its
+        # emission reaches, so after `_emit_expr(element)` this holds the size
+        # to copy. 0 means "no comprehension emitted here".
+        self._last_compr_result_size = 0
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
@@ -11290,7 +11297,7 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         X0 on entry holds the element's blob (the scratch the element site
         reserved), and on exit holds the per-iteration copy that
-        `_compr_append_elem` appends. The two outcomes:
+        `_compr_append_elem` appends. The three outcomes:
 
           * an element `M.comprehension_element_is_flat_container` accepts — a
             container literal with no nested container in it, or a nested
@@ -11311,24 +11318,29 @@ ctor_field_value=self._ctor_field_value_for(name),
         bytes_ = self._list_cursor - before
         if not bytes_ or cap <= 1:
             return
-        if not M.comprehension_element_is_flat_container(element):
+        if M.comprehension_element_is_flat_container(element):
+            blob_size = bytes_
+        elif M.comprehension_result_is_flat(element) \
+                and self._last_compr_result_size > 0:
+            blob_size = self._last_compr_result_size
+        else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
                 cap, bytes_))
-        array_off = self._reserve_blob(cap * bytes_,
+        array_off = self._reserve_blob(cap * blob_size,
                                        "comprehension element array")
         # count = result element count so far (= this iteration's ordinal).
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(10, 9, 0))
-        # dest = array_base + count * bytes_
+        # dest = array_base + count * blob_size
         self._emit_list_base(array_off)
-        self._emit_mov_imm("X11", bytes_)
+        self._emit_mov_imm("X11", blob_size)
         self.asm.emit(encode_mul_xd_xn_xm(11, 10, 11))
         self.asm.emit(encode_add_xd_xn_xm(11, 9, 11))
-        # memcpy(dest, src, bytes_): X0=dest, X1=src, X2=n.
+        # memcpy(dest, src, blob_size): X0=dest, X1=src, X2=n.
         self.asm.emit(encode_mov_zr_xn(1, 0))       # X1 = scratch (source)
         self.asm.emit(encode_mov_zr_xn(0, 11))      # X0 = destination
-        self._emit_mov_imm("X2", bytes_)
+        self._emit_mov_imm("X2", blob_size)
         self._emit_extern_call("memcpy", 3)         # returns dest in X0
 
     # ── how many times the code being emitted runs ────────────────────

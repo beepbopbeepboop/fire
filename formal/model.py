@@ -34256,6 +34256,50 @@ def comprehension_element_is_flat_container(element) -> bool:
     return not any(_expr_builds_a_container(c) for c in children)
 
 
+def comprehension_result_is_flat(expr) -> bool:
+    """True when a comprehension's own RESULT is a container a byte copy can
+    make per-iteration.
+
+    THE predicate for the shape `comprehension_element_is_flat_container` does
+    not cover: an element that is ITSELF a comprehension. The element site
+    cannot byte-copy the nested comprehension's scratch, because that scratch
+    holds the nested result and the nested RESULT is exactly what has to be
+    kept — so the emitters copy the nested comprehension's finished result blob
+    (`[count][element…]`) into a slot of a `cap`-sized array instead, indexed by
+    the outer result count. That copy is sound under the SAME condition the
+    literal predicate states, one level in: a shallow copy carries the nested
+    result's WORDS, so every word must be a scalar or a deliberately shared
+    reference, never the address of a container the element position BUILT.
+    That is why this recurses through a nested comprehension and rejects a
+    container-building element, and it is here rather than in either backend so
+    the two architectures cannot disagree about which nested comprehensions are
+    representable.
+
+    A dict comprehension carries two words per element (KEY and VALUE), so BOTH
+    must be flat.
+
+    The shapes that return False — a nested comprehension over a container-
+    building element, a nested comprehension whose value opens a container —
+    keep `comprehension_element_blob_refusal`.
+    """
+    if not isinstance(expr, F.Comprehension):
+        return False
+    el = expr.element
+    if isinstance(el, F.Comprehension):
+        if not comprehension_result_is_flat(el):
+            return False
+    elif _expr_builds_a_container(el):
+        return False
+    if getattr(expr, "kind", "list") == "dict":
+        v = getattr(expr, "value", None)
+        if isinstance(v, F.Comprehension):
+            if not comprehension_result_is_flat(v):
+                return False
+        elif _expr_builds_a_container(v):
+            return False
+    return True
+
+
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container and

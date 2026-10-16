@@ -18287,6 +18287,20 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
      "refuse:the element `[[y]]` opens a container", None),
+    # The SAME shallow-copy boundary one level in: a nested comprehension whose
+    # own ELEMENT builds a container is not `comprehension_result_is_flat`, so
+    # copying its result would carry the address of the inner container the
+    # element built and every outer iteration would share it. The recursion in
+    # the predicate is what makes this a refusal rather than a silent alias.
+    ("a_nested_comprehension_over_a_container_element_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[z] for z in [1]] for y in [10, 20, 30]]\n"
+     "    var s = 0\n"
+     "    for v in r:\n"
+     "        s = s + v[0][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "refuse:the element `[…] for …` opens a container", None),
     # ONE iteration, and this row is the other side of the rule rather than
     # tidiness: `_compr_cap` is an UPPER BOUND on the iteration count, so
     # `cap == 1` means the body runs at most once and one shared blob is then

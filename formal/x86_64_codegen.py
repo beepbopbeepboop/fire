@@ -829,6 +829,12 @@ class X86_64Codegen:
         # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
         # so a comprehension nested in a for-list cannot alias its temps.
         self._compr_depth = 0
+        # The RESULT blob size of the most recently emitted comprehension; arm64's
+        # `_last_compr_result_size`. A comprehension used as another
+        # comprehension's ELEMENT is byte-copied per iteration, and its blob size
+        # is this recorded reservation rather than the ledger delta (which also
+        # carries the nested iterables). 0 means "no comprehension emitted here".
+        self._last_compr_result_size = 0
         # The COMPREHENSION scope stack: `model.ValueKinds`.
         # `comprehension_generator_scopes` maps, outermost first, pushed by
         # `_emit_compr_gen` after each generator's target store. A comprehension
@@ -3649,33 +3655,42 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         element differently. RAX on entry holds the element's blob and on exit
         the per-iteration copy `_compr_append_elem` appends.
 
-        `i` is the result blob's count word (elements appended so far), the
-        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
-        which returns the destination in RAX for free. `before` is the ledger
-        position as the element's emission began, so `bytes_` is the element's
-        own footprint, measured BEFORE the array below steps the same ledger.
+        The blob size is the ledger delta for a literal (its own reservation) and
+        the nested comprehension's recorded RESULT size
+        (`_last_compr_result_size`) for a comprehension, because the delta also
+        carries the nested iterables. `i` is the result blob's count word
+        (elements appended so far), the destination is
+        `array_base + i * blob_size`, and the copy is `memcpy`, which returns the
+        destination in RAX for free. `before` is the ledger position as the
+        element's emission began, measured BEFORE the array below steps the same
+        ledger.
         """
         bytes_ = self._list_cursor - before
         if not bytes_ or cap <= 1:
             return
-        if not M.comprehension_element_is_flat_container(element):
+        if M.comprehension_element_is_flat_container(element):
+            blob_size = bytes_
+        elif M.comprehension_result_is_flat(element) \
+                and self._last_compr_result_size > 0:
+            blob_size = self._last_compr_result_size
+        else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
                 cap, bytes_))
-        array_off = self._reserve_blob(cap * bytes_,
+        array_off = self._reserve_blob(cap * blob_size,
                                        "comprehension element array")
         # count = result element count so far (= this iteration's ordinal).
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        # dest = array_base + count * bytes_
+        # dest = array_base + count * blob_size
         self._emit_blob_base(array_off, Reg.R11)
-        self._emit_mov_imm(Reg.RDI, bytes_)
+        self._emit_mov_imm(Reg.RDI, blob_size)
         self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
         self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
-        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
+        # memcpy(dest, src, blob_size): rdi=dest, rsi=src, rdx=n.
         self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
-        self._emit_mov_imm(Reg.RDX, bytes_)
+        self._emit_mov_imm(Reg.RDX, blob_size)
         self._emit_extern_call("memcpy")            # returns dest in RAX
 
     # ── how many times the code being emitted runs ────────────────────
