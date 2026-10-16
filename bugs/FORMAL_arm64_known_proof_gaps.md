@@ -1,5 +1,26 @@
 # FORMAL_arm64_known_proof_gaps: the arm64 examples whose proof is a documented gap
 
+**Re-measured 2026-10-12 (`work/formal306-docs`): the dec1 family is
+`fact`, `sum`, `sqsum` and `pow2` PASS with `count` the only one left, and the
+cause of the first three was NOT the obligation the census below records.**
+Every SP tracker in `formal/arm64_proof_gen.py` read an `ADD`/`SUB` immediate's
+`imm12` (bits 21-10) and dropped `sh` (bit 22), so the 128 KiB frame the codegen
+takes (`sub sp, sp, #32, lsl #12`, the only way A64 can encode 131072) was
+tracked as 32 bytes. The condition block's spill rewrite
+(`mem_read_two_writes_adj_uint`, not wrapped in `try`) then matched no store and
+the whole proof failed on a goal that was TRUE. `_addsub_imm_bytes` fixes the
+decoder and the seven tracker sites
+(`test_formal_call_proof_gen.py::TestTheFrameSizeAddSubImmediateIsShifted` pins
+it). Measured `python3 test_formal.py -j 1 fact sum sqsum pow2 count`:
+**PASS 4, KNOWN-GAP 1, FAIL 0**, and `pow2`'s `EXPECTED_FAILURES` entry was
+removed with the fix. `count`'s remaining diagnostics are the return-frame read
+`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` owns plus the
+stack-floor-word branch `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_
+admits_over_a_false_claim.md` owns — the decoder fix does not touch either.
+
+So the rows below that name `fact`, `sqsum` and `sum` as undeclared FAILs are
+now stale: those three PASS. Everything else in the census stands.
+
 **Status: the census below is CORRECTED (2026-10-04, `formal28-2`) by measurement
 on this tree, one example at a time, and the correction is in three directions
 rather than one. `EXPECTED_FAILURES` is still the authority — it is what
