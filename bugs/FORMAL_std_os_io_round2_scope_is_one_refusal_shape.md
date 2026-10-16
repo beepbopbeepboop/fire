@@ -61,8 +61,8 @@ import that is the *only statement* of an indented block) is **not** a parse
 error in this dialect, and the shape it did not name (a parenthesised import
 spanning lines) is. One repair covers both, and with it the walk measured **five
 links nobody had measured** instead of three (§0.2). §6 items 1 and 2 are
-unchanged and item 4 was filed by its own branch
-(`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`, `formal21-1`), so the two
+unchanged and item 4 — a dotted import binding a nearer root's leaf — was filed
+by its own branch (`formal21-1`, fixed by `a4cdab9a`), so the two
 features §2 names are still `formal19-1`'s and `formal16-2`'s and the per-file
 table is still §2's. §0.2 is what changed, and §0.1 (item 1) before it.
 
@@ -71,13 +71,13 @@ constants-only refusal was false in both of its clauses and no longer is, with
 cases on both architectures. The FEATURE it was standing in for is still
 `formal16-2`'s and still unlanded, so this document still has no fix of its own
 in it; what landed is the sentence.** §0.1 below is item 1, item 3 is unchanged,
-and item 4 was filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_
-nearer_leaf`, `formal21-1`).
+and item 4 (a dotted import binding a nearer root's leaf) was filed by its own
+branch (`formal21-1`, fixed by `a4cdab9a`).
 
 **Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
 can now rank this scope's causes, and the table it prints is measured rather
 than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
-filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`,
+filed by its own branch (a dotted import binding a nearer root's leaf,
 `formal21-1`), so **this document has nothing left of its own**: the two
 features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
 §2's, and the only thing this document asked for was an instrument that can
