@@ -179,10 +179,9 @@ puts the address in the chain, and the frame's deepest slot is what
 
 **Why it is cheap here and is not behind the build wall.** §"What this costs the
 fix" offers `FrameBound`'s sibling in `lib/Refine.lean`, and that is the right
-place for the MEMORY form
-(`FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` §"The
-next step: a MEMORY hypothesis, not a constant" is the same fact and wants the
-same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
+place for the MEMORY form (the unconstrained-`st.mem` fact that a
+`runs-cbz-condition` leaf admitting over `mem_read_u64 (frame stores) A = 0`
+records is the same fact and wants the same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
 tree at `5e547907`, same `ensure_library` call, same minute, against
 `lib/ProofLib.lean`'s `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at the
 tree's own `-j 4`; method and control in

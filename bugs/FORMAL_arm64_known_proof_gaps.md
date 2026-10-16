@@ -36,8 +36,8 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `wge` | known gap | **KNOWN-GAP** (declared) | same |
 | `subscript_var` | known gap | **KNOWN-GAP** (declared) | `FORMAL_wide_receiver_by_reference.md` |
 | `count` | one of the five UNEXPECTED | **KNOWN-GAP** — it is in `EXPECTED_FAILURES` now, with the return-frame read as its reason | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` |
-| `pow2` | one of the five UNEXPECTED | **KNOWN-GAP** for the same reason (measured in `EXPECTED_FAILURES`; not re-run) | same |
-| `fact`, `sqsum`, `sum` | the other three of the five | **FAIL** — one at a time, all three with the identical obligation, a read of the stack-floor word at `4294968008` | same |
+| `pow2` | one of the five UNEXPECTED | **PASS** (2026-10-12 — the `sh`-bit SP-tracking fix; see the Status above) | — |
+| `fact`, `sqsum`, `sum` | the other three of the five | **PASS** (2026-10-12 — the same fix) | — |
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
 | `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
 | `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
@@ -46,16 +46,15 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 **The three corrections, so a reader does not have to diff the table:**
 
 1. **"There are FIVE MORE red examples … so `test_formal.py` should be
-   reporting five unexpected failures" is no longer true, and the reason is not
-   that they got fixed.** `count` and `pow2` are DECLARED in `EXPECTED_FAILURES`
-   with the return-frame read as their reason, so the harness reports them as
-   gaps; `fact`, `sqsum` and `sum` still fail with the identical obligation and
-   are still undeclared. The FAMILY is unchanged — `count` was re-run here and
-   comes back with the same stack-floor-word read — and the census moved because
-   the marker table moved. That is worth stating because a declared failure is
-   not a fixed one, and the doc's own argument (a gap nobody revisits is a bug
-   quietly reintroduced) applies to `EXPECTED_FAILURES` exactly as it does to a
-   bug doc.
+   reporting five unexpected failures" is no longer true, and now the reason IS
+   that four of them were fixed.** `count` is DECLARED in `EXPECTED_FAILURES`
+   with the return-frame read as its reason and the harness reports it as a gap;
+   `pow2`, `fact`, `sqsum` and `sum` PASS as of 2026-10-12 on the `sh`-bit
+   SP-tracking fix the Status above records, so `test_formal.py` reports no
+   unexpected failure in this family at all. The doc's own argument (a gap
+   nobody revisits is a bug quietly reintroduced) is what kept the four visible
+   through the marker churn, and it is why their rows are updated here rather
+   than left to read as open.
 2. **`sum_range` does not pass with two `sorry`s.** It FAILS, with the
    `arm64_go_exit … = none` disjunct unproved — and it fails the same way with no
    change of mine applied, so this is not a regression from anything on this
@@ -87,10 +86,10 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 
 **What is still true of everything below, and is why the rest of the file is
 kept as it is:** the four declared gaps are each owned by another document or by
-this one, and the three undeclared `dec1` failures are one fact owned by
-`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`. The narrow-typed failures are
-no longer among them. Nothing in this file is a fix and nothing in it should be
-worked from as one.
+this one, and the one remaining `dec1` example (`count`) is a fact owned by
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` — the other four PASS as of
+2026-10-12. The narrow-typed failures are no longer among them. Nothing in this
+file is a fix and nothing in it should be worked from as one.
 
 
 ## The count, corrected (2026-10-03)
@@ -225,7 +224,7 @@ distinct problems, and the counts should not be conflated:
 | | count | owner |
 |---|---|---|
 | declared in `EXPECTED_FAILURES` | **7** | read on this tree 2026-10-04: `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count`, `pow2` |
-| **UNEXPECTED failures among the 13 stems measured here** | **5** | `fact`, `sqsum`, `sum` are one fact (`FORMAL_arm64_x30_is_reloaded_from_the_frame.md`); `sum_range` is another (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
+| **UNEXPECTED failures among the 13 stems measured here** | **0** | was `5`; `pow2`, `fact`, `sqsum` and `sum` PASS as of 2026-10-12 (the `sh`-bit SP-tracking fix), and `sum_range` is a `KNOWN-GAP`/refusal rather than a FAIL (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
 | **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **0** | was `2` (`sgt8`, `sle8`); both PASS as of 2026-10-05 and `ug8` with them, so the row is empty rather than moved |
 | sorries in passing proofs | **0 measured**, and the "2 in `sum_range`" row is superseded — `sum_range` does not pass at all, on this tree or on master | — |
 

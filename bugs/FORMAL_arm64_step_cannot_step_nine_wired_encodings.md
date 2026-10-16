@@ -223,10 +223,11 @@ peel in `lib/Refine.lean` is affordable to a bounded worker and something in
 `FORMAL arm64 smulh has no model arm`, `FORMAL_arm64_ieee754_has_no_step_
 arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
 and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
-`ProofLib`.  `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_
-false_claim.md` and `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` are
-on the cheap side of the line and are gated on a design decision rather than on
-memory.
+`ProofLib`.  `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` is on the
+cheap side of the line and is gated on a design decision rather than on memory.
+The CBZ-leaf admission that used to sit beside it is fixed: the SP trackers
+dropped the `sh` bit of the 128 KiB frame, in `formal/arm64_proof_gen.py`'s
+`_addsub_imm_bytes`.
 
 The probe is verified to be a real elaboration and not a cache replay: the same
 script with `this_is_not_a_definition : Nonexistent.Nope := 1` added to the
