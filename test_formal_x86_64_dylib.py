@@ -1078,6 +1078,8 @@ TESTS = [
      test_an_imported_hostmod_dylib_answers_on_x86_64),
     ("an x86-64 dylib with an extern call links and runs",
      test_module_dylib_with_an_extern_call_loads_into_a_program),
+    ("a program importing os.path.getsize matches CPython",
+     test_a_program_importing_os_path_getsize_matches_cpython),
     ("the x86-64 dylib exports its module API",
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",

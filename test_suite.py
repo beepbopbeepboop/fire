@@ -2109,7 +2109,10 @@ STALE_PER_CHILD_BUDGETS = {
                                       # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 3,
+    'test_formal_x86_64_dylib.py': 4,  # +1 on 2026-10-08: the os.path.getsize
+                                       # hostmod-dylib row's build of the reduced
+                                       # program, the same 600 s wall the file's
+                                       # other three build sites carry
     'test_general_mutable_closure_capture.py': 2,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
