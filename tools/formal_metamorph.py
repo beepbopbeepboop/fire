@@ -66,10 +66,10 @@ That is a deliberate choice with two costs and three advantages, and it is worth
 stating because a reader will wonder:
 
   * COST: comments and blank lines do not survive, so a finding's twin does not
-    read like the program it came from, and the 8 examples of
-    `formal/examples` that spell Mojo-only syntax (`var`, `fn`) cannot be
-    transformed at all — they are reported as `skipped_examples`, never
-    silently dropped.
+    read like the program it came from, and the examples of `formal/examples`
+    that spell Mojo-only syntax (`var`, `fn`, `struct`) are translated by the
+    normaliser before a transform runs — a file no rule can rescue is reported
+    as `skipped_examples`, never silently dropped.
   * ADVANTAGE: the tree being rewritten is the one CPython will execute, so the
     oracle's reading of `T` is derived from the SAME parse rather than from a
     second implementation's, and the two cannot disagree about what `T` says. A
@@ -2453,13 +2453,16 @@ TRANSFORM_WHY = {
 #                     all four of its methods `fn` and builds and answers `4` on
 #                     both backends, while 41 of the 52 examples spell `def`.
 #
-# NOT here, and said rather than guessed: `struct Point:`.  A Python `class`
-# body of bare annotations has no attributes, so `p.get_y()` reads a name that
-# was never assigned while the struct's field reads `0` — a real disagreement
-# with CPython, produced by the translation rather than found by it.  Giving
-# each field an initialiser is a judgement about what the struct's fields are
-# worth, which is not a removal of syntax, so `wide_recv.mojo` stays unmeasured
-# and `example_program` names the construct it could not remove.
+# HERE, as a DECISION rather than as a removal: `struct Point:`.  A Python
+# `class` of bare annotations has no attributes, so `p.get_y()` would read a name
+# that was never assigned while the struct's field reads `0` — a disagreement
+# with CPython the translation would manufacture rather than find.  The decision
+# (§6 item 1 of `bugs/FORMAL_metamorphic_ledger.md`) is to translate exactly the
+# struct whose every field is declared an INTEGER type, giving each field the
+# initialiser this path's own semantics already give it (a zero), and to leave
+# every other struct unmeasured naming the construct — so `wide_recv.mojo`,
+# `struct_point.mojo` and `struct_method.mojo` are driven, and the coverage
+# check asks WHY a file is unmeasured rather than assuming the corpus is lexed.
 
 #: `(name, pattern)`, applied in this order.  `re.MULTILINE` and a leading
 #: `^[ \t]*` rather than a word-boundary match, because the point is to match a
@@ -2517,6 +2520,87 @@ def _blocking_keyword(text):
     return ""
 
 
+#: A `struct` field whose DECLARED type zeroes to the integer `0`.  This path
+#: zero-initialises a struct's fields at construction — `Point()` reads `0` from
+#: every field before any store is emitted, measured on both architectures — so a
+#: field declared one of these translates to `self.<field> = 0` in the Python
+#: class the normaliser builds.  Any OTHER field type is a value this tool will
+#: not guess at, and a file that declares one stays unmeasured naming `struct`
+#: rather than being translated with an invented initialiser.  This is the
+#: DECISION §6 item 1 of `bugs/FORMAL_metamorphic_ledger.md` asked for, and this
+#: table is where it is spelled.
+_STRUCT_ZERO_TYPE_RE = re.compile(r"U?Int(?:8|16|32|64)?\Z")
+_STRUCT_HEAD_RE = re.compile(r"struct\s+([A-Za-z_]\w*)\s*:\s*$")
+_STRUCT_FIELD_RE = re.compile(r"([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)\s*$")
+
+
+def _translate_structs(text):
+    """`(text, n)` with each top-level `struct Name:` a Python `class Name:`.
+
+    A `struct`'s translation is a DECISION rather than a removal of syntax: a
+    Python `class` of bare annotations has no attributes, so `p.get_y()` would
+    read a name that was never assigned while the struct's field reads `0`, which
+    is a disagreement with CPython that the translation would MANUFACTURE rather
+    than find.  So the rule is scoped to the case where the decision is forced —
+    every field is declared an INTEGER type (its zero on this path is `0`) and no
+    explicit `__init__` is present (a constructor body is the construction, and
+    this tool does not model it) — and each field becomes a `self.<field> = 0` in
+    a synthesised `__init__`.  The `_normalisation` step of every later pair
+    builds the struct file AS WRITTEN and compares it against this twin, so the
+    decision is checked per file rather than argued.
+
+    `n` is how many structs were translated, so the caller reports the rewrite the
+    way it reports `var`/`fn`.  A struct this rule does not decide is left
+    UNCHANGED, so the file is still reported with `struct` named.
+    """
+    lines = text.splitlines(keepends=True)
+    out, i, n = [], 0, 0
+    while i < len(lines):
+        line = lines[i]
+        head = _STRUCT_HEAD_RE.match(line.rstrip("\n"))
+        if not head:
+            out.append(line)
+            i += 1
+            continue
+        j, body = i + 1, []
+        while j < len(lines):
+            s = lines[j]
+            if s.strip() and len(s) - len(s.lstrip()) == 0:
+                break
+            body.append(s)
+            j += 1
+        child = next((len(s) - len(s.lstrip()) for s in body if s.strip()), None)
+        fields, ok = [], True
+        if child is not None:
+            for s in body:
+                if not s.strip() or len(s) - len(s.lstrip()) != child:
+                    continue
+                st = s.strip()
+                if st.startswith("def "):
+                    if "__init__" in st:
+                        ok = False
+                    continue
+                m = _STRUCT_FIELD_RE.match(st)
+                if m:
+                    if not _STRUCT_ZERO_TYPE_RE.match(m.group(2)):
+                        ok = False
+                    fields.append(m.group(1))
+        if not ok:
+            out.append(line)
+            i += 1
+            continue
+        pad = " " * (child if child is not None else 4)
+        out.append("class " + head.group(1) + ":\n")
+        if fields:
+            out.append(f"{pad}def __init__(self):\n")
+            for f in fields:
+                out.append(f"{pad}{pad}self.{f} = 0\n")
+        out.extend(body)
+        i = j
+        n += 1
+    return "".join(out), n
+
+
 def normalise_mojo(source):
     """`(text, notes, why)` for `source` in a dialect CPython's parser accepts.
 
@@ -2547,11 +2631,14 @@ def normalise_mojo(source):
     if n:
         notes.append(f"proof decorators x{n}")
     text = "".join(lines)
-    for name, rx in (("var declaration", VAR_DECL_RE),
-                     ("fn declaration", FN_DECL_RE)):
-        text, k = rx.subn(r"\1", text)
+    for name, rx, repl in (("var declaration", VAR_DECL_RE, r"\1"),
+                           ("fn declaration", FN_DECL_RE, r"\1def ")):
+        text, k = rx.subn(repl, text)
         if k:
             notes.append(f"{name} x{k}")
+    text, ns = _translate_structs(text)
+    if ns:
+        notes.append(f"struct translation x{ns}")
     try:
         ast.parse(text)
     except (SyntaxError, ValueError) as e:
