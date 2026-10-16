@@ -730,6 +730,133 @@ CASES = [
      "    print(\"v:\", v)\n"
      "    return 0\n",
      "v: 5\n"),
+    # ── a comprehension whose ELEMENT builds a container ──
+    #
+    # Every row here used to answer CPython's number times THREE, or times the
+    # last iteration: the element site is reserved ONCE, so every iteration of
+    # the generator overwrote one blob and the append copied one ADDRESS, and
+    # every element of the result was the same container holding the LAST
+    # iteration's contents.  Exit 0, nothing on stderr, and a number no reader
+    # could tell from a right one.
+    #
+    # The measure is a SUM of `v[0]` rather than a print of it, and that is the
+    # load-bearing choice: three copies of one container and three distinct
+    # containers have the same COUNT, so a suite that measured `len` would not
+    # have seen this at all.
+    ("a_comprehension_whose_element_is_a_list_display_gives_each_one",
+     "def main(n):\n"
+     "    var ys = [10, 20, 30]\n"
+     "    var vs = [[y] for y in ys]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
+    # A TUPLE display, because a fix scoped to `F.ListExpr` alone would leave it:
+    # a tuple display is not a list node and it aliased exactly the same way.
+    ("a_comprehension_whose_element_is_a_tuple_display_gives_each_one",
+     "def main(n):\n"
+     "    var ys = [10, 20, 30]\n"
+     "    var vs = [(y, y + 1) for y in ys]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[1]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     "n=3 s=63"),
+    # A NESTED comprehension as the element, which is the shape the whole bug
+    # report was written about and the one where "it is materialised once, at
+    # the element site" is most obviously true: the inner comprehension's blob
+    # is a site of its own, inside the outer generator's loop.
+    ("a_comprehension_whose_element_is_a_comprehension_gives_each_one",
+     "def main(n):\n"
+     "    var ys = [10, 20, 30]\n"
+     "    var vs = [[x + y for x in [1, 2]] for y in ys]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     "n=3 s=63"),
+    # A CALL that returns a container, which is the same per-site aliasing by a
+    # different mechanism: `container_returned_blob_sites` parks the callee's
+    # block at the CALL's own site, so one block is rewritten per iteration and
+    # the append copies one address.  It is in this list because the fix's rule
+    # is "did the element reserve anything here", and a returned block does not
+    # move the blob cursor — so a rule that only watched the cursor would have
+    # left this row wrong while fixing the four above it.
+    ("a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_one",
+     "def mk(n):\n"
+     "    return [n]\n"
+     "\n"
+     "def main(n):\n"
+     "    var ys = [10, 20, 30]\n"
+     "    var vs = [mk(y) for y in ys]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
+    # A CONCAT whose operands are displays.  Its result blob holds their WORDS
+    # and not their addresses, so a word copy of it is the whole of the fix —
+    # which is why this shape is a row and not a refusal, and why
+    # `model.comprehension_element_borrowes_inner_container` asks about element
+    # positions rather than about operands.
+    ("a_comprehension_whose_element_is_a_concat_of_displays_gives_each_one",
+     "def main(n):\n"
+     "    var ys = [10, 20, 30]\n"
+     "    var vs = [[0] + [y] for y in ys]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[1]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     "n=3 s=60"),
+    # THE DIRECTION THAT MUST NOT CHANGE, and the row that says so: a bare NAME
+    # as the element is three references to ONE list in CPython, so aliasing it
+    # is the right answer and a per-iteration copy would be the bug in the other
+    # direction.  `is` is this path's unboxed integer equality, so it reads the
+    # two addresses — which is the observation that separates the two rules
+    # rather than a sum that would agree either way.
+    ("a_comprehension_whose_element_is_a_bare_name_still_aliases_it",
+     "def main(n):\n"
+     "    var one = [7]\n"
+     "    var vs = [one for y in range(3)]\n"
+     "    printf(\"same=%d\", 1 if vs[0] is vs[1] else 0)\n"
+     "    return 0\n",
+     "same=1"),
+    # The row that says the two backends SIZE ONE COMPREHENSION IDENTICALLY,
+    # which `_compr_cap`'s own docstring claimed and which was false: x86-64's
+    # reaches its bound through `_blob_est`, which had no `range` arm at all, so
+    # every `range` iterable was `BLOB_ESTIMATE_FALLBACK` there and arm64 read
+    # the literal. Measured on this source before the fix: arm64 reserved a
+    # 20-element result and x86-64 a 64-element one, for the same program — and
+    # because the per-iteration element copy (the row group above) is
+    # `cap * span`, the 3.2x over-estimate was the difference between answering
+    # and REFUSING on x86-64's 16 KiB blob region:
+    #
+    #     build: a comprehension's own copy of its element does not fit in the
+    #     frame: it needs 35328 bytes and this function has 15144 left
+    #
+    # It is pinned as an ORACLE row rather than as a reservation number because
+    # a reservation is not observable at run time and this difference IS: the
+    # frame runs out.
+    ("a_comprehension_over_a_range_iterable_is_answered_on_both_architectures",
+     "def main(n):\n"
+     "    var vs = [[j + i for j in range(3)] for i in range(20)]\n"
+     "    var s = 0\n"
+     "    for v in vs:\n"
+     "        s = s + v[0]\n"
+     "    printf(\"n=%d s=%d\", len(vs), s)\n"
+     "    return 0\n",
+     # The inner generator's target is `j`, NOT `i`: with `i` shadowed the
+     # element does not depend on the outer loop variable, the shared blob
+     # happens to hold the right value, and the row would pass with the
+     # aliasing defect in place — which is the coincidence control this
+     # document's own §1 exists to warn about.
+     "n=20 s=190"),
 ]
 
 # ── the rule the return-less refusal is decided by, asked directly ──

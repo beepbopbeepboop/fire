@@ -6220,6 +6220,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.Comprehension):
             return self._compr_cap(e)
         if isinstance(e, F.CallExpr):
+            # `range` is the ONE call with a length this path can read off the
+            # header, and reading it is what makes `_compr_cap` size
+            # `[.. for i in range(20)]` the same 20 elements arm64's does —
+            # which `_compr_cap`'s own docstring already claimed and which was
+            # false: this arm did not exist, so every `range` iterable here was
+            # `BLOB_ESTIMATE_FALLBACK` and x86-64 reserved up to 64x what
+            # arm64 reserved for the same source. Through `_range_info`, which
+            # is the one normaliser for the three spellings, so the
+            # one-argument `range(3)` — which is how almost every `range` in
+            # this repository and the stdlib is written — is not the
+            # no-bound answer it used to be. arm64's twin is the same four
+            # lines over the same two shared functions.
+            if isinstance(e.func, F.IdentExpr) and e.func.name == "range":
+                si, ti, pi = _range_info(list(e.args))
+                bound = M.loop_trip_count(self._static_int(si),
+                                          self._static_int(ti),
+                                          self._static_int(pi))
+                return bound if bound is not None else M.BLOB_ESTIMATE_FALLBACK
             return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.BinaryOp):
             if e.op in ("+", "|"):
@@ -9427,8 +9445,101 @@ preference.
         finally:
             self._loops.pop()
 
-    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+    def _emit_compr_element(self, element, cap: int):
+        """RAX = the element's value, and `(base, span)` when it needs a COPY.
+
+        The x86-64 twin of arm64's `_emit_compr_element`, over the same two
+        shared decisions (`model.comprehension_element_borrowes_inner_container`
+        for the refusal and the frame ledger for the span) and the same
+        `container_returned_blob_sites` blocks, so one source decides what is
+        copied on both machines rather than two emitters each answering.
+
+        THE element site is reserved ONCE, at the element's own place in the
+        source, so a container the element BUILDS is rewritten in place on every
+        iteration of the generator — and the append copies the ADDRESS, which is
+        the same address every time. Every element of the result is then one
+        container holding the LAST iteration's contents:
+        `for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]` answered 93
+        where CPython answers 63, on both architectures, with exit 0 and nothing
+        on stderr.
+
+        **So the question is not "is the element a container" but "did the
+        element reserve anything here"**, and the frame ledger already answers
+        it: `_list_cursor` moves only when something was reserved, and a name, an
+        arithmetic expression and the generator's own target all reserve nothing.
+        That distinction is the language's, not a convenience: `[one for y in
+        ys]` is three references to ONE list in CPython too, so aliasing a name's
+        container is right and only a container the element BUILDS is the bug.
+        """
+        if M.comprehension_element_borrowes_inner_container(element):
+            raise CodegenError(M.comprehension_element_shared_inner_message(element))
+        before = self._list_cursor
+        self._emit_expr(element)
+        # A container the element BUILDS moved the blob cursor; one a CALL
+        # handed back did not, because `container_returned_blob_sites` parks
+        # those blocks above the blob region up front. Same per-site aliasing
+        # (`[mk(y) for y in ys]` answered 90 where CPython answers 60), so the
+        # span is the sum of the two and RAX is the block either way.
+        span = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            span += ret[0]
+        if not span:
+            return None
+        return (self._reserve_blob(span * cap, "a comprehension's own copy of "
+                                   "its element"), span)
+
+    def _emit_compr_element_copy(self, base: int, nbytes: int) -> None:
+        """RAX = THIS iteration's own copy of the element blob, in slot R10.
+
+        The x86-64 twin of arm64's `_emit_compr_element_copy`. R10 is the result
+        blob's count — the index the append is about to write at — so the copy
+        lands in the slot the append fills, and the capacity guard that ran
+        before this has already answered an out-of-range iteration with
+        `exit(1)` rather than with a write one slot past the reservation.
+
+        The copy is over the element's whole RESERVED SPAN, not over its blob
+        alone: a nested comprehension also reserves its iterable and a display's
+        capacity scan can enlarge its own, so the element's blob is only ever a
+        PART of what `span` words. The count word at a blob's head is what every
+        reader goes by, so the words past the live elements are never read.
+
+        R10 (count), RDI (the destination address `_emit_elem_addr` already
+        built) and RSP are live across this, and R12-R15 are callee-saved and
+        hold locals, so the loop's own registers are R8/R9/RCX/RSI/RDX/RAX/R11.
+        """
+        nwords = nbytes // 8
+        self._emit_mov_imm(Reg.R9, nbytes)                # R9 = the span
+        self._emit_blob_base(base, Reg.R11)               # R11 = copies base
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.R11))
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R10))
+        self.asm.emit(encode_imul_r64_r64(Reg.R11, Reg.R9))   # R11 = count*span
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.RSI))   # R11 = this slot
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RAX))    # R8 = the element
+        self.asm.emit(encode_mov_r64_imm32(Reg.R9, 0))        # R9 = i = 0
+        self._emit_mov_imm(Reg.RCX, nwords)
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_cecp{wid}"
+        self.asm.label(loop)
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.RSI, header=0, scale=3)
+        self._emit_elem_addr(Reg.R8, Reg.R9, Reg.RDX, header=0, scale=3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.RCX))
+        self._emit_jcc(COND_B, loop)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))   # RAX = the copy
+
+    def _compr_append_elem(self, res_offset: int, cap: int,
+                           copies=None) -> None:
         """Append RAX to the list result; exit(1) past the reserved capacity.
+
+        `copies` is `_emit_compr_element`'s `(base, span)` for an element that
+        reserved a container of its own; `None` for every other caller and for
+        every element that reserved nothing, which is what keeps `[one for y in
+        ys]` aliasing, as CPython does.
 
         Registers: R11 the result blob, R10 the count, RDI the element's
         address. RDI rather than R11 because `_emit_elem_addr` builds the
@@ -9452,17 +9563,27 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI)
         self._pop_slot(Reg.RAX)
+        if copies is not None:
+            self._emit_compr_element_copy(*copies)
         self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
 
-    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+    def _compr_append_pair(self, res_offset: int, cap: int,
+                           key_copies=None, val_copies=None) -> None:
         """Append a (key, value) pair to a dict result.
 
         The caller leaves the KEY in a pushed slot and the VALUE in RAX, so
         the VALUE is pushed here to complete the pair; the pop order below
-        unwinds it in the opposite order."""
+        unwinds it in the opposite order.
+
+        `key_copies`/`val_copies` are `_emit_compr_element`'s `(base, span)` for
+        a key or a value that reserved a container of its own; a dict
+        comprehension's key and value are two independent element positions and
+        each gets its own region. Both copies are emitted after BOTH pops, so
+        each reads the word its own pop just put in RAX.
+        """
         self._push_slot(Reg.RAX)                     # VALUE above KEY
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # npairs
@@ -9480,9 +9601,19 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI, header=8, scale=4)
         self._pop_slot(Reg.R8)                       # VALUE
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
+        if val_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*val_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
         self._pop_slot(Reg.R8)                       # KEY
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        if key_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*key_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))

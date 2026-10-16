@@ -12655,6 +12655,117 @@ def list_literal_reserved_slots(literal) -> int:
     return len(literal.elements or [])
 
 
+#: Node kinds whose blob is a `[count][element…]` this expression BUILDS at its
+#: own site, as opposed to a name it reads or a subscript that borrows one. A
+#: comprehension's ELEMENT, evaluated inside the generator loop, is therefore
+#: re-materialised into the SAME frame words on every iteration — which is what
+#: `comprehension_element_owns_container` is asked about.
+_OWNS_ITS_BLOB = (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
+                  F.Comprehension, F.SliceExpr)
+
+
+def _materialises_a_container(node) -> bool:
+    """True when `node` builds a container blob at the site it is written at.
+
+    Deliberately excludes a bare NAME, and the exclusion is the language rather
+    than a narrowing: `[one for y in ys]` binds the same list object to every
+    element in CPython too, so aliasing it is the RIGHT answer. It also excludes
+    `or`/`and`, which return the deciding operand rather than a new container
+    (`_emit_and_or` in each backend), while `+`, `|` and `*` build one and are
+    included.
+    """
+    if isinstance(node, _OWNS_ITS_BLOB):
+        return True
+    if isinstance(node, F.BinaryOp) and node.op in ("+", "|", "*"):
+        return (_materialises_a_container(node.left)
+                or _materialises_a_container(node.right))
+    return False
+
+
+def comprehension_element_owns_container(node) -> bool:
+    """True when a comprehension's ELEMENT builds a container of its own.
+
+    **Asked of the ELEMENT expression, not of the comprehension** — see
+    `comprehension_element_borrowes_inner_container`, whose subject is the same
+    expression, and the two are different questions about it.
+
+    The shape `[[y] for y in ys]` has and `[x + y for x in ys]` does not, and the
+    difference is the whole of a defect this path used to answer with a wrong
+    number rather than with a refusal: the element's blob is reserved ONCE, at
+    the element's own site, so every iteration of the generator OVERWRITES it and
+    the append copies the ADDRESS — which means every element of the result is
+    the same container and holds the LAST iteration's contents. Measured on both
+    architectures, `s = 0; for v in [[x + y for x in [1, 2]] for y in [10, 20,
+    30]]: s = s + v[0]` answers 93 where CPython answers 63 (93 = 31 x 3).
+
+    **A bare name is excluded and must stay excluded.** `[one for y in ys]` is
+    three references to ONE list in CPython, so a per-iteration copy of it would
+    be the bug in the other direction. A CALL that returns a container is
+    included, and it needs no separate rule: the caller reserves the callee's
+    block at the call's own site (`container_returned_blob_sites`), so
+    `[mk(y) for y in ys]` rewrites one block per iteration exactly as a display
+    does.
+    """
+    return _materialises_a_container(node)
+
+
+def comprehension_element_borrowes_inner_container(node) -> bool:
+    """True when the blob `node` BUILDS holds the address of a container `node`
+    ALSO builds, so the two are one object across evaluations.
+
+    Asked of a comprehension's ELEMENT expression — the blob that gets the
+    per-iteration copy — and **one level, not a descent**, because the question
+    is only ever about that blob's own words. Copying them gives each iteration
+    its own copy of this container, and every word in that copy is right, except
+    a word that is the ADDRESS of a container the same expression rebuilt: the
+    copy is right and the thing it points at is still the one site every
+    iteration shares.
+
+    `[[[i] for i in [y]] for y in [10, 20, 30]]` is the smallest program that
+    shows it. The element is a comprehension, its result blob holds one word —
+    the address of the `[i]` blob the same element expression rebuilds each time
+    it runs — and the sum of `v[0][0]` comes back 90 where CPython answers 60.
+
+    Each `False` below is its own reason rather than a gap: a concat, a
+    repetition and a slice put their operands' WORDS in the result (a slice's
+    source is not rebuilt per iteration), and a generator's ITERABLE is not an
+    element position at all — which is why `[[x + y for x in [1, 2]] for y in ys]`,
+    whose inner comprehension iterates a list display, is `False` and is
+    answered by the copy.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return any(_materialises_a_container(el) for el in (node.elements or []))
+    if isinstance(node, F.DictExpr):
+        return any(_materialises_a_container(k) or _materialises_a_container(v)
+                   for k, v in (node.pairs or []))
+    if isinstance(node, F.Comprehension):
+        return (_materialises_a_container(node.element)
+                or _materialises_a_container(node.key))
+    return False
+
+
+def comprehension_element_shared_inner_message(node) -> str:
+    """Why a comprehension whose element holds a container of its own is refused.
+
+    One sentence for both backends because the shape is one shape: it is decided
+    here, from the source, and neither emitter gets to answer it differently.
+    """
+    return (
+        f"formal: this comprehension's element builds a container INSIDE "
+        f"another container, so the outer one holds the address of the inner one "
+        f"rather than its words, and both are rebuilt in place on every "
+        f"iteration. A per-iteration copy of the outer blob gives every element "
+        f"its own outer container and leaves the inner one shared, which is the "
+        f"same aliasing one level down: `[[[i] for i in [y]] for y in [10, 20, "
+        f"30]]` answers 90 where CPython answers 60. Copying it properly means "
+        f"relocating the inner addresses as well, and this path has no way to "
+        f"know which words of a blob are addresses. Refused rather than answered "
+        f"with a number that is wrong; a comprehension whose element is a single "
+        f"container — `[[y] for y in ys]` — is answered, because a word copy of "
+        f"that one is the whole of it."
+    )
+
+
 def blob_reserved_slots(node) -> int:
     """How many element slots a blob-constructing NODE's own construction takes.
 
@@ -27352,6 +27463,25 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # pair, and a constructor's having to build a counted region. Every consumer
 # reads the decision from `BYTE_BLOB_CTORS` (the widths) or from
 # `empty_blob_constructor` (the routing), never from this tuple.
+#
+# **`StaticString` is here for a THIRD reason, and it is the one that costs a
+# reader an hour.** It is a language builtin, so it is in NO table of DECLARED
+# types: not in any `structs_by_name` this build compiles, and not among the 220
+# `formal/imports.py::imported_struct_defs` reaches from `std/sys/arg.mojo`
+# (measured on that file). And `type_constructor_kind`'s documented `None` means
+# "not a type constructor at all", so a bracket ELEMENT spelled `StaticString`
+# classified as a bare name this image cannot resolve — which is false about the
+# language. It IS a type, and it is unrepresentable here for the ordinary reason
+# (a compile-time string is not a `char *`, so one word does not carry it).
+#
+# Being in this tuple is what makes `Span[StaticString, ImmStaticOrigin]` —
+# `std/sys/arg.mojo:51`, one refusal byte-identical on both architectures — take
+# the MIXED branch of `_comptime_param_element_sentence`, which names `element
+# 2 `ImmStaticOrigin`` alone instead of leaving the reader to choose between two
+# candidates neither of which the build can resolve. A name missing from a table
+# of types reads as a fact about the target, and this one is a fact about the
+# table; `myinterpreter.py` already knows `StaticString` as a borrowed-string-view
+# type, so the two halves of this compiler disagreed about whether it is a type.
 BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 
 #: The IEEE float formats NARROWER than binary64, the fourth of the language's
@@ -27397,6 +27527,7 @@ NARROW_FLOAT_TYPE_NAMES = (
 UNREPRESENTABLE_TYPE_CTORS = (
     "Span", "Error", "SIMD", "SIMDVector", "List", "Dict", "Set", "Tuple",
     "Optional", "StringRef", "DType", "InlineArray", "Array", "StaticTuple",
+    "StaticString",
 ) + BYTE_BLOB_TYPE_CTORS + NARROW_FLOAT_TYPE_NAMES
 
 

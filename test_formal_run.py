@@ -13587,23 +13587,31 @@ SUBSCRIPT_CASES = [
     # problem" there would be a guess, so the sentence says the reader has two
     # to resolve instead — and this row exists to pin that it does NOT accuse
     # one of them, which is the direction that could produce a false claim.
+    #
+    # Both elements are `comptime` origin ALIASES, which is what makes them
+    # unresolvable rather than unlisted: they are the same shapes
+    # `std/sys/arg.mojo:51` has, in a spelling where NEITHER side is a type, so
+    # the all-names branch is still reachable and still pinned. It used to spell
+    # them `StaticString, ImmStaticOrigin`, and `StaticString` is a language
+    # builtin that `UNREPRESENTABLE_TYPE_CTORS` now carries — so that spelling
+    # reaches the MIXED branch, which is the row three below.
     ("sub_multi_index_comptime_params_with_nothing_resolvable_says_so",
      "def pick[type: AnyType, origin: Int]() -> Int:\n"
      "    return 0\n\n"
      "def main(n):\n"
-     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    v = pick[ImmOrigin, ImmStaticOrigin]\n"
      "    return 0\n",
      "refuse:None of its 2 element(s) names something this image can resolve "
-     "to a declaration (StaticString, ImmStaticOrigin)", None),
+     "to a declaration (ImmOrigin, ImmStaticOrigin)", None),
     # …and that row's sentence now carries the SAME clause the mixed case does,
     # which is the point of the row: two unresolved names leave the reader with
     # two candidates and the actionable fact is that a bare name has two SHAPES
     # here, one of which is a `comptime` alias in a module this build cannot
-    # fold. It used to be named only in the mixed case, and this is the shape
-    # `std/sys/arg.mojo` actually gets — `StaticString` is in neither
+    # fold. It used to be named only in the mixed case, and that was the shape
+    # `std/sys/arg.mojo` actually got — `StaticString` was in neither
     # `type_constructor_kind`, nor `POINTER_TYPE_CTORS`, nor the struct table
     # this unit compiles, nor the 220 structs `formal/imports.py`'s
-    # `imported_struct_defs` reaches from that file, so the contrast never fires
+    # `imported_struct_defs` reaches from that file — so the contrast never fired
     # there and the reader was left to guess which element was the interesting
     # one. Pinned with the SPELLING as well as the clause, because the sentence
     # is what names the file and the module whose binding is the actual cause.
@@ -13611,10 +13619,32 @@ SUBSCRIPT_CASES = [
      "def pick[type: AnyType, origin: Int]() -> Int:\n"
      "    return 0\n\n"
      "def main(n):\n"
-     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    v = pick[ImmOrigin, ImmStaticOrigin]\n"
      "    return 0\n",
      "refuse:a `comptime` ALIAS whose initializer does not fold — measured on "
      "`std/sys/arg.mojo`'s `Span[StaticString, ImmStaticOrigin]`", None),
+    # …and the row that says the CULPRIT is now named for `arg.mojo`'s own
+    # spelling, which is what the two rows above could not reach.
+    # `StaticString` is a language builtin, so it is in no table of DECLARED
+    # types — not in any `structs_by_name` this build compiles and not among the
+    # 220 `imported_struct_defs` reaches from `arg.mojo` — and
+    # `type_constructor_kind`'s documented `None` means "not a type constructor
+    # at all", so the element classified as a bare name the build cannot resolve.
+    # That is false about the language: it IS a type, unrepresentable here for
+    # the ordinary reason. With it in `UNREPRESENTABLE_TYPE_CTORS` the bracket
+    # takes the MIXED branch, and the reader is told which of the two elements to
+    # go and look at instead of being handed two candidates neither of which the
+    # build can resolve. The needle is the CULPRIT SPELLING, because that is the
+    # whole difference from the all-names branch above.
+    ("sub_multi_index_comptime_params_names_the_culprit_when_a_builtin_type_is_spelled",
+     "def pick[type: AnyType, origin: Int]() -> Int:\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    v = pick[StaticString, ImmStaticOrigin]\n"
+     "    return 0\n",
+     "refuse:element 1 `StaticString` is a type this image knows; and element "
+     "2 `ImmStaticOrigin` is a bare name this image cannot resolve to a "
+     "declaration. That is where the missing word is.", None),
     # A BRACKETED type as an element — `List[Int]` — is a type, and it is the
     # case a first version of the classifier got wrong by asking
     # `subscript_is_a_type_application`, which answers about the WHOLE
