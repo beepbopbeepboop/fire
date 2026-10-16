@@ -1938,6 +1938,36 @@ def main():
     print(total(10, (4, 5)))
 """
 
+# The bare-literal half of the same construct — §2 row 4 of
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
+# the literal is what proves the value was substituted (a collapsed mangling, or
+# a body that read the parameter as a type, would print a different number). The
+# reference passes the value as an ordinary argument, exactly as
+# `VALUE_BRACKET_CPYTHON` does — the two programs are the same computation.
+VALUE_LITERAL_LIB = """\
+def plus[T: AnyType, n: Int](x: Int) -> Int:
+    return x + n
+"""
+
+VALUE_LITERAL_PROG = """\
+from vlib import plus
+
+def main():
+    print(plus[Int, 7](10))
+    print(plus[Int, 0](10))
+    print(plus[Int, -3](10))
+"""
+
+VALUE_LITERAL_CPYTHON = """\
+def plus(x, n):
+    return x + n
+def main():
+    print(plus(10, 7))
+    print(plus(10, 0))
+    print(plus(10, -3))
+"""
+
 
 # The STRUCT half of the same construct, read through `Self`. `Self.values` is
 # the parameter, and the only reason it works is that the template's OWN body is

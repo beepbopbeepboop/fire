@@ -675,6 +675,18 @@ def type_arg_text(expr, values=()) -> str:
     items are VALUES — from being read as a demand for `tile_2_3`; inside a
     display a literal is a value the argument NAMES, which is the whole
     difference between the two.
+
+    **A bare literal is nevertheless read as a VALUE argument when the same
+    bracket also names a TYPE, and `_bracket_type_args` is where that rule
+    lives.** `Tagged[Int, 0]()` on `struct Tagged[T, origin: Int]` is
+    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4:
+    the second element is a comptime VALUE and every other element is a type, so
+    the bracket is a cross-module instantiation rather than the all-values
+    comptime specialization `tile[2, 3]` is. The substitution itself already
+    works (`monomorphize_source` is a whole-word textual substitution and does
+    not read a parameter's kind); what was missing was this reader keeping the
+    literal, and the asymmetry is deliberate: a bracket that is ENTIRELY values
+    stays the local machinery's, and only a mixed one becomes a demand.
     """
     if isinstance(expr, F.IdentExpr):
         return "" if expr.name in (values or ()) else (expr.name or "")
@@ -1421,9 +1433,66 @@ def _bracket_type_args(sub, values=()) -> list:
     docstring warns against, and an unrecognised item here would be mangled into
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
+
+    **A bare literal survives only in a MIXED bracket.**  `type_arg_text` refuses
+    a top-level literal because a bracket of values alone is the comptime
+    specialization (`tile[2, 3]`) the local machinery already answers, and
+    demanding `tile_2_3` for it would publish a second symbol for a body the
+    build already emits.  But a bracket that writes a TYPE as well is not that
+    shape: `Tagged[Int, 0]` on `struct Tagged[T, origin: Int]` is a boundary
+    instantiation whose second element is a value, and before this rule it was
+    dropped here and then refused downstream as a "compile-time
+    explicit-parameter list" the model cannot bind.  So a literal (`0`, `-3`,
+    `"x"`, `True`, `None`) is read through `_value_literal_arg_text` only when at
+    least one OTHER item spelled a type; an all-values bracket is returned `[]`
+    exactly as before.  The substitution end needs no kind table:
+    `monomorphize_source` replaces the parameter's name whole-word whether the
+    parameter was declared a type or a value.
     """
-    spelled = [type_arg_text(i, values) for i in bracket_items(sub)]
-    return spelled if spelled and all(spelled) else []
+    items = bracket_items(sub)
+    spelled = [type_arg_text(i, values) for i in items]
+    if not spelled or all(spelled):
+        return spelled
+    if not any(spelled):
+        return []
+    mixed = []
+    for item, sp in zip(items, spelled):
+        if sp:
+            mixed.append(sp)
+            continue
+        value = _value_literal_arg_text(item)
+        if not value:
+            return []
+        mixed.append(value)
+    return mixed
+
+
+def _value_literal_arg_text(expr) -> str:
+    """The spelling of a bracket item that is a bare VALUE LITERAL, or "".
+
+    One reader for the mixed-bracket rule `_bracket_type_args` applies, and it
+    renders a literal the same way `_display_element_text` does — `repr` for a
+    string, the signed text for a `UnaryOp` — because the rendering is both the
+    mangled symbol fragment and the text substituted into the body, and the two
+    must be the same value the source wrote.  A name, a call, an arithmetic
+    expression and a display are all `""` here: a name is already read by
+    `type_arg_text`, a display has its own reader, and the rest have no closed
+    form to substitute.
+    """
+    if isinstance(expr, F.IntLiteral):
+        return str(expr.value)
+    if isinstance(expr, F.FloatLiteral):
+        return repr(expr.value)
+    if isinstance(expr, F.StringLiteral):
+        return repr(expr.value)
+    if isinstance(expr, F.BoolLiteral):
+        return "True" if expr.value else "False"
+    if isinstance(expr, F.NoneLiteral):
+        return "None"
+    if isinstance(expr, F.UnaryOp) and expr.op in ("-", "+"):
+        inner = _value_literal_arg_text(expr.operand)
+        return f"{expr.op}{inner}" if inner else ""
+    return ""
 
 
 def _bracket_all_args(sub, values=()) -> list:
