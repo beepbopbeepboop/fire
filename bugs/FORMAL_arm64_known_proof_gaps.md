@@ -60,8 +60,8 @@ it — the full sweep is a heavy run and belongs to the integrator):**
 | `pow2` | one of the five UNEXPECTED | **PASS** (2026-10-12 — the `sh`-bit SP-tracking fix; see the Status above) | — |
 | `fact`, `sqsum`, `sum` | the other three of the five | **PASS** (2026-10-12 — the same fix) | — |
 | `sum_range` | "2 sorries in a PASSING proof" | **FAIL** — `⊢ match arm64_go_exit … with | some s => s.x0 = mojo n | none => False`, and **it fails identically on `master`** (measured in a clean `git archive master` export with its own `ProofLib.olean`) | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — `loop_cond_flag`'s unsigned order |
-| `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem | **FIXED**, with its doc deleted |
-| `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling | **FIXED**, with its doc deleted |
+| `sgt8`, `sle8` | not mentioned at all | **PASS** (2026-10-05) — were **FAIL** on `⊢ t32s (t32u (t8s n)) = n`, an obligation FALSE over the theorem's unconstrained `n`; the range hypothesis the obligation needs is now on the theorem. **REGRESSED to FAIL on 2026-10-13** — see item 3 below and `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` | **FIXED then RED again**, its own doc deleted with the 2026-10-05 fix |
+| `ug8` | not mentioned at all | **PASS** (2026-10-05) — was **FAIL** on `⊢ t8u n = n`, the same defect on the UNSIGNED spelling. **REGRESSED to FAIL on 2026-10-13**, same cause | **FIXED then RED again**, same |
 | `floordiv`, `udivmod` | not mentioned at all | **KNOWN-GAP** (declared 2026-10-05) — were **FAIL**, and what they were failing at is **not a Lean residual goal**: `formal/arm64_proof_gen.py` raises out of `generate_arm64_proof`, so no `_proof.lean` is written at all. The cause is the universal theorem's call walk refusing two call sites of ONE callee (`//` and `%` each lower to a call to the same divide-and-correct helper) with a single halt address | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`; declared in `test_formal.py::EXPECTED_FAILURES`, and `test_formal_call_proof_gen.py::TestTheDivisionExamplesHaveNoProofToCheck` pins that no proof file exists and that both images still build and run |
 
 **The three corrections, so a reader does not have to diff the table:**
@@ -92,6 +92,27 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    `TestANarrowTypedParameterGetsItsRange` asserts the sorries count is 0
    precisely because "the obligation became admissible" is the failure mode a
    bound can hide).  The document that owned them is deleted with the fix.
+
+   **RE-MEASURED 2026-10-13 (`work/formal351-docs`): all three FAIL to typecheck
+   again, and the failure is a `rewrite` that no longer finds its pattern, not
+   the narrow-typed obligation this fix closed.** Each checked FRESH (a
+   cache-buster comment on the proof so `proof_verdict_key` misses and Lean
+   really runs), `ok=False cached=False sorries=0`, wrapped in an 8 GB memslot
+   reservation:
+
+       sgt8_proof.lean:4306  rw [mem_read_two_writes_adj_uint …] failed; ⊢ arm64_matches_condition 13
+       sle8_proof.lean:4306  the same;                                       ⊢ arm64_matches_condition 12
+       ug8_proof.lean:4168   the same;                                       ⊢ arm64_matches_condition 9
+
+   So the theorem is not the site any more — the range hypothesis is still on it
+   (`TestANarrowTypedParameterGetsItsRange`'s first two assertions are green) and
+   a `mem_read_two_writes_adj_uint` peel no longer matches the goal's shape.
+   This is the `test_formal_call_proof_gen.py` red the oct-7 merger filed and
+   still owns in `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`
+   (whose own entry for `sgt8` says only that it is "plausibly pre-existing"); it
+   is not this census's to fix, and it is not a regression from any narrow-typed
+   change.  `sorries=0` on all three, so the obligation is REJECTED and not
+   admitted.
 
    **Two more examples were missing here too, and are now RESOLVED rather than
    recorded**: `floordiv` and `udivmod` were red on `master` and were not in

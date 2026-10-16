@@ -108,6 +108,15 @@ document and its own blocker
 whose Status says the certificate is the expensive part and that the certificate
 belongs to another claim), so the reachable set this file names is now empty.
 
+**`WRONG 0` above is a row about the mixes as they were on 2026-10-05, and the
+`flagged` mix landed after it.** `gen_flagged_alu` draws the scaled register adds
+`encode_add_xd_xn_xm_lsl3/lsl4` emits, and re-measuring the same seed on this
+tree gives `--cases 200 --seed ledgerA --mix flagged` = `AGREE 133 WRONG 67`;
+the model's shifted-register `ADD` drops the shift. That is the third LOUD-WRONG
+defect, filed 2026-10-13 as
+`bugs/FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md`, and it is not
+a `NOSTEP` row in the table below for the reason this file's §5 gives.
+
 What landed, in the order §4 gives:
 
 1. **The width helpers.** `mem_read_u8` / `mem_read_u16` / `mem_read_u32` /
