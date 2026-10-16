@@ -788,6 +788,13 @@ def _memory_samples():
 #: the successor, so the check stays non-circular: it compares the model's step
 #: against the emitter's successor on the fields the instruction is ABOUT.
 #:
+#: A fourth element is an INITIAL STATE template (`%d` is the address) and is
+#: the reason `setcc`'s row is worth having: `X86State.init` leaves every
+#: register but `rdi` at 0, and an instruction whose whole output is 0 or 1 has
+#: nothing to say at a state where its destination is already 0 — the check
+#: passes on a row that states the wrong WIDTH of write, which is the mistake it
+#: exists to catch.  Omitted, it is `X86State.init 10 <address>`.
+#:
 #: `RDI` and not `R12` for the `movq` source, and that is the whole reason the
 #: row has teeth.  `X86State.init 10 _` sets `rdi := 10` and every other general
 #: register to 0, so an encoding whose source is RDI carries a NON-ZERO value

@@ -486,6 +486,37 @@ _FORMS = {
     # wiring half of a pair is still worth having: `cqo` alone makes udivmod's
     # tree one form short rather than two, which is a measurement.
     "cqo": ("x86_step_cqo", False, ["rip", "b0", "b1", "rex", "w"]),
+    # `F7 /2` and `F7 /3`, the two group-3 forms the model had always stepped
+    # and this table had no row for.  They are here because SIX of the corpus's
+    # 93 examples were refused by name for them -- `no step lemma wired for:
+    # neg` / `not` -- which is this file's honest way of saying the form is not
+    # wired, and is also a statement that the ARITHMETIC is missing when it is
+    # not: `lib/X86.lean`'s arm computes both and `x86_step_not_r64` /
+    # `x86_step_neg_r64` are two `simp` proofs over it.
+    #
+    # The ISA census could not see this gap: it counts a form covered when the
+    # DECODER names it and `x86_64_model_coverage_test.py` has a sample, and
+    # both were already true.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`
+    # names three shapes of gap and this is a FOURTH -- decoded, stepped,
+    # sampled, and unreachable by the prover -- which is what asking `_FORMS`
+    # directly is for.
+    #
+    # `ndigit2` is `neg`'s own extra exclusion and `not`'s is nothing: the arm
+    # tests `digit = 2` FIRST, so `not` needs only that, and `neg` must also be
+    # told the first arm did not run.  `dst` is concrete for the reason
+    # `imul_r64_r64`'s is: `x86_set_reg` is a `match` on its index.
+    #
+    # The names are the DECODER's (`group3:` prefix, `formal/x86_64_decode.py`'s
+    # `_GROUP3`), which is the whole reason this row could be missing for as long
+    # as the arithmetic was already here: `_plan`'s refusal prints the decoder's
+    # name, and a reader looking for `not` in a table of `not` does not find
+    # `group3:not` alarming.
+    "group3:not": ("x86_step_not_r64", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit", "rm",
+                    "dst", "dst_lt"]),
+    "group3:neg": ("x86_step_neg_r64", False,
+                   ["rip", "b0", "b1", "b2", "rex", "w", "mod", "digit",
+                    "ndigit2", "rm", "dst", "dst_lt"]),
     # `66 REX.W 0F 6E /r`, `movq xmm, r64`: the GPR-to-SSE move a floating
     # `printf` needs, and the first instruction in this corpus that crosses from
     # one register FILE into another.  Four hypotheses pin the PREFIXES and the
@@ -500,6 +531,18 @@ _FORMS = {
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
+
+#: The successor of a `shl`/`shr`/`sar` by an immediate, which is ONE string for
+#: all three because the model puts the operation in an ARGUMENT of
+#: `x86_shift_post` rather than in the shape of the state update.  Quoting the
+#: function is not a style preference: its own `if k = 0 then … else …` cannot
+#: reduce while `k` is a symbolic `code (m + 3) &&& 63`, so an inlined successor
+#: and the model's step are two records that differ in every flag field — a
+#: `Type mismatch` with both printed and neither naming the field.  See
+#: `_SUCCS["shift_imm8:shl"]`.
+_SHIFT_SUCC = ("{ x86_shift_post $s ($rm + x86_rex_b $rex) $digit "
+               "(x86_get_reg $s ($rm + x86_rex_b $rex)) $sh with "
+               "rip := $next }")
 
 #: The successor of a memory-operand LOAD through a displacement, for BOTH
 #: displacement widths.  `$disp` is the decoded number and `$next` is the literal
@@ -841,6 +884,22 @@ _SUCCS = {
     # it.  A successor table is a copy of the model, so the model was changed in
     # three places and this was the fourth.
     "cqo": "{ $s with rdx := x86_cqo $s.rax, rip := $next }",
+    # `F7 /2`: bitwise complement, and NO FLAGS at all -- which is the whole
+    # difference from `neg`'s row below and the reason the two are not one row.
+    # The value is `^^^ 0xffffffffffffffff`, which is `x86_set_reg`'s own
+    # `x86_set_reg s i (v ^^^ 0xffffffffffffffff)` -- the model's spelling, not a
+    # `(~v)` this file computed, for B3's reason.
+    "group3:not":
+        "{ x86_set_reg $s $dst (x86_get_reg $s $dst ^^^ 0xffffffffffffffff)"
+        " with rip := $next }",
+    # `F7 /3`: two's-complement negation, which is `0 - a`, and FOUR flags, which
+    # the model computes with `x86_flags_sub s 0 a (0 - a)` -- one function, four
+    # field values, and quoting it four times with the subtraction spelled four
+    # times would be four things to keep in step with the model.
+    "group3:neg":
+        "{ x86_set_reg $s $dst ((0 : UInt64) - x86_get_reg $s $dst) with "
+        "rip := $next, zf := ($fs).zf, sf := ($fs).sf, cf := ($fs).cf, "
+        "of_ := ($fs).of_ }",
     # The successor QUOTES the model's own expressions (`x86_set_xmm` over the
     # ModRM's `reg` and `rm + x86_rex_b rex`), which is B3's rule for a
     # successor table and is not optional here: `x86_set_xmm` is a `match` on
@@ -953,6 +1012,17 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
 
     Both the straight-line and the path-tree emitters go through here, so a form
     cannot be wired up in one and forgotten in the other.
+
+    `prev_defs` are the definitions of the PREVIOUS step's form, and they are in
+    the `rip` side condition for the reason the `x86_exec_go_exit_step` one
+    carries the same list: that condition is `s_k.rip = <literal>`, and `s_k` is
+    described by `hs_k`, which is the PREVIOUS step's SUCCESSOR -- so proving it
+    means projecting through whatever wrapper that successor is built on.  A
+    successor that is not a bare `{s with …}` is exactly the two rows that were
+    stale until this pass (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for
+    `imul`), and without the names the condition does not close and is ADMITTED,
+    which is the quiet failure: the proof still elaborates and the report reads
+    "proved with a `sorry`" about a fact that is a `simp` set away.
 
     `rip` overrides a successor's program counter with a LITERAL, which is only
     ever right where the tree knows the address the machine goes to next and the
@@ -1073,7 +1143,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
-                   "not66", "digit"):
+                   "not66", "digit", "ndigit2"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
@@ -1251,6 +1321,25 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # quotes the model's own expression (see `_SUCCS`), and `$tgt`/`$ret`
         # would only be substituting pre-computed arithmetic for it.
         extra_succ = {"$off": "(%d)" % off}
+    elif form in ("group3:not", "group3:neg"):
+        # `REX.W F7 /digit`, so the ModRM is `raw[2]` and the DIGIT is its reg
+        # field -- the operation, the same sense `shl`/`shr`/`sar` use, and here
+        # it is fixed: the decoder names the form by it, so digit 2 is `not` and
+        # digit 3 is `neg` by the time we are here.  The register is the rm field
+        # (+REX.B), and the decoder has already refused a memory operand for this
+        # family, so `mod` is always 3.
+        rex, modrm = raw[0], raw[2]
+        digit, rm = (modrm >> 3) & 7, modrm & 7
+        dst = rm + (8 if rex & 1 else 0)
+        extra_args = " %d %d %d %d %d" % (rex, modrm, digit, rm, dst)
+        extra_succ = {"$rex": str(rex), "$rm": str(rm), "$dst": str(dst)}
+        if form == "group3:neg":
+            # `$fs` is the model's `x86_flags_sub s 0 a (0 - a)` with `a` spelled
+            # once, so the four field values the successor reads cannot disagree
+            # with each other about what was negated.
+            extra_succ["$fs"] = ("x86_flags_sub $s (0 : UInt64) "
+                                 "(x86_get_reg $s $dst) "
+                                 "((0 : UInt64) - x86_get_reg $s $dst)")
     elif form == "cqo":
         # REX 99: the only byte after the prefix, so there is no ModRM and
         # nothing to read out of the encoding but the REX itself.  `b1` is the
@@ -3234,6 +3323,19 @@ _WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
                  "x86_shift_post")
 
 
+#: Projections through a wrapper whose own `if` CANNOT REDUCE.  Every other
+#: entry above is a fact about a projection that follows from the wrapper's
+#: result; this one is about a wrapper the simplifier cannot get inside, because
+#: its condition is a symbolic byte: `x86_shift_post s i digit a k` is
+#: `if k = 0 then … else …` and `k` is `(code (m + 3)).toNat &&& 63`, so
+#: `(x86_shift_post …).rip` unfolds to a projection through an `ite` and stops.
+#: `_MEM_LEMMAS` does not help there — `x86_shift_post_mem` says the memory is
+#: the state's own, which is a statement about the RESULT and not a way to
+#: reduce the projection — and without this the emitter's closing `hrip` is
+#: admitted for every program with a shift on its path.
+_RIP_LEMMAS = ("x86_shift_post_rip",)
+
+
 def _rex_byte_lemmas(shapes):
     """The `[simp]` REX decodings for the bytes that actually occur on a path.
 
@@ -3271,7 +3373,7 @@ def _unfold(hs_path, rex=()):
     without unfolding the `match`, and the projection walks on down.
     """
     return ", ".join(("i0, X86State.init",) + tuple(hs_path)
-                     + _MEM_LEMMAS + _WRAPPER_DEFS + tuple(rex))
+                     + _MEM_LEMMAS + _WRAPPER_DEFS + _RIP_LEMMAS + tuple(rex))
 
 
 #: **How many successor equations the closing read may UNFOLD, and why it is a
@@ -3507,9 +3609,16 @@ def emit(path, expected):
 
     prev, k = "i0", 0
     chain = []
+    prev_form = None
     for insn, form, raw in shapes:
         addr = base + insn.offset
-        call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length)
+        # `prev_form`'s definitions, for the reason `_resolve` documents: this
+        # step's `rip` fact is about the state the PREVIOUS step's successor
+        # describes.
+        call, succ = _resolve(form, raw, addr, prev, k, (), None, insn.length,
+                              prev_defs=_SIMP_FORMS.get(prev_form, ())
+                              if prev_form else ())
+        prev_form = form
         nxt = "s%d" % (k + 1)
         a("  have hstep%d : x86_step %s rc = some %s :=" % (k, prev, succ))
         a("    %s" % call)
@@ -3922,6 +4031,26 @@ def emit_terminates(path):
         # `hs_in`, the same equation the step's own `rip` fact uses -- after a
         # fork that is the BRANCH's successor equation, not this step's, and
         # naming this step's instead cites an `hs` the other arm has not emitted.
+        #
+        # **The PREVIOUS step's definitions are in the set, and that is the whole
+        # reason this side condition can fail on a step whose own row is
+        # correct.**  `hs_k` describes `s_k` as the PREVIOUS step's successor, so
+        # projecting `s_k.rip` means projecting through the wrapper that
+        # successor is built on -- and a successor that is not a bare `{s with …}`
+        # is exactly the two rows that were stale until this pass
+        # (`x86_set_reg_narrow` for `setcc`, `x86_set_flag4` for `imul`).  Without
+        # the names, the goal is
+        #
+        #     ⊢ ¬(x86_set_flag4 { … with rip := 4294968394 } …).rip = 0
+        #
+        # with the whole record printed and no field named -- a `Type mismatch`
+        # for `setcc` that reads as a stale successor and is actually a `simp` set
+        # that cannot get through the wrapper.  The same list `_decision_simp`
+        # uses, for the same reason and read off the same table; `mem_read_bytes`
+        # and `mem_write_bytes` are excluded for the reason THAT function gives.
+        prev_defs = [n for n in _SIMP_FORMS.get(fs_path[-1], ())
+                     if n not in ("mem_read_bytes", "mem_write_bytes")] \
+            if fs_path else []
         if k == 0:
             step_rule = ("x86_exec_go_exit_step (by decide) (by simp only "
                          "[i0, X86State.init] <;> decide) h0")

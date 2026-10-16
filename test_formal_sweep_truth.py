@@ -4644,6 +4644,14 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: are unchanged and still assert what they asserted) and what moved is how
     #: many programs the total is taken over.
     #:
+    #: **Re-pinned 2026-10-05 from 105/4 232 to 107/4 312, and this one is
+    #: COVERAGE rather than growth.** `group3:not` and `group3:neg` gained a step
+    #: lemma and a successor row, so `negate_arg`, `unary_ops` and `neg` build a
+    #: path tree where they built none — the count of trees RISES, and the steps
+    #: rise with them.  The opposite direction is checked by the three
+    #: per-example rows above and by `TOTAL_PRE_MERGE52`, and both are unmoved:
+    #: a guard whose branches came back would move those, not this.
+    #:
     #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
