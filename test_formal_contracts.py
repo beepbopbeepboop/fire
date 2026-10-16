@@ -302,6 +302,43 @@ def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
           v.status == CT.UNKNOWN and not v.ok, repr(v))
 
 
+def test_a_floor_division_clause_reads_as_word_division(tmpdir=None):
+    """`//` is the AST's spelling of integer division; the word model spells it
+    `/`, and both are the same operation on a word.
+
+    A reader that took only `/` refused `a // b` -- and its subset sentence
+    named `/` and not `//`, so a reader of the refusal was told the clause was
+    outside the subset when it was inside it.  A BODY containing `//` raised
+    `Unsupported`, so the bounded search skipped EVERY input of a loop that
+    halves (`collatz`).  Both halves are one reading: `//` canonicalizes to
+    `/` rather than carrying a second IR tag, because `_lean_of` renders `/` as
+    `UInt64.div` and `_eval_of` evaluates it as `(a // b) & _MASK`, which is
+    exactly the machine's floor-divided word.
+    """
+    from formal import contracts as CT
+    floor_src = ("@ensures(result == a // b)\n"
+                 "def h(a, b):\n    return a // b\n")
+    fn = functions(parse(floor_src))[0]
+    c = contract_of(fn, "floor.mojo", floor_src)
+    e = CT.contract_theorems(c, ["a", "b"], fn=fn)
+    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), e.lean)
+    check("a_floordiv_clause_renders_as_UInt64_div",
+          "UInt64.div" in e.lean, e.lean)
+    check("a_floordiv_clause_is_not_reported_unlowered",
+          CT.unlowered_reason(c, ["a", "b"]) == "",
+          CT.unlowered_reason(c, ["a", "b"]))
+    runner = CT.SourceRunner(fn)
+    check("the_source_runner_runs_a_floordiv_body", runner(7, 2) == 3,
+          repr(runner(7, 2)))
+    slash_src = "@ensures(result == a / b)\ndef h(a, b):\n    return a / b\n"
+    slash = contract_of(functions(parse(slash_src))[0], "slash.mojo")
+    floor_ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
+    slash_ir = CT._Reader(["a", "b"]).clause_ir(slash.ensures[0], ["a", "b"])
+    check("slash_and_floordiv_read_the_same_IR",
+          floor_ir is not None and floor_ir == slash_ir,
+          f"{floor_ir!r} vs {slash_ir!r}")
+
+
 # ── 2. one reader, three printers ───────────────────────────────────────────
 
 def test_the_reader_reads_the_sources_floordiv(tmpdir=None):

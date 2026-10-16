@@ -119,9 +119,31 @@ structural half is pinned by three new `_BLOB_GROWTH_PROBES` rows (`sin`, `sdf`,
 `ssd`), one for each set-algebra site, so each new site has to keep emitting its
 capacity guard.
 
-Branch `work/formal64-container-methods`, claim `project:container-methods`. Every
-number below is measured on that branch, on both `arm64` and `x86-64`, and each
-has a named row in `test_formal_container_methods.py`.
+## The set algebra as landed (`_emit_set_algebra`)
+
+The one algorithm item 3 named — "copy the left, then for each right-hand
+element scan the result and append it if it is absent" — is now written as a
+generic `_emit_set_filter(offset, src, scount, other, ocount, keep_found)` on
+each backend: the outer loop walks the source blob, the inner loop scans the
+other blob for the element, and `keep_found` picks INTERSECTION (keep the
+present ones) from DIFFERENCE (keep the absent ones).  Symmetric difference is
+the two differences appended to one result blob.  The result starts EMPTY and
+grows one append at a time, unlike `_emit_set_union`, which starts by copying
+the left operand; the reservation is `nL + nR` for all three (a symmetric
+difference can hold every element of both sides) and goes through the same
+`_emit_blob_growth_guard` the union, concatenation and repetition sites use.
+
+**Elements are compared as words**, so a set of `char *` compares addresses
+exactly as `_emit_set_union`'s dedup does — the divergence
+`bugs/FORMAL_set_value_model.md` already documents, not a new one, and the
+reason the landed cases use integer elements.  A recursive/content compare is
+item 1's value-model question, not this one's.
+
+**Measured, both architectures, against CPython**
+(`test_formal_container_methods.py set` and `operator`, green; `s = {1, 2}`):
+`s & {2}` → sum 2 len 1, `s - {2}` → sum 1 len 1, `s ^ {2}` → sum 1 len 1,
+`s -= {2}` → sum 1 len 1, `s &= {2}` → sum 2 len 1.  The 2026-10-06 "before"
+table below is unchanged history.
 
 ## What landed 2026-10-08: set algebra on arm64 (item 3)
 
