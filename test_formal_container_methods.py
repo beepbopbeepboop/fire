@@ -651,7 +651,7 @@ SET_CASES = [
     ("s_difference_r", ["s = {1, 2}", "t = s - {2}", "u = 0",
                         "for x in t:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(t)"]),
-     "`-` is SET DIFFERENCE, arm64-only like the intersection. Measured before "
+     "`-` is SET DIFFERENCE, lowered on both backends. Measured before "
      "the gate: SIGSEGV on both architectures, no output, because the result is "
      "a word nowhere near a blob and `len` read a count out of it"),
     ("s_symdiff_r", ["s = {1, 2}", "t = s ^ {2, 3}", "u = 0",
@@ -671,7 +671,7 @@ SET_CASES = [
                        "for x in s:", "    u = u + x"],
      ("sum=%d len=%d\\n", ["u", "len(s)"]),
      "the augmented intersection: 2 on arm64 and garbage on x86-64 before the "
-     "gate, and now arm64's own answer"),
+     "gate, and now the same answer on both backends"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
     ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,

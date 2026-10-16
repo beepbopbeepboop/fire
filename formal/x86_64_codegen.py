@@ -7970,7 +7970,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(M.set_algebra_refusal(
                 op, M.spelled(e.left), M.spelled(e.right),
                 self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                backend_has_emitter=False))
+                backend_has_emitter=True))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide

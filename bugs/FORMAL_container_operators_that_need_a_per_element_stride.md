@@ -1,8 +1,11 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on arm64; items 1
-(container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice store) are
-unchanged.** `test_formal_container_methods.py` measures the whole surface
+**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on BOTH backends
+(`&`, `^`, `-` between two sets; x86-64 landed 2026-10-12, see §"2026-10-12");
+items 1 (container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice
+store) are unchanged.** The one gap item 3 still has is `|` on x86-64, which is
+a SEPARATE pre-existing emitter (`set_union_refusal`) and not item 3's three
+operators. `test_formal_container_methods.py` measures the whole surface
 against CPython on both architectures and is green; this doc is about the rows
 in it that are green *as refusals*, which is a different thing from green as
 answers. The set-algebra rows are answers on arm64 now (six of them — five

@@ -15165,12 +15165,16 @@ def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
 
     * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
       sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
-      refusal names that rather than pretending a lowering was missing.  This
-      is the arm64 answer when it cannot establish both operands are sets, and
-      the x86-64 answer for every two-blob shape.
+      refusal names that rather than pretending a lowering was missing.  Both
+      backends reach this branch when they cannot establish that both operands
+      are sets; each has an emitter for the two-set case, so `backend_has_emitter`
+      is True at both call sites.
     * **two sets, no emitter** — the operator really is the set operation the
       source writes, and the machine simply does not lower it.  The message
       says which machine does, so the reader is not sent looking for a spec.
+      No backend reaches this branch today (arm64 grew the emitters first,
+      x86-64 second); it is kept for the machine that would, and the wording is
+      still what `|`'s split names.
 
     The wording lives here, beside the other refusal texts and beside
     `set_union_refusal`, so the two backends cannot word the same state
