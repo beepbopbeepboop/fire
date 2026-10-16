@@ -184,6 +184,38 @@ class TestExemptions(unittest.TestCase):
         self.assertEqual(
             [], [r.encoder for r in rows if r.missing() and not r.excluded])
 
+    def test_the_x86_64_backend_has_no_backlog_row_left(self):
+        """The x86-64 backlog is CLOSED, and no row may rejoin it by default.
+
+        `work/formal201-docs` removed the last three x86-64 `BACKLOG` entries on
+        2026-10-08, each for a measured reason: `encode_and_r8_r8` and
+        `encode_or_r8_r8` read `yes yes yes` once `_byte_rex_required` fixed the
+        byte-wise ALU encodings' missing REX prefix, and `encode_call_r64`'s
+        remaining FUZZ gap is a property of the HARNESS (it jumps to a register's
+        CONTENTS, outside the one `MAP_FIXED` region the fuzzer installs), so it
+        is a `HARNESS_LIMITS` entry and not work nobody has done.
+
+        The pin is in both directions: no x86-64 row may be exempted by a
+        `BACKLOG` entry (that is where a new gap would go by default, and the doc
+        it would have to name is no longer the home for this), and the one entry
+        that moved must still be a harness limit — otherwise the row falls
+        straight back into the unexplained-gap list above.
+        """
+        x86_backlog = sorted(n for n in C.BACKLOG
+                             if n in {r.encoder for r in _ROWS["x86_64"]})
+        self.assertEqual(
+            [], x86_backlog,
+            "the x86-64 backend has a BACKLOG entry again: %s. The x86-64 "
+            "backlog was closed 2026-10-08; a real harness limit belongs in "
+            "HARNESS_LIMITS with its own reason, and a real gap needs a doc "
+            "that says what the work is" % x86_backlog)
+        self.assertIn(
+            "encode_call_r64", C.HARNESS_LIMITS,
+            "encode_call_r64's FUZZ gap is a property of the harness (it jumps "
+            "to a register's contents, which no case value can install), not "
+            "work; without its HARNESS_LIMITS entry the row falls back into the "
+            "unexplained-gap list")
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

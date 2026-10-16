@@ -557,6 +557,12 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
+    "encode_call_r64": "`callq *%r` jumps to the CONTENTS of a register, which "
+                       "is outside the harness's one `MAP_FIXED` region and "
+                       "cannot be installed as a case value — the same reason "
+                       "as `encode_jmp_rm64` and arm64's `encode_br_xn`; the "
+                       "decoder, model arm, `samples()` row and `as` check are "
+                       "all `yes`",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -600,7 +606,7 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the forms the harness cannot even NAME ───────────────────
+    # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
     # `encode_imul_r64_r64_imm` WAS here and was removed on 2026-10-06
     # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
