@@ -2098,7 +2098,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
     'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
                                    # image-run of an emitted artifact
-    'test_formal_proof_breadth.py': 5,
+    'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
     'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2109,7 +2109,7 @@ STALE_PER_CHILD_BUDGETS = {
                                       # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 4,  # +1 on 2026-10-08: the os.path.getsize
+    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
                                        # hostmod-dylib row's build of the reduced
                                        # program, the same 600 s wall the file's
                                        # other three build sites carry
