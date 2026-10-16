@@ -4581,10 +4581,10 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
         emit():  emitted 0, refused 49, plan-failed 1
         every one of the 49 names `call_rel32`
 
-    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
-    says the same thing from the other side ("before the guard it covered 7 of
-    43") and asks for the guard's branches to be DECIDED rather than walked.
-    What was missing is anything that notices when that happens: `emit()` refusing
+    The other side of the same fact is that before the guard existed the value
+    theorem covered 7 of 43 examples; the guard's own branches must be DECIDED
+    rather than walked before it will again. What was missing is anything that
+    notices when that happens: `emit()` refusing
     every example reads exactly like a corpus of programs no straight-line
     theorem is possible for, which is a different claim and a wrong one.
 

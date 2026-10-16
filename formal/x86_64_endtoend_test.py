@@ -2823,8 +2823,9 @@ def _tree(code, info, shapes):
                 # library. Walking it as an ordinary node is what made every
                 # program in the corpus report `body loops, or branches out of
                 # the function` -- which names two reasons when the real one is
-                # the third, and `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
-                # is that report with the measurement behind it.
+                # the third: a `call` whose target is outside the image, so the
+                # walk ends there and the theorem becomes a disjunction over
+                # halt addresses.
                 node = _Node(insn, form, raw, addr, "leaves", state, addr)
                 node.kids = []
                 return done(node, abs_, after)

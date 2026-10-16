@@ -3595,6 +3595,13 @@ FD_CASES = [
  # `os.path.getsize` is the reader (`formal/hostmods/os/path`'s own `fs_stat`),
  # so the program measures its own effect: 5 bytes is `hello`, and the exit
  # status is the assertion rather than a constant the harness chose.
+ # **And it is RUN ON BOTH ARCHITECTURES** (via `both_arch_names` below), which
+ # it was not when it was written: the `getsize` chain through the
+ # `os_path___syscalls` hostmod dylib answered 86 on arm64 and SEGFAULTED
+ # (`EXC_BAD_ACCESS address 0x0`) on x86-64, and a host-architecture-only run
+ # could not see it.  The x86-64 side was fixed by the dylib call-sequence
+ # rework (the cross-module function-value call); this row is the standing pin
+ # for that shape now that the bug doc is gone.
  ("fd_write_on_an_open_result_writes",
   "from os.path import getsize\n"
   "\n"

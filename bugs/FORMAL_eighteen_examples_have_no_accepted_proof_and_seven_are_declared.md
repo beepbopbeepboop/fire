@@ -92,7 +92,7 @@ about** — it was 11 before rows #4–#6 closed.
 | 9 | `sum_range` | `lean-rejected` | `sum_range_proof.lean:3136:175: unsolved goals s : Arm64State … h : mem_read_u64 s.mem (s.sp + …)` | **no** | `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` |
 | 10 | `udivmod` | `refused` (generate) | `universal theorem: 2 calls this walk cannot follow (0x100000450 -> 0x1000004ec (opaque), 0x1000004bc -> 0x1000004ec (opaque))` | **no** | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` |
 | 11 | `floordiv` | `refused` (generate) | the same universal-theorem refusal, two call sites | **no** | as #10 |
-| — | `count` | `lean-rejected` | `count_proof.lean:2587:16`, the #1 goal | yes | `FORMAL_three_examples_fail_their_proofs_on_master.md` |
+| — | `count` | `lean-rejected` | `count_proof.lean:2587:16`, the #1 goal | yes | the epilogue `x30` read through a materialised address — `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` / `FORMAL_dylib_export_loops_and_frame_bounds.md` |
 | — | `pow2` | `lean-rejected` | `pow2_proof.lean:2880:16`, the #1 goal | yes | as above |
 | — | `countdown` | `lean-rejected`, **2 holes** | `countdown_proof.lean:61:57: ⊢ (if sKey 0 < sKey (UInt64.ofNat m) then 1 else 0) = if 0 < UInt64…` | yes | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §Still open 3 |
 | — | `wge` | `lean-rejected`, **1 hole** | `wge_proof.lean:61:57: ⊢ (if sKey 1 ≤ sKey (UInt64.ofNat m) then 1 else 0) = …` | yes | as above |
@@ -109,8 +109,9 @@ title says 15: 8 undeclared open + 7 declared.
 **Three families, and two of them are one subject each.** The
 `Tactic 'rfl' failed` rows (#1, #2, #3 and the two declared ones) are the
 epilogue's `x30` read through a materialised address, which
-`bugs/FORMAL_three_examples_fail_their_proofs_on_master.md` diagnosed and which
-is claimed by that doc's write set. The narrow-typed-parameter rows (#4, #5, #6)
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and
+`FORMAL_dylib_export_loops_and_frame_bounds.md` own. The narrow-typed-parameter
+rows (#4, #5, #6)
 are the `t32s (t8s n) = n` obligation and have a doc of their own. The
 universal-theorem refusals (#10, #11) are the per-function CFG walk's inability
 to follow a call into the same image, also with a doc. **`both`/`either` (#7,
@@ -238,7 +239,9 @@ up.
 ### What is NOT done here, and whose it is
 
 Items 1, 2 and 3 are **other work** and were not touched: `fact`, `sqsum`,
-`sum` are `FORMAL_three_examples_fail_their_proofs_on_master.md`'s, and they
+`sum` are the epilogue-`x30`-read family (owned by
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and
+`FORMAL_dylib_export_loops_and_frame_bounds.md`), and they
 still fail on the same epilogue `x30` read — re-measured 2026-10-05 as
 `PASS=4 KNOWN-GAP=0 FAIL=3 TOO-LARGE=0` over `sgt8 sle8 ug8 n8 fact sqsum sum`,
 i.e. the four narrow-parameter stems PASS and those three FAIL. `floordiv`,
