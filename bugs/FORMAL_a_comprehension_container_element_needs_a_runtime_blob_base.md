@@ -386,7 +386,15 @@ it affordable is the measured 0 above.
 ## Reproducing
 
     $ export PATH=/opt/homebrew/bin:$PATH
-    $ cat .tmp/ds/alias.mojo      # the program above
+    $ mkdir -p .tmp/ds && cat > .tmp/ds/alias.mojo <<'EOF'
+    def main():
+        s = 0
+        for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]:
+            s = s + v[0]
+        print(s)
+        return 0
+    main()
+    EOF
     $ python3 .tmp/ds/alias.mojo                        # 63
     $ python3 tools/memslot.py --gb 8 --label t -- \
           python3 fire.py build --formal --no-prove -o .tmp/al .tmp/ds/alias.mojo
@@ -395,8 +403,9 @@ it affordable is the measured 0 above.
           python3 fire.py build --formal --no-prove -o .tmp/al2 .tmp/ds/lol.mojo
     build: a comprehension in main: the element `[[y]]` opens a container, …   # a list of lists, still refused
     $ grep -n "def _reserve_blob" formal/arm64_codegen.py      # the ONE ledger
-    $ grep -n "def _refuse_an_element_blob" formal/arm64_codegen.py
-    $ grep -n "def _compr_append_elem" formal/arm64_codegen.py # where offset goes
+    $ grep -n "def _materialize_compr_element" formal/arm64_codegen.py
+    $ grep -n "def _comprehension_result_is_a_flat_container" formal/model.py
+    $ grep -n "def _iterable_yields_a_scratch_container" formal/model.py
 
 and the tests, no builds for the census:
 

@@ -157,17 +157,36 @@ and two cases in `test_formal_call_proof_gen.py`'s `TestBitTestBranches` pin it
 (a TBZ and a CBZ whose two bits disagree).
 
 **That fix is necessary for this document's test but not sufficient for it
-today**, and the rest is not this document's: with the step lemmas compiling,
-the two tests now fail one assertion later, on a HOLE COUNT — `dylib_export_N_
-…_semantics_total` is emitted as a `sorry` because the export's CFG contains a
-`bl`. That `bl` is the arm64 stack-floor guard's `getrlimit` call in every
-prologue, which is exactly the regression
-`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` measures and owns
-(its own text: "with the call in the prologue, `test_formal_call_proof_gen.py`
-goes from 21 failures to 42 failures and 15 errors"); the fix it names is to
-move the read into the startup stub. So the block layer's half of this document
-is landed and pinned, and the test goes green when that claimed regression is
-fixed — not before.
+then**: with the step lemmas compiling,
+the two tests failed one assertion later, on a HOLE COUNT — `dylib_export_N_
+…_semantics_total` was emitted as a `sorry`. The diagnosis here said the
+export's CFG contained a `bl`, the arm64 stack-floor guard's `getrlimit` call in
+every prologue, and named
+`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`'s fix (move the read
+into the startup stub) as what would make the tests green.
+
+**2026-10-12: the startup-stub fix landed and the two tests stayed red, so that
+diagnosis was incomplete — the cause was a SECOND, independent thing, and it is
+now fixed and pinned.** The `bl` is gone (`emit_startup=False` for a dylib, so
+`_emit_stack_floor_init` is not emitted at all), but the LAST export of an image
+still failed its `Total` walk and its contract for a different reason: interned
+strings live in `__TEXT` AFTER the code, `DylibExport.exportEnd` for the last
+export is `base + codeSize`, and a `Block` or a CFG walk over `[entry,
+exportEnd)` therefore decoded the string as instructions. Measured on the
+`csetval` image: `exportEnd` is `0x…69c` while the last `RET` is at `0x…350`,
+and the bytes between are `RecursionError: …` decoding as a `cbz` whose target is
+below `base` — a back edge that is not there. `formal/arm64_proof_gen.py`'s new
+`_export_body_end` gives the walk/`Block` its own range (past the export's last
+`RET`), while `exportEnd` — the address the facts and `startState`/`runExport`
+are stated at — stays `base + codeSize`, and `_dylib_contract_proof` gained an
+explicit `exit_pc` so the block range and the exit are two arguments rather than
+one. Measured after: `test_formal_dylib.py` is **27 PASS / 0 FAIL**, including a
+new case `a last export's contract stops at its own RET` (a recursive `rec`
+followed by a straight-line LAST export `add1` in an image that carries the
+trap message; `add1`'s contract is PROVED and the only hole left is `rec`'s
+named `Total`), and the two cases this section is about go green. **So the block
+layer's half of this document is landed AND its test is green**, and what is
+left is §2's CSEL model row and the certificate bound, which are unchanged.
 
 ### 1.5 2026-10-12: the startup-stub fix landed, the tests stayed red, and the residual cause was NOT a `bl` but the IMAGE TAIL
 
