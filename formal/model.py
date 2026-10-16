@@ -8017,8 +8017,36 @@ assert STRIP_CHARS[0] == chr(STRIP_MAX)
 assert all(STRIP_LO <= ord(c) <= STRIP_HI for c in STRIP_CHARS[1:])
 
 # Methods that are REAL string methods and are still refused, with the reason
-# each one is out of reach. Keyed by name; the value is the missing half of
-# the argument, quoted in the diagnostic.
+# each one is out of reach. Keyed by name; the value is the missing half of the
+# argument, quoted in the diagnostic.
+#
+# The two CODEPOINT reasons are written ONCE and shared by the fifteen names
+# that are missing the same half, for the reason every other message in this
+# file is written once: fifteen near-copies of one sentence is fifteen things
+# to fall out of step, and a reader who has read one has read them all. They
+# are named here rather than inlined into the table so that the table below
+# stays a table of NAMES — which is what a reader scans — and so the shared
+# text has a docstring of its own explaining why the family is a family.
+#
+# `CODEPOINT_CLASS_REFUSAL` and `CODEPOINT_CODEC_REFUSAL` are the two halves of
+# the same missing thing and are kept apart because they name different
+# questions: a predicate asks "what KIND of character is this one" and a codec
+# asks "what code point does this one stand for", and a reader who wants
+# `isalpha` and a reader who wants `decode` are blocked by different parts of
+# the same gap.
+CODEPOINT_CLASS_REFUSAL = (
+    "asks whether each CHARACTER of the receiver belongs to a class, and the "
+    "answer is a property of a CODE POINT rather than of a byte — `\"²\".isdigit()` "
+    "is true, and there is no way to read that off a `char *` holding its three "
+    "UTF-8 bytes. A byte predicate would be a DIFFERENT predicate rather than a "
+    "wrong one this path can honestly emit, and it would be wrong exactly where "
+    "the text is non-ASCII, which is silently")
+CODEPOINT_CODEC_REFUSAL = (
+    "maps CODE POINTS to bytes or bytes to code points, and the half of that a "
+    "bare `char *` already has is the bytes — the code point is what is missing, "
+    "and a UTF-8 byte is not one (`\"é\"` is two bytes and one character, "
+    "`\"日本\"` is six bytes and two)")
+
 LENGTH_DEPENDENT_METHODS = {
     # The one that is NOT about length, and the clearest statement of what is
     # actually missing. `strip` is a one-character edit away from `lstrip`:
@@ -8070,7 +8098,8 @@ LENGTH_DEPENDENT_METHODS = {
              "only known at run time, so there is no capacity to give it",
     "rsplit": "returns a SEQUENCE of strings; see split",
     "splitlines": "returns a SEQUENCE of strings; see split",
-    "partition": "returns a sequence; see split",
+    "partition": "returns a SEQUENCE of strings; see split",
+    "rpartition": "returns a SEQUENCE of strings; see split",
     "index": "is a length-dependent SEARCH whose result is a position, which "
              "find already answers — use find, which is lowered",
     "rfind": "walks the buffer backwards from its NUL, which needs the length "
@@ -8082,17 +8111,106 @@ LENGTH_DEPENDENT_METHODS = {
     "format": "its result's length is a function of the format AND the "
               "operands, so it is a fresh buffer of a size nothing knows at "
               "compile time; see upper",
+    # `format_map` is `format` with the mapping already resolved, so the two
+    # are missing the same half and are named together rather than leaving one
+    # of them to fall through to the generic sentence — which is what happened,
+    # and `test_formal_str_methods.py`'s refusal group is what found it.
+    "format_map": "is format() with the mapping already resolved, so its "
+                  "result's length is a function of the format AND the "
+                  "operands and there is no buffer of a size nothing knows at "
+                  "compile time; see format",
     "removeprefix": "returns a new string whenever the prefix is present, "
                     "which is a different pointer every time; a method that "
                     "sometimes aliases its receiver and sometimes does not is "
                     "worse than a refusal",
-    "removesuffix": "returns a new string whenever the suffix is present; see "
+    "removesuffix": "returns a new string whenever the suffix is present, "
+                    "which is a different pointer every time; see "
                     "removeprefix",
     "reverse": "returns a NEW string, and writing into the receiver's own "
                "bytes would fault (see upper)",
     "__len__": "is len(), which IS lowered for a string — as strlen, not as a "
                "field read. Call len(s), which reads better and is the "
                "spelling both backends agree on",
+    # ── the CHARACTER-CLASS and CODEC names ─────────────────────────────────
+    #
+    # These fifteen were in NEITHER table, so every one of them fell through to
+    # `_shape_guarded_refusal` and got its sentence from there — which does not
+    # name them and which sends the reader to the wrong remedy. Measured, both
+    # architectures, from a green build:
+    #
+    #     "ab".isalpha()  ->  build: isalpha() is a method call on a value, and
+    #     this backend lowers only append, clear, close, write (on a file
+    #     descriptor) and the string methods count, endswith, find, lstrip,
+    #     startswith — the receiver is a string literal on this path, and
+    #     'isalpha' is not one of those methods of those receivers, so adding
+    #     it to either table would be a guess about what it means on 'str'.
+    #
+    # Every clause of that is true and it is still the wrong message, twice
+    # over. It is wrong about the FACT: `isalpha` IS a method of `str`, and
+    # `is_string_method`'s own docstring says a name in neither table is
+    # precisely the case this path cannot yet describe — so the honest
+    # statement is that it belongs in one of them, not that it is "not one of
+    # those methods of those receivers". And it is wrong about the REMEDY: the
+    # sentence it ends with is about a length-prefixed string representation,
+    # which is not what `isalpha` is waiting for.
+    #
+    # What they are waiting for is a CHARACTER, and this path holds BYTES. So
+    # they are here, one reason for the whole family rather than fifteen
+    # near-copies, and the reason says the actual missing half. It is not a
+    # buffer question — a buffer would not help — and it is not a length
+    # question either: `"²".isdigit()` is True in CPython and there is no way
+    # to read that off a `char *`, because "²" is three bytes of UTF-8 and the
+    # answer is a property of the code point 178. Naming them is what lets
+    # `test_formal_str_methods.py` assert that the message carries "characters"
+    # for each of them, which is the anti-rot half: a name that leaves this
+    # table gets its message back, and the row that pinned it fails.
+    #
+    # The family is spelled out by name rather than matched by prefix on
+    # purpose. A prefix rule would also catch `island` if a struct ever grew
+    # one, and a refusal that fires on a name that is not a `str` method is
+    # its own class of wrong message.
+    "isalnum": CODEPOINT_CLASS_REFUSAL,
+    "isalpha": CODEPOINT_CLASS_REFUSAL,
+    "isascii": CODEPOINT_CLASS_REFUSAL,
+    "isdecimal": CODEPOINT_CLASS_REFUSAL,
+    "isdigit": CODEPOINT_CLASS_REFUSAL,
+    "isidentifier": CODEPOINT_CLASS_REFUSAL,
+    "islower": CODEPOINT_CLASS_REFUSAL,
+    "isnumeric": CODEPOINT_CLASS_REFUSAL,
+    "isprintable": CODEPOINT_CLASS_REFUSAL,
+    "isspace": CODEPOINT_CLASS_REFUSAL,
+    "istitle": CODEPOINT_CLASS_REFUSAL,
+    "isupper": CODEPOINT_CLASS_REFUSAL,
+    # `encode`/`decode` are the same missing half from the other direction: a
+    # codec maps CODE POINTS to bytes and bytes to code points, and the half
+    # of that a bare `char *` has is the bytes. `decode` in particular is the
+    # tempting one — `"ab".decode()` is an identity on ASCII — and it is
+    # refused anyway, because on the one input where it is an identity it is
+    # also a no-op that changes nothing, and on every other input it is a
+    # UTF-8 VALIDITY QUESTION that bytes can answer only by rejecting, which is
+    # not what `decode` does.
+    "encode": CODEPOINT_CODEC_REFUSAL,
+    "decode": CODEPOINT_CODEC_REFUSAL,
+    # `translate` is a table applied by CODE POINT, and `maketrans` is the
+    # table's constructor, so it is missing the same half: a table keyed by
+    # code point is a table keyed by integers, and this path's `str` is a
+    # `char *`.
+    "translate": CODEPOINT_CODEC_REFUSAL,
+    "maketrans": CODEPOINT_CODEC_REFUSAL,
+    # `expandtabs` is here rather than with the buffer family because it is
+    # BOTH: it replaces each tab with spaces to the next multiple of
+    # `tabsize`, so the result's length is not the receiver's — the same
+    # missing buffer as `upper` — and it also decides column positions, which
+    # is a character question on text that is not ASCII. The buffer half is
+    # named because it is the one that bites first.
+    "expandtabs": "replaces each tab with spaces to the next tab stop, so the "
+                  "RESULT's length is not the receiver's and no buffer of the "
+                  "right size exists; see upper",
+    # `rindex` is `index`'s mirror and `index`'s entry below already sends the
+    # reader to `find`, which is lowered. Both spellings are named so neither
+    # is the one that falls through to the generic sentence.
+    "rindex": "is a length-dependent SEARCH whose result is a position, which "
+              "find already answers — use find, which is lowered",
 }
 
 # ── THE STRING REPRESENTATION, and why it is a bare `char *` ──────────────
@@ -16582,9 +16700,25 @@ def string_has_static_storage() -> bool:
 
 
 def string_method_result_kind(method: str):
-    """The kind a lowered string method yields, or None if it is not one."""
+    """The kind a lowered or folded string method yields, or None.
+
+    Both tables, and the reason they are read together is a measured wrong
+    answer rather than a tidy-up. `POINTER_BOUNDED_METHODS` records what the
+    five libc-backed methods yield; `STRING_FOLDED_METHODS` records what the
+    thirty-five folded ones yield. They have to agree about the RESULT rather
+    than each knowing its own half, because the consumer is a classifier and a
+    classifier that is told a `str` method yields a number reads a `char *` as
+    an integer: `m = "ab".upper()` followed by `printf("[%s]", m)` printed an
+    address, and `m == "AB"` compared a pointer against an integer. That is the
+    `_expr_str_kind` lesson one level up, and the fold is the third way to reach
+    the same place — a method whose result is misclassified poisons every use
+    site after it, with a wrong answer rather than a diagnostic as the symptom.
+    """
     entry = POINTER_BOUNDED_METHODS.get(method)
-    return entry[1] if entry else None
+    if entry is not None:
+        return entry[1]
+    folded = STRING_FOLDED_METHODS.get(method)
+    return folded[2] if folded is not None else None
 
 
 def string_method_yields_string(call, receiver_is_str: bool) -> bool:
@@ -16613,6 +16747,693 @@ def pointer_bounded_method(method: str):
     """The lowering name of a pointer-bounded string method, or None."""
     entry = POINTER_BOUNDED_METHODS.get(method)
     return entry[0] if entry else None
+
+
+# ── WHAT A LOWERED STRING METHOD'S ARGUMENTS MAY BE ────────────────────────
+#
+# `POINTER_BOUNDED_METHODS` decides WHICH string methods exist on this path and
+# `value_method_refusal` guards the RECEIVER of each one. Neither of them says
+# anything about the ARGUMENTS, and that gap was the whole of the measured
+# defect this block exists for. Every one of the five lowerings reads its
+# argument as a `char *` and hands it to a libc routine, so an argument that is
+# not a `char *` is not a wrong answer — it is a call into the C library with a
+# number where an address belongs. Measured, both architectures, from a green
+# build:
+#
+#     "abc".find(98)     ->  SIGSEGV, exit 139
+#     "abc".count(98)    ->  SIGSEGV, exit 139
+#     "abc".startswith(97) -> SIGSEGV, exit 139
+#
+# 98 is `'b'`, so every one of those is a call that CPython REJECTS with a
+# `TypeError` and that this path turned into a dereference of the integer 98.
+# The receiver guard could not have caught it — `"abc"` is a string literal, so
+# the receiver's kind is exactly right — which is why the answer cannot be a
+# second receiver guard but has to be a guard on the operand the libc call
+# actually reads.
+#
+# Two more shapes reach the same place without faulting, and they are worse
+# because they ANSWER:
+#
+#     "ab".startswith(("x", "a"))    CPython True   this path 0
+#     "xxaxx".lstrip("x")            CPython "axx"  this path "xxaxx"
+#
+# The first is a TUPLE, which on this path is a counted blob, so its address
+# was compared as text — and `strncmp` found no match and reported 0, which is
+# a plausible-looking boolean. The second is an argument that was not read at
+# all: `lstrip`'s lowering passed `model.STRIP_CHARS` to `strspn` whatever the
+# source said, so the `chars` parameter was accepted, type-checked against
+# nothing, and ignored. Both are in `test_formal_str_methods.py` as `guard` and
+# `lstrip` rows, and both were measured before this block existed.
+#
+# THE SHAPE OF THE ANSWER. `string_method_call_plan` below is ONE reader for
+# both architectures, asked once per call from each backend's method dispatch
+# and returning one of four things. The DECISION is here because a decision
+# taken per architecture is a decision that can differ; the FACTS are the
+# backend's, which is why `arg_kinds` is passed in rather than read here.
+
+# The four answers. `None` as the verdict is the refusal, so a caller writes
+# `if plan is None: raise CodegenError(why)` and cannot mistake a refusal for
+# an answer — which is the failure mode a bare string return invites.
+STRING_PLAN_EMIT = "emit"          # emit the libc lowering; payload is the
+                                    # accept set for `lstrip`, else None
+STRING_PLAN_FOLD_INT = "fold_int"  # payload is the INTEGER to materialise
+STRING_PLAN_FOLD_TEXT = "fold_text"  # payload is the TEXT to intern
+
+# The argument's NAME in each of the five methods, and how many this path
+# accepts. The names are CPython's own (`str.lstrip.__doc__` and the
+# signatures beside it) rather than this file's, because the refusal quotes the
+# parameter the source passed and a reader looking it up will look it up under
+# CPython's spelling. The full list is CPython's, INCLUDING the parameters this
+# path does not lower, because the refusal has to name the one it is refusing —
+# a message that said "argument 1" where the source said `start` would be
+# telling the reader something they can see.
+STRING_METHOD_ARGS = {
+    "lstrip": ("chars",),
+    "startswith": ("prefix",),
+    "endswith": ("suffix",),
+    "find": ("sub", "start", "end"),
+    "count": ("sub", "start", "end"),
+}
+
+# How many of the above each lowering actually emits. `find`'s and `count`'s
+# are 1: the window's `start`/`end` are refused, and `string_method_unlowered_
+# arg_refusal` is what says so. The two counts are separate because CPython's
+# parameter list and this path's are different facts, and a table that held one
+# column for both would have to invent the difference somewhere else.
+STRING_METHOD_MAX_ARGS = {
+    "lstrip": 1, "startswith": 1, "endswith": 1, "find": 1, "count": 1,
+}
+
+# The parameters of the above that may be OMITTED. `lstrip()` with no argument
+# is not a degenerate call — it is the call that strips WHITESPACE, which is a
+# different answer from `lstrip(chars)` for every receiver CPython does not
+# already have no leading `chars` character in, so the two arities are two
+# methods rather than one method and a shorthand. That is also why it is a
+# separate table rather than a `min_args` column: whether a parameter is
+# optional is CPython's fact, and which one it is decides which sentence the
+# arity refusal uses.
+STRING_METHOD_OPTIONAL_ARGS = {
+    "lstrip": ("chars",),
+}
+
+# The parameters this path does not lower, per method, and the half that is
+# missing for each. `find`'s and `count`'s are the same pair and the same
+# reason, and the two halves are NOT the same size, which is why they are two
+# entries rather than one sentence: `start` only moves where the search begins,
+# which is pointer arithmetic this path can do, and `end` has to BOUND it,
+# which no libc routine here does — `strstr` walks to its haystack's NUL and
+# there is no `strnstr` in libSystem. So the honest split is "start could be
+# lowered and is not yet" against "end has no libc form at all", and a refusal
+# that gave them one reason would send a reader to build the wrong thing.
+STRING_METHOD_UNLOWERED_ARGS = {
+    "find": {
+        "start": "a position to start from, which is pointer arithmetic on a "
+                 "`char *` — `strstr(s + start, sub)` — and is not lowered here "
+                 "only because the CLAMPING CPython applies to it (a negative "
+                 "`start` counts back from the end, a `start` past the end is "
+                 "the end) is a four-way branch that has to be emitted per "
+                 "architecture rather than folded",
+        "end": "the far end of a window, and no libc routine on this path can "
+               "bound a search with one: `strstr` walks to its haystack's NUL "
+               "and libSystem has no `strnstr`, so the bound would have to be "
+               "a hand-written `strncmp` loop in each backend",
+    },
+    "count": {
+        "start": "a position to start from; see `find`'s `start`, which is "
+                 "the same offset and the same clamping",
+        "end": "the far end of a window; see `find`'s `end`, which is the "
+               "same missing bounded search",
+    },
+}
+
+
+def string_method_unlowered_arg_refusal(dotted: str, method: str,
+                                        extra: list) -> str | None:
+    """Why these extra arguments cannot be lowered, or None when there are none.
+
+    The message names each PARAMETER and says what is missing for it, because
+    "takes exactly one argument on this path (got 2)" — which is what both
+    emitters said, in their own words, before this existed — tells a reader
+    that a count is wrong without telling them WHICH of `start`/`end` it is or
+    why. It also does not say what to do instead, and the two facts together
+    are what make a refusal actionable.
+
+    An extra argument that is past CPython's OWN parameter list is not a
+    parameter at all — `lstrip("x", "y")` is a `TypeError` in CPython, and
+    `"a".lstrip("x", "y")` has no second parameter to be missing — so it is
+    named by its POSITION and the message says the call has more arguments than
+    the method has parameters. Naming it `argument 2` rather than inventing a
+    parameter name is the honest form, and it is the reason `names[i]` is
+    guarded: an unguarded index here took an `IndexError` out of the refusal
+    path, which is a crash in the diagnostic rather than a diagnostic.
+    """
+    if not extra:
+        return None
+    names = STRING_METHOD_ARGS[method]
+    limit = STRING_METHOD_MAX_ARGS[method]
+    table = STRING_METHOD_UNLOWERED_ARGS.get(method, {})
+    named, halves, past = [], [], False
+    for i in extra:
+        if i < len(names):
+            n = names[i]
+        else:
+            past = True
+            n = "argument %d" % (i + 1)
+        named.append(n)
+        halves.append(table.get(
+            n, "a parameter the method does not have: CPython's `%s` takes "
+               "at most %d argument%s, so this call is a TypeError rather "
+               "than a question" % (method, len(names),
+                                    "" if len(names) == 1 else "s")))
+    return (f"{dotted}() lowers {names[:limit]} and this call also passes "
+            f"{', '.join('`%s`' % n for n in named)}. What is missing here is "
+            f"{' and '.join(halves)}. "
+            + ("`.%s(%s)` with the needle alone is the whole of what this path "
+               "answers for `%s`" % (method, names[0], method)))
+
+
+def string_method_count_empty_needle(dotted: str, recv):
+    """`(verdict, payload)` for `count("")`, whose answer is a LENGTH.
+
+    The one `count` whose answer is not a function of the needle's position in
+    the haystack: an empty needle matches at each of the L+1 boundaries of a
+    string of length L, so the answer is `len(s) + 1`. The emitter computes
+    that as `strlen(s) + 1`, which is right in BYTES and wrong in CHARACTERS
+    for any text that is not ASCII — measured, `"héllo".count("")` answered 7
+    where CPython answers 6, because `strlen` sees five characters as six
+    bytes.
+
+    It is the ONLY such row in this table's `count` group, and that is not an
+    accident: a non-empty needle's byte occurrences coincide with its character
+    occurrences, because UTF-8 is self-synchronising (a lead byte occurs only
+    at a character boundary) and a needle written in source is always a whole
+    number of characters. So `count` over `"é"` or `"ll"` is right by that
+    argument, while the empty needle's "+1 per boundary" is a count of
+    boundaries and there is one fewer boundary per multi-byte character. The
+    rows that need stating are therefore the empty one and only the empty one,
+    and saying so here is what keeps the next reader from re-deriving it.
+
+    `STRING_PLAN_FOLD_INT` when the build knows the receiver's text, which is
+    the answer with no instruction at all; the permissive `EMIT` when the image
+    holds no non-ASCII literal, where `strlen` and `len` are the same function;
+    and a refusal otherwise, for the same reason `string_position_verdict`
+    refuses: a byte count presented as a character count is a small, stable,
+    plausible-looking wrong number.
+    """
+    text = string_literal_text(recv)
+    if text is not None:
+        return (STRING_PLAN_FOLD_INT, codepoint_count(text) + 1)
+    if non_ascii_strings():
+        return (None, codepoint_refusal(
+            f"{dotted}()", spelled(recv)))
+    return (STRING_PLAN_EMIT, None)
+
+
+
+
+def string_method_arg_refusal(dotted: str, method: str, param: str, arg,
+                              kind) -> str | None:
+    """Why `arg` cannot be read as a `char *`, or None when it can.
+
+    This is the guard that did not exist, and the four cases it distinguishes
+    are the four things a source can put where a needle goes. They are handled
+    in this order because they get progressively less specific, and the order is
+    the order a reader needs them in: a shape this path KNOWS how to answer
+    (a literal tuple of affixes, folded by the caller) never reaches here, a
+    shape it can name (a number) gets the number in the message, and a shape
+    it can only observe (something whose kind the source does not say) gets the
+    "annotate it" sentence.
+
+    **The kind guard is positive evidence, for the reason
+    `value_method_refusal`'s is.** `kind is None` is "this build cannot tell",
+    and it is NOT read as "it is fine": the unclassified case is refused rather
+    than guessed, because the guess here is a dereference. `find`'s own
+    docstring records the same reasoning for the position it computes —
+    `string_position_verdict` refuses rather than emitting a byte offset as a
+    character one — and this is the argument-side half of that decision.
+    """
+    if string_operand_is_string(kind):
+        return None
+    if is_list_kind(kind) or isinstance(arg, (F.TupleExpr, F.ListExpr)):
+        return (f"{dotted}() is given a {spelled(arg)} as its `{param}`, and a "
+                f"tuple on this path is a COUNTED BLOB rather than a sequence "
+                f"of text: lowering it would compare the blob's HEADER — its "
+                f"element count, then its first element — as though those "
+                f"bytes were the affix, and `strncmp` would find no match and "
+                f"answer 0, which is a plausible-looking boolean rather than a "
+                f"wrong one that looks wrong. Measured on both architectures, "
+                f"`\"ab\".startswith((\"x\", \"a\"))` answered 0 where CPython "
+                f"answers True. This path answers a tuple whose elements are "
+                f"all string LITERALS, where the build can see the affixes and "
+                f"compute Python's own answer; a tuple bound to a name cannot "
+                f"be seen into, so bind the affixes to a literal tuple or "
+                f"compare each one yourself")
+    if kind is None:
+        return (f"{dotted}() is given a `{param}` whose type the source does "
+                f"not say — {spelled(arg)} — and this lowering reads it as a "
+                f"`char *` and hands it to the C library, which would walk "
+                f"whatever address those bytes hold. Annotate the {param} "
+                f"(e.g. `{param}: String`), bind it to a string literal, or "
+                f"pass a literal directly")
+    return (f"{dotted}() is given a `{param}` of kind {kind!r} — "
+            f"{spelled(arg)} — and this lowering reads its argument as a "
+            f"`char *` and hands it to the C library, so a number here is an "
+            f"ADDRESS rather than text to search for. Measured on both "
+            f"architectures, `\"abc\".find(98)` took SIGSEGV — exit 139 — "
+            f"because 98 was dereferenced, and CPython rejects that call with "
+            f"a `TypeError` rather than answering it. Pass text: "
+            f"`{param}=\"b\"`")
+
+
+def string_method_lstrip_accept_set(dotted: str, arg) -> str | None:
+    """The `strspn` ACCEPT SET for `lstrip(chars)`, or None to refuse.
+
+    `strspn(s, set)` returns the length of the initial segment of `s` made only
+    of bytes in `set`, which is exactly `lstrip(chars)` whenever every
+    character of `chars` is one byte wide — so the argument IS the accept set
+    and the lowering is one instruction different from the no-argument form.
+    That is why this is a fold of a `StringLiteral` into the emitter rather
+    than a new lowering: the emitter already emits `strspn(s, X)` and already
+    had `X` hard-wired to `model.STRIP_CHARS`, which is why the `chars`
+    parameter was accepted and then ignored.
+
+    **The refusal is about `chars` and not about the RECEIVER, and the
+    distinction is the whole of the correctness argument.** Python's `chars` is
+    a set of CHARACTERS and `strspn`'s is a set of BYTES, and the two agree
+    exactly when every character in the set is single-byte. They disagree the
+    moment the set holds a multi-byte character, and they disagree SILENTLY:
+    with `chars = "Ã"` (U+00C3, bytes C3 83) and a receiver of `"é"`
+    (C3 A9), Python strips nothing — `é` is not `Ã` — while `strspn` consumes
+    the leading C3 and hands back a pointer into the middle of a character,
+    which prints as an invalid UTF-8 fragment. So the check is on the SET.
+
+    The permissive row follows `string_position_verdict`'s reasoning rather
+    than inventing a new one: when the build cannot see the set, the IMAGE's
+    own fact is the bound, because on this path every string value is a
+    literal's interned bytes or an interior pointer into them
+    (`model.py`'s string-representation note, point 3). So an image with no
+    non-ASCII literal cannot hold a non-ASCII `chars`, whatever the name is
+    bound to, and `non_ascii_strings()` is a sufficient answer rather than a
+    guess.
+    """
+    text = string_literal_text(arg)
+    if text is not None:
+        if text_is_ascii(text):
+            return text
+        return (f"{dotted}(chars) is refused: its `chars` is a set of "
+                f"CHARACTERS in CPython and a set of BYTES here, and the two "
+                f"agree only while every character in the set is one byte "
+                f"wide. `{spelled(arg)}` holds "
+                f"{_non_ascii_examples([text]) or 'a non-ASCII character'}, so "
+                f"`strspn` would consume the leading byte of a multi-byte "
+                f"character and hand back a pointer into the middle of it — a "
+                f"string that prints as an invalid UTF-8 fragment rather than "
+                f"as an error. Pass a `chars` of ASCII characters, where the "
+                f"byte set and the character set are the same set")
+    if not non_ascii_strings():
+        # The image holds no non-ASCII literal, so every `char *` in it is
+        # ASCII bytes and the accept set is one byte per character whatever
+        # the name is bound to.
+        return None
+    return (f"{dotted}(chars) is refused: `chars` is a set of CHARACTERS in "
+            f"CPython and a set of BYTES here, and the two agree only while "
+            f"every character in the set is one byte wide. This image holds a "
+            f"string literal that is not ASCII — "
+            f"{_non_ascii_examples(non_ascii_strings())} — and "
+            f"{spelled(arg)} is a name, so the build cannot see what "
+            f"characters its value holds. Pass a `chars` of ASCII "
+            f"characters, where the byte set and the character set are the "
+            f"same set")
+
+
+# ── THE COMPILE-TIME FOLD, and the thirty-five methods it answers ──────────
+#
+# `LEN_FROM_CODPOINT_FOLD`, `STRING_POSITION_FOLD` and `ord_fold` already fold
+# the three constructs whose answer is a function of text the build can read.
+# This block is the same idea for the rest of `str`, and the reason it is worth
+# having is arithmetic rather than taste: on this path the answer to most string
+# methods is a NEW BUFFER, and there is nowhere to put one — a literal is
+# interned into `__TEXT,__text` with `initprot 0x5`, read and execute and not
+# writable, which is the measured reason half of `LENGTH_DEPENDENT_METHODS`
+# gives. But that obstacle is about the RUN-TIME answer, and it does not apply
+# when the build can see the text: then the answer is computed here, in Python,
+# by the same `str` methods CPython runs, and the result is an ordinary literal
+# this path already knows how to emit. No buffer, no length, no new instruction
+# on either architecture.
+#
+# So the row's cost is a SCOPE, not a correctness risk, and the scope has one
+# rule: **every operand's text must be visible to the build.** A name, a
+# parameter or a call result is text behind a `char *` at run time, and there
+# the fold does not apply and the method's own refusal stands. That is the same
+# rule `string_position_verdict` applies to `find`, and the reason it can be
+# stated once for the whole family.
+#
+# **What this buys that is not obvious, and is the reason to do it at all: the
+# fold is exact where a run-time lowering could not be.** `isdigit` over "²",
+# `upper` over "ß", `title` over "ǳ" and `swapcase` over "i̇" are Unicode
+# questions, and a byte-level implementation of any of them would be a
+# DIFFERENT predicate rather than a wrong one this path could honestly emit (see
+# `CODEPOINT_CLASS_REFUSAL`). Computed here they are CPython's own answers,
+# because they are CPython's own methods — `"²".isdigit()` folds to True, and
+# the image materialises a 1. So the twelve predicates, which are the largest
+# group in `dir(str)` after the case conversions, are answered outright for
+# text the build can see, with no character model at all.
+#
+# The values are the UNBOUND `str` METHODS, not lambdas. `str.upper` applied to
+# a decoded literal is Python's own `upper`, so this table cannot be a second
+# implementation of any of them: a change in CPython's rules changes this
+# backend's answers, which is the property a table of hand-written case folding
+# would not have.
+#
+# `arity` is the number of arguments the method takes AFTER the receiver, and it
+# is `None` for a method this path will not fold however many arguments it is
+# given — `translate` (a table), `format`/`format_map` (another worker's claim),
+# `encode` (a `bytes` result, which is a blob and not a string). The arity is
+# what decides a refusal for a call this path would otherwise fold: a
+# three-argument `center` is CPython's answer too, so it folds, and a
+# three-argument `strip` is a `TypeError` in CPython, so the fold declines and
+# the call is refused rather than folded into something CPython never computed.
+STRING_FOLDED_METHODS = {
+    # ── the case conversions: receiver only, and all six are Unicode ──
+    "upper": (str.upper, 0, STR_KIND),
+    "lower": (str.lower, 0, STR_KIND),
+    "title": (str.title, 0, STR_KIND),
+    "capitalize": (str.capitalize, 0, STR_KIND),
+    "swapcase": (str.swapcase, 0, STR_KIND),
+    "casefold": (str.casefold, 0, STR_KIND),
+    # ── the trims: receiver only ──
+    # `lstrip` is absent because it is LOWERED, not folded: its answer is an
+    # interior pointer and `strspn` computes it at run time, which also answers
+    # the case where the receiver is a name. Folding it would be the smaller
+    # answer.
+    "strip": (str.strip, 0, STR_KIND),
+    "rstrip": (str.rstrip, 0, STR_KIND),
+    # ── the pads: a WIDTH, and a fill character that may be given or not ──
+    "zfill": (str.zfill, 1, STR_KIND),
+    "center": (str.center, 2, STR_KIND),
+    "ljust": (str.ljust, 2, STR_KIND),
+    "rjust": (str.rjust, 2, STR_KIND),
+    # ── the substitutions ──
+    "replace": (str.replace, 3, STR_KIND),
+    "removeprefix": (str.removeprefix, 1, STR_KIND),
+    "removesuffix": (str.removesuffix, 1, STR_KIND),
+    "expandtabs": (str.expandtabs, 1, STR_KIND),
+    # ── the predicates: receiver only, and each is a CHARACTER-class
+    # question. This is the group a byte-level lowering could not answer at
+    # all, and the group the fold answers outright. ──
+    "isalnum": (str.isalnum, 0, INT_KIND),
+    "isalpha": (str.isalpha, 0, INT_KIND),
+    "isascii": (str.isascii, 0, INT_KIND),
+    "isdecimal": (str.isdecimal, 0, INT_KIND),
+    "isdigit": (str.isdigit, 0, INT_KIND),
+    "isidentifier": (str.isidentifier, 0, INT_KIND),
+    "islower": (str.islower, 0, INT_KIND),
+    "isnumeric": (str.isnumeric, 0, INT_KIND),
+    "isprintable": (str.isprintable, 0, INT_KIND),
+    "isspace": (str.isspace, 0, INT_KIND),
+    "istitle": (str.istitle, 0, INT_KIND),
+    "isupper": (str.isupper, 0, INT_KIND),
+    # ── the three SEARCHES that raise or need a direction `find` does not
+    # answer. `index` is `find` plus "and raise if it is -1", and the raise is
+    # the whole difference; folding it computes the position AND the fact that
+    # there is one, and a needle that is absent falls through to the refusal
+    # rather than to a -1 that CPython never returns. `rfind` walks backwards
+    # and `rindex` is its raising form; both are pure functions of the text and
+    # both are answers a `strstr` cannot give. ──
+    "index": (str.index, 1, INT_KIND),
+    "rfind": (str.rfind, 1, INT_KIND),
+    "rindex": (str.rindex, 1, INT_KIND),
+}
+
+# The methods this block deliberately does NOT fold, and the one-line reason for
+# each. A table rather than a comment, because `test_formal_str_methods.py`
+# asserts against it: a `str` method that is neither in `STRING_FOLDED_METHODS`
+# nor in `POINTER_BOUNDED_METHODS` nor given a refusal reason fails that file's
+# coverage check, so this table and the test are two ends of one ratchet.
+STRING_METHODS_NOT_FOLDED = {
+    "translate": "a translation TABLE, keyed by code point — the same missing "
+                 "half as `CODEPOINT_CODEC_REFUSAL`, and the table itself is a "
+                 "sequence this path would have to read",
+    "maketrans": "builds that table",
+    "encode": "its result is a `bytes` object, which on this path is a counted "
+              "BLOB rather than a `char *`, so there is nothing to intern the "
+              "answer into",
+    "decode": "CPython's `str.decode` does not exist — the method is on "
+              "`bytes` — so there is no `str` method to fold",
+    "format": "`formal65-format-and-repr`'s claim; not touched here",
+    "format_map": "`formal65-format-and-repr`'s claim; not touched here",
+    "join": "its operand is a SEQUENCE, and a sequence's ELEMENTS have to be "
+            "text the build can see; see `STRING_FOLDED_LIST_METHODS`",
+    "split": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "rsplit": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "splitlines": "its result is a SEQUENCE; see "
+                  "`STRING_FOLDED_LIST_METHODS`",
+    "partition": "its result is a SEQUENCE; see `STRING_FOLDED_LIST_METHODS`",
+    "rpartition": "its result is a SEQUENCE; see "
+                  "`STRING_FOLDED_LIST_METHODS`",
+    # The five lowered ones are answered at RUN time by a libc call, which is
+    # strictly more than the fold: it also answers a receiver that is a name.
+    "lstrip": "lowered by `strspn`, which also answers a receiver the build "
+              "cannot see",
+    "startswith": "lowered by `strncmp`, same",
+    "endswith": "lowered by `strncmp`, same",
+    "find": "lowered by `strstr`, and folded for a non-ASCII haystack by "
+            "`string_position_verdict`",
+    "count": "lowered by a `strstr` loop, and folded for an EMPTY needle by "
+             "`string_method_count_empty_needle`",
+}
+
+
+def fold_operand_value(node):
+    """The Python VALUE of a literal the build can compute with, else None.
+
+    The operand reader `string_method_fold` uses, and it is four shapes
+    because a folded string method takes more than text: `zfill`'s width is an
+    integer, `split`'s separator may be `None` (which is a DIFFERENT algorithm
+    — CPython's whitespace rule with its own runs — and not a default value the
+    fold could substitute), and `expandtabs`'s size may be omitted.
+
+    `0 - 2` is here for the reason it is all over this tree's own tests: the
+    project's convention is that a negative number is written `0 - n` because a
+    unary minus binds tighter than the arithmetic around it (see
+    `test_formal_int_semantics.py`'s precedence rows), so a fold that read only
+    `IntLiteral` would decline every negative width in a corpus written this
+    way. The evaluator is deliberately tiny — literals, `+`/`-` over them, and
+    a unary sign — because every shape it does NOT cover is a shape that falls
+    through to the refusal, which is the safe direction: a fold that guessed an
+    arithmetic expression's value would be computing CPython's answer to a
+    question nobody asked.
+
+    `None` is returned for "not a literal the build can see", and a fold that
+    wants a real `None` cannot have one — which is why `split(None)` is in
+    `STRING_METHODS_NOT_FOLDED`'s companion table rather than folded here. The
+    distinction is worth stating because it is the one place this function's
+    return value is ambiguous, and it is resolved by the CALLER checking
+    `isinstance(node, F.NoneLiteral)` rather than by this function inventing a
+    sentinel.
+    """
+    if isinstance(node, F.StringLiteral):
+        return string_literal_text(node)
+    if isinstance(node, F.BoolLiteral):
+        return bool(node.value)
+    if isinstance(node, F.IntLiteral):
+        return int(node.value)
+    if isinstance(node, F.NoneLiteral):
+        return None
+    if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
+        inner = fold_operand_value(node.operand)
+        if isinstance(inner, int) and not isinstance(inner, bool):
+            return -inner if node.op == "-" else inner
+        return None
+    if isinstance(node, F.BinaryOp) and node.op in ("+", "-"):
+        left = fold_operand_value(node.left)
+        right = fold_operand_value(node.right)
+        if (isinstance(left, int) and not isinstance(left, bool)
+                and isinstance(right, int) and not isinstance(right, bool)):
+            return left + right if node.op == "+" else left - right
+        return None
+    return None
+
+
+def string_method_fold(method: str, dotted: str, recv, args: list):
+    """`(verdict, payload)` for a FOLDABLE string method, or `EMIT` to decline.
+
+    The reader behind `STRING_FOLDED_METHODS`, and the rule it applies is one
+    sentence: **if the build can see the text of every operand, the answer is
+    Python's own and no instruction is needed.** `STRING_PLAN_FOLD_TEXT` for a
+    `str` answer, `STRING_PLAN_FOLD_INT` for a number, and
+    `(STRING_PLAN_EMIT, None)` — which the caller reads as "not foldable, carry
+    on" — whenever any operand's text is behind a `char *`.
+
+    The decline cases are four and each is deliberate:
+
+      * an operand the build cannot see. The fold is a compile-time
+        computation, so a run-time value has nothing to compute from.
+      * a call CPython itself rejects, or one whose arity this path does not
+        fold (`"abc".center(1, "-", "x")`). The fold DECLINES rather than
+        raising, so the caller's own refusal speaks — a fold that raised
+        CPython's `TypeError` would be reporting Python's message for a
+        construct this path has its own words about.
+      * a folded `str` that CONTAINS A NUL. `"a\0b".upper()` is `"A\0B"` in
+        CPython and is unrepresentable here: a `char *` ends at its NUL, so
+        emitting the answer would produce `"A"` — a string that is not what the
+        method returned and that looks entirely plausible. This is the same
+        latent gap `model.py`'s string-representation note records for
+        `len`, reached from a method.
+      * a folded LIST, which is `STRING_FOLDED_LIST_METHODS`'s business and is
+        declined here so that the text table above stays a table of TEXT and
+        NUMBERS.
+
+    Everything it computes, it computes by calling the unbound `str` method on
+    the DECODED text — `string_literal_text`, which is the tree's one decoder,
+    the same one both backends' `_intern_string` calls. So `"a\\nb".upper()` is
+    an `A`, a newline and a `B`, and the image interns those three characters
+    and not a backslash and an `n`.
+    """
+    entry = STRING_FOLDED_METHODS.get(method)
+    if entry is None:
+        return (STRING_PLAN_EMIT, None)
+    fn, arity, kind = entry
+    if len(args) > arity:
+        return (STRING_PLAN_EMIT, None)
+    recv_text = string_literal_text(recv)
+    if recv_text is None:
+        return (STRING_PLAN_EMIT, None)
+    arg_texts = []
+    for a in args:
+        if isinstance(a, F.NoneLiteral):
+            return (STRING_PLAN_EMIT, None)
+        text = fold_operand_value(a)
+        if text is None:
+            return (STRING_PLAN_EMIT, None)
+        arg_texts.append(text)
+    try:
+        value = fn(recv_text, *arg_texts)
+    except Exception:                                       # noqa: BLE001
+        # CPython raises here — `index` on an absent needle, `center` with a
+        # two-character fill — so there is no answer to fold. Decline and let
+        # the caller refuse in its own words.
+        return (STRING_PLAN_EMIT, None)
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int):
+        return (STRING_PLAN_FOLD_INT, value)
+    if isinstance(value, str):
+        if "\0" in value:
+            return (STRING_PLAN_EMIT, None)
+        return (STRING_PLAN_FOLD_TEXT, value)
+    return (STRING_PLAN_EMIT, None)
+
+
+def string_method_fold_nul_refusal(dotted: str) -> str:
+    """Why a folded answer holding a NUL cannot be emitted, if it is needed."""
+    return (f"{dotted}() folds to text containing a NUL, and a `char *` on "
+            f"this path ENDS at its NUL, so interning the answer would produce "
+            f"the text before it — a string that is not what the method "
+            f"returned and that prints as though it were. This is the same "
+            f"representation gap `len` of a string with an embedded NUL has, "
+            f"reached from a method")
+
+
+def string_method_call_plan(method: str, dotted: str, recv, args: list,
+                            arg_kinds: list):
+    """`(verdict, payload)` for one call to a string method.
+
+    The ONE reader of "may this call be lowered", asked by both backends from
+    their method dispatch, so a construct the two machines could disagree about
+    cannot be answered differently by them. It is asked BEFORE
+    `value_method_refusal`, which is the order that lets the two guards be
+    complementary rather than conflicting: a method that can be FOLDED here has
+    no receiver question to ask — its receiver is a literal by definition — and
+    a method that cannot is refused by one of the two, with this one naming the
+    operand and `value_method_refusal` naming the missing representation.
+
+    `arg_kinds` is the backend's own per-argument answer — one kind per
+    positional argument — because the kind of an expression is a flow fact
+    (`ValueKinds` plus each backend's `_string_vars`), and re-deriving it here
+    would be the second reader of a fact the first one already settled with the
+    same arguments.
+
+    `STRING_PLAN_EMIT`'s payload is the `lstrip` ACCEPT SET when the source
+    supplied one and `None` when it did not, which is the only payload an emit
+    verdict carries; the fold verdicts carry the folded value itself.
+    """
+    if method in STRING_FOLDED_METHODS:
+        return string_method_fold(method, dotted, recv, args)
+    if method not in STRING_METHOD_ARGS:
+        return (STRING_PLAN_EMIT, None)
+    names = STRING_METHOD_ARGS[method]
+    limit = STRING_METHOD_MAX_ARGS[method]
+    optional = STRING_METHOD_OPTIONAL_ARGS.get(method, ())
+    if not (limit - len(optional)) <= len(args) <= limit:
+        extra = list(range(limit, len(args)))
+        missing = list(range(len(args), limit))
+        why = string_method_unlowered_arg_refusal(dotted, method, extra)
+        if why is None and missing:
+            why = (f"{dotted}() needs at least {limit - len(optional)} "
+                   f"argument on this path — `{names[0]}` — and this call "
+                   f"passes {len(args)}, so there is nothing to search for. "
+                   f"CPython raises a TypeError here rather than answering")
+        if why is not None:
+            return (None, why)
+    accept = None
+    if method in ("startswith", "endswith") and args:
+        foldable, value = affix_tuple_fold(dotted, method, recv, args[0])
+        if foldable:
+            return (STRING_PLAN_FOLD_INT, 1 if value else 0)
+    if method == "count" and args and string_literal_text(args[0]) == "":
+        return string_method_count_empty_needle(dotted, recv)
+    for i, arg in enumerate(args):
+        why = string_method_arg_refusal(dotted, method, names[i], arg,
+                                        arg_kinds[i] if i < len(arg_kinds)
+                                        else None)
+        if why is not None:
+            return (None, why)
+    if method == "lstrip" and args:
+        accept = string_method_lstrip_accept_set(dotted, args[0])
+        if isinstance(accept, str) and accept != "" and "\0" in accept:
+            return (None, f"{dotted}() is given a `chars` containing a NUL, "
+                          f"and a NUL inside the accept set would end the set "
+                          f"one character early — `strspn` reads its second "
+                          f"argument as a C string")
+    return (STRING_PLAN_EMIT, accept)
+
+
+def affix_tuple_fold(dotted: str, method: str, recv, arg):
+    """`(foldable, CPython's answer)` for a TUPLE affix.
+
+    The second half of `string_method_arg_refusal`'s tuple case: this path
+    cannot WALK a blob's elements at run time, but it does not have to. A tuple
+    written in the source whose elements are all string literals is text the
+    build can read, and CPython's rule for `startswith`/`endswith` over a tuple
+    is "does ANY element match" — so the whole call is a compile-time
+    computation and the emitters need no new instruction for it. `()` is the
+    row that makes the rule worth stating: CPython answers False for it, and a
+    vacuous "any" would answer True.
+
+    `F.ListExpr` is deliberately NOT accepted, and the reason is CPython's
+    rather than this path's: `str.startswith` accepts a tuple or a string and
+    raises `TypeError` for a list, so `"ab".startswith(["a"])` has no answer
+    to fold — the honest lowering of it is a refusal, and folding it would
+    answer a question CPython declines to answer.
+
+    Returning a bool rather than a lowered expression is deliberate. The
+    alternative — materialising the answer as a sequence of `strncmp` calls —
+    would mean unrolling an unbounded number of libc calls into an image, and
+    the fold is the same computation with no code at all.
+    """
+    if not isinstance(arg, F.TupleExpr):
+        return (False, None)
+    elements = list(getattr(arg, "elements", []) or [])
+    recv_text = string_literal_text(recv)
+    texts = [string_literal_text(el) for el in elements]
+    if recv_text is None or any(t is None for t in texts):
+        return (False, None)
+    probe = recv_text.startswith if method == "startswith" \
+        else recv_text.endswith
+    return (True, any(probe(t) for t in texts))
+
+
 
 
 # The string methods that are a CONVERSION to a bare `char *` and are therefore
@@ -16732,13 +17553,55 @@ def value_method_refusal(method: str, receiver_kind, dotted: str, *,
                 f"the identity — and on anything else the same word is not an "
                 f"address at all")
     if method in LENGTH_DEPENDENT_METHODS:
-        return (f"{dotted}() is a real method of String, but it {LENGTH_DEPENDENT_METHODS[method]}. "
-                f"Answering it would need a string representation that "
-                f"carries a length — a value-model change, shared by both "
-                f"backends and the Lean proof, not a lowering of this one "
-                f"call")
+        return (f"{dotted}() is a real method of String, but it "
+                f"{LENGTH_DEPENDENT_METHODS[method]}. "
+                f"{string_method_remedy(method)}")
     return _shape_guarded_refusal(method, receiver_kind, dotted,
                                   receiver_is_fd, receiver_shape)
+
+
+# The names whose missing half is a CODE POINT rather than a LENGTH, and so
+# whose remedy sentence is a different one. A separate table rather than a
+# marker inside `LENGTH_DEPENDENT_METHODS` because that table's values are
+# quoted on their own elsewhere — `arm64_codegen._emit_str_lstrip`'s docstring
+# cites the `strip` entry directly, and `test_formal_unicode.py` reads the
+# reasons as text — so its shape is not this function's to change. And the two
+# facts being kept apart are genuinely different: a length is something a
+# `{ptr, len}` descriptor would carry, and a code point is not a property of
+# the representation at all. `"é".upper()` is refused for want of a BUFFER
+# and `"é".isalpha()` for want of a CHARACTER, and telling a reader the second
+# wants the first is worse than telling them nothing, because it points them at
+# a change that would not answer them.
+CODEPOINT_REMEDY_METHODS = frozenset({
+    "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier",
+    "islower", "isnumeric", "isprintable", "isspace", "istitle", "isupper",
+    "encode", "decode", "translate", "maketrans",
+})
+
+# The sentence `value_method_refusal` ends a refusal with: what a reader would
+# have to change. Written once because it is the same sentence for every
+# length-dependent name, and split by the one fact that differs.
+LENGTH_REMEDY = ("Answering it would need a string representation that "
+                 "carries a length — a value-model change, shared by both "
+                 "backends and the Lean proof, not a lowering of this one call")
+CODEPOINT_REMEDY = ("Answering it would need a representation that carries "
+                    "CHARACTERS rather than bytes, which is a different and "
+                    "larger change than a length: a length says how many bytes "
+                    "there are, and this question is about what each one of them "
+                    "STANDS FOR")
+
+
+def string_method_remedy(method: str) -> str:
+    """The closing sentence of a string method's refusal, by what it is missing.
+
+    Two sentences for one table, chosen by `CODEPOINT_REMEDY_METHODS`, and the
+    choice is a fact about the METHOD rather than about the message: a reader
+    who wants `isalpha` is not blocked by the same thing as a reader who wants
+    `zfill`, and pointing both of them at the same change is how a refusal ends
+    up describing a fix that would not answer the question.
+    """
+    return (CODEPOINT_REMEDY if method in CODEPOINT_REMEDY_METHODS
+            else LENGTH_REMEDY)
 
 
 # ── What a value-shaped method means, PER RECEIVER KIND ───────────────────
@@ -25651,23 +26514,32 @@ class ValueKinds:
         return dict_literal_key_value_kind(self._dict_inits.get(obj.name), e.index)
 
     def _string_method_kind(self, call):
-        """What a lowered string method call yields, or None if this is not one.
+        """What a lowered or folded string method call yields, or None.
 
-        None for a method the model does not lower, for a bare name, and — the
-        case that makes this a guard rather than a lookup — for a method whose
-        receiver is not classified as a string. `x.value()` on a struct whose
-        kind is unknown must stay unknown here, or the caller would bind `x`'s
-        result to a string and format an integer as text."""
+        None for a method the model does not lower or fold, for a bare name,
+        and — the case that makes this a guard rather than a lookup — for a
+        method whose receiver is not classified as a string. `x.value()` on a
+        struct whose kind is unknown must stay unknown here, or the caller would
+        bind `x`'s result to a string and format an integer as text.
+
+        The receiver gate is what stops a folded method from being believed on
+        a receiver it cannot be: a fold needs its receiver to be a LITERAL, and
+        `"abc".upper()` is one while `s.upper()` is not — so on a name the
+        answer is None and the name binds to an unclassified word, which is the
+        conservative direction and the same one the five libc-backed methods
+        already took.
+        """
         func = call.func
         if not isinstance(func, F.MemberExpr):
             return None
         method = func.member
-        if method not in POINTER_BOUNDED_METHODS:
+        if method not in POINTER_BOUNDED_METHODS \
+                and method not in STRING_FOLDED_METHODS:
             return None
         if not string_method_yields_string(
                 call, string_operand_is_string(self.kind_of(func.obj))):
             return None
-        return POINTER_BOUNDED_METHODS[method][1]
+        return string_method_result_kind(method)
 
 
 _COMPARISON_OPS = ("<", ">", "<=", ">=", "==", "!=", "is", "is not", "in",

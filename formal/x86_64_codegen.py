@@ -4617,6 +4617,33 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     raise CodegenError(word)
                 self._emit_optional_unwrap(e, how, word)
                 return
+        # THE STRING-METHOD PLAN, asked for EVERY string method and BEFORE the
+        # receiver guard, because the order is what lets the two coexist: a
+        # method that FOLDS has no receiver question to ask (its receiver is a
+        # literal by definition) and a method that does not is refused by
+        # whichever of the two has the more specific thing to say. Before the
+        # guard it can reach the thirty-five methods `model.STRING_FOLDED_
+        # METHODS` computes from text the build can see; after it, every one of
+        # them would already have been refused by name for want of a buffer.
+        #
+        # The DECISION is the model's and is shared by both backends; the kinds
+        # are this backend's, and the plan needs them only for the five methods
+        # whose arguments are read as `char *`.
+        accept = None
+        if M.is_string_method(method):
+            args = list(e.args)
+            plan, payload = M.string_method_call_plan(
+                method, _dotted(e.func), obj, args,
+                [self._expr_str_kind(a) for a in args])
+            if plan is None:
+                raise CodegenError(payload)
+            if plan == M.STRING_PLAN_FOLD_INT:
+                self._emit_mov_imm(Reg.RAX, payload)
+                return
+            if plan == M.STRING_PLAN_FOLD_TEXT:
+                self._emit_expr(F.StringLiteral(payload))
+                return
+            accept = payload
         reason = M.value_method_refusal(
             method, self._method_recv_kind(e), _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
@@ -4639,7 +4666,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         elif how == "file_close":
             self._emit_file_close(e)
         elif how == "str_lstrip":
-            self._emit_str_lstrip(e)
+            self._emit_str_lstrip(e, accept=accept)
         elif how in ("str_startswith", "str_endswith"):
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
@@ -4831,21 +4858,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
         return None if obj is None else self._expr_str_kind(obj)
 
-    def _emit_str_lstrip(self, e) -> None:
-        """`s.lstrip()` — an INTERIOR pointer to the first non-whitespace byte.
+    def _emit_str_lstrip(self, e, *, accept=None) -> None:
+        """`s.lstrip()` / `s.lstrip(chars)` — an INTERIOR pointer to the answer.
 
-        `strspn(s, STRIP_CHARS)` IS the left-strip: it returns the length of the
+        `strspn(s, ACCEPT)` IS the left-strip: it returns the length of the
         initial segment of `s` made only of those characters, so `s + that` is
         the answer. Nothing is written and nothing is copied, which is what
         makes this pointer-bounded and `strip` not.
 
         The character set is model.STRIP_CHARS, ONE definition for both
         backends. An earlier version hand-wrote the scan loop per architecture
-        and each copy had its own bug."""
+        and each copy had its own bug.
+
+        **THE ACCEPT SET IS THE ARGUMENT**, and that is the whole of the
+        `chars` parameter: `model.string_method_lstrip_accept_set` decides which
+        set it is and refuses the call where a byte set and a character set
+        would disagree, so `accept is None` here means exactly one thing — the
+        source wrote no `chars`. It was `STRIP_CHARS` UNCONDITIONALLY before
+        this, so `"xxaxx".lstrip("x")` built, ran and answered `"xxaxx"` where
+        CPython answers `"axx"`."""
+        chars = (F.StringLiteral(accept) if accept is not None
+                 else F.StringLiteral(M.STRIP_CHARS))
         # One push, so [rsp] = s.
         self._emit_expr(e.func.obj)
         self._push_slot(Reg.RAX)
-        self._emit_expr(F.StringLiteral(M.STRIP_CHARS))
+        self._emit_expr(chars)
         self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))    # accept set
         self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 0))  # s
         self._emit_extern_call("strspn")
@@ -4876,11 +4913,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reads before the start of the buffer. Unsigned compares, matching the
         signedness `strlen` actually returns."""
         args = list(e.args)
-        name = "str.endswith" if at_end else "str.startswith"
+        # The arity and the affix's kind were BOTH decided by
+        # `model.string_method_call_plan` in the method dispatch above, which
+        # is also where a tuple affix is folded and where a number where an
+        # affix belongs is refused. This check remains as the emitter's own
+        # statement of the shape it can emit, and it is a `raise` rather than
+        # an `assert` because a backend that reached it with two arguments
+        # would read `args[1]` — the plan is what makes that unreachable, not
+        # this line.
         if len(args) != 1:
             raise CodegenError(
-                f"{name}() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.{'endswith' if at_end else 'startswith'}() reached its "
+                f"lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         # RDI, not RAX: an expression leaves its value in RAX and the first
         # ARGUMENT register is RDI. Omitting the move is not a wrong-answer bug
         # but a fault inside libc — strlen dereferences whatever RDI held.
@@ -4974,10 +5020,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         are literals the answer is Python's and is folded here instead, which
         is why the two literals never reach `strstr` at all."""
         args = list(e.args)
+        # `model.string_method_call_plan` owns the arity and the needle's kind;
+        # see `_emit_str_affix` for why this line remains.
         if len(args) != 1:
             raise CodegenError(
-                f"str.find() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.find() reached its lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         verdict, folded = M.string_position_verdict(
             f"{M.spelled(e.func.obj)}.find({M.spelled(args[0])})",
             e.func.obj, args[0])
@@ -5021,10 +5070,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `strlen(s) + 1` — and it is also the case that would otherwise spin
         forever, since `strstr` returns the cursor unchanged for it."""
         args = list(e.args)
+        # `model.string_method_call_plan` owns the arity and the needle's kind;
+        # see `_emit_str_affix` for why this line remains.
         if len(args) != 1:
             raise CodegenError(
-                f"str.count() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.count() reached its lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         self._while_counter += 1
         n = self._while_counter
         fn = self.func_name
