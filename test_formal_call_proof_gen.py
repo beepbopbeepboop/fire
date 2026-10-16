@@ -1902,6 +1902,130 @@ class TestBitTestBranches(unittest.TestCase):
                           f"`lhs = 0`: {hb[0].strip()}")
 
 
+class TestACompareIsOrderInsensitiveInTheProof(unittest.TestCase):
+    """`if 0 == n:` and `if n == 0:` must reach the same obligation.
+
+    `formal/arm64_codegen.py::_cmp_spec` decides which operand of a compare is
+    the immediate and which is a register, so the two spellings emit different
+    `CMP` words; the proof generator reconstructs the branch's proposition from
+    the AST and must not care which side the literal is on.
+
+    The failure this pins: on `if 0 == n:` the `B.cond`'s condition field is 1
+    (`ne`), so `r = w & 0x1f` is 1 and `_cbz_reg_const` — the scan that closes a
+    codegen-internal `CBZ` whose tested register is a compile-time non-zero
+    constant — walked the block prefix, found a constant in register 1, and
+    emitted
+
+        have hne_11 : arm64_reg 1 s_11 ≠ 0
+        exact absurd hc_11 hne_11
+
+    under `by_cases hc_11 : arm64_matches_condition 1 s_11.nzcv = true`. The two
+    facts are about different things (flags and a register), so `absurd` is a
+    type mismatch and the proof never elaborates. `_cbz_reg_const` and the
+    shortcut it feeds are about a CBZ's own `arm64_reg r = 0`, so they now run
+    only for index 16; `B.cond` (`r` is the condition field) and `CBNZ` (whose
+    taken arm is `reg ≠ 0`, made LIVE rather than dead by a non-zero constant)
+    were both handed the contradiction wrongly.
+
+    The SECOND defect, and it is why the fix is two edits rather than one: the
+    comparison is rendered twice (`_cmp_term_t` for the `by_cases`, the `ast`
+    via `_expr_ast` for the `eval_eq_mojo` bridge) and `0 = n` did not match
+    `n = 0`. `simp` rewrites a numeral to a variable but never a variable to a
+    numeral, so a `by_cases h : 0 = n` left `n` unreduced and the bridge did not
+    close. A bare literal is now normalised to the RIGHT in both renderers;
+    x86-64 shares neither edit's duplicate because it imports these functions.
+
+    The acceptance here is structural and needs no Lean. The end-to-end Lean
+    check now reaches exactly the three pre-existing errors `if n == 0:` reaches
+    (a TBZ step-lemma over the data region and a `maxRecDepth` failure, outside
+    this bug), where `if 0 == n:` used to add the `Application type mismatch`.
+    """
+
+    _RIGHT = ("def main() -> Int:\n    n = 3\n    if n == 0:\n"
+              "        return 10\n    else:\n        return 20\n")
+    _LEFT = ("def main() -> Int:\n    n = 3\n    if 0 == n:\n"
+             "        return 10\n    else:\n        return 20\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-cond-order-")
+        cls.proofs = {}
+        cls.errors = {}
+        for name, src in (("lit_right", cls._RIGHT), ("lit_left", cls._LEFT)):
+            p, err = _generate(cls.tmp, src, name)
+            cls.proofs[name] = p
+            cls.errors[name] = err
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_both_spellings_generate_a_proof(self):
+        for name in ("lit_right", "lit_left"):
+            self.assertIsNone(
+                self.errors[name],
+                f"{name}: proof generation raised {self.errors[name]}")
+
+    def test_a_flags_branch_is_not_closed_by_a_register_contradiction(self):
+        for name in ("lit_right", "lit_left"):
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertIn("arm64_matches_condition", text,
+                          f"{name}: the B.cond path was not exercised")
+            for m in re.finditer(
+                    r"by_cases (hc_\d+) : arm64_matches_condition", text):
+                self.assertNotIn(
+                    f"exact absurd {m.group(1)}", text,
+                    f"{name}: the flag branch {m.group(1)} is closed by an "
+                    f"`absurd` against a register fact, which cannot typecheck")
+
+    def test_the_ast_bridge_spells_an_equality_literal_last(self):
+        """Both spellings emit the SAME `ast` term for the comparison.
+
+        `eval_eq_mojo` proves the `ast` evaluation equals the `_go` model, and
+        its `by_cases` hypothesis comes from `_cmp_term_t`; if the two renderers
+        disagreed about which side the literal is on, the `if` test and the
+        hypothesis would be two different terms and the bridge would not close.
+        """
+        want = ('(MojoExpr.binop "=" (MojoExpr.var "n") '
+                '(MojoExpr.int (UInt64.ofNat 0)))')
+        for name in ("lit_right", "lit_left"):
+            with open(self.proofs[name]) as fh:
+                text = fh.read()
+            self.assertIn(want, text,
+                          f"{name}: the equality literal is not on the right in "
+                          f"the emitted `ast`")
+            self.assertNotIn('(MojoExpr.binop "=" (MojoExpr.int',
+                             text,
+                             f"{name}: a literal is still on the left of an "
+                             f"equality in the emitted `ast`")
+
+    def test_a_literal_only_moves_across_an_equality(self):
+        """`_literal_last` is the normaliser, and an order is left alone.
+
+        Equality is symmetric; `<` is not, so a literal must not be moved for a
+        signed order — `0 < n` and `n < 0` are different propositions.
+        """
+        import formal.arm64_proof_gen as G
+        self.assertEqual(G._literal_last("(UInt64.ofNat 0)", "n"),
+                         ("n", "(UInt64.ofNat 0)"))
+        self.assertEqual(G._literal_last("0", "x"), ("x", "0"))
+        self.assertEqual(G._literal_last("n", "(UInt64.ofNat 0)"),
+                         ("n", "(UInt64.ofNat 0)"))
+        self.assertEqual(G._literal_last("a", "b"), ("a", "b"))
+        self.assertEqual(G._cmp_term_t("(UInt64.ofNat 0)", "n", None, "="),
+                         "(n = (UInt64.ofNat 0))")
+        self.assertEqual(G._cmp_term_t("n", "(UInt64.ofNat 0)", None, "="),
+                         "(n = (UInt64.ofNat 0))")
+        # An order is NOT symmetric: `_cmp_term_t` must not move the literal,
+        # so the left term (the literal, sign-flipped for a flexible type) is
+        # emitted first.
+        order = G._cmp_term_t("(UInt64.ofNat 0)", "n", None, "<")
+        self.assertLess(order.index("(UInt64.ofNat 0) ^^^"),
+                        order.index("n ^^^"),
+                        f"a literal moved across `<`: {order}")
+
+
 class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
     """`_written_expr` reads the value a step writes to a register, for EVERY
     spelling `_step_rhs` emits — and refuses rather than guesses on the rest.
