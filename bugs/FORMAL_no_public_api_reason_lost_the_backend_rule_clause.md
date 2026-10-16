@@ -31,7 +31,7 @@ and the constants-only sentence `no_public_api_reason` returns today contains no
 value model for a container constant, and a rule that a module nothing binds
 needs no library) but it no longer says the missing thing is a decision about
 the **backend** rather than work on the module — which
-`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §0.4 says the
+`FORMAL std os io round2 scope is one refusal shape` §0.4 says the
 sentence was changed to say.
 
 **The two sides are in git and the sentence is the one that moved.** Both the
@@ -46,13 +46,13 @@ edit to the sentence dropped the clause and left the guard that checks it.
 ## What is expected
 
 The constants-only branch should say the missing thing is a rule about the
-backend, as `FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §0.4 and the
+backend, as `FORMAL std os io round2 scope is one refusal shape` §0.4 and the
 test both state. The exact next step is to restore that clause in
 `no_public_api_reason`'s constants-only return (the other two branches are
 different facts and must not gain it — the test's private sibling asserts
 `"BACKEND" not in other`), then re-run
 `python3 test_formal_imports.py` and require the one failure to clear. This is
-the owner's (`bug:FORMAL_std_os_io_round2_scope_is_one_refusal_shape`, worker
+the owner's (`bug:FORMAL std os io round2 scope is one refusal shape`, worker
 `formal217-docs`) area, so it is filed rather than fixed from here.
 
 ## Why it is not fixed here

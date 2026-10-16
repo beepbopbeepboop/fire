@@ -40,7 +40,7 @@ to prevent, and it was the state of the whole type.
 **What is NOT here, and is refused rather than pretended at.** `p[0]`, `len(p)`,
 `a, b = p`, `for v in p`, `p._replace(...)`, `p._asdict()` and `repr(p)` are all
 tuple operations on a value that has no tuple reading on this path. Each is
-pinned by the refusal that names it, and `bugs/FORMAL_value_types_beyond_comparison.md`
+pinned by the refusal that names it, and `FORMAL value types beyond comparison`
 records the whole table with the next step for each. A refusal here is the
 honest answer; what is refused is not implemented, and the word "implemented"
 is doing no work it has not earned.

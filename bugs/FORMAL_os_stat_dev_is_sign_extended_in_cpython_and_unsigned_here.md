@@ -55,7 +55,7 @@ One of two, and the first is the honest one:
 
 Either way, `test_formal_os_backing.py` is a registered job in the `proofs`
 bucket (not in `check`/`gate`) and its **registrations** are already tracked by
-`bugs/TEST_formal_os_backing_is_red_with_no_marker.md`, whose count (30 of 58,
+`TEST formal os backing is red with no marker`, whose count (30 of 58,
 all the non-ASCII string class) is now STALE — the non-ASCII class is fixed and
 what is left is this one case, 2 of 70. That document is the right one to update
 with the new number; this one exists so the `stat_dev` subject has a home.

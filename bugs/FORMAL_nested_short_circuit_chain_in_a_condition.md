@@ -71,7 +71,7 @@ alphabetically. **This is not this document's subject and not this worker's to
 fix**: the halt the generator picks is the `getrlimit` BL the stack-floor guard
 puts in EVERY arm64 prologue, `_reached_without_a_condition` accepts it as the
 halt boundary when it is reached before any source conditional, and that area is
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`
+`FORMAL the stack guards getrlimit is counted as a program call`
 (measured 2026-10-06) plus `formal245-docs`'s
 `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function` /
 `FORMAL_arm64_known_proof_gaps`. What this round contributes is the measurement

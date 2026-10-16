@@ -130,7 +130,7 @@ produce a `_proof.lean` to read a residual out of. **The cause is NOT this
 doc's subject and is not the terminal value flow**: `q(a, b) = a // b` now has
 TWO opaque calls in its entry function, and the second is the stack-floor
 guard's `bl getrlimit`, which
-`bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md`
+`FORMAL arm64 stack floor getrlimit is the opaque call for every function`
 measures and owns (`work/formal104-docs`, and it is the same regression that
 doc's `TestTheBranchFlagLemmaIsTheBranchOwns` row is red for). That doc's
 `getrlimit`-off-the-walk fix is the prerequisite: until the guard's read is
@@ -162,7 +162,7 @@ GENERATION for the symbolic-divisor program raises before Lean is reached:
 
 Measured here, no Lean: the same `FormalBuildError` the arm64 half of
 `test_formal_call_proof_gen.py` reports for every bounded-stop program, and the
-same one `bugs/FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`
+same one `FORMAL arm64 startup stub extern call lands past text`
 describes (the `getrlimit` call belongs in the startup stub, which needs the
 `__TEXT,__stubs` region sized for it). **So the next step for THIS doc is
 blocked on that fix**, not on the terminal value flow: re-measure the div0

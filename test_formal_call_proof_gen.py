@@ -5033,7 +5033,7 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
 class TestTheRecursionContractBaseCaseCarriesTheStepBody(unittest.TestCase):
     """A SECOND, independent reason `count`/`pow2` fail their proofs, found
     2026-10-08 while re-measuring
-    `bugs/FORMAL_three_examples_fail_their_proofs_on_master.md`.
+    `FORMAL three examples fail their proofs on master`.
 
     The doc's x30 frame read (`rfl` failed) is still one of the diagnostics, but
     the generated `count_contract` now also fails in its **base-case** bullet:
@@ -5753,7 +5753,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: again on this tree because `bfeec991`'s stack-floor guard put a
     #: `getrlimit` call in every arm64 prologue, and the guard's low address is
     #: the run terminal, so the loop contract has no block to match. That is
-    #: `bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`'s
+    #: `FORMAL the stack guards getrlimit is counted as a program call`'s
     #: regression, and the row is recorded rather than fixed here because the
     #: repair is a `formal/arm64_codegen.py` change owned by that doc.
     #:
@@ -5781,7 +5781,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: here, and neither doc contains its stem: `sum_range`'s is
     #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
     #: flag.md` and `wdiff`'s is
-    #: `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` — each
+    #: `FORMAL the stack guards getrlimit is counted as a program call` — each
     #: a name that says what is wrong, which is why
     #: `test_the_owners_of_the_refusals_still_exist` cannot find either by
     #: prefix and has to be told.

@@ -81,7 +81,7 @@ report's single `NO-RUN` line does not say which.
    `formal/x86_64_endtoend_test.py`'s `_tree` computes (`by_addr`/`_leaf_halts`).
 3. **`movsxd_r64_r32`** is the one form in this table that no document names, and
    the shape of that gap is written up as the "fourth shape" in
-   `bugs/FORMAL_x86_64_instruction_coverage_backlog.md` — decoded, stepped,
+   `FORMAL x86 64 instruction coverage backlog` — decoded, stepped,
    sampled, and (here) unreachable by the prover. A step lemma plus a successor
    row is the fix, and `formal/x86_64_endtoend_test.py::_plan` is how you see
    that it is needed.

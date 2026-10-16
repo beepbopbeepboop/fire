@@ -11,7 +11,7 @@ change**; the reason is recorded below so the next reader does not re-derive it
 by reverting anything.
 
 **The two failures are the same shape as
-`bugs/TEST_the_formal_doc_truth_census_is_in_no_bucket.md` — a census in no
+`TEST the formal doc truth census is in no bucket` — a census in no
 bucket — which is why this is filed next to it rather than as a compiler bug.**
 
 ## What I ran

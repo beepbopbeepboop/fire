@@ -2539,7 +2539,7 @@ def test_a_phantom_struct_template_is_kept(_tmpdir):
     needs the declaration in the unit; the filter used to remove every struct
     template, so the binding got no classification and every field access
     through it was refused. That is
-    `bugs/FORMAL_generic_local_binding_has_no_home.md`, and the phantom
+    `FORMAL generic local binding has no home`, and the phantom
     predicate is `elaborate.phantom_type_params`.
 
     The USED parameter is the control and it is the important half: a template

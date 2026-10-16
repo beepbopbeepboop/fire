@@ -50,7 +50,7 @@ emitter's:** a branched export (`branched`, `pick`) whose prologue carries the
 stack-floor guard's `bl getrlimit` is refused by `_gen_universal_e2e_cfg`'s
 fixed-fuel `any bl` check, so its `_semantics_total` is a `sorry` and the counts
 are 2 and 1 against this doc's 1 and 0. That is
-`bugs/FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_every_function.md`'s
+`FORMAL arm64 stack floor getrlimit is the opaque call for every function`'s
 subject; the counts move when that call leaves the walked path, and nothing here
 substitutes for it.
 

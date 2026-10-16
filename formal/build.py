@@ -1543,7 +1543,7 @@ def _without_own_template_bodies(source_path: str, stmts: list,
     PHANTOM (`monomorph.concrete_struct_templates`), because such a declaration
     is already concrete and an un-bracketed construction of it needs the
     declaration in the unit to bind a home
-    (`bugs/FORMAL_generic_local_binding_has_no_home.md`). The EXECUTABLE path
+    (`FORMAL generic local binding has no home`). The EXECUTABLE path
     passes it and the LIBRARY path does not, and the difference is the export
     boundary rather than a convenience: a kept declaration joins
     `_method_exports`' source set and would publish its methods under the

@@ -1106,7 +1106,7 @@ def is_namedtuple_struct(struct_def) -> bool:
     class body, and this path cannot answer that spelling (there is no class
     body to read a field list from), so recognising the name here is harmless
     and gives the refusal a base to name rather than leaving the class a bare
-    struct with no explanation. `bugs/FORMAL_collections_namedtuple_is_a_call.md`
+    struct with no explanation. `FORMAL collections namedtuple is a call`
     is where the `collections` half is written down.
     """
     return any(b in NAMEDTUPLE_BASES

@@ -96,7 +96,7 @@ claim honest from the outside.
 WHAT IS DELIBERATELY NOT PINNED
 -------------------------------
 The `printf` differences that are not about `str`: `%d` reads a C `int` and so
-renders 32 bits (`bugs/FORMAL_printf_d_renders_32_bits.md`), which is why every
+renders 32 bits (`FORMAL printf d renders 32 bits`), which is why every
 number below is read through `%lld`, and a float operand read through `%f` on
 x86-64 (`test_formal_math.py`'s `consts` group measures that one).
 """

@@ -18,7 +18,7 @@ it into the loop contract — `_reached_without_a_condition`'s fix had landed an
 `wdiff`'s own refusal is the guard's address being the run terminal. `wdiff` is
 now a `REFUSED` row beside `sum_range`, with the needles its message actually
 carries (`unsupported edge to … loop back-edge / continuation`) and its owner
-named (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`,
+named (`FORMAL the stack guards getrlimit is counted as a program call`,
 `formal213-docs`'s claim), so **ten generate and two refuse** and the census
 cannot go stale silently. §4.1's eleven Lean runs are unchanged and remain the
 integrator's.**
@@ -80,7 +80,7 @@ it refused at generation — the census above (2026-10-06) already records why �
 back to `REFUSED`, with the two needles its refusal actually carries
 (`unsupported edge to …` and `loop back-edge / continuation; no loop contract
 matches`) and `REFUSED_OWNER` naming
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, which
+`FORMAL the stack guards getrlimit is counted as a program call`, which
 is where the `getrlimit` halt-boundary defect is filed. The class docstring's
 "all twelve generate" and the census total are corrected to 10 + 2. The
 underlying bug is still that other doc's; what this pins is the honest split, and

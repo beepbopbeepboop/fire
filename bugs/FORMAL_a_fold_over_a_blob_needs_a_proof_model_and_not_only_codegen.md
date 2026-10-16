@@ -93,7 +93,7 @@ this document:
 **WHAT IS NOT NEEDED, so nobody re-derives it.** `zip`, `enumerate` and
 `reversed` are NOT in this document's scope and are not blocked by the proof
 layer's absence of a fold model: their answers are a pair or a run-time-sized
-container, which `bugs/FORMAL_the_value_model_is_one_word.md` and
+container, which `FORMAL the value model is one word` and
 `bugs/FORMAL_listdir_no_run_time_sequence.md` are about, and no fold model
 changes that. `sorted`, `map` and `filter` are blocked by a different wall
 entirely — a call THROUGH A VALUE per element, since a value here has no code

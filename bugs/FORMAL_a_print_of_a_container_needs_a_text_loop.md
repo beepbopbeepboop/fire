@@ -89,7 +89,7 @@ each is a question rather than a mechanism:
 
 **What is NOT the fix**, and is named because it is the obvious one:
 `printf("%s", xs)` on a blob prints the ADDRESS (that is
-`bugs/FORMAL_printf_d_of_a_container_prints_its_address.md`'s measured shape,
+`FORMAL printf d of a container prints its address`'s measured shape,
 and `string_operand_is_string` is what admits it), and a `%s` cannot render a
 `[` or a count.
 

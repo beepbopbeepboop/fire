@@ -42,7 +42,7 @@ exit statuses would have called the second "did not crash".
 
 **No row reads a value through `printf("%d", …)`.** Measured on both backends:
 `%d` reads a C `int` and prints 0 for `2**62`, where `%lld` and `print` are
-right (`bugs/FORMAL_printf_d_renders_32_bits.md`). Every output call here is
+right (`FORMAL printf d renders 32 bits`). Every output call here is
 `print`, which is also the call under test.
 
 **What this path cannot render is refused, and a refusal is a documented
@@ -332,7 +332,7 @@ DIVERGENT_ROWS = [
     # decoder is SHARED with the interpreter (`python3 fire.py run` prints
     # `\u00e9` too) and with the compiled path, so this is a FRONT-END
     # question and not a print one, and it is already filed there with its whole
-    # table: `bugs/LEXER_unicode_escapes_are_not_decoded.md`.
+    # table: `LEXER unicode escapes are not decoded`.
     ("unicode_escape", prog('print("\\u00e9")'),
      ("divergent", "\\u00e9\n", "é\n")),
     # A TYPE VALUE is a 64-bit tag on this path and `is_number_kind` says a tag

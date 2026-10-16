@@ -278,7 +278,7 @@ def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     behind any name and nothing for `instantiate` to substitute. Keeping it is
     what lets an un-bracketed construction of it (`Marker(b.a)`, the type
     argument inferred or annotated rather than spelled in the call) bind a home —
-    the defect `bugs/FORMAL_generic_local_binding_has_no_home.md` records. The
+    the defect `FORMAL generic local binding has no home` records. The
     LIBRARY path deliberately does not pass it: a kept declaration becomes part
     of `_method_exports`' source set, so it would publish the template's methods
     under the template's own name, and changing a dylib's export surface is not

@@ -25070,7 +25070,7 @@ def bytes_repr_body(value: str) -> str:
 # ── the two refusals a `print` of a FLOAT and of a CONTAINER now gets ───────
 #
 # Both replace a message that was FALSE about the source, which is the defect
-# `bugs/FORMAL_sweep_work_map_2026-10-05_b14.md` §4.2 names for the `rf`/`fr`
+# `FORMAL sweep work map 2026-10-05 b14` §4.2 names for the `rf`/`fr`
 # f-strings ("every one is refused with a sentence that is FALSE about the
 # source").  `print(1.5)` was refused with "print() cannot tell whether
 # FloatLiteral is a string or a number … guessing would print an address as if

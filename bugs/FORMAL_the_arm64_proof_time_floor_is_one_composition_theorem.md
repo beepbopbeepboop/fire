@@ -16,7 +16,7 @@ this tree:
   `EXPECTED_FAILURES`). `bitops`'s universal theorem is now
   `bitops_reaches_call_at_0x10000041c` rather than a value theorem, because
   `bfeec991`'s stack-floor guard put a `getrlimit` call in every arm64 prologue
-  (`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`).
+  (`FORMAL the stack guards getrlimit is counted as a program call`).
 * And the file is rejected outright on `bitops_sr_240`, a step lemma about a
   word inside the stack-trap message `bfeec991` embeds in `__TEXT`:
   `_gen_step_lemmas` walks the WHOLE code buffer instead of the function's

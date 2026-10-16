@@ -55,7 +55,7 @@ add/sub step RHS already scaled the field where it read it, and
 `test_formal_call_proof_gen.py::TestGeneratorSource::\
 test_every_sp_tracker_scales_an_add_sub_immediate_by_its_sh_bit` pins the reader
 and each consumer with no Lean run. It is the same `sh`-bit family
-`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` fixed in
+`FORMAL arm64 the extended immediate arms ignore their shift` fixed in
 the model and in `_step_rhs`; this was the reader set that fix did not reach.
 
 **The fix also moved four rows of this table, and it is worth reading what a

@@ -143,7 +143,7 @@ are in the order the corpus reaches them.
   `_select.mojo`'s export rule
   (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`), and the
   `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` scope's own terminal is
-  `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`. FILES BLOCKED IS
+  `FORMAL std os io round2 scope is one refusal shape`. FILES BLOCKED IS
   AN UPPER BOUND, in the class column.
 * **Nothing here says a refusal is wrong.** The refusal names the operation, says
   what it denotes, and names what is missing; `test_formal_mlir_precedence.py` is

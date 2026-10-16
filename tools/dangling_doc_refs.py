@@ -63,7 +63,7 @@ the objection was made when the finder had no convention, so the two were never
 in the same state.
 
 What it cost to leave the class out is now on the record four times over
-(`bugs/FORMAL_a_surviving_citation_is_not_checked.md`): a bug doc was deleted with
+(`the surviving-citation bug`): a bug doc was deleted with
 its fix, and three documents kept citing it by bare stem — a census row, a
 per-stem table row and a prose pointer — while `--ratchet` was GREEN, because a
 citation spelled without `bugs/` was invisible to it. A check that cannot see the
@@ -118,7 +118,7 @@ SUFFIXES = ('.md', '.py')
 # citation, and the ledger is seeded from the census by `--write-baseline` like
 # the prefixed one. What the exclusion bought was four stranded citations of a
 # deleted document with `--ratchet` green throughout
-# (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`), which is the failure
+# (`the surviving-citation bug`), which is the failure
 # mode this file exists to end.
 #
 # The number it printed was an OVER-COUNT until 2026-10-05 — 272 where the truth
@@ -358,7 +358,7 @@ _BARE_BASELINE_HEADER = '''# `BARE_BASELINE`: the same per-file ceilings for the
 # and a file that GAINS one — which is what deleting a bug doc whose name is
 # cited without the directory does to every file that named it — is a failure at
 # the delete rather than at the next reader's convenience
-# (`bugs/FORMAL_a_surviving_citation_is_not_checked.md`).
+# (`the surviving-citation bug`).
 #
 # The exclusions are the walk's, not this table's: `tools/dangling_refs_baseline
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
@@ -843,9 +843,15 @@ def main() -> int:
         return 0
 
     if args.ratchet:
-        regressions = ratchet_regressions(by_file)
         stale = stale_baseline_entries(by_file)
         total = sum(len(v) for v in by_file.values())
+        # The BARE class, in its own ledger and with its own walk, judged by the
+        # one `ratchet_verdict` call so the prefixed and bare halves cannot
+        # disagree about what a gain is — `bugs/FORMAL_a_surviving_citation_is_
+        # not_checked.md` is the defect that a one-walk verdict left open.
+        _bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
+        regressions, bare_regressions = ratchet_verdict(by_file, bare_by_file)
+        bare_total = sum(len(v) for v in bare_by_file.values())
         # A stale entry is REPORTED and never FAILS. The two are different
         # directions: a gain is a citation somebody added and the fix is a prose
         # rewrite, while a stale entry is a citation somebody already fixed and

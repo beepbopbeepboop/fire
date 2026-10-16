@@ -23,8 +23,8 @@ could see. Re-read §6 before using this file's tooling as a coverage claim.
 **merged 2026-10-13 (merging `work/formal250-docs`): the two sibling docs are
 DELETED, and this file keeps their surviving records.** The branch landed the
 same two fixes (its `0f62e449`/`5044b5f7`) and `git rm`'d
-`FORMAL_arm64_the_cmn_arm_writes_no_destination_register.md` and
-`FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md`; on the merged
+`FORMAL arm64 the cmn arm writes no destination register` and
+`FORMAL arm64 the extended immediate arms ignore their shift`; on the merged
 tree both fixes are the master-side parallel forms (the `ADDS/CMN` `Rd` write
 and the shared `arm64_ext_imm12` reader, pinned in
 `test_formal_call_proof_gen.py`'s `TestGeneratorSource` and the
@@ -216,7 +216,7 @@ minute. **So the dividing line is per-module, and it is worth knowing which
 side of it a piece of work is on before anyone prices it:** a hypothesis or a
 peel in `lib/Refine.lean` is affordable to a bounded worker and something in
 `lib/ProofLib.lean` is not — every arm in this file, and every row of
-`FORMAL_arm64_smulh_has_no_model_arm.md`, `FORMAL_arm64_ieee754_has_no_step_
+`FORMAL arm64 smulh has no model arm`, `FORMAL_arm64_ieee754_has_no_step_
 arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
 and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
 `ProofLib`.  `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_

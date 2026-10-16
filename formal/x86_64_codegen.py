@@ -6984,7 +6984,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # them: a star leaf keeps its `*`, so a starred for-target is
             # refused HERE, by this identifier check, with the same sentence
             # arm64 gives it — the option (1) refusal of
-            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
+            # `FORMAL a starred for target is broken on both backends`.
             leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(

@@ -6483,7 +6483,7 @@ BOTH_ARCH_CASES = [
     # A generic struct whose type parameter is PHANTOM (it occurs nowhere in
     # the body) is already a concrete declaration, so an INFERRED-argument
     # construction of it binds like any one-word constructor. Before this it
-    # was refused at the binding — `bugs/FORMAL_generic_local_binding_has_no_home.md`
+    # was refused at the binding — `FORMAL generic local binding has no home`
     # — because `formal/monomorph.py::without_template_bodies` dropped every
     # struct template, leaving the construction with no home. Both machines,
     # because the filter and the holder analysis are shared
@@ -8968,7 +8968,7 @@ BOTH_ARCH_CASES = [
     # is here rather than in the host-arch group. 3*100 + 4*10 + 9 = 349, and a
     # one-field struct is a WORD while a two-field one is a FRAME ADDRESS — so
     # a lowering that classified only one of the two shapes cannot land on 349.
-    # `bugs/FORMAL_generic_local_binding_has_no_home.md` is the measurement.
+    # `FORMAL generic local binding has no home` is the measurement.
     ("both_arch_an_unused_type_parameter_construction_needs_no_bracket",
      "struct One[T: AnyType]:\n"
      "    var v: Int\n"
@@ -22490,7 +22490,7 @@ ORIGIN_OF_CASES = [
     # This row used to be re-pointed at a refusal: the annotated (or
     # inferred-type-arg) construction of the generic `Marker` lost its home
     # classification, so the BINDING refused before the annotation was ever
-    # relevant (bugs/FORMAL_generic_local_binding_has_no_home.md). That
+    # relevant (FORMAL generic local binding has no home). That
     # defect is fixed — a struct template whose type parameters are all
     # PHANTOM is already a concrete declaration, so its declaration is kept and
     # `Marker(...)` binds like any one-word constructor — and the row is back

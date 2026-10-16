@@ -5424,7 +5424,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
 
     # ── the BARE class is a VERDICT now, and this is the check that says so ──
     #
-    # `bugs/FORMAL_a_surviving_citation_is_not_checked.md`: a bug doc was
+    # `the surviving-citation bug`: a bug doc was
     # deleted with its fix and three documents kept citing it by bare stem — a
     # census row, a per-stem table row, a prose pointer — while `--ratchet` was
     # GREEN, because the spelling `BARE_REF` matches has no `bugs/` in front of

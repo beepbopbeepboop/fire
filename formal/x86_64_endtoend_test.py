@@ -496,7 +496,7 @@ _FORMS = {
     #
     # The ISA census could not see this gap: it counts a form covered when the
     # DECODER names it and `x86_64_model_coverage_test.py` has a sample, and
-    # both were already true.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`
+    # both were already true.  `FORMAL x86 64 instruction coverage backlog`
     # names three shapes of gap and this is a FOURTH -- decoded, stepped,
     # sampled, and unreachable by the prover -- which is what asking `_FORMS`
     # directly is for.

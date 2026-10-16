@@ -338,7 +338,7 @@ group(
         # a decision rather than a style one.** A `\uXXXX` escape in a literal is
         # not decoded by this tree's lexer, so `len("h\\u00e9llo")` counts TEN
         # characters where CPython counts five — measured on both backends. That
-        # is `bugs/LEXER_unicode_escapes_are_not_decoded.md`, it is about the
+        # is `LEXER unicode escapes are not decoded`, it is about the
         # LEXER rather than about `len`, and it is not this table's to fix; a case
         # here that spelled the characters as escapes would be reporting a
         # lexer's bug as a `len` divergence on every row. The UTF-8 bytes are

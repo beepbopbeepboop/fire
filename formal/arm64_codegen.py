@@ -3839,7 +3839,7 @@ dylib_exports: list = None, globals_base: int = None,
         with the one shared sentence the x86-64 site gives it. The rest-blob
         machinery this method used to own (`_emit_for_unpack_star_rest`) was
         deleted with that refusal — the option (1) resolution of
-        `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md` —
+        `FORMAL a starred for target is broken on both backends` —
         rather than left as dead code that reads as support."""
         if isinstance(tree, str):
             self._store_var(tree, 0)

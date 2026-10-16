@@ -64,7 +64,7 @@ false step lemma.
 
 ## Why it is not the `getrlimit` regression, and not this document's to fix
 
-`bugs/FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md` owns
+`FORMAL the stack guards getrlimit is counted as a program call` owns
 the OTHER half of `bfeec991`: the guard's `getrlimit` is a call the CFG walk
 cannot step, so `bitops`'s universal theorem is now
 `bitops_reaches_call_at_0x10000041c` rather than a value theorem. **That fix

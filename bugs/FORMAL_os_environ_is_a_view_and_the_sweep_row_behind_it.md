@@ -4,7 +4,7 @@
 the one figure it publishes for the suite is now stale — `test_formal_os_backing.py`
 is 68/70, and the two reds are a DIFFERENT subject.** They are `stat_null` on both
 architectures, and they are the `stat(2)` `st_dev` / sub-word-pointee defect filed
-as `bugs/FORMAL_os_backing_sub_word_pointer_and_stat_dev_are_red.md` — not an
+as `FORMAL os backing sub word pointer and stat dev are red` — not an
 `env*` row. Every row this document rests on still passes: `environ_view` and
 `environ_view_empty` (88 answers per architecture against CPython) and the `blob`
 group. So the `70/70` below is the suite's total at that measurement; the

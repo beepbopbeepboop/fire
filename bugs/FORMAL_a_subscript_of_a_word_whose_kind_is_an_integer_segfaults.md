@@ -4,7 +4,7 @@
 `formal/model.py::scalar_container_base_evidence`, asked from both emitters'
 single subscript/slice/membership/for-in choke point). Found 2026-10-05 on
 `work/formal40-1-r2` while fixing
-`FORMAL_a_comprehension_element_container_aliases_every_iteration.md`.
+`FORMAL a comprehension element container aliases every iteration`.
 
 **Status: NOT FIXED, and the refusal for this construct EXISTS and is correct —
 the base classifier simply never asks the question for this one base shape. Not
@@ -127,7 +127,7 @@ It is also reachable from ordinary code rather than from a fuzzer: it needs a
 subscript whose base is an integer, which is one ragged-table indexing mistake
 away in any program that walks a list of lists without binding the row first —
 and the corpus deliberately reads nested subscripts through a local (see
-`FORMAL_len_of_a_subscript_of_a_list_of_lists_is_an_int.md` §"Why the corpus does
+`FORMAL len of a subscript of a list of lists is an int` §"Why the corpus does
 not generate it"), which is why 738 files never produced one.
 
 ## The exact next step
