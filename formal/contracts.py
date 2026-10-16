@@ -799,9 +799,21 @@ _MASK = (1 << 64) - 1
 #   * `simp_all` first: it closes a clause whose model the simplifier can
 #     evaluate under the `by_cases` split, which is the common case and the one
 #     `eval_eq_mojo` closes for the same shapes.
-#   * `omega` second: it closes the linear-arithmetic clauses the simplifier
+#   * `u64_order` second: it opens `UInt64`'s ORDER into `Nat`'s and hands the
+#     goal to `omega`.  It is second because it is `simp_all` plus one step,
+#     and it is in the list at all because of a measured fact: `UInt64`'s order
+#     is `BitVec 64`'s, which is `Nat`'s behind two structures, and `omega` does
+#     linear arithmetic over `Nat`/`Int` and NOTHING else -- so before this rung
+#     every goal the ladder states (all of which are `UInt64` comparisons,
+#     because the signed reading of a source comparison is spelled
+#     `x ^^^ 0x8000000000000000`) was invisible to `omega`, and a contract whose
+#     goal needed one comparison from another was UNREACHED no matter what ran.
+#     `formal/contracts/bounds_index.mojo` is the measurement: exit 1 without
+#     it, exit 0 with it, and `wrong_clampv.mojo` still exits 1 (a false
+#     contract must be refused).
+#   * `omega` third: it closes the linear-arithmetic clauses the simplifier
 #     cannot, and it is where a genuinely unprovable contract says so.
-#   * `decide` third: a fully concrete goal.
+#   * `decide` fourth: a fully concrete goal.
 #
 # `bv_decide` is DELIBERATELY absent.  It decides `BitVec` goals; `UInt64` is
 # `Lean.UInt64`, a `Fin (2^64)`, which is a STRUCTURE and not a bitvector, so on

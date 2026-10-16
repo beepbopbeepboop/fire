@@ -2643,12 +2643,15 @@ def _go_simp_lemmas(fn) -> list:
 def _expr_ast(e, scope=None) -> str:
     """Translate a Mojo expression to a ProofLib MojoExpr term.
 
-    The `Call` arm keeps exactly one argument, and that is NOT a choice:
-    `MojoExpr.call` in `lib/ProofLib.lean` carries a single `MojoExpr`, and
-    `callFunc` is `String → UInt64 → UInt64`, so there is no way to hand it two.
-    `_ast_bridge_gaps` is what keeps this honest — every caller of the bridge
-    asks it first, so `e.args[0]` below is reached only for a call that can be
-    stated.
+    The `Call` arm renders EVERY argument, because `MojoExpr.call` in
+    `lib/ProofLib.lean` carries a `List MojoExpr` — so the AST is faithful for a
+    call of any arity.  What it is NOT is *statable* for a call of any arity but
+    one: `callFunc` is `String → UInt64 → UInt64`, so `lib/ProofLib.lean`'s
+    `evalArgs` PACKS the arguments into a single `UInt64` product, and that is
+    not what a callee of this arity takes.  `_ast_bridge_gaps` is what keeps
+    this honest — every caller of the bridge asks it first, so `e.args` below is
+    reached only for a call that can be stated, and a wider one is REFUSED with
+    its arity rather than rendered into a bridge that cannot close.
 
     `scope` is the `_Scope` every value renderer in this file already takes, and
     the AST bridge needs it for the same reason `_expr_go` does: the `String`
@@ -2713,8 +2716,8 @@ def _expr_ast(e, scope=None) -> str:
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
                 f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
     if isinstance(e, Call):
-        return (f'(MojoExpr.call "{_call_name(e)}" '
-                f'({_expr_ast(e.args[0], scope)}))')
+        args = ", ".join(_expr_ast(a, scope) for a in e.args)
+        return f'(MojoExpr.call "{_call_name(e)}" [{args}])' 
     if isinstance(e, F.TernaryExpr):
         # `MojoExpr` has no conditional form, and this arm REFUSES rather than
         # falling through to the `MojoExpr.int 0` below: the bridge exists to
@@ -2775,18 +2778,19 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
     disagreement is only visible as a red build of a program whose source is
     three lines long.
 
-    Two independent gaps, both consequences of `MojoExpr.call` carrying one
-    argument and `callFunc` being unary:
+    Two independent gaps, both consequences of `callFunc` being UNARY:
 
       * an UNRESOLVABLE callee — anything but the proved function and an
         admitted contract. `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
         §"step 2" is the work: `callFunc` has to become the model's own
         function table over the program's `_go` definitions, which `_gen_go`
         already emits.
-      * an ARITY other than one. Zero arguments reached `e.args[0]` and raised
-        `IndexError: list index out of range` out of the generator (measured on
-        `cas.reset_stats()`, `build --formal` on arm64); two or more silently
-        dropped every argument after the first, which is the same false theorem
+      * an ARITY other than one. `MojoExpr.call` carries a `List MojoExpr`, so
+        the AST is FAITHFUL for any arity (widened 2026-10-05; before that a
+        zero-argument call reached `e.args[0]` and raised `IndexError: list index
+        out of range` out of the generator, measured on `cas.reset_stats()`,
+        `build --formal` on arm64, and two or more silently dropped every
+        argument after the first, which is the same false theorem
         by a different route.
 
     A recursive self-call is neither: its name is the proved function's and it
@@ -2805,12 +2809,14 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
             name = _call_name(e)
             if len(e.args) != 1:
                 gaps.append(
-                    f"`{name or '?'}` with {len(e.args)} arguments — "
-                    f"`MojoExpr.call` carries ONE `MojoExpr` and `callFunc` is "
-                    f"`String → UInt64 → UInt64`, so a call of any other arity "
-                    f"has no faithful AST: with none, `_expr_ast` reached "
-                    f"`e.args[0]` and raised `IndexError`; with two or more, "
-                    f"every argument after the first was dropped silently")
+                    f"`{name or '?'}` with {len(e.args)} arguments — the AST "
+                    f"carries all of them (`MojoExpr.call` is "
+                    f"`List MojoExpr`) but `callFunc` is "
+                    f"`String → UInt64 → UInt64`, so the AST layer PACKS them "
+                    f"into one value: `evalArgs` multiplies them and "
+                    f"`callFunc` is handed that product, which is not what a "
+                    f"callee of this arity takes, so `eval_eq_mojo` cannot be "
+                    f"stated about this call")
             elif used and name not in resolvable:
                 gaps.append(
                     f"`{name}` — `callFunc` answers 0 for a name it does not "
@@ -2871,11 +2877,17 @@ def _ast_gap_message(gaps: list) -> str:
     """The refusal both generators raise for a call the bridge cannot state.
 
     ONE message for both architectures, because the limit is one limit:
-    `MojoExpr.call` carries a single argument and `callFunc` is
-    `String → UInt64 → UInt64`, and `eval_eq_mojo` is stated against that
-    `callFunc` on both sides. Two copies would be free to drift into two
-    different accounts of the same gap, and the x86-64 copy is the one that
-    decides whether a false theorem is emitted or the bridge is dropped.
+    `callFunc` is `String → UInt64 → UInt64` — it is handed ONE value, so
+    `lib/ProofLib.lean`'s `evalArgs` PACKS a call's arguments into a single
+    product — and `eval_eq_mojo` is stated against that `callFunc` on both
+    sides. Two copies would be free to drift into two different accounts of the
+    same gap, and the x86-64 copy is the one that decides whether a false
+    theorem is emitted or the bridge is dropped.
+
+    The node is NOT part of the limit any more.  `MojoExpr.call` carries a
+    `List MojoExpr` (widened 2026-10-05), so the AST is faithful for a call of
+    any arity; what cannot be stated is a `callFunc` that takes more than one
+    value, which is a different widening — of the HANDLER, not the node.
 
     At most three gaps are named: the message goes into the generated file as a
     one-line note (via `x86_64_proof_gen._first_sentence`) as well as onto the
@@ -2889,10 +2901,11 @@ def _ast_gap_message(gaps: list) -> str:
     return (f"eval_eq_mojo: the AST bridge cannot state this function's "
             f"call{plural} — " + "; ".join(shown) + more
             + ". Refusing rather than emitting `eval_eq_mojo` as a statement "
-              "about a different program: `callFunc` and `MojoExpr.call` are "
-              "the two ends of one limit (a unary handler and a one-argument "
-              "node), and until both are widened the bridge can only speak "
-              "about a function that calls nothing but itself. "
+              "about a different program: `callFunc` takes ONE value, so the "
+              "AST PACKS a call's arguments into a single product and that "
+              "product is not what a callee of this arity returns -- until "
+              "the handler is widened too, the bridge can only speak about a "
+              "function that calls nothing but itself with one argument. "
               "`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` has "
               "the measurement and the two routes.")
 

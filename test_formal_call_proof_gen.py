@@ -3677,6 +3677,27 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                       f"the arity is the whole fact: {gaps[0]}")
         self.assertIn("MojoExpr.call", gaps[0])
 
+    def test_the_ARITY_gap_names_the_HANDLER_and_not_the_node(self):
+        """The node was widened (2026-10-05) and the handler was not, so the
+        reason has to name the one that is still the limit.
+
+        The gap used to say "`MojoExpr.call` carries ONE `MojoExpr`", which
+        stopped being true when the node became `List MojoExpr` — and a refusal
+        that points at a fact which is gone sends the next reader to widen the
+        wrong thing.  The node now carries every argument; what cannot be
+        stated is a `callFunc` handed one value, so `evalArgs` PACKS them into a
+        single product.  That is the fact the message has to carry.
+        """
+        gaps = self._gaps(self.ONE_ARG, {"main", "_scalar_max2"})
+        self.assertEqual(len(gaps), 1, gaps)
+        self.assertIn("PACKS", gaps[0],
+                      "the arity gap must name the HANDLER's unary shape:\n"
+                      + gaps[0])
+        self.assertIn("List MojoExpr", gaps[0],
+                      "and it must say the node carries a list, so a reader "
+                      "does not go and widen it again:\n" + gaps[0])
+        self.assertNotIn("carries ONE `MojoExpr`", gaps[0])
+
     def test_a_call_with_no_arguments_is_named_by_its_arity(self):
         gaps = self._gaps(self.NO_ARG, {"main", "zero"})
         self.assertEqual(len(gaps), 1, gaps)

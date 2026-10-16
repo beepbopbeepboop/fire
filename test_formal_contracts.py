@@ -708,6 +708,55 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
           "the_bridge_is_these_three_order_names_and_no_other",
           str(CT._ORDER_BRIDGE))
 
+
+def test_every_ladder_rung_is_a_first_alternative_that_can_FALL_THROUGH(tmpdir=None):
+    """A rung Lean's `first` cannot fall THROUGH is a rung that never runs.
+
+    `first | t1 | t2 | …` is `t1 <|> t2 <|> …`: it takes the first alternative
+    that does not THROW, and a tactic which leaves the goal open does not
+    throw.  `simp_all` on a goal it cannot fully close is exactly such a
+    tactic.  So the emitted
+
+        first
+          | (simp_all [model, sKey, …])
+          | omega
+          | decide
+
+    ran `simp_all` and STOPPED, and `omega`/`decide` were unreachable for every
+    goal `simp_all` did not close by itself — while `Verdict.why` named all
+    three as the rungs that ran.  Measured on `formal/contracts/bounds_index.mojo`
+    before the fix: exit 1, and Lean named the `decide` alternative's own
+    complaint rather than ever reaching the `omega` one.
+
+    The property asserted here is the one the fix rests on: each rung is a
+    `first` alternative AND its spelling ends in `<;> done`, which is what makes
+    an alternative that left the goal open throw so that `first` moves on.
+    Asserted against `_LADDER_SPELLINGS` rather than against hand-written
+    strings, so adding a rung cannot quietly reintroduce this."""
+    from formal import contracts as CT
+    check("the_ladder_is_not_empty", bool(CT.LADDER), str(CT.LADDER))
+    missing = [r for r in CT.LADDER if r not in CT._LADDER_SPELLINGS]
+    check("every_rung_has_a_spelling", not missing,
+          f"{missing} have none in _LADDER_SPELLINGS")
+    unspelled = [k for k in CT._LADDER_SPELLINGS if k not in CT.LADDER]
+    check("no_spelling_is_left_out_of_the_ladder", not unspelled,
+          f"{unspelled} are spelled but not in LADDER")
+    for rung in CT.LADDER:
+        spelling = CT._LADDER_SPELLINGS.get(rung, "")
+        check(f"{rung}_ends_in_done_so_first_can_fall_through",
+              spelling.rstrip().endswith("<;> done"), spelling)
+        check(f"{rung}_takes_the_clause_lemma_set",
+              "{simp}" in spelling, spelling)
+    script = CT._ladder_script("h0, m_go, sKey")
+    alternatives = [ln for ln in script.split("\n") if ln.strip().startswith("|")]
+    check("the_script_has_one_alternative_per_rung",
+          len(alternatives) == len(CT.LADDER),
+          f"{len(alternatives)} vs {CT.LADDER}\n{script}")
+    for rung, line in zip(CT.LADDER, alternatives):
+        check(f"the_{rung}_alternative_is_the_spelling",
+              line.strip() == "| (" + CT._LADDER_SPELLINGS[rung].format(
+                  simp="h0, m_go, sKey") + ")", line)
+
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
     `@requires(n >= 0)` is TRUE for small `n` and FALSE at `n = 2^63 - 1`,
