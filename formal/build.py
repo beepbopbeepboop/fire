@@ -1560,6 +1560,32 @@ def _without_own_template_bodies(source_path: str, stmts: list,
     return MM.without_template_bodies(stmts, source, keep=keep)
 
 
+def _own_template_structs(source_path: str) -> frozenset:
+    """The generic STRUCT TEMPLATES this source declares, by name.
+
+    `_without_own_template_bodies` removes each of these declarations from the
+    statement list — a template's body has no instantiation in scope, so
+    analysing it is a `len(Self.keys)` refusal — and `structs_by_name` is built
+    from what is left, so the NAME is gone from the one table
+    `formal/model.py::subscript_index_is_a_comptime_parameter_list` consults to
+    tell an explicit-parameter list from a container subscript. It reads it from
+    `template_struct_names`, which is the same export-rule answer the drop
+    itself uses, rather than re-testing the source, so the two cannot disagree
+    about which names are templates.
+
+    Empty when the source cannot be read, which is the same answer
+    `_without_own_template_bodies` gives and for the same reason: no source, no
+    templates, and the caller keeps today's diagnosis.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    try:
+        with open(source_path) as f:
+            source = f.read()
+    except OSError:
+        return frozenset()
+    return frozenset(MM.template_struct_names(source))
+
+
 def _imported_structs(source_path: str, stmts: list, arch: str,
                       linked: list = None) -> list:
     """Struct declarations from the modules this file imports, or [].
@@ -2146,7 +2172,7 @@ def compile_formal(source_path: str, output: str = None,
                                 if d["install_name"] not in _have]
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if import_dylibs else None,
-                         _line)
+                         _line, _own_template_structs(source_path))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -2902,7 +2928,8 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
         # imports, and `check_imported_frame_handoffs` is what decides that.
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if link_dylibs else None,
-                         link_manifests or [])
+                         link_manifests or [],
+                         _own_template_structs(source_path))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
@@ -2938,7 +2965,8 @@ def _own_structs(structs) -> list:
 
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
-                     imported_module_names, link_line=None) -> None:
+                     imported_module_names, link_line=None,
+                     own_template_structs=None) -> None:
     """Publish this unit's module-level tables, then run every late check.
 
     ONE function for the two front ends, and the reason is a measured drift
@@ -3088,7 +3116,8 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_module_symbols(functions, by_name,
                          imported_module_names=imported_module_names,
                          link_line=link_line,
-                         import_aliases=_import_aliases(stmts))
+                         import_aliases=_import_aliases(stmts),
+                         own_template_structs=own_template_structs)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -15171,7 +15200,8 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
                                      rule=rule, declared=declared)
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
-                         import_aliases: dict = None) -> None:
+                         import_aliases: dict = None,
+                         own_template_structs=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -15839,7 +15869,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     and id(sub) not in type_positions:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
-                                                structs_by_name)
+                                                structs_by_name,
+                                                own_template_structs)
                 if why is None and M.is_external_call_template(sub) \
                         and id(sub) not in xc_callees:
                     # A well-formed template that is not a call's callee: a

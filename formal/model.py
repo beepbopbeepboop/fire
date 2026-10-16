@@ -2281,7 +2281,8 @@ def refuse_module_level_mlir_templates(stmts) -> None:
 
 
 def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
-                                                 callee_defs=None) -> bool:
+                                                 callee_defs=None,
+                                                 own_template_structs=None) -> bool:
     """True when `e`'s bracketed comma list is a COMPILE-TIME PARAMETER list.
 
     `x[a, b]` and `Foo[A, B]` are ONE node shape and not the same construct,
@@ -2319,7 +2320,19 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
       * a bare name `callee_defs` holds a GENERIC `FunctionDef` for, which is
         `multi_index_kind`'s own `generic_callee` test, kept here as well
         because the escape check has no `generic_callee` and would otherwise
-        have to re-ask this question without it (`tag[Self.T, origin_of(self)]`).
+        have to re-ask this question without it (`tag[Self.T, origin_of(self)]`);
+      * a bare name in `own_template_structs`, THIS unit's own generic struct
+        TEMPLATES. They are not in `structs_by_name`, and that is not an
+        oversight: `monomorph.without_template_bodies` removes each template
+        DECLARATION from the statement list before the pipeline that builds
+        `structs` runs, because a template's body has no instantiation in scope
+        and analysing it turns a correct generic into a `len(Self.keys)`
+        refusal. The declaration has to go, but the NAME is still a
+        compile-time parameter list here, so it is handed over separately: the
+        document-string claim that `structs_by_name` "covers a module's OWN
+        generics" was false for exactly these, and `Tagged[Int, 0]()` in the
+        file that declares `Tagged` was answered with the tuple-index sentence —
+        about a container lookup the source never wrote.
 
     Everything else answers **no**, and the caller keeps today's behaviour.
     That includes every dotted base — `Self.IteratorType[origin_of(self)]` is
@@ -2341,7 +2354,8 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
         return False
     if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
             or ((callee_defs or {}).get(name) is not None
-                and is_generic(callee_defs[name]))):
+                and is_generic(callee_defs[name]))
+            or (own_template_structs and name in own_template_structs)):
         return True
     return bool(structs_by_name) and name in structs_by_name
 
@@ -2418,7 +2432,7 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
 
 def multi_index_kind(e, base_is_dict: bool = False,
                      generic_callee=None, structs_by_name=None,
-                     callee_defs=None) -> str:
+                     callee_defs=None, own_template_structs=None) -> str:
     """What a multi-element subscript index means here. See the section note.
 
     `e` is the whole `SubscriptExpr`, so the base is available and the answer
@@ -2440,6 +2454,10 @@ def multi_index_kind(e, base_is_dict: bool = False,
     `subscript_index_is_a_comptime_parameter_list`, which is the single answer
     for it; both are refusals, so no program that built before this does, and
     the only thing that changes is which true sentence names the construct.
+    `own_template_structs` is the same membership test extended to this unit's
+    own generic struct TEMPLATES, which are not in `structs_by_name` because
+    their declarations are dropped before it is built — see
+    `subscript_index_is_a_comptime_parameter_list`.
 
     A LOWERED `external_call["sym", RetType]` never reaches this function: it
     is answered in `multi_index_refusal_for` above, which returns None for the
@@ -2454,7 +2472,8 @@ def multi_index_kind(e, base_is_dict: bool = False,
     if generic_callee is not None and is_generic(generic_callee):
         return MULTI_INDEX_COMPTIME_PARAMS
     if subscript_index_is_a_comptime_parameter_list(e, structs_by_name,
-                                                   callee_defs):
+                                                   callee_defs,
+                                                   own_template_structs):
         return MULTI_INDEX_COMPTIME_PARAMS
     return MULTI_INDEX_DATA
 
@@ -2684,7 +2703,7 @@ def multi_index_refusal(kind: str, spelled: str, elements_note: str = "") -> str
 
 
 def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
-                            structs_by_name=None):
+                            structs_by_name=None, own_template_structs=None):
     """The refusal text for `e`, or None when it is the lowered dict-key case.
 
     This is the ONE place either backend asks, so the two architectures
@@ -2699,7 +2718,10 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
     `multi_index_kind`, which is where both are decided, and
     `subscript_index_is_a_comptime_parameter_list` for why a base this image
     cannot classify falls through to the tuple-index refusal, which is still
-    true of it.
+    true of it. `own_template_structs` is the third half of the same fact, for
+    this unit's own generic struct TEMPLATES, whose declarations
+    `monomorph.without_template_bodies` has already removed from
+    `structs_by_name` — see `subscript_index_is_a_comptime_parameter_list`.
 
     Called from the address computation, not from the read: that is the one
     place a read, a store and an augmented assignment all pass through, and the
@@ -2742,7 +2764,8 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
                             generic_callee=(
                                 (callee_defs or {}).get(_base_name(e.obj))),
                             structs_by_name=structs_by_name,
-                            callee_defs=callee_defs)
+                            callee_defs=callee_defs,
+                            own_template_structs=own_template_structs)
     if kind is None:
         return None
     # The per-element diagnosis, and ONLY for the kind it is about: which

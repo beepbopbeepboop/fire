@@ -1,4 +1,4 @@
-# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source
+# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
@@ -50,6 +50,40 @@ is a value substitution of a *resolved alias*, and it is the CPython-vs-source
 half of `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
 (claimed elsewhere), not this one. So this doc stays open with §4.1's literal
 half closed.
+
+**What changed 2026-10-08, and what did not.** §2 row 4's construct,
+`Tagged[Int, 0]()` — a generic applied with a type argument and a comptime VALUE —
+was measured on the IMPORTED spelling (where `imported_struct_defs` puts `Tagged`
+in `structs_by_name`), so the row recorded the correct
+`compile-time explicit-parameter list` message. **The SAME construct in the file
+that DECLARES the template fell through to §2's tuple-index sentence instead**,
+which is false about the source: `Tagged[Int, 0]` names two compile-time
+parameters and no container. Root cause: `monomorph.without_template_bodies`
+removes each template DECLARATION before `structs_by_name` is built (a template
+body has no instantiation in scope, so analysing it is a `len(Self.keys)`
+refusal), leaving `model.subscript_index_is_a_comptime_parameter_list` — whose
+docstring claimed `structs_by_name` "covers a module's OWN generics" — unable to
+classify it, so `multi_index_kind` answered `MULTI_INDEX_DATA`.
+`formal/build.py::_own_template_structs` now hands the unit's own template
+struct names to that classifier separately, and
+`test_formal_monomorph.py::test_an_own_struct_template_with_a_comptime_value_is_
+diagnosed_as_one` pins both directions on both architectures. **This is a
+diagnosis fix and not the wall**: `type_arg_text` still answers `""` for a
+top-level literal, so no demand is computed, nothing is instantiated, and the
+construct is still refused — it is now refused with the true sentence.
+
+**One shape is deliberately NOT covered, so nobody re-derives it.**
+`tagged.Tagged[Int, 0]()` — the DOTTED spelling of the same construct — still
+reaches the tuple-index sentence, and that is the classifier's stated boundary
+rather than an oversight: `formal/model.py::_base_name` answers `None` for a
+`MemberExpr`, and §`subscript_index_is_a_comptime_parameter_list`'s docstring
+says every dotted base keeps today's answer, because deciding one needs the
+IMPORTED module's declarations (`formal/imports.py`'s question) and guessing is
+the one direction that could turn a refusal into a wrong image. The type-only
+dotted shape (`mylib.Box[Int]()`) has its own answer
+(`dotted_specialization_refusal`, §3 row 5); the comptime-value dotted shape is
+a gap left for whoever makes a dotted base classifiable, and the fix above does
+not reach it.
 
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:

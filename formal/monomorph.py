@@ -201,6 +201,35 @@ def template_names(src: str) -> list:
         if why == reflect.EXCL_GENERIC))))
 
 
+def template_struct_names(src: str) -> list:
+    """The names in `template_names(src)` that are STRUCT templates.
+
+    The subset that matters to `formal/model.py::subscript_index_is_a_comptime_
+    parameter_list`: a bracket on a struct template's name is an explicit
+    parameter list, a bracket on a function template's name is a comptime
+    specialization both backends answer locally. `template_kind` is the one
+    reader of the distinction (`without_template_bodies` asks it the same way),
+    and it may raise `MonomorphError` for the export rule's one known
+    imprecision — a nested `def name[…]` inside a function body — so a name no
+    extractor can pull out is skipped rather than propagated: this is a
+    DIAGNOSIS aid, and a name that is not really a template must not turn a
+    build into a crash.
+
+    Both halves it composes are already memoized on the source text
+    (`template_names` and `template_kind`), so a build asks each of them once
+    however many front ends call this.
+    """
+    out = []
+    for name in template_names(src):
+        try:
+            kind = template_kind(src, name)
+        except MonomorphError:
+            continue
+        if kind == KIND_STRUCT:
+            out.append(name)
+    return out
+
+
 def without_template_bodies(stmts: list, src: str, keep=()) -> list:
     """`stmts` with this source's GENERIC TEMPLATE declarations removed.
 

@@ -1260,6 +1260,61 @@ def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
               f"{text.strip()[-400:]}")
 
 
+def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir):
+    """`Tagged[Int, 0]()` in the file that declares `Tagged` names a comptime
+    PARAMETER LIST, and the refusal must say so — not call it a tuple index.
+
+    The construct is the one
+    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
+    measures: a generic applied with a TYPE argument and a comptime VALUE, which
+    this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
+    `""` for a top-level literal, by design, so no demand is computed). What is
+    refused is therefore correct, and the case is about the DIAGNOSIS.
+
+    It regressed silently because `formal/monomorph.py::without_template_bodies`
+    removes a template's DECLARATION from the statement list — a template body
+    has no instantiation in scope, so analysing it is a refusal — and
+    `structs_by_name`, which `formal/model.py::subscript_index_is_a_comptime_
+    parameter_list` consults for "is this base a type", is built from what is
+    left. So `Tagged` was absent from the one table that would have classified
+    the bracket, the classifier answered `MULTI_INDEX_DATA`, and the source was
+    told it wrote `Tagged[Int, 0]` as a two-dimensional/tuple index — a
+    container lookup this path never wrote. The fix hands the unit's own
+    template struct names to the classifier separately
+    (`formal/build.py::_own_template_structs`), and this pins both directions:
+    the true sentence is present and the false one is gone.
+
+    The same-unit shape is the one no case had: an imported `Tagged` reaches
+    `structs_by_name` through `imported_struct_defs` and was already diagnosed
+    correctly, so the missing coverage was exactly the file that declares the
+    template itself — which is why this is a row and not a re-measurement.
+    """
+    prog = ("struct Tagged[T, origin: Int]:\n"
+            "    var v: Int\n"
+            "\n"
+            "def main():\n"
+            "    var t = Tagged[Int, 0]()\n"
+            "    return 42\n")
+    for arch in ARCHES:
+        fresh_cas()
+        _root, _out, result = build_pair_case(
+            tmpdir, arch, "mm_own_comptime", None, prog)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"[{arch}] `Tagged[Int, 0]()` built, and this path has no comptime "
+              f"VALUE substitution, so the instantiation it would carry is not "
+              f"the source's: {text.strip()[-400:]}")
+        check("compile-time explicit-parameter list" in text,
+              f"[{arch}] the refusal does not name the construct. A generic "
+              f"applied with a comptime value is an explicit-parameter list, "
+              f"which is what a reader acts on: {text.strip()[-500:]}")
+        check("subscript whose index is a tuple" not in text,
+              f"[{arch}] the refusal says the source wrote a tuple index. "
+              f"`Tagged[Int, 0]` names two compile-time parameters and no "
+              f"container, so this sentence is false about the program — the "
+              f"`refuse_without:` class of defect: {text.strip()[-500:]}")
+
+
 # ── the decisions, pinned without an image ──────────────────────────────────
 
 
@@ -3427,6 +3482,8 @@ TESTS = [
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
+    ("an own struct template with a comptime value is diagnosed as one",
+     test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
     ("an annotated construction is a demand only when it can be named",

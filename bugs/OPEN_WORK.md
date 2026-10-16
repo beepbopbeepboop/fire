@@ -213,7 +213,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` | `formal417-docs` | the row the per-edge export gate hands 98 of the 163 files to |
-| `FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` | `formal408-docs` | a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source |
+| `FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` | `formal408-docs` | a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source |
 | `FORMAL_generic_local_binding_has_no_home.md` | `formal413-docs` | A generic struct constructed with inferred (or annotated) type arguments loses its binding's home |
 | `FORMAL_generic_monomorph_scope.md` | `formal413-docs` | what a generic's instantiation does NOT cover |
 
