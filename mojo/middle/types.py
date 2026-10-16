@@ -1002,6 +1002,16 @@ def _is_dataclasses_module_ref(obj) -> bool:
         return obj.member == 'dataclasses'
     return False
 
+def _is_copy_module_ref(obj) -> bool:
+    """True for an AST expression referencing the `copy` module, bare or
+    through a hub alias (`gimple_ctypes.copy`) -- the same two spellings
+    `_is_dataclasses_module_ref` accepts, for the same reason."""
+    if isinstance(obj, IdentExpr):
+        return obj.name == 'copy'
+    if isinstance(obj, MemberExpr) and isinstance(obj.obj, IdentExpr):
+        return obj.member == 'copy'
+    return False
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'

@@ -1810,6 +1810,10 @@ def _emit_reflection_dispatch(self, parts):
         tag_cases_asdict = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
             for sn in reflect_emitted)
+        tag_cases_copy = "\n".join(
+            f'  if (_tag == {_struct_type_id(sn)}) {{ {sn} *_n = ({sn} *)malloc(sizeof({sn})); '
+            f'memcpy(_n, obj, sizeof({sn})); return (int64_t)(intptr_t)_n; }}'
+            for sn in reflect_emitted)
         tag_set_literal = ", ".join(
             str(_struct_type_id(sn)) for sn in reflect_emitted)
         if len(tag_set_literal) == 0:
@@ -1845,6 +1849,21 @@ def _emit_reflection_dispatch(self, parts):
                "  for (size_t _i = 0; _i < sizeof(_known)/sizeof(_known[0]); _i++)\n"
                "    if (_known[_i] == _tag) return 1;\n"
                "  return 0;\n"
+               "}\n")
+            # `copy.copy(x)` (see its lowering in emit_methods): a struct by
+            # its tag, a container by its registry, anything else is its own
+            # copy (a scalar, a string, a tuple).
+            + ("static int64_t _mojo_dispatch_shallow_copy (void *obj) {\n"
+               "  int64_t _w = (int64_t)(intptr_t)obj;\n"
+               "  if (!obj) return 0;\n"
+               "  if (mojo_is_registered_list(_w))\n"
+               "    return mojo_is_tuple((MojoList *)obj) ? _w\n"
+               "         : (int64_t)(intptr_t)mojo_list_copy((MojoList *)obj);\n"
+               "  if (mojo_is_registered_dict(_w)) return (int64_t)(intptr_t)mojo_dict_copy((MojoDict *)obj);\n"
+               "  if (mojo_is_registered_set(_w)) return (int64_t)(intptr_t)mojo_set_copy((MojoSet *)obj);\n"
+               "  int64_t _tag = mojo_read_type_tag_safe(_w);\n")
+            + f"{tag_cases_copy}\n"
+            + ("  return _w;\n"
                "}\n")
         )
         tag_cases_repr = "\n".join(
@@ -14317,6 +14336,7 @@ def gen_module_impl(self, stmts):
     if self._asdict_dispatch_needed:  # see that flag's own declaration
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
+    parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
     # The FOUR the ungated path needs, which is `REPR_CLUSTER_DECLS` without
     # `_mojo_repr_pair` — the one member no generated call site names directly,
     # so only the `emit_struct_defs` module's `_emit_reflection_fwd_decls` pass

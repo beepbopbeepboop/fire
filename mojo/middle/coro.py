@@ -5009,10 +5009,43 @@ def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
 
 
 def _deep_copy_stmt(node):
-    """Shallow structural clone so rewrites don't mutate the original AST
-    (the same FunctionDef object can be walked again elsewhere)."""
+    """A structural clone of an AST subtree, so the coroutine rewrites do not
+    mutate the original (the same FunctionDef object can be walked again
+    elsewhere).
+
+    Every dataclass node is copied (`copy.copy`) and every list reachable
+    through its fields is rebuilt with its elements cloned; anything else --
+    a string, a number, None -- is
+    immutable and shared (a tuple is rebuilt only so the nodes inside an
+    `elifs` pair are cloned too). That is what `copy.deepcopy` gave for an AST, and
+    it is spelled out rather than delegated because the compiled compiler
+    has no generic deep copy: `copy.deepcopy(node)` lowered to the module
+    marker, so the stage2 binary built every stack-switch generator body
+    out of None statements (`/* TODO: <type> */`) and every genexp it
+    compiled came out empty."""
+    if isinstance(node, tuple):
+        # Tested BEFORE `list`: the compiled value model spells a tuple as a
+        # marked list, and an `elifs` / `kwargs` entry has to come back a
+        # tuple (with its nodes cloned) for every `isinstance(e, tuple)`
+        # reader downstream.
+        items: list = []
+        for item in node:
+            items.append(_deep_copy_stmt(item))
+        return tuple(items)
+    if isinstance(node, list):
+        out: list = []
+        for item in node:
+            out.append(_deep_copy_stmt(item))
+        return out
+    if not dataclasses.is_dataclass(node):
+        return node
     import copy
-    return copy.deepcopy(node)
+    new = copy.copy(node)
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
+            setattr(new, f.name, _deep_copy_stmt(v))
+    return new
 
 
 # ── registration + C emission ─────────────────────────────────────────

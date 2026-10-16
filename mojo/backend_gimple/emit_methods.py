@@ -1961,6 +1961,23 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # attribute in this codebase is `.name`; see the for-loop lowering's
     # _dataclass_fields_vars handling for how `f.name` resolves back to
     # `f` itself).
+    # `copy.copy(x)`: a real shallow copy. It used to fall through to the
+    # opaque-module receiver stub (`int64_t.copy() stubbed`), which hands back
+    # the MODULE marker -- 0 -- so every compiled `copy.copy(node)` was None.
+    # `_mojo_dispatch_shallow_copy` copies a reflected struct by its type tag,
+    # copies a list/dict/set, and returns anything else (a scalar, a string, a
+    # tuple -- immutable, so the object itself IS a copy) unchanged.
+    if (gimple_ctypes._is_copy_module_ref(func.obj)
+            and func.member == 'copy' and len(node.args) == 1):
+        at, av = gen.lower_expr(node.args[0])
+        if at in ('int', 'int8_t', 'int16_t', 'int32_t', 'uint8_t', 'uint16_t',
+                  'uint32_t', 'uint64_t', '_Bool', 'double', 'float', 'char *'):
+            return at, av
+        vp = gen._ensure_local(at, av)
+        w = gen._call_expr('int64_t', '_mojo_dispatch_shallow_copy', [(at, vp)])
+        if at == 'int64_t':
+            return 'int64_t', w
+        return at, gen._coerce_to_type('int64_t', at, w)
     if (gimple_ctypes._is_dataclasses_module_ref(func.obj)
             and func.member == 'fields' and len(node.args) == 1):
         at, av = gen.lower_expr(node.args[0])

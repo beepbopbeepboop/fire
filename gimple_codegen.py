@@ -3204,6 +3204,7 @@ class GimpleGen:
         '_mojo_dispatch_fields':     ('MojoList *', ['void *']),
         '_mojo_dispatch_asdict':     ('MojoDict *', ['void *']),
         '_mojo_dispatch_is_dataclass': ('int',     ['void *']),
+        '_mojo_dispatch_shallow_copy': ('int64_t', ['void *']),
         '_mojo_dispatch_repr':       ('char *',    ['void *']),
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
