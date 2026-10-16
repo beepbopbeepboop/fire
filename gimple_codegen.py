@@ -3426,6 +3426,7 @@ class GimpleGen:
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_add_word':     ('void',      ['MojoSet *', 'int64_t']),
         'mojo_word_slice':       ('int64_t',   ['int64_t', 'int64_t', 'int64_t']),
+        'mojo_str_format_words': ('char *',    ['char *', 'MojoList *', 'MojoDict *']),
         'mojo_str_startswith_word': ('int',    ['char *', 'int64_t']),
         'mojo_str_endswith_word': ('int',      ['char *', 'int64_t']),
         'mojo_set_contains_word': ('int',      ['MojoSet *', 'int64_t']),

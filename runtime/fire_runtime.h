@@ -1470,6 +1470,10 @@ void        mojo_module_not_compiled(char *module, char *member);
  * fires when the template is a string LITERAL in the source; this covers
  * the real-world remainder — templates read from data/parameters
  * (`text % dict(prog=...)`, `readme % textvars`). */
+/* `tmpl.format(*args, **kwargs)`: `args` / `kwargs` hold WORDS (an int, a
+ * string pointer, or a value the caller already rendered to a string).
+ * See the definition for the replacement-field subset. */
+char       *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs);
 char       *mojo_str_format_dict(char *fmt, MojoDict *vals,
                                     char *(*dict_str)(MojoDict *));
 /* `dict_str` is how an UNKEYED spec renders the mapping. CPython's rule is

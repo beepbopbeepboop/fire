@@ -5155,6 +5155,38 @@ def _lower_file_method(gen, ov: str, method: str, args: list) -> tuple:
     return 'int', gen._new_val('int', '0')
 
 
+def _format_arg_word(gen, at: str, av: str) -> str:
+    """One `str.format` argument as the WORD `mojo_str_format_words` reads:
+    an integer or a string pointer as itself (the runtime tells them apart,
+    and `!r` needs to know which it was), anything else rendered with
+    `str()` here, where its type is still known."""
+    if at in ('int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
+              'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t'):
+        return gen._to_int64(at, av)
+    if at != 'char *':
+        at, av = 'char *', gen._stringify_value(at, av)
+    _l = gen._ensure_local('char *', av)
+    return gen._new_val('int64_t', f'(int64_t){_l}')
+
+
+def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs) -> tuple:
+    """`tmpl.format(*args, **kwargs)` -> `mojo_str_format_words` (see its
+    definition: before this the call answered the template unchanged)."""
+    lst = gen._new_val('MojoList *', 'mojo_list_new ()')
+    for _fa in arg_pairs:
+        _w = _format_arg_word(gen, _fa[0], _fa[1])
+        gen._emit(f'  mojo_list_append_int ({lst}, {_w});')
+    kd = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+    for _kp in (kwargs or []):
+        _kt, _kv = gen.lower_expr(_kp[1])
+        _w = _format_arg_word(gen, _kt, _kv)
+        _kn = gen._new_val('char *', gen._intern_string(_as_str(_kp[0])))
+        gen._emit(f'  mojo_dict_set_int ({kd}, {_kn}, {_w});')
+    return 'char *', gen._call_expr('char *', 'mojo_str_format_words',
+                                    [('char *', tmpl), ('MojoList *', lst),
+                                     ('MojoDict *', kd)])
+
+
 def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tuple:
     """Lower char * string method calls."""
     # Lower each argument exactly once. Calling self.lower_expr(a) twice
@@ -5421,7 +5453,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # where real Python returns an absolute one.
         return 'char *', gen._call_expr('char *', 'int64_t_realpath',
                                         [('char *', cstr_ov)])
-    if method in ('encode', 'decode', 'format', 'readlink'):
+    if method == 'format':
+        return _lower_str_format_call(gen, cstr_ov, arg_pairs, kwargs)
+    if method in ('encode', 'decode', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
     return gen._stub_result('int', '0', f'TODO: char*.{method}')

@@ -917,7 +917,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 693
+standing in for a shape, and the shape answers the same question for all 694
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -928,17 +928,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 693 |
+| entry points declared | 694 |
 | every type crossing the boundary is one word | **279** |
-| a box in an argument or the return | 414 |
+| a box in an argument or the return | 415 |
 | of the 279, refused only for want of a linked library | 279 |
 
-**279 of 693 is what a link line converts into working code with no backend
+**279 of 694 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 693
-entry points, 279 word-shaped, 414 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 694
+entry points, 279 word-shaped, 415 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -954,7 +954,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 693 / 520 / 173 by return type alone, and 279
+1. **455 / 352 / 101.** I measure 694 / 521 / 173 by return type alone, and 279
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —

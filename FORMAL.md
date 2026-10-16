@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **693** | `fire_runtime.h` 590, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| entry points across **11** headers | **694** | `fire_runtime.h` 591, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
 | **word in, word out** | **279** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **414** | a box crosses the boundary — in an argument, in the return, or both |
+| not word-shaped | **415** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **279 of 693 (40.2%)** is the reachable-surface ceiling. The previous
+So **279 of 694 (40.2%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added

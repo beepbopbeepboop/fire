@@ -6950,6 +6950,114 @@ static int _str_affix_word(char *s, int64_t p, int ends)
 int mojo_str_startswith_word(char *s, int64_t p) { return _str_affix_word(s, p, 0); }
 int mojo_str_endswith_word(char *s, int64_t p) { return _str_affix_word(s, p, 1); }
 
+/* Render one `str.format` replacement value: a WORD that is a string, an
+ * integer, or (for every other kind) a string the codegen already produced
+ * with `str()`. `conv` is the `!r` / `!s` conversion character or 0. */
+static char *_fmt_render_word(int64_t w, char conv)
+{
+    if (mojo_boxed_is_str(w)) {
+        if (conv == 'r') return mojo_repr_str((char *)(intptr_t)w);
+        return strdup((char *)(intptr_t)w);
+    }
+    return mojo_cstr_or_int_str(w);
+}
+
+/* Apply the `[[fill]align][width]` part of a format spec to a rendered
+ * value. Anything else in the spec (precision, type, sign, grouping) is not
+ * modelled and the value is used as rendered: a runtime template is the
+ * rare case, and every spec a compiled f-string carries is handled at
+ * compile time instead. */
+static char *_fmt_apply_spec(char *val, const char *spec, size_t speclen, int numeric)
+{
+    if (speclen == 0) return val;
+    char fill = ' ', align = numeric ? '>' : '<';
+    size_t i = 0;
+    if (speclen >= 2 && (spec[1] == '<' || spec[1] == '>' || spec[1] == '^')) {
+        fill = spec[0]; align = spec[1]; i = 2;
+    } else if (spec[0] == '<' || spec[0] == '>' || spec[0] == '^') {
+        align = spec[0]; i = 1;
+    }
+    int64_t width = 0;
+    while (i < speclen && spec[i] >= '0' && spec[i] <= '9') {
+        width = width * 10 + (spec[i] - '0');
+        i++;
+    }
+    int64_t n = (int64_t)strlen(val);
+    if (width <= n) return val;
+    int64_t pad = width - n, left = 0;
+    if (align == '>') left = pad;
+    else if (align == '^') left = pad / 2;
+    char *out = malloc((size_t)width + 1);
+    memset(out, fill, (size_t)width);
+    memcpy(out + left, val, (size_t)n);
+    out[width] = '\0';
+    free(val);
+    return out;
+}
+
+/* `tmpl.format(*args, **kwargs)` with the template known only at run time.
+ * It had no lowering at all: `.format` on a string answered the TEMPLATE
+ * unchanged, so the self-hosted compiler emitted its coroutine trampolines
+ * as the literal text `MojoGenerator *{base}_start ({start_params})`.
+ * Replacement fields: `{}` (next positional), `{N}`, `{name}` (a keyword),
+ * an optional `!r` / `!s`, an optional `:spec` (see `_fmt_apply_spec`), and
+ * `{{` / `}}` escapes. A field naming nothing raises, as CPython does. */
+char *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs)
+{
+    if (!tmpl) return strdup("");
+    size_t cap = strlen(tmpl) + 64, len = 0;
+    char *out = malloc(cap);
+    int64_t auto_idx = 0;
+    const char *p = tmpl;
+#define _FMT_PUT(s_, n_) do { size_t _n = (n_); \
+        if (len + _n + 1 > cap) { cap = (len + _n + 1) * 2; out = realloc(out, cap); } \
+        memcpy(out + len, (s_), _n); len += _n; } while (0)
+    while (*p) {
+        if (p[0] == '{' && p[1] == '{') { _FMT_PUT("{", 1); p += 2; continue; }
+        if (p[0] == '}' && p[1] == '}') { _FMT_PUT("}", 1); p += 2; continue; }
+        if (*p != '{') { _FMT_PUT(p, 1); p++; continue; }
+        const char *q = p + 1;
+        const char *end = strchr(q, '}');
+        if (!end) { free(out); mojo_raise_value_error("Single '{' encountered in format string"); return NULL; }
+        const char *name_end = q;
+        while (name_end < end && *name_end != '!' && *name_end != ':') name_end++;
+        char conv = 0;
+        const char *spec = end;
+        if (name_end < end && *name_end == '!' && name_end + 1 < end) {
+            conv = name_end[1];
+            spec = name_end + 2;
+            if (spec < end && *spec == ':') spec++;
+        } else if (name_end < end && *name_end == ':') {
+            spec = name_end + 1;
+        }
+        size_t nlen = (size_t)(name_end - q);
+        int64_t w = 0;
+        int found = 0;
+        if (nlen == 0) {
+            if (args && auto_idx < mojo_list_len(args)) { w = mojo_list_get_int(args, auto_idx); found = 1; }
+            auto_idx++;
+        } else if (q[0] >= '0' && q[0] <= '9') {
+            int64_t idx = 0;
+            for (size_t k = 0; k < nlen; k++) idx = idx * 10 + (q[k] - '0');
+            if (args && idx < mojo_list_len(args)) { w = mojo_list_get_int(args, idx); found = 1; }
+        } else {
+            char *nm = strndup(q, nlen);
+            if (kwargs && mojo_dict_contains(kwargs, nm)) { w = mojo_dict_get_int(kwargs, nm); found = 1; }
+            if (!found) { free(out); mojo_raise_key_error(nm); return NULL; }
+            free(nm);
+        }
+        if (!found) { free(out); mojo_raise_index_error("Replacement index out of range for positional args tuple"); return NULL; }
+        char *val = _fmt_render_word(w, conv);
+        val = _fmt_apply_spec(val, spec, (size_t)(end - spec), !mojo_boxed_is_str(w));
+        _FMT_PUT(val, strlen(val));
+        free(val);
+        p = end + 1;
+    }
+#undef _FMT_PUT
+    out[len] = '\0';
+    return out;
+}
+
 int mojo_word_eq(int64_t a, int64_t b)
 {
     if (a == b) return 1;
