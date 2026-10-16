@@ -21333,11 +21333,7 @@ def _libsystem_probe_status() -> str:
     tell which happened rather than being told "nothing provides this symbol"
     with no indication that the question was only partly asked.
     """
-    return ("asked the C library (dlsym)"
-            if _libsystem_handle() is not False
-            else "FALLBACK: this host would not let the build open its C "
-                 "library, so a 19-name list was used instead")
-
+    return M.libc_probe_status()
 
 
 def _export_entries(source_paths: list, prefixes: dict = None) -> dict:

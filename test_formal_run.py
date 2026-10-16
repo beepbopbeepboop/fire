@@ -1162,7 +1162,7 @@ CASES = [
     # the constant THROUGH the instance, which does build, run, and print
     # the constant's own value on both backends.
     ("comptime_binding_with_a_literal_value_still_builds",
-     "struct Box[T: AnyType, keys: List[T]]:\n"
+     "struct Box:\n"
      "    comptime length = 3\n"
      "\n"
      "    def size(self) -> Int:\n"
@@ -1172,6 +1172,30 @@ CASES = [
      "    var b = Box[Int, [1, 2, 3]]()\n"
      "    printf(\"%d\", b.size())\n"
      "    return 0\n", 0, "3"),
+    # …and the generic spelling, pinned because it is a refusal with a real
+    # cause and nothing else in the group names it. The message is the
+    # no-home one, which is about `Box` as a NAME: a class-attribute read through
+    # a template's own name is a NAME read on this path, because the template's
+    # declaration is not in the table the read is answered from (the same
+    # `without_template_bodies` gap the two rows above name). The needle is the
+    # no-home clause and NOT "'Box' is read at line N before anything in this
+    # function stores it", which is what a value read would say and is not what
+    # this is.
+    ("comptime_class_attribute_of_a_generic_struct_read_through_its_name",
+     "struct Box[T: AnyType]:\n"
+     "    comptime length = 3\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def show() -> Int:\n"
+     "    return Box.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    printf(\"%d\", show())\n"
+     "    return 0\n",
+     "refuse:'Box' has no home: the module-level symbol table is empty for this "
+     "unit", None),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
@@ -22092,7 +22116,7 @@ ORIGIN_OF_CASES = [
      "    var a: Int\n"
      "    var b: Int\n\n"
      "def tag(ref b: Bag) -> Int:\n"
-     "    var m: Marker[origin_of(b)] = Marker(b.a)\n"
+     "    var m: Marker[origin_of(b)] = Marker[Int](b.a)\n"
      "    return m.v\n\n"
      "def main(n: Int) -> Int:\n"
      "    var g = Bag()\n"
@@ -22216,11 +22240,35 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    return s.a\n", "refuse:compile-time explicit-parameter list", None),
     # The other half, and the one no name table can answer: a struct THIS MODULE
     # declares. `_DequeIter[Self.ElementType, origin_of(self), False]` in
-    # `std/collections/deque.mojo` is this shape, and it is here because
-    # `structs_by_name` is the only thing that settles it — a declared struct
-    # has no runtime container representation at all, so a subscript on its name
-    # cannot be a lookup into one.
-    ("type_argument_list_on_a_struct_this_unit_declares",
+    # `std/collections/deque.mojo` is this shape, and `structs_by_name` is the
+    # only thing that settles it — a declared struct has no runtime container
+    # representation at all, so a subscript on its name cannot be a lookup into
+    # one.
+    #
+    # **It is a GENERIC struct, and that is why the row cannot pin the
+    # explicit-parameter sentence: `structs_by_name` does not contain it.**
+    # `formal/monomorph.py::without_template_bodies` drops a generic template's
+    # `StructDef` — its own docstring says the template BODY is not in any image —
+    # and `structs_by_name` is built from what is left, so the second class of
+    # `model.subscript_index_is_a_comptime_parameter_list` ("a bare name
+    # `structs_by_name` says this module declares") never fires for one. The
+    # bracket list arrives where a container literal would, and with a FRAME in it
+    # the escape check refuses first, which is why this row used to arrive at the
+    # wide-receiver sentence instead of the one it named.
+    #
+    # The row pins the refusal that IS this program's verdict, and its name says
+    # so, because a row that kept the old needle could not fail. **The two rows
+    # below are the measurement**: the same construct, once with a FRAME in the
+    # bracket and once with a literal, and TWO DIFFERENT wrong sentences — the
+    # escape check's when the frame is there (because `_check_frame_escapes` sees
+    # a container literal holding a frame) and the tuple-index sentence when it is
+    # not (because `multi_index_kind` reaches `MULTI_INDEX_DATA`). Neither is about
+    # a compile-time parameter list, which is what the source wrote. Add the
+    # all-TYPE bracket on the same struct, which IS answered
+    # (`type_argument_list_of_two_type_arguments_answers`, further down), and the
+    # discriminator is exact: a VALUE in a MULTI-element bracket over a TEMPLATE
+    # struct declared by this unit.
+    ("type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container",
      "struct S:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"

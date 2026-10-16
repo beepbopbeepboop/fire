@@ -11069,10 +11069,25 @@ ctor_field_value=self._ctor_field_value_for(name),
             # not go away for want of a declaration — it is the C library's
             # prototype that says how wide the answer is, and
             # `model.BARE_C_RETURN_KINDS` is that prototype for every C symbol
-            # this tree calls bare. `None` when the callee is a Mojo export some
-            # linked library publishes, which is a word whatever it is spelled;
-            # the decision and the export test are shared, so x86-64 cannot
-            # disagree with this about one call.
+            # this tree calls bare.
+            #
+            # **…and where there is NO prototype, that is a REFUSAL rather than
+            # a pass-through.** `refuse_unprototyped_bare_c_call` is asked here,
+            # over the SAME six arguments `bare_c_return_kind` is asked with, so
+            # the export exception that keeps a call into another host module
+            # out of this rule is the one resolution rather than two. It fires
+            # only for a name the target's C library DEFINES: `strcasecmp` built,
+            # ran and answered 4294967295 where C answers -1, and `a < 0`
+            # answered `no`, on both architectures and byte-identical — a wrong
+            # boolean out of a word the ABI leaves unspecified. `None` from
+            # `bare_c_return_kind` below is then only reached for a callee this
+            # tree owns (a linked library's export, or a name the C library does
+            # not define, which the bind audit reports by its own name).
+            refusal = M.refuse_unprototyped_bare_c_call(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms)
+            if refusal:
+                raise CodegenError(refusal)
             self._emit_extern_return(M.bare_c_return_kind(
                 name, self._dylib_by_name, self._dylib_by_module,
                 self._dylib_forwarded, self._import_aliases, self._dylib_syms))

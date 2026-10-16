@@ -3016,6 +3016,12 @@ BARE_C_RETURN_KINDS = {
     "usleep": (32, True),
     "utimes": (32, True),
     "lstat": (32, True),
+    # The row the 2026-10-05 corpus census FOUND after this table's totality was
+    # first pinned, so the claim that every real libc bare callee had a row had
+    # already gone stale. It is the one the bug doc quotes: `strcasecmp("a","b")`
+    # built, ran and answered 4294967295 where C answers -1, and `a < 0`
+    # answered `no`, on both architectures and byte-identical.
+    "strcasecmp": (32, True),
 
     # ── 64-bit integers and sizes: the whole register is the answer. The
     # `clock_gettime_nsec_np` row is the one that says why this group exists.
@@ -3049,6 +3055,27 @@ BARE_C_RETURN_KINDS = {
     "strcat": EXTERN_RETURN_WORD,
     "strchr": EXTERN_RETURN_WORD,
     "strsignal": EXTERN_RETURN_WORD,
+    # …and the three MORE the 2026-10-05 corpus census found without rows, the
+    # same walk that found `strcasecmp`: `atof`/`atol` are reached by
+    # `stdlib/std/collections/string/string_span.mojo` and
+    # `stdlib/std/python/_cpython.mojo`, `index` (libc's own spelling of
+    # `strchr`) by `stdlib/std/builtin/range.mojo` and
+    # `stdlib/std/collections/array.mojo`. Their widths were read out of this
+    # SDK's headers with `clang -Xclang -ast-dump`, the same way as every row
+    # above — and they are the reason the three are here rather than guessed:
+    #
+    #     atof   double (const char *)      atof is a DOUBLE, so the whole
+    #     atol   long (const char *)        register, and `atol` is a 64-bit
+    #     index  char *(const char *, int)  `long` under LP64 on both targets.
+    #
+    # A `(32, True)` row on any of the three would fabricate a negative number,
+    # which is the argument `time_ns` makes above and the reason these widths are
+    # measured rather than assumed — `strtol` and `atoll` are the same two
+    # conversions at `long`/`long long` and would be the same wrong answer if
+    # they were reached bare without a row.
+    "atof": EXTERN_RETURN_WORD,
+    "atol": EXTERN_RETURN_WORD,
+    "index": EXTERN_RETURN_WORD,
     # `getpwnam` and `strsignal` are the two `struct passwd *` / `char *`
     # returns `formal/hostmods/os/_syscalls.mojo` reads, and both are here for
     # the reason the whole pointer group is: an address is below
@@ -3196,6 +3223,18 @@ def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
     whose width is this path's own 64-bit word whatever the symbol is spelled —
     or the callee is a C symbol with no entry above.
 
+    **The second half of that `None` used to be silently WRONG, and the split
+    above is what makes the difference visible.** A C callee with no row means
+    its return WIDTH is not established anywhere, so the register is handed on as
+    it arrived — and for a return narrower than eight bytes what arrives is
+    unspecified by the ABI (AAPCS64 §6.9, SysV AMD64 §3.2.3), which on both of
+    this path's targets means zero-extended. Measured, both architectures,
+    byte-identical: `strcasecmp("a","b")` answers 4294967295 where C answers
+    -1, `a < 0` answers `no`, `a == -1` answers `no`. So a `None` from this
+    function is no longer allowed to be the whole answer for a name the C
+    library defines — `refuse_unprototyped_bare_call` is asked beside it and
+    names the symbol instead of guessing its prototype.
+
     The export half is not optional and it is the whole reason the decision is
     not one line at the `BL`.  A name is extern exactly when this unit does not
     compile it, and a call into another host module is extern too, so `read`,
@@ -3204,10 +3243,8 @@ def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
     `dylib_callee_export` — the ONE resolution, in `dylib_extern_symbol`'s order
     — rather than here, because a caller that asked in a different order could
     normalise a call to somebody's Mojo function as though libc had declared it."""
-    if callee in dylib_syms:
-        return None
-    if dylib_callee_export(by_name, by_module, forwarded, aliases,
-                           callee) is not None:
+    if bare_c_callee_is_project_function(callee, by_name, by_module, forwarded,
+                                         aliases, dylib_syms):
         return None
     kind = BARE_C_RETURN_KINDS.get(callee)
     if kind is not None:
@@ -3228,6 +3265,104 @@ def bare_c_return_kind(callee: str, by_name: dict, by_module: dict,
             f"import so the dylib export test resolves it rather than "
             f"reaching this line bare.")
     return None
+
+
+def refuse_unprototyped_bare_c_call(callee: str, by_name: dict, by_module: dict,
+                                    forwarded: dict, aliases: dict,
+                                    dylib_syms: dict) -> str:
+    """The sentence refusing a bare C call whose return width is unestablished,
+    or `""` when there is nothing to refuse.
+
+    ## The rule, and why it is a refusal rather than a widening
+
+    A bare callee with no `BARE_C_RETURN_KINDS` row has no PROTOTYPE on this
+    path, so the width of what comes back in the return register is not
+    established by anything. That is not the same as "it is a word": AAPCS64 §6.9
+    and SysV AMD64 §3.2.3 both say a value narrower than eight bytes is returned
+    in the least significant bits and the remaining bits are **unspecified**, so
+    the model's value for such a register is a free variable rather than a
+    number the source determined. Measured, both architectures and byte-identical
+    before this rule existed:
+
+        var a = strcasecmp("a", "b")     # libc's `int`
+        printf("%lld", a)   ->  4294967295      C: -1
+        printf("%d", a < 0) ->  0               C: 1
+        printf("%d", a == -1) -> 0              C: 1
+
+    So the defect is not a conversion that was got wrong; it is that there was no
+    answer to give and the build emitted a program anyway. Every operation on
+    that word — a comparison most of all — is a silent wrong boolean, and it is
+    invisible to any test whose subject is an arithmetic expression.
+
+    ## Why the scope is "a symbol the target's C library DEFINES"
+
+    Three reasons, and they are not interchangeable:
+
+      * **a linked Mojo library's export** is excluded by the shared
+        `bare_c_callee_is_project_function`, because its return IS a formal
+        value. This is the row that matters in practice: `basename` and
+        `dirname` are real libSystem symbols (`ctypes`/`dlsym` finds both, and
+        the backward totality check in `test_formal_libc_symbol.py` would NOT
+        have caught a mistake about either) yet `formal/hostmods/glob.mojo`
+        reaches this project's own `os.path` functions of those names, so a rule
+        keyed on the spelling alone would refuse a call that compiles and runs
+        today.
+      * **a name the C library does not define** is left alone, because the
+        build's own bind audit already reports it — as a symbol nothing on the
+        link line provides, which is a more accurate sentence than this one and
+        costs the caller no rewrite. Refusing here would replace a linker
+        message with a compiler one and lose the linker's.
+      * **a callee reached through a VALUE** (`callee_is_a_bound_value`) never
+        reaches this function at all: `is_extern` is False for it, so this is
+        not in its scope.
+
+    ## Why not widen instead
+
+    "Sign-extend every bare call" is the one-line change and it is wrong in the
+    direction that fabricates numbers rather than losing them: a `size_t`, an
+    `off_t` or a `uint64_t` return has bit 31 set in ordinary use, and
+    `formal/hostmods/time.mojo`'s `time_ns()` — 1.7e18 nanoseconds — would come
+    back negative on every run. There is no conversion that is safe without the
+    prototype, so the build says so.
+
+    ## Why not derive the prototype
+
+    The headers are on disk and could be scanned, and that is not what this does:
+    the answer would then come from `clang`'s interpretation of a header rather
+    than from anything measured, and a `#define`, an `_Noreturn` attribute or a
+    target-conditional declaration is enough to make it wrong in the direction
+    that is invisible. A refusal a reader can act on is worth more here than a
+    guess that is right until the SDK moves, and the fix for a name this refuses
+    is one line in a table whose every other entry was read out of the same
+    headers.
+
+    `""` — not None — for "no refusal", because every caller in this tree asks
+    the `*_refusal` family for a sentence and tests it for emptiness.
+    """
+    if callee in BARE_C_RETURN_KINDS:
+        return ""
+    if bare_c_callee_is_project_function(callee, by_name, by_module, forwarded,
+                                         aliases, dylib_syms):
+        return ""
+    if not libc_defines(callee):
+        return ""
+    return (
+        f"'{callee}' is a C library function and this build has no prototype "
+        f"for what it returns, so the value coming back in the return register "
+        f"has no established width. The C ABIs both say a value narrower than "
+        f"eight bytes is returned in the least significant bits and the rest is "
+        f"UNSPECIFIED (AAPCS64 6.9, SysV AMD64 3.2.3), and on this target the "
+        f"unspecified half arrives zero-extended — so the word this image holds "
+        f"is not the number libc returned: `strcasecmp(\"a\", \"b\")` builds, "
+        f"runs and answers 4294967295 where C answers -1, and `a < 0` answers "
+        f"no. Give the call a declared return type with "
+        f"`external_call[\"{callee}\", T](...)`, or add a "
+        f"`BARE_C_RETURN_KINDS` row in formal/model.py for it — `(32, True)` "
+        f"for a C `int`, `EXTERN_RETURN_WORD` for a pointer or a 64-bit "
+        f"integer, `EXTERN_RETURN_VOID` for nothing — read out of the SDK's "
+        f"headers rather than guessed at, because the two are different "
+        f"instructions and guessing wrong fabricates a number instead of "
+        f"failing")
 
 
 def is_external_call_template(e) -> bool:
@@ -24099,6 +24234,119 @@ def libc_source_name(symbol: str) -> str:
     if bare.endswith(INODE64_SUFFIX):
         return bare[:-len(INODE64_SUFFIX)]
     return bare
+
+
+# ── "does the C library this image will load define this name?" ────────────
+#
+# ONE oracle, and it moved here for a reason rather than for tidiness. It used
+# to be `formal/build.py::_is_libsystem`, which the link audit asks, and the
+# bare-C-return table needed the SAME question for a different purpose — "is
+# this callee a C library entry point at all?" — and a second dlsym with a
+# second memo and a second 19-name fallback list is two implementations of one
+# fact that can disagree, which is the exact shape every consolidation note in
+# this tree is about.
+#
+# Deliberately NOT `ctypes.CDLL(None)`. The global namespace holds everything the
+# BUILDING process has loaded, so it answers questions about the compiler rather
+# than about the target; measured on this machine, same symbol, two handles:
+#
+#     CDLL('/usr/lib/libSystem.B.dylib')   sqlite3_open -> False   correct
+#     CDLL(None)                           sqlite3_open -> True    WRONG
+#
+# because the python running the build has libsqlite3 in its own namespace. A
+# build-time question about the target that inherits the builder's namespace
+# waves through exactly the symbols it exists to catch, so the handle is the one
+# the image's own load command names (`macho_linker.LIBSYSTEM_PATH`,
+# `elf.DEFAULT_LIBC`) — the same library the emitted image declares.
+
+_LIBC_HANDLE = None
+
+# The 19 names the fallback below hardcodes, for a host that will not let us
+# dlopen its own C library. They are a GUESS at names rather than a check of
+# anything, which is the whole reason the real oracle exists; on such a host the
+# guess is no worse than having no question at all, and
+# `libc_probe_status()` says which of the two a build actually used so a
+# diagnostic that depends on it cannot claim a check it did not make.
+LIBC_LEGACY_NAMES = frozenset((
+    "printf", "puts", "putchar", "malloc", "calloc", "realloc", "free",
+    "memcpy", "memset", "strlen", "strcmp", "strncmp", "abort", "exit",
+    "atoi", "qsort", "fmod", "pow", "sqrt",
+))
+
+# memo: bare name -> bool. One dlsym per distinct name per process, because a
+# large program has hundreds of externs and a syscall per extern is a storm.
+_LIBC_MEMO: dict = {}
+
+
+def libc_handle():
+    """A dlopen-able handle on the C library this image's load command names.
+
+    `None` until the first call, then a handle or `False` for "this host will
+    not let us ask". The three-valued answer is load-bearing: `False` is not
+    "the library defines nothing", it is "we cannot find out", and every caller
+    has to be able to tell those apart — `libc_probe_status()` exists so a
+    refusal or a diagnostic can say which one it is standing on.
+    """
+    global _LIBC_HANDLE
+    if _LIBC_HANDLE is None:
+        _LIBC_HANDLE = False
+        try:
+            import ctypes
+            import platform
+            if platform.system() == "Darwin":
+                from formal.macho_linker import LIBSYSTEM_PATH
+                name = LIBSYSTEM_PATH.decode().rstrip("\0")
+            else:
+                from formal.elf import DEFAULT_LIBC
+                name = DEFAULT_LIBC
+            _LIBC_HANDLE = ctypes.CDLL(name)
+        except Exception:
+            _LIBC_HANDLE = False
+    return _LIBC_HANDLE
+
+
+def libc_probe_status() -> str:
+    """How `libc_defines` reached its answer, for a diagnostic that needs it."""
+    return ("asked the C library (dlsym)"
+            if libc_handle() is not False else
+            "FALLBACK: this host would not let the build open its C library, "
+            "so a 19-name list was used instead")
+
+
+def libc_defines(symbol) -> bool:
+    """True for a symbol the C library this image will load actually provides.
+
+    The name asked about is `libc_source_name`'s, not the symbol's own
+    spelling, and the difference is a whole architecture's worth: a
+    `readdir$INODE64` in the symbol list is the 64-bit-inode `readdir(3)`, and
+    this dlsym runs in the BUILDING python, so it can only answer for the host —
+    where that spelling may not exist at all. Asking about the suffix-bearing
+    spelling on an arm64 host reports an x86-64 image's correct binding as a
+    symbol nothing provides.
+
+    False is a real answer — "nothing here defines it", which is what makes the
+    link audit's missing-provider report true — but it is NOT the same answer as
+    `libc_probe_status()`'s fallback, so a caller that turns a False into a
+    refusal has to be asking a question a guess can still answer.
+    """
+    if not isinstance(symbol, str) or not symbol:
+        return False
+    bare = libc_source_name(symbol)
+    if not bare:
+        return False
+    hit = _LIBC_MEMO.get(bare)
+    if hit is not None:
+        return hit
+    handle = libc_handle()
+    if handle is False:
+        answer = bare in LIBC_LEGACY_NAMES
+    else:
+        try:
+            answer = hasattr(handle, bare)
+        except Exception:
+            answer = bare in LIBC_LEGACY_NAMES
+    _LIBC_MEMO[bare] = answer
+    return answer
 
 
 # ── print() ───────────────────────────────────────────────────────────────

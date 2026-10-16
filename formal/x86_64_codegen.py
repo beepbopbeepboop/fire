@@ -11427,6 +11427,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             # narrow integer return is the same one AAPCS states — the low bits
             # are the answer and the rest is unspecified, so `0xFFFFFFFF` is -1
             # and not 4294967295 whatever the callee left in the top half.
+            #
+            # A name with NO prototype is refused rather than passed through, by
+            # the same shared sentence arm64 asks over the same six arguments,
+            # so the two backends cannot disagree about one call.
+            refusal = M.refuse_unprototyped_bare_c_call(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms)
+            if refusal:
+                raise CodegenError(refusal)
             self._emit_extern_return(M.bare_c_return_kind(
                 name, self._dylib_by_name, self._dylib_by_module,
                 self._dylib_forwarded, self._import_aliases, self._dylib_syms))
