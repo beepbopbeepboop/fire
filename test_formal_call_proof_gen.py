@@ -5351,6 +5351,20 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertFalse(info.get("compiler_traps"),
                          "a program with no bounded trap published one, so "
                          "something other than a stop is being recorded")
+        entry = info.get("func_offset")
+        for call in (info.get("extern_calls") or []):
+            with self.subTest(sym=call["sym"], addr=hex(call["addr"])):
+                self.assertLess(
+                    call["addr"], entry,
+                    "an unbound call at or above the entry function is on a "
+                    "walked path: the stack limit's `getrlimit` belongs in the "
+                    "startup stub, below `func_offset`, and a `BL` in a "
+                    "prologue is what cost every calling program its universal "
+                    "theorem")
+        from formal.arm64_proof_gen import _program_extern_calls
+        self.assertEqual(_program_extern_calls(info), [],
+                         "the startup limit read is not being subtracted, so "
+                         "every run test on this backend stays suppressed")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)
@@ -5478,6 +5492,34 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
             {"extern_calls": info["extern_calls"]})), 2,
             "with no traps published both calls are the program's")
         self.assertEqual(_program_extern_calls({}), [])
+
+    def test_the_arm64_subtraction_drops_a_call_below_the_entry(self):
+        """The startup stub's `getrlimit` is not the program's call.
+
+        The runtime stack limit is read once, in the startup stub, which is
+        BELOW `func_offset`; the run tests start at the entry function, so that
+        call is on no path they walk. Counting it suppressed every run test on
+        this backend — the same failure x86-64's `_program_externs` already
+        subtracts against `func_offset`.  This is that rule, unit-pinned, so a
+        regression names the rule rather than a whole generated file.
+        """
+        from formal.arm64_proof_gen import _program_extern_calls
+        below, at, above = 0x1000, 0x2000, 0x3000
+        info = {
+            "func_offset": at,
+            "extern_calls": [{"sym": "getrlimit", "addr": below},
+                             {"sym": "printf", "addr": above},
+                             {"sym": "puts", "addr": at}],
+        }
+        self.assertEqual(
+            _program_extern_calls(info),
+            [{"sym": "printf", "addr": above}, {"sym": "puts", "addr": at}],
+            "a call below the entry is in the startup stub, not the program")
+        self.assertEqual(
+            _program_extern_calls({"extern_calls": info["extern_calls"]}),
+            info["extern_calls"],
+            "with no `func_offset` nothing below-entry can be named, so the "
+            "conservative answer is that every call is the program's")
 
 
 class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):

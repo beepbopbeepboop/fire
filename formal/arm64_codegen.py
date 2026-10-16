@@ -1489,9 +1489,10 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_stp_sp_pre(29, 30))
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
         # The caller's callee-saved registers are pushed BEFORE the argument
-        # homes below overwrite them (the homes ARE X19..X28), and the guard
-        # comes after the homes, so its `getrlimit` call cannot destroy an
-        # incoming argument.
+        # homes below overwrite them (the homes ARE X19..X28). The guard comes
+        # after the homes and emits no call of its own — the runtime limit read
+        # is in the startup stub (`_emit_stack_floor_init`) — so it destroys no
+        # argument.
         for i in range(self._npairs):
             self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
         # The module-global initializer, LAZILY: a function that touches a
@@ -1631,10 +1632,16 @@ dylib_exports: list = None, globals_base: int = None,
                     or f"{f.name} needs one hidden word for the caller's block "
                        f"and there is no argument register left for it")
             self._load_home_from_reg(_SRET_LOCAL, sret_arg)
-        # **The guard goes HERE: after every incoming argument is in its
-        # callee-saved home, and before this prologue pushes ANY register or
-        # reserves the frame.** Both halves are measurements, and the order above
-        # is the only one that has both.
+        # **The guard goes HERE: before this prologue pushes ANY further
+        # register or reserves the frame.** That is the property to preserve if
+        # this is ever moved again: before the `sub sp, #_SCRATCH`, because that
+        # reservation is what the guard exists to catch. With the guard after
+        # it, the frame had already been reserved — and the saved registers
+        # already pushed — by the time anything compared SP, so a frame that
+        # crossed the real limit had already touched the memory below it.
+        # Measured, arm64, `deep(n)` under `ulimit -s 2048` where the usable
+        # stack is exactly 14 frames: `n=13` exits 0 and `n=14` dies of SIGSEGV
+        # with no output.
         #
         # Before the `sub sp, #_SCRATCH` because that reservation is what the
         # guard exists to catch: with the guard after it, the frame had already
