@@ -12175,6 +12175,20 @@ SPREAD_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var d = {'b': 2}\n"
+     "    d = {'b': 3}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:constructing P spreads `d` with `**`", None),
+    # A LOCAL bound to something that is not a dict at all has no key set
+    # either — `_dict_inits` tombstones it, so the same refusal comes back.
+    ("a_spread_through_a_name_bound_to_a_non_dict_is_refused_by_name",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = [1, 2]\n"
      "    var p = P(a=1, **d)\n"
      "    printf(\"%d\", p.a)\n"
      "    return 0\n",
@@ -12199,14 +12213,18 @@ SPREAD_REFUSALS = [
      "    return 0\n",
      "refuse:constructing Insn spreads `kw` with `**`", None),
     # The same on a call, so the two readers cannot drift: one message, one
-    # cause, and the subject spelled by the construct it is about.
-    ("a_spread_through_a_mapping_name_is_refused_by_name_at_a_call",
+    # cause, and the subject spelled by the construct it is about. The operand
+    # here is a parameter of this function, which nothing binds to a literal,
+    # so the refusal is the one a name with no single home always got.
+    ("a_spread_through_a_parameter_name_is_refused_by_name_at_a_call",
      "def f(a: Int, b: Int) -> Int:\n"
      "    return a * 10 + b\n"
      "\n"
+     "def g(d) -> Int:\n"
+     "    return f(a=1, **d)\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
-     "    var d = {'b': 2}\n"
-     "    printf(\"%d\", f(a=1, **d))\n"
+     "    printf(\"%d\", g({'b': 2}))\n"
      "    return 0\n",
      "refuse:call f() spreads `d` with `**`", None),
 ]

@@ -926,6 +926,10 @@ dylib_exports: list = None, globals_base: int = None,
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
         self._vkinds_cache: dict = {}
+        # `{name: DictExpr}` for the CURRENT function's single-literal locals,
+        # set beside `_vkinds` in `_emit_function`. Empty before the first
+        # function is emitted, which refuses a spread rather than guessing one.
+        self._spread_mappings: dict = {}
         # String literal interning: content → label (same bytes share one
         # ADRP/ADD site). Persists across compile() re-emits so labels stay
         # unique. Pointer equality on interned literals is then valid for
@@ -1462,6 +1466,12 @@ dylib_exports: list = None, globals_base: int = None,
         # question, and the two are combined (never contradicted) in
         # _expr_str_kind.
         self._vkinds = self._scan_value_kinds(f)
+        # `{name: DictExpr}` for the locals of THIS function whose only binding
+        # is a dict literal — the evidence `S(a=1, **d)` needs to un-spread `d`
+        # the same way it un-spreads a literal (`model._unspread_keyword_mappings`).
+        # Computed once here, beside `_vkinds`, because it is the same
+        # whole-function property and the build pass computes it the same way.
+        self._spread_mappings = self._vkinds.dict_inits()
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
         self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
@@ -9800,7 +9810,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # answer, no refusal. See `model.one_word_construction`, which is where
         # the rule lives now.
         value, refusal = M.one_word_construction(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
@@ -9852,7 +9863,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         many times the constructor runs: a constructor inside a loop reuses
         its site's block, exactly as a C local is reused."""
         plan, refusal = M.struct_construction_plan(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         shape = plan[0]
