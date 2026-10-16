@@ -70,7 +70,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_instruction_coverage.md` | `formal418-docs` | the arm64 encoder survey, and what wiring the new instructions actually bought |
 | `FORMAL_model_fuzz_ledger.md` | `formal415-docs` | what `tools/formal_model_fuzz.py` has measured |
 
-### `formal/arm64_codegen` — 11 documents, 9 claimed
+### `formal/arm64_codegen` — 12 documents, 9 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -85,8 +85,9 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stack_floor_charge_is_dead_and_one_frame_off.md` | `formal409-docs` | the helper the guard's comments name would charge one frame too little if anyone called it |
 | `FORMAL_arm64_exit_flush_is_not_published_as_a_compiler_trap.md` | **unclaimed** | FORMAL/arm64: `_emit_exit`'s `BL fflush` is not published as a compiler trap, so it reads as a program call |
 | `FORMAL_arm64_step_lemmas_are_generated_for_the_images_diagnostic_string.md` | **unclaimed** | `_gen_step_lemmas` walks the whole code buffer, so `bfeec991`'s embedded stack-trap message gets false `sr`/`step_ok` lemmas and `bitops` no longer proves |
+| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 
-### `formal/arm64_proof_gen` — 24 documents, 17 claimed
+### `formal/arm64_proof_gen` — 23 documents, 17 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
@@ -111,7 +112,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_frame_contract_sp_trackers_scale_an_immediate_by_8.md` | **unclaimed** | The frame-contract sp trackers scale an ADD/SUB immediate by 8 AND drop its `sh` bit |
 | `FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot.md` | **unclaimed** | FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot |
 | `FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md` | **unclaimed** | twelve red examples nobody could see, because the suite raised before it generated one |
-| `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
 | `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
 

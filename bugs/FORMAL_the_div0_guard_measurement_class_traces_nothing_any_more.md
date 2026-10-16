@@ -1,5 +1,65 @@
 # FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more
 
+**Status 2026-10-12 (`work/formal282-docs`): the SYMPTOM has moved once
+further, the two claims the 2026-10-07/`formal115-docs` block below rests on are
+both FALSE on this tree, and the class's own step-1 check now names the real
+cause BY NAME. Measured, no Lean in the diagnosis:**
+`formal/build.py::compile_formal(..., prove=True, check=False)` on
+`_SYMBOLIC_DIVISOR` (`def q(a, b): return a // b`) no longer RAISES in
+`setUpClass` — it GENERATES a proof file — and that file has **no**
+`q_compiles_correctly_universal`; in its place it emits
+`theorem q_reaches_call_at_0x100000504`, a REACHABILITY statement (the
+`some s => True | none => False` match the walk substitutes when the run halts
+at a call it cannot follow). So `_ADMIT` is absent, the class's
+`test_the_measurement_class_can_still_see_what_it_measures` fails naming it, and
+`TestTheZeroDivisorGuardAgainstLean` is 5 failures on any tree with
+`lib/ProofLib.olean` — which is what "traces nothing" looks like today, not the
+`FormalBuildError` the block below records.
+
+1. **`info["compiler_traps"]` is populated on arm64 again, so the block below's
+   "IS EMPTY ON ARM64" is false.** `e632f228` ("arm64: record the compiler's own
+   calls again") restored `_emit_trap_flush`/`_record_trap_addresses`
+   (`formal/arm64_codegen.py:3077`). Measured on the fixture: `compiler_traps =
+   ['0x100000504']`, `extern_calls = [('0x1000003e0','getrlimit'),
+   ('0x100000504','fflush')]`, `func_offset = 0x100000458`. The `getrlimit` is
+   below `func_offset` (the startup-stub move) and `_program_extern_calls`
+   subtracts both classes by address; the div0 arm's `fflush` is the one that
+   still stops the WALK.
+2. **The cause of the substitution is the walk, not the emitter, and the
+   doc's option 1 is measured necessary and NOT sufficient — re-confirmed on
+   this tree.** `_unfollowable_calls` is what decides the halt address and it
+   does not consult `compiler_traps`, so the div0 `fflush` is read as the
+   program's opaque call. Monkeypatching the subtraction in (generation only,
+   no Lean) moves the refusal to
+   `recursion contract: the call in block 4 has to be below the source
+   condition's negation (u64_sub_one_toNat_le needs it), and this walk reached
+   the call with no enclosing branch condition to take it from` — the same third
+   refusal `formal145-docs` measured, so the fix this doc wants ends at
+   `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
+   (set-valued / per-block terminal, a `lib/ProofLib.lean` project). **The class
+   is therefore BLOCKED on that doc's owner, not on anything this branch may
+   change**: it is the intended outcome of the step-1 check, which fails by name
+   rather than reporting "the residual moved".
+3. **And a second, separate red sits under it, so even with a universal theorem
+   the class would not yet get a residual.** The generated `q(a,b)` proof does
+   not typecheck: `lean` on it fails at `q_b6_self1`'s
+   `q_sr_86 (q_b6_qS0 st) (hpc0)` with `maximum recursion depth has been
+   reached` (`q_check.lean:4723:50`), the same merge-era red
+   `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` measures on
+   `mod_by_var` (its `b6_self1`).
+
+**What landed here, and it is a pin rather than a fix.**
+`TestTheZeroDivisorGuardAgainstLean`'s `blind` report now NAMES the
+reachability substitution instead of only "no theorem carrying `_ADMIT`", and
+`test_formal_call_proof_gen.py::TestTheDiv0FixtureHaltsAtTheCompilerTrap` pins
+the substitution itself with no Lean (the fixture emits
+`q_reaches_call_at_0x100000504`, not `q_compiles_correctly_universal`, and no
+`_ADMIT`), so the day the walk lands this test goes red and says the class is
+measurable again. Verified with `lib/*.olean` materialised from the cas:
+`TestTheDiv0FixtureHaltsAtTheCompilerTrap` 1 test / OK;
+`TestTheZeroDivisorGuardAgainstLean` still 5 failures, each now naming the
+substitution.
+
 **Area:** FORMAL, the arm64 proof generator's own doc-truth test.
 `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean`
 (`test_the_false_goal_survives_the_documented_next_step`,
