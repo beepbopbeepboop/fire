@@ -154,6 +154,11 @@ file is a fix and nothing in it should be worked from as one.
 
 ## The count, corrected (2026-10-03)
 
+**SUPERSEDED 2026-10-13: `fact`, `pow2`, `sqsum` and `sum` now PASS, and
+`count`'s failure has moved off the `x30` read.  The measurement below is kept
+because it is what the family looked like on 2026-10-03, not because it still
+describes the tree — see the Status update at the top.**
+
 `41 pass / 4 known-gap / 0 fail` was measured 2026-10-01 and the "0 fail" has
 not been true since. On this tree:
 
@@ -286,7 +291,7 @@ distinct problems, and the counts should not be conflated:
 | declared in `EXPECTED_FAILURES` | **7** | read on this tree 2026-10-04: `fib`, `countdown`, `wge`, `subscript_var`, `wide_recv`, `count`, `pow2` |
 | **UNEXPECTED failures among the 13 stems measured here** | **0** | was `5`; `pow2`, `fact`, `sqsum` and `sum` PASS as of 2026-10-12 (the `sh`-bit SP-tracking fix), and `sum_range` is a `KNOWN-GAP`/refusal rather than a FAIL (`CODEGEN_arm64_cmp_flags_and_loop_signedness.md`, the range loop's `loop_cond_flag` stating an UNSIGNED order) |
 | **UNDECLARED and not listed anywhere in this file before 2026-10-04** | **0** | was `2` (`sgt8`, `sle8`); both PASS as of 2026-10-05 and `ug8` with them, so the row is empty rather than moved |
-| sorries in passing proofs | **0 measured**, and the "2 in `sum_range`" row is superseded — `sum_range` does not pass at all, on this tree or on master | — |
+| sorries in a passing arm64 proof | **1 each** (2026-10-13) | `fact`, `pow2`, `sqsum` and `sum` each PASS with ONE admitted `sorry` (`test_formal.py` prints the per-file census: "1 declaration(s) admitted a `sorry`"); the hole is the stack-floor guard's branch, owned by `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` — so "PASS" here is "the obligations it can close are closed", not "no hole" |
 
 **The second row is the one this file was missing, and it is why the "0 fail"
 in the header was wrong.** A gap that is not in `EXPECTED_FAILURES` is
