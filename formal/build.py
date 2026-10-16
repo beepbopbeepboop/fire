@@ -4300,6 +4300,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         holders = {_fn_key(fn): set() for fn in functions}
         hstruct = {_fn_key(fn): {} for fn in functions}
         one_word = {_fn_key(fn): {} for fn in functions}
+        _return_structs = _one_word_return_structs(functions, structs_by_name,
+                                                   one_field)
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
                                     holders, hstruct, one_word, one_field,
@@ -4482,6 +4484,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # function's docstring for the measured hang a name-keyed slot produced
     # when two definitions of one name disagreed.
     returns_frame: dict = {}
+    # Once per unit rather than once per function: `_seed_one_word_bindings`
+    # reads it for every binding in every body, and recomputing it there would
+    # make the walk quadratic in the module.  `_one_word_field_map`'s caller in
+    # `_prepare_functions` computes the same table and passes it for the same
+    # reason.
+    _return_structs = _one_word_return_structs(
+        functions, structs_by_name, one_field)
     for fn in functions:
         owner = method_owners.get(fn.name)
         # `and M.method_receiver_name(fn) is not None`, and the guard rather
@@ -11402,6 +11411,13 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
     struct's constructor holds that struct's only field, and so does one
     initialised from a CALL whose declared `-> T` names a one-word struct
     (`_call_returns_one_word_struct`).
+
+    A local bound from a CALL whose declared `-> T` names a one-field struct
+    holds the same word, and `_call_result_one_field_struct` is the reader that
+    gives that case the answer the constructor case has always had.  Without
+    it, `r = make(7); r.field` was refused while `r = make(7); r.method()`
+    lowered — the method lift reads the declared return type and the field read
+    did not.
 
     A PARAMETER declared as a one-field struct joins them, from the
     declaration rather than from a binding, because the declaration is the same
