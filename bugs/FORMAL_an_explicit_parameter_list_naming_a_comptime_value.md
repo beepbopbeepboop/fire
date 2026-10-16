@@ -85,6 +85,44 @@ dotted shape (`mylib.Box[Int]()`) has its own answer
 a gap left for whoever makes a dotted base classifiable, and the fix above does
 not reach it.
 
+**2026-10-13 (`work/formal350-docs`): the wall is open in general and PART of
+it is now closed — a SCALAR LITERAL value argument on a STRUCT template is a
+demand and builds.** §4.1's "value substitution" was assumed to need a value
+model, and for a literal it does not: `monomorphize.monomorphize_source` already
+substitutes a bracket argument's TEXT whole-word, so a literal's own text IS the
+value. What was missing was the READER — `type_arg_text` refuses a top-level
+literal (for `tile[2, 3]`'s reason, correctly), so `Tagged[Int, 0]` never became
+a demand and the call site kept its brackets and hit the explicit-parameter-list
+refusal measured in §1.
+
+The fix is a SECOND half of the demand walk,
+`formal/monomorph.py::value_arg_demands`, which reads the DECLARATION to find
+which bracket positions are SCALAR value parameters — `origin: Int` is one, a
+type parameter `T` and a container `keys: List[T]` are not — and accepts a
+literal only at one of those, and only on a STRUCT template (a FUNCTION template
+with a bracket is the local-specialization machinery's, and demanding a boundary
+symbol for `tile[2, 3]` would publish a second copy of a body the build already
+emits). Its `bracketed_callees` walk is the same call site walk
+`all_instantiation_calls` uses, so the two halves cannot disagree about which
+sites have a bracket. It is wired into `formal/imports.py::instantiation_demands`
+and `formal/monomorph.py::own_demands`, and `rewrite_instantiation_calls` reads a
+value element too — so the call site is rewritten to the mangled symbol and the
+refusal is bypassed by construction rather than by loosening it. Pinned by
+`test_formal_monomorph.py::test_a_scalar_value_literal_is_a_demand_at_a_declared_value_parameter`,
+which builds `struct Tagged[T, origin: Int]` with a method returning `origin`
+and requires `Tagged[Int, 0]()` and `Tagged[Int, 5]()` to print `0` and `5` on
+BOTH architectures.
+
+**What is STILL open, and it is the rest of §4.1**, so the doc stays: a value
+that is a NAME or a computed expression (`ImmStaticOrigin`, `origin_of(self)`); a
+scalar value at a FUNCTION template's parameter; a value whose declared type is
+a comptime type this path has no word for (`target: CompilationTarget`,
+`origin: Origin[mut=mut]`); and §1's standing instance
+`Span[StaticString, ImmStaticOrigin]`, whose second element is a `comptime` ALIAS
+whose initializer does not fold — so even a formed demand fails to instantiate
+for a reason that lives in another module. The landed subset is exactly the one
+whose substitution is a literal the mangler can already carry.
+
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
 
