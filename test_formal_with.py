@@ -756,6 +756,42 @@ DECLARED = [
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"
+      "        raise ValueError('m')\n"
+      "    print('after')\n"
+      "    return 0\n", 3),
+    # …and the FALSY half of the two literal kinds a gate keyed on `int` used to
+    # let through.  `return ""` and `return 0.0` are not suppressions, so the
+    # protocol lowers and the exception propagates — CPython exits 1 having
+    # printed the cleanup, and so must this image.  These are the boundary rows
+    # that keep the truthy-string/float REFUSALS below from being a gate that
+    # refuses the literal kind rather than the VALUE.
+    ("an_exit_returning_an_empty_string_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return ""') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return ""') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_zero_point_zero_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
