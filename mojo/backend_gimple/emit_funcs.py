@@ -1659,8 +1659,16 @@ def overload_suffix_for(c_param_types) -> str:
     codegen. The 6 hex digits are built with `chr()` (a per-digit 1-char
     string) rather than indexing a hex-alphabet string — compiled char*
     subscription yields the byte's integer value, not a 1-char string."""
-    if not c_param_types or any('...' in p for p in c_param_types):
+    if not c_param_types:
         return ''
+    # An explicit loop over `_as_str` views, not `any(<genexp>)`: the
+    # elements are type strings read out of an untyped list, and the compiled
+    # compiler answered the generator form False for a variadic `...`
+    # signature, so it suffixed `_mojo_iota` (`*args`) where the reference
+    # compiler left it bare -- a different symbol for the same definition.
+    for _cpt in c_param_types:
+        if '...' in _as_str(_cpt):
+            return ''
     # Hand-rolled polynomial hash over the joined string's bytes — same
     # `while i < n` + `if isinstance(c, str): c = ord(c)` shape as
     # `_struct_type_id`. Neither hashlib.md5 NOR zlib.crc32 is available in
