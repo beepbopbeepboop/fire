@@ -3722,6 +3722,13 @@ _RN = "(((w >>> 5) &&& 0x1f).toNat)"
 _RM = "(((w >>> 16) &&& 0x1f).toNat)"
 _RT2 = "(((w >>> 10) &&& 0x1f).toNat)"
 _I12 = "(((w >>> 10) &&& 0xfff).toNat)"
+#: The `ADD`/`SUB`/`CMP` `#imm12` value WITH its `sh` field: the model's
+#: `arm64_ext_imm12 w`, spelled out so the generated right-hand side does not
+#: carry the helper into downstream value-flow `simp only` lists. The
+#: step-result lemma is closed by `exact`-ing the library lemma, whose statement
+#: uses the helper, so the two only have to be `defeq` — which unfolding makes
+#: them.
+_EXT12 = f"({_I12} <<< ((((w >>> 22) &&& 0x3).toNat) * 12))"
 _I16 = "(((w >>> 5) &&& 0xffff).toNat)"
 _HW = "(((w >>> 21) &&& 0x3).toNat)"
 _I7 = "(((w >>> 15) &&& 0x7f).toNat)"

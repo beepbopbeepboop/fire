@@ -635,6 +635,71 @@ class TestGeneratorSource(unittest.TestCase):
         for note in notes:
             self.assertIn("shadows entry", note)
 
+    def test_the_flag_setting_compare_arms_write_their_destination(self):
+        """`ADDS`/`SUBS` write `Rd`; the `CMN`/`CMP` spellings (`Rd = 31`) do not.
+
+        Two soundness defects, both landed together because they are one fact
+        about one table: `arm64_step`'s `0xab000000` (`ADDS Xd, Xn, Xm`) and
+        `0xeb000000` (`SUBS Xd, Xn, Xm`) arms are the WHOLE class, whose `Rd` is
+        bits 4:0, and the CMP arm was fixed while the CMN arm and the
+        value-flow table's `_regs_written` rows were not. A model that sets the
+        flags and leaves `Rd` at its old value is a state the machine never
+        reached, and `formal/arm64_codegen.py` emits `adds x0, x0, x1` and
+        `subs x0, x0, x1` for the signed-overflow check of `+` and `-`, so this
+        is on the path of ordinary arithmetic.
+
+        The assertions are all SOURCE-level (the generator's own right-hand
+        sides and the model text) because the Lean half is the library build;
+        `TestUnsignedOffsetAccess` is the CPU-vs-model half.
+        """
+        import formal.arm64_proof_gen as G
+        with open(os.path.join(HERE, "lib", "ProofLib.lean")) as f:
+            lib = f.read()
+        # `arm64_ext_imm12` exists and every `#imm12` arm reads it, so the shift
+        # cannot be present in one and absent from another. Five arms: ADD
+        # 32/64, SUB 32/64, CMP.
+        self.assertIn("def arm64_ext_imm12 (insn : UInt32) : Nat :=", lib)
+        self.assertEqual(lib.count("let imm12 := arm64_ext_imm12 insn"), 5,
+                         "an `ADD`/`SUB`/`CMP` `#imm12` arm does not read "
+                         "`arm64_ext_imm12`, so it drops the `lsl #12`")
+        self.assertIn("(((insn >>> 22) &&& 0x3).toNat * 12)", lib,
+                      "`arm64_ext_imm12` does not read the `sh` field")
+        # The generator's own right-hand sides, word by word. `adds x11, x1,
+        # x15` is `0xab0f002b` and `cmn x1, x15` is `0xab0f003f`.
+        self.assertEqual(
+            G._step_rhs(0xab0f002b, 66),
+            "some { (arm64_set_reg 11 s (arm64_reg 1 s + arm64_reg 15 s)) "
+            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "the ADDS row does not write `Rd`")
+        self.assertEqual(
+            G._step_rhs(0xab0f003f, 66),
+            "some { (arm64_set_reg 31 s (arm64_reg 1 s + arm64_reg 15 s)) "
+            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "the CMN row must write `Rd = 31` — `arm64_set_reg 31` is the "
+            "identity, which is what makes the flags-only spelling the same "
+            "statement, and writing it unconditionally is what the library "
+            "lemma does")
+        # `add x12, x29, #1675, lsl #12` is `0x915a2fac`: the value is
+        # `1675 << 12 = 6860800`, not `1675`.
+        self.assertIn("UInt64.ofNat 6860800", G._step_rhs(0x915a2fac, 10),
+                      "the ADD `#imm12` row dropped its `lsl #12`")
+        self.assertIn("UInt64.ofNat 2232320", G._step_rhs(0xd14885d9, 12),
+                      "the SUB `#imm12` row dropped its `lsl #12`")
+        # The anti-rot: an UNSHIFTED `#imm12` is not shifted. A helper that
+        # always shifted would pass the two rows above and fail this one.
+        self.assertIn("UInt64.ofNat 1675", G._step_rhs(0x911a2fac, 10),
+                      "the ADD `#imm12` row shifted an `sh = 0` immediate")
+        # `_regs_written` is what the value-flow chains read; a flag-only row
+        # there makes every chain for `Rd` claim it was unchanged.
+        self.assertEqual(G._regs_written(0xab0f002b, 66), {11},
+                         "`_regs_written` says ADDS writes nothing")
+        self.assertEqual(G._regs_written(0xab0f003f, 66), set(),
+                         "`_regs_written` says CMN writes a register")
+        self.assertEqual(G._regs_written(0xeb0f002b, 6), {11},
+                         "`_regs_written` says SUBS writes nothing")
+        self.assertEqual(G._regs_written(0xeb0f003f, 6), set(),
+                         "`_regs_written` says CMP writes a register")
+
     def test_smulh_is_modelled_and_disjoint_from_mul(self):
         """The four things `SMULH` costs, and the one that is easy to get wrong.
 

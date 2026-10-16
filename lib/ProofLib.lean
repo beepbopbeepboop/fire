@@ -1891,6 +1891,19 @@ def arm64_read_insn (code : Nat → UInt8) (pc : Nat) : UInt32 :=
   ((code (pc + 2)).toUInt32 <<< 16) |||
   ((code (pc + 3)).toUInt32 <<< 24)
 
+/-- The extended-immediate field of the `ADD`/`SUB`/`CMP` `#imm12` classes: the
+    12-bit immediate at bits 21:10, shifted by `sh` (bits 23:22) times 12.
+    `sh = 0` is `lsl #0` and `sh = 1` is `lsl #12`; bit 23 is fixed at 0 in
+    every class this backend emits, so the shift is never more than 12, but the
+    expression is total and `sh = 2`/`sh = 3` (a different class) are computed
+    the way the hardware would rather than left undefined.
+
+    One helper so the shift cannot be present in one arm and absent from
+    another: the two `ADD` arms, the two `SUB` arms and the `CMP` arm all read
+    it, and before it existed every one of them dropped the shift. -/
+def arm64_ext_imm12 (insn : UInt32) : Nat :=
+  ((insn >>> 10) &&& 0xfff).toNat <<< (((insn >>> 22) &&& 0x3).toNat * 12)
+
 /-- Check if condition code matches NZCV flags. -/
 def arm64_matches_condition (cond : Nat) (nzcv : UInt8) : Bool :=
   let n := (nzcv >>> 0) &&& 0x1
@@ -2210,7 +2223,8 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- CMP Xn, #imm12{, lsl #12}: 0xf1000000 (64-bit subs xzr, Xn, #imm)
   -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
   -- assembles, and `cmp sp, #0` is how a guard tests a register against a
-  -- literal floor.
+  -- literal floor. The immediate carries the same `sh` field as the ADD/SUB
+  -- arms, so it reads the same helper.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := arm64_ext_imm12 insn
