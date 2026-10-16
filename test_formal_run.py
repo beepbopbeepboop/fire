@@ -26753,6 +26753,7 @@ def main():
                      + REPEAT_CASES + SET_UNION_CASES
                      + CTOR_RECEIVER_CASES + CALL_RECEIVER_CASES
                      + FLOAT_CASES
+                     + INTERPOLATED_FOLD_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and

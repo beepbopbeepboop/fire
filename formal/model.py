@@ -53089,11 +53089,13 @@ def variadic_read_refusal(fn_name: str, name: str, is_kwarg: bool,
     A variadic parameter is where the ABI is missing, and it is missing in one
     place: a formal value is one 64-bit word, so the arguments past the fixed
     ones have nowhere to be packed. The callee's caller-side already does the
-    only correct thing available — it passes the fixed arguments and drops the
-    rest — so a body that never reads the variadic parameter is exact, and it
-    is the READ that has no answer. Measured before this check existed, on both
-    architectures: `def f(*rest): return rest[2]` called as `f(1, 2, r)` built
-    and died with SIGSEGV, because `rest` had no home and the index read
+    only correct thing available — it passes the fixed arguments, drops the
+    rest, and (since 2026-10-10) still EVALUATES the dropped ones for their
+    side effects, because `bind_call_arguments` returns them and the emitters
+    run them — so a body that never reads the variadic parameter is exact, and
+    it is the READ that has no answer. Measured before this check existed, on
+    both architectures: `def f(*rest): return rest[2]` called as `f(1, 2, r)`
+    built and died with SIGSEGV, because `rest` had no home and the index read
     through it. That is the wrong answer's other face, and both are the same
     absence."""
     kind = "**" if is_kwarg else "*"
