@@ -289,6 +289,40 @@ Two ways out, and they are different jobs:
    `“`struct` keyword arguments are silently dropped”` asks on the gimple
    side and should share an answer with.
 
+**Item 2's literal half is DONE (2026-10-12) — see the Status at the top and
+"What landed (2026-10-12)" at the end.** The "through a local" half is the part
+that landed; "keeping the set through a `**`-parameter" is the variadic ABI and
+is untouched.
+
+## What landed (2026-10-12, `work/formal304-docs`): the literal half, through a NAME
+
+The capability is one reader and one parameter, in the shared model:
+
+* `model.ValueKinds.spread_items(operand)` — the one reader of "this spread's
+  keys are written where its operand is", answering for the inline dict literal
+  (`literal_dict_items`, unchanged) and for a NAME through `_dict_inits`, the
+  unanimity map the element-kind reader already asks. A name any other
+  statement rebinds is tombstoned in that map and answers None, so it keeps the
+  old refusal.
+* `_unspread_keyword_mappings(args, kwargs, name, spread_items=None)` calls the
+  supplied reader, so a caller that has a `ValueKinds` folds a name exactly as
+  it folds a literal, and a caller that does not keeps the literal-only answer.
+* `struct_construction_plan` and `bind_call_arguments` take the reader as an
+  optional last argument and pass it down; both emitters pass
+  `self._vkinds.spread_items`, and `formal/build.py`'s construction check builds
+  one `ValueKinds` per function, lazily, only when a construction carries a
+  `**`, so the build pass and the emitter resolve the same name out of one
+  table.
+
+The rows (`test_formal_run.py`, both architectures against CPython):
+`a_spread_through_a_local_dict_literal_is_answered` (a construction) and
+`a_spread_through_a_local_dict_literal_is_answered_at_a_call` (a call) moved out
+of `SPREAD_REFUSALS` and into `SPREAD_CONSTRUCTION_CASES`, and
+`a_spread_through_a_rebound_dict_local_is_still_refused` is the new tombstone
+row. `a_spread_through_a_kwargs_parameter_is_refused_by_name` still refuses: a
+`**kw` parameter has no binding statement, so `spread_items` answers None for it
+and the variadic ABI remains the blocker.
+
 ## Why it is in no list
 
 `tools/formal_sweep_causes.py` ranks causes by how many files a refusal blocks,
