@@ -170,6 +170,57 @@ residual once arm64 proof generation can walk a guarded prologue again. The
 measurement below stays valid as the state of the class on a tree without the
 `getrlimit` prologue call.
 
+**Status 2026-10-12 (`work/formal280-docs`): SUPERSEDED, and §4's hypothesis is
+refuted by measurement. The residual goal this doc was filed about is not
+emitted at all any more, so these three rows have nothing to read — and the
+red they now report is the class's OWN blindness check, owned by another doc,
+not the `'⊢ 1 =' not found` message §3 quotes.** Re-measured with `lib/*.olean`
+materialised from the CAS, on this tree:
+
+    $ python3 tools/memslot.py --gb 8 --label div0 -- \
+          python3 -m unittest test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean
+    Ran 3 tests in 74.573s
+    FAILED (failures=5)   # all five are the `blind` check, by NAME
+
+with the message
+
+    the fixture generates no `q_compiles_correctly_universal` carrying
+    `all_goals (first | done | sorry)`, so `tail.replace(_ADMIT, _TRACE)` is a
+    no-op and no goal can be traced: whatever the div0 residual is today, this
+    class is not looking at it
+
+and the generated proof for `def q(a, b): return a // b` now carries
+`q_reaches_call_at_0x100000504` (a valueless `arm64_exec_go_exit` match) and NO
+value theorem. So:
+
+* **§4's cause is WRONG.** It guessed the 833 new `bv_decide` sites from the
+  `formal28-2` merge moved the terminal value flow. `fdiv64` is not the route:
+  the route is gone one level UP, at the call boundary. `_emit_exit`'s
+  `fflush(NULL)` is ONE unfollowable call, and the one-call arm restates the
+  universal theorem as reachability (`prop` a `match` on `arm64_exec_go_exit`)
+  instead of emitting the terminal value flow this doc's §5 wanted to read. The
+  measurement, the 0/1/≥2-opaque-call taxonomy and the pins are
+  `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`,
+  and `TestTheOneOpaqueCallIsAnnounced` is what keeps the substitution
+  announced.
+* **The class's red belongs to that doc's sibling.**
+  `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+  owns the class: its step 1 is the `blind` check that produced the message
+  above, and its Status records that the class stays red until the walk can
+  discharge a compiler call on a conditional path. §5's "read the div0
+  theorem's own body" is therefore not a live step — there is no such theorem.
+* **The underlying defect is NOT fixed** — `lib/ProofLib.lean`'s `fdiv64` still
+  says `0` on the div0 arm where arm64's machine leaves `1` — but it is
+  tracked, with its three options, by
+  `bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`,
+  and the only honest fix is the walk's divergence decision (its option 2),
+  which is a theorem-SHAPE change, not a light worker's patch.
+
+**No code changed for this doc**, and this section records the supersession
+rather than claiming a fix: the doc's subject (the false goal, reachable
+through the terminal value flow) is genuinely gone, and what is left is
+another lane's.
+
 ## 1. What I ran, and why `master` is green
 
 ```console
