@@ -12,10 +12,12 @@ answers the other four, for every instruction form the code generators CAN emit:
 
 The unit is the EMITTED FORM, and "emitted" means a call site: an `encode_*`
 that some emitter (a backend's `codegen.py`, or the Mach-O linker's stub)
-references. That is the same distinction the survey's 2026-10-03 method change
-made and it is the reason this tool exists at all — an encoder nothing calls is
-byte-exact, has a Lean arm, and cannot occur in an image, so counting it in any
-of the four columns would over-report all of them at once.
+references, read by an AST walk of the emitter so a DOCSTRING that names an
+encoder is not one (see `_emitter_refs`). That is the same distinction the
+survey's 2026-10-03 method change made and it is the reason this tool exists at
+all — an encoder nothing calls is byte-exact, has a Lean arm, and cannot occur
+in an image, so counting it in any of the four columns would over-report all of
+them at once.
 
 **Each column names the thing it reads, because a column that cannot say where
 its answer came from is not a measurement.**
@@ -557,20 +559,12 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
-    # `encode_call_r64` moved here from `BACKLOG` on 2026-10-12: it is a
-    # harness limit rather than a gap, exactly as the x86-64 backlog doc always
-    # said (`FF /2` with mod=11 is the call through a function VALUE). The
-    # emulated region is one `MAP_FIXED` mapping and a random 64-bit register
-    # target lands outside it, so the case leaves the stub before the model's
-    # answer can be compared — the same reason arm64's `encode_blr_xn` is here.
-    # `x86_step` has the arm and `test_x86_64_encoders.py` checks the bytes, so
-    # the LEAN and AS columns read `yes`.
-    "encode_call_r64": "`FF /2` with mod=11, a call through a function VALUE; "
-                       "the fuzz harness can only set a register's contents and "
-                       "a random 64-bit target is outside its one `MAP_FIXED` "
-                       "region, so the case leaves the stub — as arm64's "
-                       "`encode_blr_xn`. `x86_step` has the arm and `as` checks "
-                       "the bytes",
+    "encode_call_r64": "`callq *%r` jumps to the CONTENTS of a register, which "
+                       "is outside the harness's one `MAP_FIXED` region and "
+                       "cannot be installed as a case value — the same reason "
+                       "as `encode_jmp_rm64` and arm64's `encode_br_xn`; the "
+                       "decoder, model arm, `samples()` row and `as` check are "
+                       "all `yes`",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -614,36 +608,29 @@ BACKLOG = {
                            "as `encode_fadd_dd_dn_dm`"),
     "encode_fcvtzs_xn_dn": ("bugs/FORMAL_arm64_ieee754_has_no_step_arms.md",
                             "as `encode_fadd_dd_dn_dm`"),
-    # ── x86-64: the three rows that were here are all closed ─────────────
+    # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
     # `encode_imul_r64_r64_imm` was removed on 2026-10-06
     # (`work/x86-coverage-endtoend`): the row is `yes/yes/yes` and its note
     # ("`69 /r id`: no decoder arm …") was false twice over — the encoder emits
     # `6B /r ib` and it has had a decoder arm, a model arm, a `samples()` row and
-    # a pool entry since `4a680153`.
-    #
-    # `encode_call_r64`, `encode_and_r8_r8` and `encode_or_r8_r8` were removed on
-    # 2026-10-12 (`work/formal285-docs`), and the two ways they left are the two
-    # the anti-rot half of `test_formal_isa_census.py` exists to force:
-    #
-    #   * `encode_and_r8_r8` / `encode_or_r8_r8` are OVER-COVERED now — their
-    #     LEAN, FUZZ and AS columns all read `yes` (the byte-wise ALU class was
-    #     fixed by `_byte_rex_required` and the pool draws every `rm`/`reg` pair),
-    #     so the entries exempted a row that is no longer missing anything. This
-    #     was the exact failure the test names: a fixed gap that kept its
-    #     exemption.
-    #   * `encode_call_r64` is a real LIMIT OF THE HARNESS, not a gap, which is
-    #     what the doc that tracked it always said; it moved to `HARNESS_LIMITS`
-    #     with that reason rather than being deleted, because its FUZZ column is
-    #     still `NO` and an unexplained `NO` is what both tables exist to avoid.
-    #
-    # All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
-    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:
+    # a pool entry since `4a680153`. The previous pass recorded that and left it
+    # here on purpose because the tool was "another claim's write set"; the
+    # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
+    # it is removed now rather than reported once more.
+    # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-07: the
+    # byte-wise `and`/`or` the floating compare needs, whose gap was a REX prefix
+    # the tree's own encoder omitted for SPL/BPL/SIL/DIL. `_byte_rex_required`
+    # fixed the encoder, the pool draws both, and the census reads `yes yes yes`
+    # for each — so the entries were stale and the anti-rot half of
+    # `test_formal_isa_census.py` is what caught them.
+    # **All nine of shape 1's SSE2 rows came out of this dict on 2026-10-06
+    # (work/x86-coverage-endtoend) and are a covered form now, not a gap:**
     # `addsd`, `subsd`, `mulsd`, `divsd`, `ucomisd`, `xorpd`, `movq_r64_xmm`,
     # `cvtsi2sd` and `cvttsd2si` each gained a decoder arm, a model arm, a
     # `samples()` row and a fuzz-pool entry, and the census reads `yes yes yes`
     # for every one.
-    #
+    # ── x86-64: runnable, and the pool does not draw them ────────────────
     # `encode_lea_r64_rip`, `encode_jcc_rel32`, `encode_jmp_rel32` and
     # `encode_call_rel32` were here until 2026-10-05, with the reason "the two
     # engines' RIPs differ by the load slide" for the `lea` and "a call cannot

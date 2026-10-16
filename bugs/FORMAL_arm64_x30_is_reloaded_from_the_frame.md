@@ -89,7 +89,7 @@ place.** Three things moved under it since the 2026-10-05 measurement:
 So the defect this file NAMES is not reachable on this tree, and the five
 examples are red for the same-image/halt obligations owned by
 `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
-and `FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_call.md`, not for
+and `FORMAL the stack guards getrlimit is counted as a program call`, not for
 this one. The file stays because those examples are still red and the peel
 machinery they will need is written down here; a Lean run is what would confirm
 the obligation closes for all five, and it is not affordable from a bounded

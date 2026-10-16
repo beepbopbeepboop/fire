@@ -28,6 +28,32 @@ the two open subjects are named rather than restated, because both are held by
 live claims and a second copy of either is a document that will be right until
 the claim lands and then wrong.
 
+**Update 2026-10-08 (`work/formal227-docs`): §1's pins were RED on `master`, and
+the cause was a step-lemma bug that is now fixed; what they still report is the
+hole COUNT, which is a separate OPEN regression this doc does not own.**
+`test_formal_dylib.py::a conditional value is not a branch` and
+`test_several_exports_and_no_derivable_spec` both failed with Lean REJECTING the
+emitted contract ("lean rejected a contract for a block whose steps choose
+values"), not with a wrong hole count. The cause was
+`formal/arm64_proof_gen.py::_gen_step_result_lemmas`'s TBZ/TBNZ sign-extend
+decision: `hb`'s polarity was taken from `w & 0x2000` — bit 13 of the word —
+while its `lhs` isolates bit 13 of `w >>> 5`, which is bit 18 of the word, so
+`hb` was FALSE for `csetval.mojo`'s TBZ (`0x36312064`: bit 13 set, bit 18 clear)
+and its `native_decide` could not fire. Fixed to `0x00040000`, the mask the
+19-bit family already uses, and pinned by
+`test_formal_call_proof_gen.py::TestBitTestBranches::
+test_the_sign_decision_reads_the_immediate_s_own_bit` (commit `a6d7d416`). Lean
+now ACCEPTS both proofs, so §1's block-layer fix stands.
+
+**The hole COUNT both tests still report is `bfeec991`'s regression, not this
+emitter's:** a branched export (`branched`, `pick`) whose prologue carries the
+stack-floor guard's `bl getrlimit` is refused by `_gen_universal_e2e_cfg`'s
+fixed-fuel `any bl` check, so its `_semantics_total` is a `sorry` and the counts
+are 2 and 1 against this doc's 1 and 0. That is
+`FORMAL arm64 stack floor getrlimit is the opaque call for every function`'s
+subject; the counts move when that call leaves the walked path, and nothing here
+substitutes for it.
+
 ---
 
 ## 1. The block layer is not the ceiling, and a conditional value is not a branch

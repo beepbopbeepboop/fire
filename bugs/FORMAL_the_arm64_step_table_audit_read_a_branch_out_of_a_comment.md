@@ -10,6 +10,20 @@ of the four signatures now carrying the obligation that fails, named from the
 generated file rather than from a truncated tail. Filed 2026-10-03 on
 `work/formal16-2`, refreshed 2026-10-04.
 
+**Status 2026-10-08 (`work/formal217-docs`): the CENSUS is reconciled to this
+tree and `TestTheRecursionFamiliesStillGenerate` is GREEN again.** The audit fix
+(§1) had landed, but the class's census still pinned `wdiff` as generating while
+the stack-floor guard's `getrlimit` (`bfeec991`, every arm64 prologue) had moved
+it into the loop contract — `_reached_without_a_condition`'s fix had landed and
+`wdiff`'s own refusal is the guard's address being the run terminal. `wdiff` is
+now a `REFUSED` row beside `sum_range`, with the needles its message actually
+carries (`unsupported edge to … loop back-edge / continuation`) and its owner
+named (`FORMAL the stack guards getrlimit is counted as a program call`,
+`formal213-docs`'s claim), so **ten generate and two refuse** and the census
+cannot go stale silently. §4.1's eleven Lean runs are unchanged and remain the
+integrator's.**
+
+
 **Update 2026-10-06 (`work/formal42-4`): the PIN class below went red again for
 a reason that is not the audit, and half of it is fixed.** The generator's
 `_reached_without_a_condition` returned False on meeting ANY reachable source
@@ -57,6 +71,33 @@ TestTheRecursionFamiliesStillGenerate` is 3 tests OK on this tree, with
 `sum_range` back at its owned loop-contract refusal. The retired bug doc's two
 root causes are the two fixes above, pinned by `TestTheReachedWalkIsPerPath`
 and `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`.
+
+**Status 2026-10-08 (`work/formal205-docs`): the PIN class is GREEN again, and
+the split is now TEN generate / TWO refuse.** `test_formal_call_proof_gen.py::
+TestTheRecursionFamiliesStillGenerate` had `wdiff` in its `GENERATE` tuple while
+it refused at generation — the census above (2026-10-06) already records why — so
+`test_every_one_of_them_still_generates` was red on `master`. `wdiff` is moved
+back to `REFUSED`, with the two needles its refusal actually carries
+(`unsupported edge to …` and `loop back-edge / continuation; no loop contract
+matches`) and `REFUSED_OWNER` naming
+`FORMAL the stack guards getrlimit is counted as a program call`, which
+is where the `getrlimit` halt-boundary defect is filed. The class docstring's
+"all twelve generate" and the census total are corrected to 10 + 2. The
+underlying bug is still that other doc's; what this pins is the honest split, and
+`test_the_owner_of_the_one_refusal_still_exists` will fail if the owning doc is
+deleted (i.e. when the fix lands), which is the cue to move `wdiff` back.
+
+**Status 2026-10-08 (`work/formal233-docs`): the census pin above was RED on
+`master` — it still listed `wdiff` in `GENERATE`, while the paragraph above
+(and the getrlimit doc) already said `wdiff` refuses.** So the class asserted a
+generation that had stopped and reported the getrlimit regression as "either the
+gap closed or it reopened". `wdiff` is now a `REFUSED` row with the needles its
+message carries (`unsupported edge to`, `no loop contract matches`) and its owner
+doc named in `REFUSED_OWNER`, so the census is **ten generate / two refuse** and
+cannot go stale in either direction: if the guard fix lands and `wdiff`
+generates again, the row fails and says to delete it.
+`test_formal_call_proof_gen.TestTheRecursionFamiliesStillGenerate` is
+**3 tests / OK**.
 
 **Re-measured 2026-10-05 on this tree (`work/formal25-5-r2`), generation only,
 no Lean.** Two things moved since §4's table was written, and neither is a fix

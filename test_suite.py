@@ -2109,7 +2109,10 @@ STALE_PER_CHILD_BUDGETS = {
                                       # arrived with the derived host-import rows
     'test_formal_sys.py': 2,
     'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 3,
+    'test_formal_x86_64_dylib.py': 4,  # +1 on 2026-10-08: the os.path.getsize
+                                       # hostmod-dylib row's build of the reduced
+                                       # program, the same 600 s wall the file's
+                                       # other three build sites carry
     'test_general_mutable_closure_capture.py': 2,
     'test_import_integration.py': 4,
     'test_link_mode.py': 2,
@@ -5392,7 +5395,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           dangling_doc_refs.stale_baseline_entries(synth, led)
           == {'c.py': (0, 2), 'd.py': (1, 4)},
           f'stale {dangling_doc_refs.stale_baseline_entries(synth, led)}; the '
-          f'ledger is a CEILING, so a file that fixed its citations needs no '
+          f'ledger is a CEILING, so a worker who fixes a citation needs no '
           f'entry change to stay green and an entry left behind by a fix is '
           f'indistinguishable from one still needed — a worker who fixes a '
           f'citation should drop the entry rather than leave it')
@@ -5418,6 +5421,93 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'corpus keys {sorted(synth)}; "fixed every citation in this file" '
           f'and "the ledger never mentioned this file" were the same '
           f'observation, so the join has to be over the LEDGER')
+
+    # ── the BARE class is a VERDICT now, and this is the check that says so ──
+    #
+    # `the surviving-citation bug`: a bug doc was
+    # deleted with its fix and three documents kept citing it by bare stem — a
+    # census row, a per-stem table row, a prose pointer — while `--ratchet` was
+    # GREEN, because the spelling `BARE_REF` matches has no `bugs/` in front of
+    # it and the ratchet only read `BASELINE`.  `bare_find` reported the class
+    # and `BARE_REF`'s own comment said a ledger for it "would have to bless
+    # every existing sentence", which was true when it was written and stopped
+    # being true when the `deleted_convention` skip landed: a line that SAYS the
+    # doc was deleted is not counted, so there is a convention and the ledger is
+    # seeded from the census like the other one.
+    #
+    # Three checks, and each one is a way that could be got wrong independently:
+    # the ledger exists and is green on arrival (a missing table defaults every
+    # ceiling to 0, so an absent `BARE_BASELINE` would turn the gate into 86 red
+    # lines rather than a sentence); the same reader that judges the prefixed
+    # class judges this one, on a synthetic corpus, so "it is wired to a verdict"
+    # is not the same claim as "the table was written"; and the planted corpus
+    # below is seen by `bare_find` and NOT by `find`, which is the whole defect
+    # stated as a difference between two functions rather than as prose.
+    bare_led = dangling_doc_refs.load_baseline('BARE_BASELINE')
+    pref_led = dangling_doc_refs.load_baseline()
+    bare_gains = dangling_doc_refs.ratchet_regressions(bare_by_file, bare_led)
+    check('dangling refs: the BARE class has a ledger of its own, and it is '
+          'green on arrival — a citation spelled without `bugs/` is judged too',
+          bool(bare_led) and pref_led is not bare_led and not bare_gains
+          and all(f in bare_led for f in bare_by_file),
+          f'BARE_BASELINE has {len(bare_led)} entries and the corpus has '
+          f'{len(bare_by_file)} citing files; gains {bare_gains[:5]}. Two '
+          f'tables because two classes: `doc/ELABORATION.md` is cited bare by '
+          f'four real files and must never be a ceiling, and the same spelling '
+          f'of a document that is nowhere must be. An absent table is not a '
+          f'green light — every ceiling would read 0 — which is why this asks '
+          f'for the table rather than for the absence of complaints')
+    check('dangling refs: the BARE ratchet is the SAME reader as the prefixed '
+          'one, so it fails on a gain and not on a leftover',
+          dangling_doc_refs.ratchet_regressions(synth, led) == [('b.py', 2, 1)]
+          and dangling_doc_refs.sanctioned(synth, led) == {'a.py', 'd.py'},
+          'one implementation for both ledgers, checked against the same '
+          'synthetic corpus: a file over its ceiling is a gain in either class '
+          'and a file under one is not')
+
+    # The planted corpus, which is the defect itself. A file in `.tmp/` (which
+    # `.git/info/exclude` keeps out of the tree, so the self-test leaves no
+    # trace) citing a document that is nowhere, by bare stem — and `candidates`
+    # is redirected at it so the guarantee is the file rather than this tree's
+    # own corpus, which is exactly the trade the checks above make.
+    plant_dir = os.path.join(HERE, '.tmp')
+    os.makedirs(plant_dir, exist_ok=True)
+    plant = os.path.join(plant_dir, 'docrefs_plant.md')
+    with open(plant, 'w', encoding='utf-8') as f:
+        f.write('see NO_SUCH_DOC_ANYWHERE.md for why\n')
+    rel_plant = os.path.relpath(plant, dangling_doc_refs.ROOT).replace(
+        os.sep, '/')
+    old_candidates = dangling_doc_refs.candidates
+    try:
+        dangling_doc_refs.candidates = lambda skip=(): [rel_plant]
+        _h, planted_doc, planted_file = dangling_doc_refs.find()
+        p_bare_doc, p_bare_file = dangling_doc_refs.bare_find()
+        # `--ratchet`'s OWN verdict function, with both corpora and both
+        # ledgers handed in — so what is under test is the wiring the CLI uses,
+        # not two halves of a walk called from a test.
+        p_pref, p_gains = dangling_doc_refs.ratchet_verdict(
+            planted_file, p_bare_file, {}, {})
+    finally:
+        dangling_doc_refs.candidates = old_candidates
+        try:
+            os.remove(plant)
+        except OSError:
+            pass
+    check('dangling refs: a bare citation of a document that is nowhere is a '
+          'GAIN the ratchet reports — the class it used to walk past',
+          not planted_doc and not p_pref
+          and 'NO_SUCH_DOC_ANYWHERE.md' in p_bare_doc
+          and p_bare_file.get(rel_plant) == [('NO_SUCH_DOC_ANYWHERE.md', 1)]
+          and p_gains == [(rel_plant, 1, 0)],
+          f'the prefixed walk found {planted_doc} and the bare walk found '
+          f'{sorted(p_bare_doc)}; one verdict over both halves said '
+          f'prefixed={p_pref} bare={p_gains}. `find()` cannot see a stem '
+          f'with no `bugs/` in front of it, which is why four citations of one '
+          f'deleted document sat in three files with the ratchet green. The '
+          f'planted name is one of this file\'s own prefixed fixtures, so the '
+          f'walk that cannot see it is shown on a name the walk that can has '
+          f'already been using as a control; the plant is removed above '
+          f'either way')
 
 
 def test_the_formal_doc_index_is_current():
@@ -5486,6 +5576,22 @@ def test_the_formal_doc_index_is_current():
     rc, out = run_check(['--check'])
     check('formal doc index: OPEN_WORK.md\'s generated block is current',
           rc == 0, out.strip() or f'--check exited {rc}')
+
+    # A committed MERGE CONFLICT MARKER is always a bug, and the block check
+    # above cannot see one in the HAND-maintained half of OPEN_WORK.md — it
+    # compares the generated region only, and that is where one sat from a merge
+    # until 2026-10-08 (a `=======` plus a duplicated table). Checked over the
+    # whole file, and shown to fire on a planted string rather than only on the
+    # clean tree it is run against.
+    planted_marker = 'before\n=======\nafter\n'
+    check('formal doc index: a committed merge conflict marker is caught',
+          F.conflict_markers(F.open_work_text()) == []
+          and F.conflict_markers(planted_marker) == [2]
+          and F.conflict_markers('<<<<<<< HEAD\nx\n>>>>>>> other\n') == [1, 3],
+          'a `=======` / `<<<<<<<` / `>>>>>>>` line in OPEN_WORK.md must fail '
+          '--check: the block comparison cannot see the hand-maintained half, '
+          'so the marker this checks for went unnoticed through every gate '
+          'until a reader found it')
 
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')

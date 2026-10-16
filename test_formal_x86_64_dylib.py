@@ -171,6 +171,53 @@ def test_x86_64_dylib_stub_entries_are_jmpq_rrip(tmpdir, shared):
               f"— an arm64 stub (ADRP/LDR/BR) was written for an x86-64 image")
 
 
+def test_dylib_flags_and_stub_reserved_fields_are_the_headers(tmpdir, shared):
+    """The two Mach-O header facts the bisect got wrong, pinned byte for byte.
+
+    * the mach_header flags: `build_macho_dylib` used to write `0x800005`,
+      which set `MH_HAS_TLV_DESCRIPTORS` (a bit this library does not mean) and
+      omitted `MH_TWOLEVEL`.  `ld` emits `0x100085` for the same dylib:
+      `MH_NOUNDEFS|MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS`.
+    * a `S_SYMBOL_STUBS` section's `reserved1`/`reserved2`: the header defines
+      `reserved1` as the indirect-symbol-table index and `reserved2` as the
+      size of one stub.  These images carry no indirect symbol table, so
+      `reserved1` is 0 and `reserved2` is the stub size — the writer used to
+      have them the other way round.
+    """
+    path = shared["extern_dylib"]
+    with open(path, "rb") as f:
+        data = f.read()
+    flags = struct.unpack_from("<I", data, 24)[0]
+    want_flags = 0x1 | 0x4 | 0x80 | 0x100000
+    check(flags == want_flags,
+          f"dylib mach_header flags are {flags:#x}, expected {want_flags:#x} "
+          f"(MH_NOUNDEFS|MH_DYLDLINK|MH_TWOLEVEL|MH_NO_REEXPORTED_DYLIBS)")
+
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    pos = 32
+    stub_section = None
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, pos)
+        if cmd == LC_SEGMENT_64:
+            nsects = struct.unpack_from("<I", data, pos + 64)[0]
+            so = pos + 72
+            for _i in range(nsects):
+                sname = data[so:so + 16].rstrip(b"\0").decode()
+                if sname == "__stubs":
+                    stub_section = struct.unpack_from("<II", data, so + 68)
+                so += 80
+        pos += cmdsize
+    check(stub_section is not None,
+          "the extern-calling dylib has no __stubs section to inspect")
+    reserved1, reserved2 = stub_section
+    check(reserved1 == 0,
+          f"__stubs reserved1 is {reserved1}, expected 0 — reserved1 is the "
+          f"indirect-symbol-table index and these images have no such table")
+    check(reserved2 == X86_64_STUB_SIZE,
+          f"__stubs reserved2 is {reserved2}, expected {X86_64_STUB_SIZE} — "
+          f"reserved2 is the size of one stub")
+
+
 def test_x86_64_dylib_passes_strict_validation(tmpdir, shared):
     """`codesign -v` accepts the library.
 
@@ -509,6 +556,46 @@ def test_an_elf_image_with_a_macho_module_is_refused(tmpdir, shared):
           f"link line and not about elf as a container")
 
 
+def test_a_hostmod_getsize_call_answers_under_rosetta(tmpdir, shared):
+    """`os.path.getsize` through an imported hostmod dylib returns the size.
+
+    The reduced reproduction of the x86-64 `getsize` crash: the image's
+    `os_path___syscalls` dylib calls `lstat` and then reads the out-parameter
+    struct through a pointer formed rip-relative INSIDE the dylib. The Mach-O
+    linker mapped `__LINKEDIT` below the fixed `__DATA` segment, so Rosetta 2
+    slid the image wrongly and that pointer landed out-of-mapping: the program
+    executed at address 0 and died with `EXC_BAD_ACCESS` while arm64 answered
+    correctly. `formal/macho_linker.py::_linkedit_vm` places `__LINKEDIT` above
+    the last fixed segment now.
+
+    The assertion is CPython's own `os.path.getsize` modulo 256, so a
+    jump-to-0, a signal and a wrong size are each distinguishable from the
+    right answer — and `/etc/hosts` is a file this host has.
+    """
+    prog = os.path.join(tmpdir, "x86getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                "    return getsize(\"/etc/hosts\")\n")
+    out = os.path.join(tmpdir, "x86getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"the getsize program did not build for x86-64: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 getsize image died on a signal ({got.returncode}): "
+          f"{(got.stderr or got.stdout).strip()[:200]}")
+    want = os.path.getsize("/etc/hosts") % 256
+    check(got.returncode == want,
+          f"the x86-64 getsize image exited {got.returncode}, expected {want} "
+          f"(CPython's os.path.getsize('/etc/hosts') mod 256)")
+
+
 def test_the_link_line_containers_must_agree(tmpdir, shared):
     """A library in the wrong container is refused, and the matching one is not.
 
@@ -660,6 +747,61 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
     check(got.returncode == 0,
           f"a program linked against the x86-64 dylib exited "
           f"{got.returncode}, expected 0")
+
+
+def test_an_imported_hostmod_dylib_answers_on_x86_64(tmpdir, shared):
+    """A program importing `os.path.getsize` runs and returns the real size.
+
+    The cross-dylib host-module call path, which is a different image shape from
+    the `x86ext` module the other rows use: `os.path` is one Mojo dylib that
+    calls a second (`os._syscalls`), and the call that failed here was an
+    outbound libc call made from inside the imported library, not from the
+    executable.
+
+    `FORMAL_x86_64_getsize_crashes_in_an_imported_hostmod_dylib` blamed Rosetta;
+    the cause was this tree's Mach-O linker mapping `__LINKEDIT` below the fixed
+    `__DATA` segment, so Rosetta slid the image wrongly and a rip-relative
+    pointer formed inside the imported dylib landed out-of-mapping — a jump to
+    address 0, reported by the shell as `Segmentation fault: 11`. The fix is
+    `3ac56981` (`_linkedit_vm` places `__LINKEDIT` above the last fixed
+    segment).
+
+    The assertion is the one that separates a working image from a
+    well-formed-but-wrong one: the exit status must be CPython's own
+    `os.path.getsize` reduced modulo 256, which is an answer a jump to 0 cannot
+    produce. A signal death is checked separately so the message names the
+    original symptom rather than a bare mismatch.
+    """
+    import os.path as cpython_path
+    payload = os.path.join(tmpdir, "sized.bin")
+    with open(payload, "wb") as f:
+        f.write(b"x" * 342)
+    want = cpython_path.getsize(payload)
+
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                f"    return getsize({payload!r})\n")
+    out = os.path.join(tmpdir, "getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"an x86-64 program importing os.path.getsize did not build: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 getsize image died on signal {-got.returncode} "
+          f"(stderr {got.stderr!r}); before the linker fix it executed at "
+          f"address 0, which arrives here as -11")
+    check(got.returncode == want % 256,
+          f"the x86-64 image exited {got.returncode}, but CPython's "
+          f"os.path.getsize({payload!r}) is {want} => {want % 256}; a wrong "
+          f"answer and a jump to 0 must not be confusable")
 
 
 def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
@@ -950,9 +1092,50 @@ def test_a_receiver_bound_to_a_frame_is_refused_on_both_machines(tmpdir,
               f"{text}")
 
 
+def test_a_program_importing_os_path_getsize_matches_cpython(tmpdir, shared):
+    """A HOST-MOD dylib's outbound call runs: `os.path.getsize` answers.
+
+    The reduced reproduction of the getsize hostmod-dylib crash (found
+    2026-10-07): `getsize` builds `os_path` and `os_path.__syscalls`, and the syscalls dylib calls
+    libSystem — the exact shape that used to jump to address 0 on x86-64 because
+    the Mach-O linker mapped `__LINKEDIT` below the fixed `__DATA` segment and
+    Rosetta slid the image wrongly (`_linkedit_vm`, `3ac56981`). A file this test
+    makes is the argument, so the expected size is CPython's own answer on the
+    same bytes; the exit status is that size modulo 256, which a jump to 0 cannot
+    produce and a wrong-but-surviving answer does not match.
+    """
+    target = os.path.join(tmpdir, "sized.dat")
+    with open(target, "wb") as f:
+        f.write(b"A" * 342)
+    prog = os.path.join(tmpdir, "getsize.mojo")
+    with open(prog, "w") as f:
+        f.write("from os.path import getsize\n"
+                "\n"
+                "def main() -> Int:\n"
+                "    return getsize(%r)\n" % target)
+    out = os.path.join(tmpdir, "getsize.aout")
+    build = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(build.returncode == 0,
+          f"an x86-64 program importing os.path.getsize did not build: "
+          f"{(build.stderr or build.stdout).strip()[-400:]}")
+    got = run_x86_64(out)
+    check(got.returncode >= 0,
+          f"the x86-64 image died on a signal ({got.returncode}); before "
+          f"3ac56981 it jumped to address 0 (SIGSEGV, -11) here")
+    size = os.path.getsize(target)
+    check(got.returncode == size % 256,
+          f"the x86-64 image exited {got.returncode}, expected {size % 256} "
+          f"(CPython's os.path.getsize = {size} mod 256)")
+
+
 TESTS = [
     ("x86-64 dylib stubs are jmpq *(%rip)",
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),
+    ("dylib flags and stub reserved fields are the header's",
+     test_dylib_flags_and_stub_reserved_fields_are_the_headers),
     ("x86-64 dylib passes codesign strict validation",
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
@@ -967,12 +1150,18 @@ TESTS = [
      test_an_elf_image_with_a_macho_module_is_refused),
     ("the link line containers must agree",
      test_the_link_line_containers_must_agree),
+    ("a hostmod getsize call answers under Rosetta",
+     test_a_hostmod_getsize_call_answers_under_rosetta),
     ("every byte of the x86-64 dylib is claimed by a segment",
      test_every_byte_of_the_dylib_is_claimed),
     ("a program importing an extern module matches CPython",
      test_program_importing_an_extern_module_matches_cpython),
+    ("an imported hostmod dylib answers on x86-64",
+     test_an_imported_hostmod_dylib_answers_on_x86_64),
     ("an x86-64 dylib with an extern call links and runs",
      test_module_dylib_with_an_extern_call_loads_into_a_program),
+    ("a program importing os.path.getsize matches CPython",
+     test_a_program_importing_os_path_getsize_matches_cpython),
     ("the x86-64 dylib exports its module API",
      test_the_x86_64_dylib_exports_its_module_api),
     ("a receiver bound to a frame is refused on both machines",

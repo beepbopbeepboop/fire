@@ -305,6 +305,14 @@ def main(n):
     printf("makedirs-again=%d@@", makedirs(join(root, "a/b/c"), 511))
     printf("makedirs-deep=%d@@", makedirs(join(root, "a/b/c/d/e"), 511))
     printf("makedirs-kept=%d@@", makedirs(join(root, "p/q/r"), 511))
+    # The OMITTED-argument spelling, which is CPython's one-argument form: the
+    # default is materialized at the call site from the callee's own
+    # declaration (`formal/imports.py::external_declarations`). A default that
+    # did not survive the dylib boundary would leave the argument register
+    # holding whatever the caller last put there, so a `mode` of 0 here would
+    # make a real directory nobody can enter.
+    printf("mkdir-default=%d@@", mkdir(join(root, "one-default")))
+    printf("makedirs-default=%d@@", makedirs(join(root, "q/r/s")))
     show("made-deep", join(root, "p/q/r"))
     # The mode OMITTED, which is CPython's `mode=0o777` default. The oracle
     # for the mode is a directory CPython's own `os.mkdir`/`os.makedirs`
@@ -609,6 +617,8 @@ def group_fs(tmpdir, verbose):
         "makedirs": "0",
         "makedirs-again": "0",        # exist_ok: already there is not an error
         "makedirs-deep": "0",
+        "mkdir-default": "0",         # `mode` omitted: CPython's 0777 default
+        "makedirs-default": "0",
         "rmdir": "0",
         "rmdir-missing": "-1",
         "remove": "0",
@@ -652,6 +662,7 @@ def group_fs(tmpdir, verbose):
     })
     for tag, path in (("made", p("a", "b", "c")),
                       ("made-deep", p("p", "q", "r")),
+                      ("made-default", p("dd", "ee")),
                       ("removed", p("a", "b", "c", "d", "e")),
                       ("removed-file", p("f.txt")),
                       ("gone", p("x1")), ("renamed", p("z2")),

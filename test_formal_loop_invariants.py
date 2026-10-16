@@ -449,6 +449,39 @@ def test_a_program_the_search_cannot_run_is_recorded_as_skipped(tmpdir=None):
           str(v.why_family))
 
 
+def test_a_loop_that_halves_is_run_and_not_skipped(tmpdir=None):
+    """`collatz` halves with `//`, and the search now RUNS it.
+
+    `//` is the AST's spelling of integer division and `formal/contracts.py`'s
+    reader took only `/`, so every halving step raised `Unsupported` and the
+    search skipped EVERY input of the one loop whose termination is the whole
+    point of the example.  A skip reads as "no counterexample", so the loop was
+    silently outside its own instrument.  This row is the other half of
+    `test_a_program_the_search_cannot_run_is_recorded_as_skipped`: `array_fill`
+    is still skipped (a subscript), `collatz` is not (a floor division), and the
+    two are now different programs rather than one skip count.
+    """
+    from formal import loop_invariants as LI
+    v = verdicts_of("collatz")[0]
+    check(v.family == "collatz", "collatz: the family is `collatz`", v.family)
+    check(bool(v.candidates), "collatz: the search ran and reported per candidate")
+    check(all(not c["skipped"] for c in v.candidates),
+          "collatz: NO candidate is reported as skipped — the `//` in the body "
+          "reads now",
+          str([(c["role"], c["skipped"]) for c in v.candidates]))
+    check(any(c["witness"] is not None for c in v.candidates),
+          "collatz: and the search reaches a state, so it said something rather "
+          "than nothing",
+          str([(c["role"], c["witness"]) for c in v.candidates]))
+    # The negative control: `array_fill`'s skip is still a skip, so this row is
+    # about the `//` and not about a search that stopped skipping entirely.
+    af = verdicts_of("array_fill")[0]
+    check(all(c["skipped"] for c in af.candidates),
+          "array_fill: is STILL skipped, so the two programs differ for the "
+          "operator that changed",
+          str([(c["role"], c["skipped"]) for c in af.candidates]))
+
+
 
 # ── 4. the ladder, and the shape of the emitted file ──────────────────────────
 

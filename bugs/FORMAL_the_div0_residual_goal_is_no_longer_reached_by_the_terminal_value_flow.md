@@ -107,6 +107,120 @@ honest status of the doc's own subject is BLOCKED behind it rather than red on
 its own terms. The library is not the variable here — the refusal is at
 generation, before Lean — so a rebuild does not change this.
 
+## 0. UPDATE 2026-10-08 (`work/formal219-docs`): the class no longer gets far
+## enough to see the residual at all — it now ERRORS in `setUpClass`
+
+Re-run on this tree, with the library current (all eight `lib/*.olean` report
+`_library_is_current=True` through `formal.lean._effective_digest`):
+
+```console
+$ export PATH=/opt/homebrew/bin:$PATH
+$ python3 tools/memslot.py --gb 8 --label div0 -- \
+      python3 test_formal_call_proof_gen.py TestTheZeroDivisorGuardAgainstLean
+ERROR: setUpClass … formal.build.FormalBuildError: no proof was generated: …
+  universal theorem: 2 calls this walk cannot follow
+  (0x100000424 -> 0x100000890 (opaque), 0x100000518 -> 0x100000884 (opaque)),
+  every one of them OUT OF THE IMAGE, and ONE halt address cannot discharge them
+Ran 0 tests … FAILED (errors=1)
+```
+
+So the premise in the title — that the residual `⊢ 1 = …` goal is no longer
+REACHED — is no longer measurable here: `_symbolic_divisor_proof` cannot even
+produce a `_proof.lean` to read a residual out of. **The cause is NOT this
+doc's subject and is not the terminal value flow**: `q(a, b) = a // b` now has
+TWO opaque calls in its entry function, and the second is the stack-floor
+guard's `bl getrlimit`, which
+`FORMAL arm64 stack floor getrlimit is the opaque call for every function`
+measures and owns (`work/formal104-docs`, and it is the same regression that
+doc's `TestTheBranchFlagLemmaIsTheBranchOwns` row is red for). That doc's
+`getrlimit`-off-the-walk fix is the prerequisite: until the guard's read is
+moved to the startup stub, no program with a source conditional — this class's
+`//` included — generates a universal theorem, so neither "reached" nor "closed"
+can be told apart. Confirmed not caused by this branch: reverting the branch's
+own arm64 guard change (`a4d5bf58`) and re-running gives the SAME
+`setUpClass` error with the same two addresses.
+
+**What to do with this doc:** it stays OPEN and its next step is now the
+`getrlimit` doc's, not `formal/arm64_proof_gen.py`'s terminal flow. Once the
+guard's call is off the walked path, re-run this class and read §3's two
+outcomes; if the residual then reappears, §3/§5 stand as written, and if the
+proof still refuses, the refusal is a third state and this doc should say so.
+
+**Status update 2026-10-08 (`work/formal238-docs`): the three assertion
+failures are NO LONGER the state of this class — it cannot BUILD the proof at
+all, and the blocker is not the terminal value flow.** `bfeec991` put a
+`call getrlimit` in arm64's stack-floor guard prologue, and
+`formal/arm64_proof_gen.py` refuses a run test over any extern call, so proof
+GENERATION for the symbolic-divisor program raises before Lean is reached:
+
+    $ python3 - <<'PY'
+    import test_formal_call_proof_gen as T; T._symbolic_divisor_proof('.tmp')
+    PY
+    FormalBuildError: no proof was generated: … universal theorem: 2 calls this
+    walk cannot follow (… -> … (opaque), … -> … (opaque)), every one of them OUT
+    OF THE IMAGE …
+
+Measured here, no Lean: the same `FormalBuildError` the arm64 half of
+`test_formal_call_proof_gen.py` reports for every bounded-stop program, and the
+same one `FORMAL arm64 startup stub extern call lands past text`
+describes (the `getrlimit` call belongs in the startup stub, which needs the
+`__TEXT,__stubs` region sized for it). **So the next step for THIS doc is
+blocked on that fix**, not on the terminal value flow: re-measure the div0
+residual once arm64 proof generation can walk a guarded prologue again. The
+measurement below stays valid as the state of the class on a tree without the
+`getrlimit` prologue call.
+
+**Status 2026-10-12 (`work/formal280-docs`): SUPERSEDED, and §4's hypothesis is
+refuted by measurement. The residual goal this doc was filed about is not
+emitted at all any more, so these three rows have nothing to read — and the
+red they now report is the class's OWN blindness check, owned by another doc,
+not the `'⊢ 1 =' not found` message §3 quotes.** Re-measured with `lib/*.olean`
+materialised from the CAS, on this tree:
+
+    $ python3 tools/memslot.py --gb 8 --label div0 -- \
+          python3 -m unittest test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean
+    Ran 3 tests in 74.573s
+    FAILED (failures=5)   # all five are the `blind` check, by NAME
+
+with the message
+
+    the fixture generates no `q_compiles_correctly_universal` carrying
+    `all_goals (first | done | sorry)`, so `tail.replace(_ADMIT, _TRACE)` is a
+    no-op and no goal can be traced: whatever the div0 residual is today, this
+    class is not looking at it
+
+and the generated proof for `def q(a, b): return a // b` now carries
+`q_reaches_call_at_0x100000504` (a valueless `arm64_exec_go_exit` match) and NO
+value theorem. So:
+
+* **§4's cause is WRONG.** It guessed the 833 new `bv_decide` sites from the
+  `formal28-2` merge moved the terminal value flow. `fdiv64` is not the route:
+  the route is gone one level UP, at the call boundary. `_emit_exit`'s
+  `fflush(NULL)` is ONE unfollowable call, and the one-call arm restates the
+  universal theorem as reachability (`prop` a `match` on `arm64_exec_go_exit`)
+  instead of emitting the terminal value flow this doc's §5 wanted to read. The
+  measurement, the 0/1/≥2-opaque-call taxonomy and the pins are
+  `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`,
+  and `TestTheOneOpaqueCallIsAnnounced` is what keeps the substitution
+  announced.
+* **The class's red belongs to that doc's sibling.**
+  `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+  owns the class: its step 1 is the `blind` check that produced the message
+  above, and its Status records that the class stays red until the walk can
+  discharge a compiler call on a conditional path. §5's "read the div0
+  theorem's own body" is therefore not a live step — there is no such theorem.
+* **The underlying defect is NOT fixed** — `lib/ProofLib.lean`'s `fdiv64` still
+  says `0` on the div0 arm where arm64's machine leaves `1` — but it is
+  tracked, with its three options, by
+  `bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`,
+  and the only honest fix is the walk's divergence decision (its option 2),
+  which is a theorem-SHAPE change, not a light worker's patch.
+
+**No code changed for this doc**, and this section records the supersession
+rather than claiming a fix: the doc's subject (the false goal, reachable
+through the terminal value flow) is genuinely gone, and what is left is
+another lane's.
+
 ## 1. What I ran, and why `master` is green
 
 ```console

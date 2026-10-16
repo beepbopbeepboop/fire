@@ -41,21 +41,15 @@ LC_UNIXTHREAD = 0x05
 ARM_THREAD_STATE64 = 4
 ARM_THREAD_STATE64_COUNT = 32
 
-# `mach-o/loader.h`'s `MH_*` header flags. Each is a SINGLE bit at the position
-# the header names, and the three that used to sit here were aliased onto other
-# flags (`MH_TWOLEVEL` on `MH_HAS_TLV_DESCRIPTORS`, `MH_BIND_AT_LOAD` on
-# `MH_INCRLINK`, `MH_DEAD_STRIPPABLE_DYLIB` on `MH_SUBSECTIONS_VIA_SYMBOLS`) —
-# a defect that only shows up when something finally reads the flag, because
-# every one of them is still a valid `MH_*` value.
-MH_NOUNDEFS = 0x00000001
-MH_INCRLINK = 0x00000002
-MH_DYLDLINK = 0x00000004
-MH_BIND_AT_LOAD = 0x00000008
+# `<mach-o/loader.h>`'s `MH_*` flags. These three were aliased onto other
+# flags — `MH_TWOLEVEL` was `0x00800000` (which is `MH_HAS_TLV_DESCRIPTORS`),
+# and `MH_BIND_AT_LOAD`/`MH_DEAD_STRIPPABLE_DYLIB` were two more offsets into
+# the wrong bits — so a caller that used them wrote a flag the image's real
+# header does not mean. The values are the header's.
 MH_TWOLEVEL = 0x00000080
-MH_NO_REEXPORTED_DYLIBS = 0x00100000
-MH_PIE = 0x00200000
+MH_NOUNDEFS = 0x00000001
+MH_BIND_AT_LOAD = 0x00000008
 MH_DEAD_STRIPPABLE_DYLIB = 0x00400000
-MH_HAS_TLV_DESCRIPTORS = 0x00800000
 
 
 def _build_segment_64(

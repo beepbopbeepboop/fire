@@ -3758,6 +3758,11 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
+# `deps=['preflight', 'prooflib']`: one assertion,
+# `test_library_state_agrees_with_the_question_it_asks`, requires all six
+# `lib/*.olean` to be present (it is what says a cache report is not reporting
+# about a missing library), so the job must not start before the shared library
+# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so
@@ -3800,7 +3805,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      desc='every formal/examples proof against its recorded state: a worse '
           'status, a new hole, or a 2x slower proof fails')
 test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
-     mem='tiny', deps=['preflight'],
+     mem='tiny', deps=['preflight', 'prooflib'],
      extra=['test_formal_proof_census.py', 'tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json', 'formal/admitted.py',
             'formal/lean.py'],

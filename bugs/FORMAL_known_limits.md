@@ -808,9 +808,8 @@ missing value — the last of those because its bracket carries two values this 
 COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
 
 Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
-other three sit behind other modules' refusals
-(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
-so they move one refusal along rather than out — which is §2.0's "the next
+other three sit behind other modules' refusals (the round-1 `std-os-io` scope
+chain), so they move one refusal along rather than out — which is §2.0's "the next
 terminal is a different construct" again, and the reason the census above is
 corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
 halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that

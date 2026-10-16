@@ -1,4 +1,4 @@
-# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and two of the messages are wrong about the source
+# FORMAL_an_explicit_parameter_list_naming_a_comptime_value: a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source
 
 **Area:** FORMAL (`formal/monomorph.py`'s demand walk, and the two refusal
 messages a caller reaches when it does not fire). **Status:** §3's TWO WRONG
@@ -51,6 +51,40 @@ half of `bugs/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
 (claimed elsewhere), not this one. So this doc stays open with §4.1's literal
 half closed.
 
+**What changed 2026-10-08, and what did not.** §2 row 4's construct,
+`Tagged[Int, 0]()` — a generic applied with a type argument and a comptime VALUE —
+was measured on the IMPORTED spelling (where `imported_struct_defs` puts `Tagged`
+in `structs_by_name`), so the row recorded the correct
+`compile-time explicit-parameter list` message. **The SAME construct in the file
+that DECLARES the template fell through to §2's tuple-index sentence instead**,
+which is false about the source: `Tagged[Int, 0]` names two compile-time
+parameters and no container. Root cause: `monomorph.without_template_bodies`
+removes each template DECLARATION before `structs_by_name` is built (a template
+body has no instantiation in scope, so analysing it is a `len(Self.keys)`
+refusal), leaving `model.subscript_index_is_a_comptime_parameter_list` — whose
+docstring claimed `structs_by_name` "covers a module's OWN generics" — unable to
+classify it, so `multi_index_kind` answered `MULTI_INDEX_DATA`.
+`formal/build.py::_own_template_structs` now hands the unit's own template
+struct names to that classifier separately, and
+`test_formal_monomorph.py::test_an_own_struct_template_with_a_comptime_value_is_
+diagnosed_as_one` pins both directions on both architectures. **This is a
+diagnosis fix and not the wall**: `type_arg_text` still answers `""` for a
+top-level literal, so no demand is computed, nothing is instantiated, and the
+construct is still refused — it is now refused with the true sentence.
+
+**One shape is deliberately NOT covered, so nobody re-derives it.**
+`tagged.Tagged[Int, 0]()` — the DOTTED spelling of the same construct — still
+reaches the tuple-index sentence, and that is the classifier's stated boundary
+rather than an oversight: `formal/model.py::_base_name` answers `None` for a
+`MemberExpr`, and §`subscript_index_is_a_comptime_parameter_list`'s docstring
+says every dotted base keeps today's answer, because deciding one needs the
+IMPORTED module's declarations (`formal/imports.py`'s question) and guessing is
+the one direction that could turn a refusal into a wrong image. The type-only
+dotted shape (`mylib.Box[Int]()`) has its own answer
+(`dotted_specialization_refusal`, §3 row 5); the comptime-value dotted shape is
+a gap left for whoever makes a dotted base classifiable, and the fix above does
+not reach it.
+
 **What changed 2026-10-07, and what did not.** §3 named two messages wrong about
 the source, and both are now about it:
 
@@ -81,7 +115,7 @@ item §4.2 is closed.
 
 **Why it is filed rather than mentioned:** two of the sweep-scope docs asked for
 exactly this and could not do it themselves, because the shape is in neither of
-their scopes. `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §3
+their scopes. The round-2 `std-os-io` scope audit's §3
 link 2: *"Link 2 has NO bug doc and no claim … It is filed nowhere of its own,
 and 4 files of this scope sit behind it, so it is worth a doc rather than a
 mention."* `bugs/FORMAL_std_builtin_sys_time_slice_2026-10-04.md` §3 row 12
@@ -148,7 +182,7 @@ not `FORMAL_generic_monomorph_scope.md` §1 (a type argument in a **non-call**
 position — an annotation, a field, a return type). It is a bracket that IS
 written, whose second element is not a type. Neither existing doc lists it;
 §8 of the monomorph doc's "what is not here, deliberately" does not mention it,
-which is where `FORMAL_std_os_io_round2_…` §3 looked for it.
+which is where the round-2 `std-os-io` audit's §3 looked for it.
 
 ## 3. Two messages in this neighbourhood are wrong about the source — BOTH FIXED
 
@@ -249,6 +283,6 @@ under the export row depending on which message fires, which is a fourth fact
 about it: **one construct, two rows in the ranking instrument, and neither row
 is about the construct.** The `sys/arg.mojo` instance is 1 of the 60 dependency
 refusals in `FORMAL_std_builtin_sys_time_slice_2026-10-03.md` §4 and 4 files
-behind it in `FORMAL_std_os_io_round2_…` §3, so the sweep's own numbers put it
+behind it in the round-2 `std-os-io` audit's §3, so the sweep's own numbers put it
 at 5 files and the round-2 doc's probe put it at 4; both are lower bounds,
 because a file whose own construct refuses first is not in either count.

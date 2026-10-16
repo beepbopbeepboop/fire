@@ -1262,6 +1262,70 @@ CASES = [
      "    return 0\n"
      "\n"
      "main(0)\n", "/a/b\n/a\n"),
+
+    # ── a container ELEMENT the build can FOLD ──────────────────────────────
+    #
+    # Every one of these was refused as "one of its elements is computed by a
+    # CALL", and not one of them has a call in it. Measured on this tree, both
+    # architectures, before the fix: `TBL = [1 + 2, 3]` — arithmetic on two
+    # integer literals — carried that sentence, and so did `[7 // 2, 3]`,
+    # `[2 ** 10, 3]`, `[1 << 4, 3]`, `[K, 3]` for `K = 5`, and `[1.5, 2]`. That
+    # is the same misdiagnosis `static_initializer_refusal_reason` records for
+    # `None` in 2026-10-04, one level out: `_static_word` asked four questions
+    # about a node's SHAPE where the tree already has folders that answer the
+    # fifth one — what does this expression COME TO.
+    #
+    # The rows are written with `printf` so they assert a value rather than the
+    # interpreter's agreement with it (`**` and `<<` are not the point), and the
+    # LOCAL spelling of the same programs already worked, which is what makes this
+    # a gap in the initializer rather than in the value model: `var xs = [1 + 2,
+    # 3]` builds, runs and answers `3 3` on both machines, because a frame blob is
+    # built by instructions that compute the element and only `__DATA` has to
+    # compute it at BUILD time.
+    #
+    # `(0 - 7) // 2` is in the list on purpose: this path's `//` FLOORS
+    # (`model.division_floors`), and folding it with Python's `//` is what agrees
+    # with both CPython and the emitted `SDIV`+correction. A folder that used
+    # truncation here would build green and answer -3.
+    ("folded_arithmetic_elements_in_a_container_global",
+     "TBL = [1 + 2, 7 // 2, (0 - 7) // 2, 2 ** 10, 1 << 4, 3 * 4 - 1]\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d %d %d\\n\", TBL[0], TBL[1], TBL[2], TBL[3],\n"
+     "           TBL[4], TBL[5])\n"
+     "    return 0\n",
+     "3 3 -4 1024 16 11\n"),
+
+    # A module-level CONSTANT as an element, which is the same fold one hop out:
+    # `GlobalSymbol.literal` is the folded NODE `collect_module_symbols` already
+    # built in source order, so the element is answered from the build's own
+    # decision about that name rather than from a second fold. `MAX = 2 ** 63 - 1`
+    # is in the program because it is the shape a corpus writes and because its
+    # own intermediates are outside a word — the folder is exact modulo 2**64 and
+    # the range check is the caller's half of that contract.
+    ("a_folded_module_constant_as_a_container_element",
+     "K = 5\n"
+     "MAX = 2 ** 63 - 1\n"
+     "S = \"hi\"\n"
+     "TBL = [K, MAX, S]\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %s\\n\", TBL[0], TBL[1], TBL[2])\n"
+     "    return 0\n",
+     "5 9223372036854775807 hi\n"),
+
+    # A FLOAT element, and the control that says the answer is the IEEE pattern
+    # rather than a truncation of it: `printf(\"%f\")` reads 1.5, and `%d` of the
+    # same word prints the PATTERN — which is what the LOCAL spelling of this
+    # literal prints too (measured), so the two paths agree rather than one of
+    # them inventing a conversion.
+    ("a_float_element_in_a_container_global",
+     "TBL = [1.5, 2]\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%f %d\\n\", TBL[0], TBL[1])\n"
+     "    return 0\n",
+     "1.500000 2\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -1286,6 +1350,16 @@ REFUSALS = [
     # program runs, and no amount of laying out `__DATA` changes that. The
     # nested-container half of the old message is gone with
     # `nested_container_global` above; what is left is this.
+    #
+    # **The needle is the whole clause and not "no initializer", because the
+    # clause is what says WHICH element and WHY, and both used to be wrong.**
+    # This message said "one of its elements is computed by a call" for every
+    # shape that reached it, and `_static_word` has since learned to fold
+    # arithmetic on literals, a float literal and a module constant — so the
+    # shapes left are a call, a NAME the build cannot fold, and a value outside
+    # one word, and only the first is a call. The three rows below are those
+    # three, and each asserts the sentence that is TRUE of it plus, where there
+    # is one, the sentence that must be absent.
     ("call_computed_container_element_refused",
      "L = [len(\"ab\"), 3]\n"
      "\n"
@@ -1293,7 +1367,42 @@ REFUSALS = [
      "    v: Int = L[0]\n"
      "    print(v)\n"
      "    return 0\n",
-     "no initializer"),
+     "its element `len('ab')` is computed by a CALL",
+     "is a NAME this build cannot fold"),
+
+    # A NAME this build cannot fold — the second of the three, and the one the
+    # old message was most wrong about, because `os.pi` is not a call and a
+    # reader sent after "a call's result is not known before the program runs"
+    # would go looking for a call. What is missing is a fact about the SOURCE
+    # this path cannot see (a module attribute, an imported constant), which is a
+    # different repair from filling a cell at first call.
+    ("an_unfoldable_name_element_is_not_reported_as_a_call",
+     "import os\n"
+     "\n"
+     "L = [os.pi, 3]\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = L[0]\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "its element `os.pi` is a NAME this build cannot fold",
+     "is computed by a CALL"),
+
+    # And the third: an EXPRESSION whose value is not one 64-bit word. `2 ** 64`
+    # is the honest spelling of the case — the arithmetic is ordinary and the
+    # RESULT is outside the range a word holds — and writing its low bits (0)
+    # would be a plausible number rather than this one, which is why it is refused
+    # rather than folded. `1 // 0` is the same clause for the other reason it can
+    # fire, and both are named in it.
+    ("an_out_of_word_element_is_reported_as_an_expression",
+     "L = [2 ** 64, 3]\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = L[0]\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "its element `2 ** 64` is an EXPRESSION",
+     "is computed by a CALL"),
     # …and WHY the name has a slot, which is the second half of that row's
     # sentence and was false of every container global. `GlobalSlot.mutable`'s
     # own comment records this sentence being fixed once already — in the

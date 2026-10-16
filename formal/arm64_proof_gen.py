@@ -923,6 +923,254 @@ def _collect_conds(fn, param: str, env: dict, vtypes: dict = None,
                                               scope)]
 
 
+def _eval_closed_cond(p: str):
+    """Evaluate a closed Lean UInt64 condition string to True/False, or None.
+
+    Only the condition vocabulary this generator itself emits is supported —
+    parenthesised u64 arithmetic (`+ - * / % &&& ||| ^^^ <<< >>> asr64`),
+    the sign-flip of a signed comparison (`(l ^^^ 0x8000…) < (r ^^^ 0x8000…)`),
+    `(N : UInt64)` literals, and `==  ≠  <  ≤  >  ≥  ∧  ∨`.  Anything else —
+    a parameter name, an operator outside the subset, a division whose divisor
+    is not known to be non-zero — is NOT a sign that the condition is
+    decidable or not; it is the evaluator declining to guess, and the caller
+    treats `None` exactly as it treated every condition before this function
+    existed.
+    """
+    import re
+
+    M = 1 << 64
+    SIGN = 0x8000000000000000
+    CMPS = ("=", "!=", "<=", ">=", "<", ">")
+    ARITH = {
+        "+": lambda x, y: (x + y) % M,
+        "-": lambda x, y: (x - y) % M,
+        "*": lambda x, y: (x * y) % M,
+        "/": lambda x, y: None if y == 0 else x // y,
+        "%": lambda x, y: None if y == 0 else x % y,
+        "&&&": lambda x, y: x & y,
+        "|||": lambda x, y: x | y,
+        "^^^": lambda x, y: x ^ y,
+        "<<<": lambda x, y: (x << (y & 63)) % M,
+        ">>>": lambda x, y: x >> (y & 63),
+    }
+    toker = re.compile(
+        r"\s*(0x[0-9a-fA-F]+|\d+|<<<|>>>|&&&|\|\|\||\^\^\^|!=|<=|>=|"
+        r"UInt64\.ofNat|UInt64|ofNat|asr64|[=<>+\-*/%&|^:().,∧∨≤≥≠])")
+
+    def toks(s):
+        out = []
+        i = 0
+        while i < len(s):
+            m = toker.match(s, i)
+            if not m:
+                return None
+            out.append(m.group(1))
+            i = m.end()
+        return out
+
+    def split_top(t):
+        depth = 0
+        for i, x in enumerate(t):
+            if x == "(":
+                depth += 1
+            elif x == ")":
+                depth -= 1
+            elif depth == 0 and (x in CMPS or x in ARITH
+                                 or x in ("∧", "∨", "≠", "≤", "≥")):
+                return t[:i], x, t[i + 1:]
+        return None
+
+    def match_close(t, pos):
+        depth = 0
+        for j in range(pos, len(t)):
+            if t[j] == "(":
+                depth += 1
+            elif t[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return j
+        return None
+
+    def num(x):
+        return int(x[2:], 16) if x.startswith("0x") else int(x)
+
+    def sra(a, b):
+        b &= 63
+        if b == 0:
+            return a
+        if a & SIGN:
+            return (a >> b) | (M - (1 << b))
+        return a >> b
+
+    def value(t, pos):
+        """(v, next_pos) for a u64 value starting at t[pos], or None."""
+        if pos >= len(t):
+            return None
+        x = t[pos]
+        if x == "asr64":
+            a = value(t, pos + 1)
+            b = a and value(t, a[1])
+            if a is None or b is None:
+                return None
+            return sra(a[0], b[0]), b[1]
+        if x == "UInt64.ofNat":
+            if pos + 1 >= len(t):
+                return None
+            return num(t[pos + 1]) % M, pos + 2
+        if x == "UInt64" and pos + 3 < len(t) and t[pos + 1] == "." \
+                and t[pos + 2] == "ofNat":
+            return num(t[pos + 3]) % M, pos + 4
+        if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", x):
+            v = num(x) % M
+            p = pos + 1
+            if p < len(t) and t[p] == ":" and p + 1 < len(t) \
+                    and t[p + 1] == "UInt64":
+                if p + 2 < len(t) and t[p + 2] == ")":
+                    return v, p + 3
+                if p + 2 == len(t):
+                    return v, p + 2
+            return v, p
+        if x == "(":
+            close = match_close(t, pos)
+            if close is None:
+                return None
+            inner = t[pos + 1:close]
+            if not inner:
+                return None
+            sp = split_top(inner)
+            if sp is None:
+                vv = value(inner, 0)
+                if vv is None or vv[1] != len(inner):
+                    return None
+                return vv[0], close + 1
+            a, op, b = sp
+            av = value(a, 0)
+            bv = b and value(b, 0)
+            if av is None or bv is None or av[1] != len(a) or bv[1] != len(b):
+                return None
+            f = ARITH.get(op)
+            if f is None:
+                return None
+            r = f(av[0], bv[0])
+            if r is None:
+                return None
+            return r, close + 1
+        return None
+
+    def yes(a, b, op):
+        if op in ("=", "=="):
+            return a == b
+        if op in ("!=", "≠"):
+            return a != b
+        if op in ("<",):
+            return a < b
+        if op in ("<=", "≤"):
+            return a <= b
+        if op in (">",):
+            return a > b
+        if op in (">=", "≥"):
+            return a >= b
+        return None
+
+    def cond(t):
+        if not t:
+            return None
+        if t[0] == "(" and t[-1] == ")":
+            close = match_close(t, 0)
+            if close == len(t) - 1:
+                t = t[1:-1]
+        if not t:
+            return None
+        sp = split_top(t)
+        if sp is not None:
+            a, op, b = sp
+            if op in ("∧", "∨"):
+                av = cond(a)
+                bv = cond(b)
+                if av is None or bv is None:
+                    return None
+                return (av and bv) if op == "∧" else (av or bv)
+            av = value(a, 0)
+            bv = value(b, 0)
+            if av is None or bv is None or av[1] != len(a) or bv[1] != len(b):
+                return None
+            if op in CMPS or op in ("≠", "≤", "≥"):
+                return yes(av[0], bv[0], op)
+            f = ARITH.get(op)
+            if f is None:
+                return None
+            r = f(av[0], bv[0])
+            if r is None:
+                return None
+            return r != 0
+        v = value(t, 0)
+        if v is not None and v[1] == len(t):
+            return v[0] != 0
+        return None
+
+    return cond(toks(p))
+
+
+def _u64_cast_numerals(p: str):
+    """Ascribe `(N : UInt64)` to every bare decimal in a u64 condition.
+
+    In the model's `if` conditions a bare `0 - 7` is typed by the u64
+    context around it, so `(x - 7) ...` means wrap-around.  In an isolated
+    `have h : (0 - 7 ≠ 0 - 12) := by native_decide` there IS no such context,
+    and Lean infers the default `Nat`, whose subtraction saturates at 0 — a
+    different proposition that `native_decide` then refutes.  Wrapping each
+    numeral in the proposition pins every operation to UInt64 so the fact is
+    the same one the model's `if` sees.  Hex `(0x… : UInt64)` literals already
+    carry the suffix and are not matched.
+    """
+    import re
+    return re.sub(r"\b(\d+)\b", r"((\1 : UInt64))", p)
+
+
+def _eval_eq_conds_tactic(conds, hs: str, simp_lems: str, extra: str = ""):
+    """The `eval_eq_mojo` tactic over a straight-line split, or None to keep
+    the historical text (byte-identical).
+
+    A `by_cases` on a condition `native_decide` can settle outright is two
+    goals where one fact is the whole content, and the cost is real: every
+    split DOUBLES the number of `simp_all +decide` passes, so a k-condition
+    program costs 2^k passes and the constant-condition programs carry all of
+    it in leaves whose arithmetic is decided anyway.  So each condition that is
+    a closed constant proposition is emitted as a `have` fact (`native_decide`
+    computes it; `decide` would reduce it in the kernel instead), and
+    `by_cases` splits only the conditions that actually depend on an argument.
+    `simp_lems` and `extra` (the sign-lemma tail) are the same sets the
+    historical tactic used; the have-facts replace the by_cases hypotheses for
+    the conditions they decide, so the final pass sees the same information.
+
+    Returns None when no condition is a closed constant the evaluator is
+    confident of, so the caller emits today's exact text for those programs.
+    """
+    haves = []
+    opens = []
+    for i, c in enumerate(conds):
+        truth = _eval_closed_cond(c)
+        if truth is True:
+            haves.append(f"have h{i} : ({_u64_cast_numerals(c)}) := (by native_decide)")
+        elif truth is False:
+            haves.append(f"have h{i} : ¬ ({_u64_cast_numerals(c)}) := (by native_decide)")
+        else:
+            opens.append(i)
+    if not haves:
+        return None
+    if not opens:
+        tail = f"simp +decide [{hs}, {simp_lems}{extra}]"
+    else:
+        bys = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in opens)
+        tail = f"{bys} simp_all +decide [{hs}, {simp_lems}{extra}]"
+    # One tactic line, `;`-joined: the callers embed this text as
+    # `f"... := by\n  {tactic}"`, which indents only the FIRST line, and a
+    # Lean tactic block ends the moment a following line is indented LESS than
+    # the block's first line — which is exactly what a multi-line string with
+    # internal indentation produces.  A single line has no such boundary.
+    return "; ".join(haves) + "; " + tail
+
+
 def eval_split_conds(fn, param: str, env: dict, vtypes: dict = None,
                      call_types: dict = None, scope=None) -> list:
     """The propositions `eval_eq_mojo` splits on: source conditions FIRST.
@@ -2643,12 +2891,15 @@ def _go_simp_lemmas(fn) -> list:
 def _expr_ast(e, scope=None) -> str:
     """Translate a Mojo expression to a ProofLib MojoExpr term.
 
-    The `Call` arm keeps exactly one argument, and that is NOT a choice:
-    `MojoExpr.call` in `lib/ProofLib.lean` carries a single `MojoExpr`, and
-    `callFunc` is `String → UInt64 → UInt64`, so there is no way to hand it two.
-    `_ast_bridge_gaps` is what keeps this honest — every caller of the bridge
-    asks it first, so `e.args[0]` below is reached only for a call that can be
-    stated.
+    The `Call` arm renders EVERY argument, because `MojoExpr.call` in
+    `lib/ProofLib.lean` carries a `List MojoExpr` — so the AST is faithful for a
+    call of any arity.  What it is NOT is *statable* for a call of any arity but
+    one: `callFunc` is `String → UInt64 → UInt64`, so `lib/ProofLib.lean`'s
+    `evalArgs` PACKS the arguments into a single `UInt64` product, and that is
+    not what a callee of this arity takes.  `_ast_bridge_gaps` is what keeps
+    this honest — every caller of the bridge asks it first, so `e.args` below is
+    reached only for a call that can be stated, and a wider one is REFUSED with
+    its arity rather than rendered into a bridge that cannot close.
 
     `scope` is the `_Scope` every value renderer in this file already takes, and
     the AST bridge needs it for the same reason `_expr_go` does: the `String`
@@ -2713,8 +2964,8 @@ def _expr_ast(e, scope=None) -> str:
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
                 f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
     if isinstance(e, Call):
-        return (f'(MojoExpr.call "{_call_name(e)}" '
-                f'({_expr_ast(e.args[0], scope)}))')
+        args = ", ".join(_expr_ast(a, scope) for a in e.args)
+        return f'(MojoExpr.call "{_call_name(e)}" [{args}])' 
     if isinstance(e, F.TernaryExpr):
         # `MojoExpr` has no conditional form, and this arm REFUSES rather than
         # falling through to the `MojoExpr.int 0` below: the bridge exists to
@@ -2775,18 +3026,19 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
     disagreement is only visible as a red build of a program whose source is
     three lines long.
 
-    Two independent gaps, both consequences of `MojoExpr.call` carrying one
-    argument and `callFunc` being unary:
+    Two independent gaps, both consequences of `callFunc` being UNARY:
 
       * an UNRESOLVABLE callee — anything but the proved function and an
         admitted contract. `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
         §"step 2" is the work: `callFunc` has to become the model's own
         function table over the program's `_go` definitions, which `_gen_go`
         already emits.
-      * an ARITY other than one. Zero arguments reached `e.args[0]` and raised
-        `IndexError: list index out of range` out of the generator (measured on
-        `cas.reset_stats()`, `build --formal` on arm64); two or more silently
-        dropped every argument after the first, which is the same false theorem
+      * an ARITY other than one. `MojoExpr.call` carries a `List MojoExpr`, so
+        the AST is FAITHFUL for any arity (widened 2026-10-05; before that a
+        zero-argument call reached `e.args[0]` and raised `IndexError: list index
+        out of range` out of the generator, measured on `cas.reset_stats()`,
+        `build --formal` on arm64, and two or more silently dropped every
+        argument after the first, which is the same false theorem
         by a different route.
 
     A recursive self-call is neither: its name is the proved function's and it
@@ -2805,12 +3057,14 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
             name = _call_name(e)
             if len(e.args) != 1:
                 gaps.append(
-                    f"`{name or '?'}` with {len(e.args)} arguments — "
-                    f"`MojoExpr.call` carries ONE `MojoExpr` and `callFunc` is "
-                    f"`String → UInt64 → UInt64`, so a call of any other arity "
-                    f"has no faithful AST: with none, `_expr_ast` reached "
-                    f"`e.args[0]` and raised `IndexError`; with two or more, "
-                    f"every argument after the first was dropped silently")
+                    f"`{name or '?'}` with {len(e.args)} arguments — the AST "
+                    f"carries all of them (`MojoExpr.call` is "
+                    f"`List MojoExpr`) but `callFunc` is "
+                    f"`String → UInt64 → UInt64`, so the AST layer PACKS them "
+                    f"into one value: `evalArgs` multiplies them and "
+                    f"`callFunc` is handed that product, which is not what a "
+                    f"callee of this arity takes, so `eval_eq_mojo` cannot be "
+                    f"stated about this call")
             elif used and name not in resolvable:
                 gaps.append(
                     f"`{name}` — `callFunc` answers 0 for a name it does not "
@@ -2871,11 +3125,17 @@ def _ast_gap_message(gaps: list) -> str:
     """The refusal both generators raise for a call the bridge cannot state.
 
     ONE message for both architectures, because the limit is one limit:
-    `MojoExpr.call` carries a single argument and `callFunc` is
-    `String → UInt64 → UInt64`, and `eval_eq_mojo` is stated against that
-    `callFunc` on both sides. Two copies would be free to drift into two
-    different accounts of the same gap, and the x86-64 copy is the one that
-    decides whether a false theorem is emitted or the bridge is dropped.
+    `callFunc` is `String → UInt64 → UInt64` — it is handed ONE value, so
+    `lib/ProofLib.lean`'s `evalArgs` PACKS a call's arguments into a single
+    product — and `eval_eq_mojo` is stated against that `callFunc` on both
+    sides. Two copies would be free to drift into two different accounts of the
+    same gap, and the x86-64 copy is the one that decides whether a false
+    theorem is emitted or the bridge is dropped.
+
+    The node is NOT part of the limit any more.  `MojoExpr.call` carries a
+    `List MojoExpr` (widened 2026-10-05), so the AST is faithful for a call of
+    any arity; what cannot be stated is a `callFunc` that takes more than one
+    value, which is a different widening — of the HANDLER, not the node.
 
     At most three gaps are named: the message goes into the generated file as a
     one-line note (via `x86_64_proof_gen._first_sentence`) as well as onto the
@@ -2889,10 +3149,11 @@ def _ast_gap_message(gaps: list) -> str:
     return (f"eval_eq_mojo: the AST bridge cannot state this function's "
             f"call{plural} — " + "; ".join(shown) + more
             + ". Refusing rather than emitting `eval_eq_mojo` as a statement "
-              "about a different program: `callFunc` and `MojoExpr.call` are "
-              "the two ends of one limit (a unary handler and a one-argument "
-              "node), and until both are widened the bridge can only speak "
-              "about a function that calls nothing but itself. "
+              "about a different program: `callFunc` takes ONE value, so the "
+              "AST PACKS a call's arguments into a single product and that "
+              "product is not what a callee of this arity returns -- until "
+              "the handler is widened too, the bridge can only speak about a "
+              "function that calls nothing but itself with one argument. "
               "`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` has "
               "the measurement and the two routes.")
 
@@ -3039,10 +3300,37 @@ def _stmts_ast(stmts, scope=None) -> list:
     return parts
 
 
-def _gen_decode_lemmas(name: str, code: bytes, base: int) -> str:
+def _exec_code_limit(code: bytes) -> int:
+    """The byte length of the EXECUTABLE code: through the last `RET`.
+
+    `code` is the whole `__TEXT` section, and interned string literals — the
+    program's own and the stack-floor trap's message — are appended to it AFTER
+    the last function's `RET` (`formal/arm64_codegen.py::compile`'s string
+    emission). A per-word scan that ran to `len(code)` therefore emitted decode
+    and step lemmas for the DATA, and a data word that happened to decode as an
+    instruction produced a lemma whose hypotheses are false: measured, the trap
+    message's bytes `64 20 31 36` ("d 16") decode as `TBZ W4, #6, …`, and
+    `native_decide` rejected the `hb` hypothesis the generator wrote for it, so
+    EVERY arm64 proof containing the trap message failed to typecheck. The
+    message arrived with `bfeec991` (the run-time RLIMIT read), which is also
+    why no proof generated at all on that tree and this was never reached.
+
+    A `RET` is the one instruction whose meaning is the same in every function
+    of an image (`_walk_range`'s argument), so "after the last one" is data.
+    An image with no `RET` at all reads as all-code, which keeps a synthetic
+    single-word call site unchanged.
+    """
+    rets = [i for i in range(0, len(code) - len(code) % 4, 4)
+            if code[i:i + 4] == b"\xc0\x03\x5f\xd6"]
+    return (max(rets) + 4) if rets else len(code)
+
+
+def _gen_decode_lemmas(name: str, code: bytes, base: int,
+                       limit: int = None) -> str:
     """Generate per-instruction decode lemmas (each rfl-provable)."""
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     blocks = []
     for i, w in enumerate(words):
         pc = base + i * 4
@@ -3316,6 +3604,27 @@ def _step_branch_index(w: int):
     return None
 
 
+def _imm12_scaled(w: int) -> int:
+    """The EFFECTIVE immediate of an ADD/SUB (immediate): the 12-bit field,
+    scaled by 4096 when the instruction's `sh` bit (bit 22) is set.
+
+    This is the rule `lib/ProofLib.lean::arm64_ext_imm12` implements and the one
+    `formal/arm64_codegen.py::_emit_imm_shift12` emits, and a Python-side `sp`
+    tracker that read the 12-bit field alone did NOT apply it. The frame scratch
+    is `_SCRATCH = 32 << 12` and the prologue writes it as ONE scaled immediate
+    (`sub sp, sp, #32, lsl #12`), so such a tracker computed `sp - 32` for an
+    instruction the machine applies as `sp - 131072` — measured: the emitted
+    goal of `formal/examples/condassign2.mojo` reads a slot at
+    `sp - 131072 - 16` while the generated branch-condition proof rewrote
+    `sp - 32 - 16`, so the `rw` found no occurrence of its pattern and `rfl`
+    never got off the ground. Four trackers (`_frame_ldp_addrs`,
+    `_frame_read_addrs`, `_hcond_mem_rws`, `_sp_stores`) had the bug; the
+    add/sub step RHS did not, because it scaled the field where it read it, and
+    `_step_rhs_generic` spells the library helper `arm64_ext_imm12` directly.
+    """
+    return ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+
+
 def _step_rhs(w: int, idx: int):
     """Return the Lean `some ...` result the model produces for word w.
 
@@ -3387,9 +3696,9 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
-        imm12 = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm12 = _imm12_scaled(w)
         return (f"some {{ s with nzcv := arm64_subs_flags "
-                f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
+                f"(arm64_reg {rn} s) (UInt64.ofNat {ext}) }}")
     if idx == 14:  # B
         imm = w & 0x03ffffff
         off = (f"(if (({imm} : UInt32) &&& 0x02000000) ≠ 0 then "
@@ -3443,16 +3752,16 @@ def _step_rhs(w: int, idx: int):
                 f"({{ s with pc := {tgt} }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (9, 10):  # ADD immediate 32/64
-        # `sh` (bits 23:22) is `LSL #0` at 0 and `LSL #12` at 1; the arm's mask
-        # keeps bit 23, so a word reaching here has `sh ∈ {0, 1}`. `& 0x1` makes
-        # the shift total without ever computing a reserved immediate.
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        # The immediate is the 12-bit field scaled by the `sh` bit; `_imm12_scaled`
+        # is the one reader of it, the same rule `arm64_ext_imm12` states.
+        imm = _imm12_scaled(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
+        op = "+" if idx in (9, 10) else "-"
         if rd == 31:
             return f"some {{ s with sp := ({base} + UInt64.ofNat {imm}) }}"
         return f"some (arm64_set_reg {rd} s ({base} + UInt64.ofNat {imm}))"
     if idx in (11, 12):  # SUB immediate 32/64
-        imm = ((w >> 10) & 0xfff) << (12 * ((w >> 22) & 0x1))
+        imm = _imm12_scaled(w)
         base = "s.sp" if rn == 31 else f"arm64_reg {rn} s"
         if rd == 31:
             return f"some {{ s with sp := ({base} - UInt64.ofNat {imm}) }}"
@@ -3709,6 +4018,13 @@ _RN = "(((w >>> 5) &&& 0x1f).toNat)"
 _RM = "(((w >>> 16) &&& 0x1f).toNat)"
 _RT2 = "(((w >>> 10) &&& 0x1f).toNat)"
 _I12 = "(((w >>> 10) &&& 0xfff).toNat)"
+#: The `ADD`/`SUB`/`CMP` `#imm12` value WITH its `sh` field: the model's
+#: `arm64_ext_imm12 w`, spelled out so the generated right-hand side does not
+#: carry the helper into downstream value-flow `simp only` lists. The
+#: step-result lemma is closed by `exact`-ing the library lemma, whose statement
+#: uses the helper, so the two only have to be `defeq` — which unfolding makes
+#: them.
+_EXT12 = f"({_I12} <<< ((((w >>> 22) &&& 0x3).toNat) * 12))"
 _I16 = "(((w >>> 5) &&& 0xffff).toNat)"
 _HW = "(((w >>> 21) &&& 0x3).toNat)"
 _I7 = "(((w >>> 15) &&& 0x7f).toNat)"
@@ -4033,10 +4349,10 @@ def _frame_ldp_addrs(blocks_path, words: dict, state: str):
                 sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
             elif idx in (11, 12):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
             elif idx in (9, 10):
                 if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                    sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                    sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     return addrs
 
 
@@ -4533,10 +4849,10 @@ def _frame_read_addrs(block, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):  # SUB immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
         elif idx in (9, 10):  # ADD immediate (only when writing sp)
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     return out
 
 
@@ -4570,10 +4886,10 @@ def _hcond_mem_rws(all_instrs, cur_instrs, words: dict, state: str):
             sp = f"({sp} + UInt64.ofNat {imm7 * 8})"
         elif idx in (11, 12):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} - UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} - UInt64.ofNat {_imm12_scaled(w)})"
         elif idx in (9, 10):
             if ((w >> 5) & 0x1f) == 31 and (w & 0x1f) == 31:
-                sp = f"({sp} + UInt64.ofNat {(w >> 10) & 0xfff})"
+                sp = f"({sp} + UInt64.ofNat {_imm12_scaled(w)})"
     rws = []
     for ri in range(len(events) - 1, -1, -1):
         kind, addr, pc = events[ri]
@@ -4613,9 +4929,9 @@ def _sp_stores(words: dict, instrs, sp_off: int, stores: list) -> int:
             imm7 = (w >> 15) & 0x7f
             sp_off += imm7 * 8
         elif idx in (9, 10) and rn == 31 and rd == 31:
-            sp_off += (w >> 10) & 0xfff
+            sp_off += _imm12_scaled(w)
         elif idx in (11, 12) and rn == 31 and rd == 31:
-            sp_off -= (w >> 10) & 0xfff
+            sp_off -= _imm12_scaled(w)
     return sp_off
 
 
@@ -5004,9 +5320,7 @@ def _cbz_reg_const(block, words: dict, r: int):
             if rd != 31:
                 known[rd] = (w >> 5) & 0xffff
         elif idx in (9, 10):  # ADD imm 32/64
-            imm = (w >> 10) & 0xfff
-            if (w >> 22) & 1:
-                imm <<= 12
+            imm = _imm12_scaled(w)
             if rd == 31:
                 continue
             if rn == 31 or rn not in known:
@@ -5031,6 +5345,63 @@ def _cbz_reg_const(block, words: dict, r: int):
     return known.get(r)
 
 
+def _block_state_defs(S: str, n: int):
+    """The generated composed-state `def`s a block's first `n` steps go through.
+
+    A run's state after step `k` is `{name}_{tag}_qS{k}` and after that step's
+    effect `{name}_{tag}_qT{k}`, each defined in terms of the one before it, so
+    the chain is what has to be unfolded to see any single field — and only the
+    chain up to the step being asked about, because `simp only` over the WHOLE
+    block would flatten the innermost step effect too and leave a goal about the
+    raw record update.
+    """
+    return ([f"{S}_qS{k}" for k in range(n)]
+            + [f"{S}_qT{k}" for k in range(n)])
+
+
+#: The two record helpers a composed `qT` body can put BETWEEN the state and the
+#: field being asked about: a step's effect is often `{ (arm64_set_reg 31 …) with
+#: nzcv := … }`, and `arm64_set_reg 31` is the identity only because the `match`
+#: is reduced.  Unfolding them is textual, so it costs what a rewrite costs.
+_STATE_HELPERS = ["arm64_reg", "arm64_set_reg"]
+
+
+def _block_state_unfold(S: str, n: int):
+    """`_block_state_defs` plus the record helpers, for a `simp only [...]`."""
+    return _STATE_HELPERS + _block_state_defs(S, n)
+
+
+def _state_proof(names, paren: bool = False):
+    """A side condition over a generated composed state, proved by UNFOLDING.
+
+    **Why not `rfl`.** `rfl` discharges `({S}_qS2 st).pc = <pc>` by asking Lean
+    to `whnf` the composed state, and that whnf is not free: `Lean.Meta.whnf`
+    on a `def` whose body carries a `UInt64.ofNat` of a LARGE literal re-reduces
+    the `UInt64` numeral from inside the state, and the reduction walks
+    `Nat.mod_lt`'s own `Nat.decLe` evidence, whose `Nat.ble` is a structural
+    recursion. The cost therefore grows with the immediate, not with the proof:
+    measured on the arm64 model after the `sh`-field fix, an `ADD sp, sp, #32,
+    lsl #12` (`+131072`) made one side condition need more than `maxRecDepth
+    100000`, while `#0`, `#16`, `#1024` and `#+4096` all stayed cheap, and
+    `#32 <<< 12` reached it while `#+16384` did not. The whole proof takes 40 s
+    once the limit is raised, so nothing about it is TRUE-only-at-depth — it is
+    a reduction the generated file should not be asking for.
+
+    `simp only` unfolds the named `def`s TEXTUALLY and never forces that
+    reduction, so the same side condition is discharged in milliseconds. It is
+    also the more honest proof: it says which definitions are being unfolded,
+    where `rfl` leaves it to whatever the elaborator decides to reduce.
+
+    `paren` wraps the proof in parentheses, which is what a rewrite rule's side
+    condition needs inside `rw [rule (proof), …]` — `rw` parses its arguments
+    as terms, so a bare `by` there is a syntax error.
+    """
+    if not names:
+        return "rfl"
+    proof = "by simp only [" + ", ".join(names) + "]"
+    return f"({proof})" if paren else proof
+
+
 def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st: str = "st",
                     hname: str = None):
     """Emit a per-instruction `arm64_reg r` chain over a block run.
@@ -5050,7 +5421,8 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
         wr = _regs_written(w, idx)
         if k + 1 < m:
             A(f"have hS{k + 1} : arm64_reg {r} ({S}_qS{k + 1} {st}) = "
-              f"arm64_reg {r} ({S}_qT{k} {st}) := rfl")
+              f"arm64_reg {r} ({S}_qT{k} {st}) := "
+              + _state_proof(_block_state_unfold(S, k + 2)))
         if wr is not None and r in wr and rhs is not None:
             expr = _written_expr(rhs, r)
             if expr is not None:
@@ -5065,7 +5437,8 @@ def _emit_reg_chain(name: str, words: dict, tag: str, run_pcs: list, r: int, st:
           f"arm64_reg {r} ({S}_qS{k} {st}) := by")
         A(f"  simp only [{S}_qT{k}, arm64_reg, arm64_set_reg]")
     if wpos is None:
-        A(f"have hS0 : arm64_reg {r} ({S}_qS0 {st}) = arm64_reg {r} {st} := rfl")
+        A(f"have hS0 : arm64_reg {r} ({S}_qS0 {st}) = arm64_reg {r} {st} := "
+          + _state_proof(_STATE_HELPERS + [f"{S}_qS0"]))
         chain = "hT0.trans hS0"
         for k in range(1, m):
             chain = f"hT{k}.trans (hS{k}.trans ({chain}))"
@@ -5133,11 +5506,19 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A(f"def {S}_qS{k + 1} (st : Arm64State) : Arm64State := "
               f"{{ {S}_qT{k} st with pc := {run_pcs[k + 1]} }}")
     # pc facts (shared by self_k / runs / mid)
+    #
+    # `hpc{k}` is the side condition `runs_cons_seq`/`runs_cons_jump` wants, and
+    # it is stated over the COMPOSED state, so it is discharged by unfolding the
+    # block's own `def`s rather than by `rfl` — see `_state_proof` for the
+    # reduction `rfl` asks for and why it is not free.  Each `k` unfolds only
+    # the chain up to itself, which is all its own projection needs.
+    defs_unfold = _block_state_unfold(S, m)
     pc_facts = []
     pc_facts.append(f"  have hpc0 : ({S}_qS0 st).pc = {run_pcs[0]} := by")
     pc_facts.append(f"    simp [{S}_qS0, hpc]")
     for k in range(1, m):
-        pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := rfl")
+        pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := "
+                        + _state_proof(_block_state_unfold(S, k + 1)))
     step_facts = []
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
@@ -5152,14 +5533,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts[:k + 1]))
         A("\n".join(step_facts[:k]))
         if k == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
             A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
             A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
-              f"{code_name} 0 hs{k - 1} rfl,")
+              f"{code_name} 0 hs{k - 1} "
+              f"{_state_proof(_block_state_unfold(S, k), paren=True)},")
             A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
               f"from by rw [hpc{k - 1}]]")
             A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
@@ -5182,15 +5565,16 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(step_facts))
         if m == 1:
             A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
-            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat from rfl]; exact hjump)]")
+            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
+              f"from {_state_proof(_block_state_unfold(S, 1))}]; exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
               f"{code_name} 0 hs{m - 1}")
-            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat from rfl]; "
-              f"exact hjump)]")
+            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
+              f"from {_state_proof(defs_unfold)}]; exact hjump)]")
             A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         exit_expr = f"({S}_qT{m - 1} st)"
     else:
@@ -5199,14 +5583,15 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(pc_facts))
         A("\n".join(step_facts))
         if m == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 rfl,")
+            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
         else:
             A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
             A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{code_name} 0 hs{m - 1} rfl,")
+              f"{code_name} 0 hs{m - 1} {_state_proof(defs_unfold, paren=True)},")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
             A(f"  exact runs_zero {code_name} "
@@ -6570,17 +6955,28 @@ def _walk_range(words: dict, func_entry: int, func_end=None) -> int:
 
 def _same_image_call_plan(code: bytes, base: int, func_entry: int,
                           func_end=None) -> tuple:
-    """`({call_pc: return_pc}, "")` for a call the CFG walk CAN follow into the
-    same image, and `(None, why)` for one it cannot.
+    """`({call_pc: return_pc}, "")` for the calls the CFG walk CAN follow into
+    the same image, and `(None, why)` for a set it cannot.
 
     The return-address map this file lacked is exact for ONE shape, and this is
-    that shape: a single `BL` whose target is a block start inside the walked
-    range, whose own body contains no call of its own, and which the caller
-    returns from itself.  For that shape `x30` at the callee's `RET` is the
-    constant `call_pc + 4`, so the callee's blocks are ordinary blocks with an
-    ordinary edge — no dispatch, no disjunction, no second induction chain.
+    that shape, once PER CALL SITE: a `BL` whose target is a block start inside
+    the walked range, whose own body contains no call of its own, and which the
+    caller returns from itself.  For such a call `x30` at the callee's `RET` is
+    the constant `call_pc + 4`, so the callee's blocks are ordinary blocks with
+    an ordinary edge — no dispatch, no disjunction, no second induction chain.
     The doc named this the whole limit (`bugs/FORMAL_arm64_the_universal_theorem_
     cannot_follow_a_call_into_the_same_image.md` step 1) and it is.
+
+    **More than one such call is followable when their CALLEES are DISTINCT, and
+    that is the whole of the extension.** The walk is already keyed by call site
+    (`_gen_universal_e2e_cfg`'s `bl` arm reads `_intra_returns[bl_pc]`, and the
+    caller's continuation drops the return address again), so two calls that
+    each enter their OWN callee's blocks emit each callee's certificates once.
+    Two calls to the SAME callee are refused instead: its blocks would be entered
+    from two sites, the block certificates are named by block index and cannot be
+    told apart, and the second entry would emit a duplicate declaration rather
+    than a second certificate.  The doc's step 2 (a map keyed by `return_pc` so a
+    shared callee's blocks can be parameterised) is still the work for that case.
 
     Every other shape is REFUSED, and it is refused HERE rather than in each of
     the two places that need to know: `generate_arm64_proof` writes the reason
@@ -6596,65 +6992,70 @@ def _same_image_call_plan(code: bytes, base: int, func_entry: int,
     if not intra:
         return {}, ""
     where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x}" for c in intra)
-    if len(intra) > 1:
+    targets = [c["target"] for c in intra]
+    if len(set(targets)) != len(targets):
         return None, (
-            f"there are {len(intra)} calls into the same image ({where}) and ONE "
-            f"return address does not serve them: a path can reach the second "
-            f"without passing the first, so `x30` at the callee's `RET` would be "
-            f"a property of the CALL PATH rather than a constant")
-    c = intra[0]
-    if not (func_entry <= c["target"] < end):
-        return None, (
-            f"the callee at {c['target']:#x} lies outside the range the walk "
-            f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be a "
-            f"second walk over code this theorem does not cover")
+            f"there are {len(intra)} calls into the same image ({where}) and two "
+            f"of them target the same callee: its blocks would be entered from "
+            f"two call sites, so one return address does not serve them and the "
+            f"block certificates cannot be told apart")
     blocks = _cfg_blocks(words, func_entry, end)
-    if c["target"] not in {b["start"] for b in blocks}:
-        return None, (
-            f"the callee's entry {c['target']:#x} is not a block start of the "
-            f"walk, so no certificate would exist for its first run")
-    inner = [pc for pc, w in words.items()
-             if c["target"] <= pc < end and _step_branch_index(w) == 15]
-    if inner:
-        # Two different things, and the refusal must not call both of them
-        # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
-        # to follow again (and its frame bound and fuel descent with it), while a
-        # `BL` out of it is a call the model stops at — which is the halt-address
-        # family's own question, decided by `_unfollowable_calls` above. Saying
-        # "recursion" about a `printf` sends a reader after a program that has
-        # none.
-        again, outside = [], []
-        for pc in inner:
-            tgt = _branch_target(words, pc)
-            (again if (tgt is not None and func_entry <= tgt < end)
-             else outside).append(pc)
-        what = []
-        if again:
-            what.append(
-                f"it calls back into this image at "
-                f"{', '.join(hex(p) for p in again)}, which is RECURSION and not "
-                f"a return-address map: the frame bound and the fuel descent of "
-                f"the recursion contract would have to be re-proved for a second "
-                f"function")
-        if outside:
-            what.append(
-                f"it calls OUT of the image at "
-                f"{', '.join(hex(p) for p in outside)}, so the run stops there "
-                f"and the theorem becomes reachability of that call — which the "
-                f"callee's own return address cannot also be, because the two "
-                f"answers are about different terminals")
-        return None, (
-            f"the callee is not a straight-line leaf, because "
-            + "; and ".join(what))
-    if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
-        return None, (
-            f"the caller has no return of its own before {c['target']:#x}, so "
-            f"nothing states what the program returns once the callee has")
-    if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
-        return None, (
-            f"the callee has no `RET` inside the walked range, so its blocks "
-            f"have no terminal and the walk would leave the function without one")
-    return {c["pc"]: c["pc"] + 4}, ""
+    starts = {b["start"] for b in blocks}
+    plan = {}
+    for c in intra:
+        if not (func_entry <= c["target"] < end):
+            return None, (
+                f"the callee at {c['target']:#x} lies outside the range the walk "
+                f"decomposes ([{func_entry:#x}, {end:#x}), so entering it would be "
+                f"a second walk over code this theorem does not cover")
+        if c["target"] not in starts:
+            return None, (
+                f"the callee's entry {c['target']:#x} is not a block start of the "
+                f"walk, so no certificate would exist for its first run")
+        inner = [pc for pc, w in words.items()
+                 if c["target"] <= pc < end and _step_branch_index(w) == 15]
+        if inner:
+            # Two different things, and the refusal must not call both of them
+            # RECURSION: a `BL` back into THIS IMAGE is a call the walk would have
+            # to follow again (and its frame bound and fuel descent with it), while
+            # a `BL` out of it is a call the model stops at — which is the
+            # halt-address family's own question, decided by `_unfollowable_calls`
+            # above. Saying "recursion" about a `printf` sends a reader after a
+            # program that has none.
+            again, outside = [], []
+            for pc in inner:
+                tgt = _branch_target(words, pc)
+                (again if (tgt is not None and func_entry <= tgt < end)
+                 else outside).append(pc)
+            what = []
+            if again:
+                what.append(
+                    f"it calls back into this image at "
+                    f"{', '.join(hex(p) for p in again)}, which is RECURSION and "
+                    f"not a return-address map: the frame bound and the fuel "
+                    f"descent of the recursion contract would have to be re-proved "
+                    f"for a second function")
+            if outside:
+                what.append(
+                    f"it calls OUT of the image at "
+                    f"{', '.join(hex(p) for p in outside)}, so the run stops there "
+                    f"and the theorem becomes reachability of that call — which "
+                    f"the callee's own return address cannot also be, because the "
+                    f"two answers are about different terminals")
+            return None, (
+                f"the callee at {c['target']:#x} is not a straight-line leaf, "
+                f"because " + "; and ".join(what))
+        if not any(b["kind"] == "ret" and b["start"] < c["target"] for b in blocks):
+            return None, (
+                f"the caller has no return of its own before {c['target']:#x}, so "
+                f"nothing states what the program returns once the callee has")
+        if not any(b["kind"] == "ret" and b["start"] >= c["target"] for b in blocks):
+            return None, (
+                f"the callee has no `RET` inside the walked range, so its blocks "
+                f"have no terminal and the walk would leave the function without "
+                f"one")
+        plan[c["pc"]] = c["pc"] + 4
+    return plan, ""
 
 
 def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
@@ -9617,7 +10018,8 @@ def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
     return sorted(out)
 
 
-def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
+def _gen_step_lemmas(name: str, code: bytes, base: int,
+                     limit: int = None) -> str:
     """Generate real per-instruction coverage lemmas.
 
     For every instruction word the machine model handles, a lemma proves
@@ -9641,9 +10043,10 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     cover (a word the model recognises but has no right-hand side for), where
     there is nothing to derive from.
     """
-    plan = _step_result_plan(code)
+    plan = _step_result_plan(code, limit)
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     blocks = []
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9710,7 +10113,7 @@ def _gen_step_lemmas(name: str, code: bytes, base: int) -> str:
     return "\n\n".join(blocks)
 
 
-def _step_result_plan(code: bytes) -> dict:
+def _step_result_plan(code: bytes, limit: int = None) -> dict:
     """Which instruction indices get a step-RESULT lemma, and with what.
 
     `{index: (word, model branch, right-hand side text)}`, derived ONCE and read
@@ -9723,8 +10126,9 @@ def _step_result_plan(code: bytes) -> dict:
     derivation is what makes "the `sr` exists" a checkable consequence of the
     plan rather than a second guess at it.
     """
+    end = len(code) if limit is None else limit
     words = [int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)]
+             for i in range(0, end - end % 4, 4)]
     plan = {}
     for i, w in enumerate(words):
         idx = _step_branch_index(w)
@@ -9771,7 +10175,7 @@ def _sign_extend_mask(idx: int) -> int:
 def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
     """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
     blocks = []
-    for i, (w, idx, rhs) in sorted(_step_result_plan(code).items()):
+    for i, (w, idx, rhs) in sorted(_step_result_plan(code, limit).items()):
         pc = base + i * 4
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
@@ -11211,6 +11615,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = eval_split_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
+        hs_join = f"{hs}, " if hs else ""
         # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
         # comparison, and it has to be in the simp set or the `by_cases`
         # hypothesis is not the goal's `if` test: `_cmp_go` spells the
@@ -11222,13 +11627,20 @@ def generate_arm64_proof(prog, code, info) -> str:
         # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
         # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
         # generator has had `sKey` in this set for the same reason.
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
+        simp_lems = f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
-            eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
+            eval_eq_mojo_proof = f"simp +decide [{hs_join}{simp_lems}]"
         else:
+            # `_eval_eq_conds_tactic` decides the constant conditions with
+            # `have`/`native_decide` and splits only the argument-dependent
+            # ones; it returns None (the historical full-`by_cases` text) for
+            # a program whose conditions are all beyond its subset.
             eval_eq_mojo_proof = (
-                f"{by_cases} simp_all +decide [{simp_lems}, "
-                f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+                _eval_eq_conds_tactic(
+                    conds, hs, simp_lems,
+                    extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
+                or f"{by_cases} simp_all +decide [{hs_join}{simp_lems}, "
+                   f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
             )
     else:
         eval_eq_mojo_proof = None
@@ -11398,7 +11810,14 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"semantic model for the call is correct and emitted (see the `_go` "
             f"definitions above); what is missing is the return-address map for "
             f"the shape named above.")
-    if len(_calls) - (1 if _intra else 0) > 1:
+    # Counted as OPAQUE calls and not as "calls minus the one the map followed":
+    # every intra-image call is followed once the plan above returned (it returns
+    # all of them or refuses), so the calls that still need a halt address are
+    # exactly the out-of-image ones — and a program may now have more than one
+    # FOLLOWED intra-image call, which the old `len(_calls) - 1` miscounted as an
+    # unfollowable one.
+    n_opaque = sum(1 for c in _calls if c["kind"] == "opaque")
+    if n_opaque > 1:
         # The halt address is ONE address and the walk reaches it only on the
         # paths that pass it, so a second unfollowable call has a path of its own
         # and the walk executes it as if it were a self-call — landing in the
@@ -11411,7 +11830,6 @@ def generate_arm64_proof(prog, code, info) -> str:
         # than as a defect in the generator.
         where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x} ({c['kind']})"
                           for c in _calls if c["kind"] == "opaque")
-        n_opaque = sum(1 for c in _calls if c["kind"] == "opaque")
         raise NotImplementedError(
             f"universal theorem: {n_opaque} calls this walk cannot follow "
             f"({where}), every one of them OUT OF THE IMAGE, and ONE halt "
@@ -12452,10 +12870,12 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     exit_pc = base_addr + len(code)
     concrete_fuel = max(100000, len(code) * 500)
     code_defs = _gen_code_defs(stem, code, base_addr, test_input)
-    decode_lemmas = _gen_decode_lemmas(stem, code, base_addr)
+    _code_end = _exec_code_limit(code)
+    decode_lemmas = _gen_decode_lemmas(stem, code, base_addr, _code_end)
     # step-OK derives from step-RESULT, so the results come first.
-    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr) + "\n\n"
-                   + _gen_step_lemmas(stem, code, base_addr))
+    step_lemmas = (_gen_step_result_lemmas(stem, code, base_addr, _code_end)
+                   + "\n\n"
+                   + _gen_step_lemmas(stem, code, base_addr, _code_end))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
 import work
@@ -13135,12 +13555,16 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                       "    rfl"]
             else:
                 # The library's own runner equation, with `hseq` discharged by
-                # `rfl`: a step whose effect is a record update on `sp` (or an
-                # `arm64_set_reg`) does not mention `pc` at all, so the two
-                # sides of the bump condition are the same term.
+                # UNFOLDING `st{i}`: a step whose effect is a record update on
+                # `sp` (or an `arm64_set_reg`) does not mention `pc` at all, so
+                # the two sides of the bump condition are the same term — but
+                # `st{i}` is a `def` over the step's effect, and `rfl` there
+                # asks Lean to `whnf` it, which re-reduces a `UInt64` immediate
+                # in the record and costs O(immediate).  `_state_proof`.
                 L += [f"    exact runs_cons_seq ({prev}) (st{i} ({prev})) "
                       f"dylib_code {k - i - 1}",
-                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) (by rfl)"]
+                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) "
+                      f"{_state_proof(_STATE_HELPERS + [f'st{i}'], paren=True)}"]
         L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
         L.append("  rfl")
         out.append("\n".join(L))
@@ -13466,9 +13890,9 @@ set_option linter.unusedVariables false
 
 {_gen_code_defs("dylib", code, base, test_input)}
 
-{_gen_decode_lemmas("dylib", code, base)}
+{_gen_decode_lemmas("dylib", code, base, _exec_code_limit(code))}
 
-{_gen_step_result_lemmas("dylib", code, base) + "\n\n" + _gen_step_lemmas("dylib", code, base)}
+{_gen_step_result_lemmas("dylib", code, base, _exec_code_limit(code)) + "\n\n" + _gen_step_lemmas("dylib", code, base, _exec_code_limit(code))}
 
 /- What a caller can read off a result word.  [3] left this line to me
    explicitly rather than pick it, and it matters more than it looks: the new

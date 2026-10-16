@@ -60,10 +60,23 @@ def running_claims(tasks):
     return held
 
 
+def _unlanded(t):
+    """True when the task's branch still has commits master lacks. Releasing the claim of such a task is how the same
+    bug got fixed five times over: the work sat unmerged for days, the doc looked open, and a new worker re-did it."""
+    br = t.get("branch")
+    if not br:
+        return False
+    r = subprocess.run(["git", "-C", C.MAIN, "rev-list", "--count", "master.." + br], capture_output=True, text=True)
+    return r.returncode == 0 and int(r.stdout.strip() or 0) > 0
+
+
 def release_finished():
     n = 0
     for name, t in C.load().items():
-        if C.state_of(t) in ("exited-ok", "exited-err", "superseded"):
+        st = C.state_of(t)
+        if st in ("exited-ok", "exited-err") and _unlanded(t):
+            continue   # its fix is on a branch master does not have yet: the doc is NOT free, or the next worker re-fixes it
+        if st in ("exited-ok", "exited-err", "superseded"):
             r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "integrated"],
                                capture_output=True, text=True)
             n += r.returncode == 0

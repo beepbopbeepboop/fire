@@ -339,14 +339,16 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
     """Write the __TEXT segment command and its section headers at `o`.
 
     One section is a (name, vmaddr, size, fileoff, flags, stub_size) tuple —
-    `stub_size` is the last element and it is written to `reserved2`, NOT to
-    `reserved1`, because that is the field `<mach-o/loader.h>` defines it in:
-    for `S_SYMBOL_STUBS`, `reserved1` is the indirect-symbol-table index and
-    `reserved2` is **the size of one stub**. Every other section passes 0 and
-    gets `reserved1 == reserved2 == 0`. `ld` emits `reserved1 0 / reserved2 12`
-    on arm64 (6 on x86-64) for the same section, and this tree had the two
-    swapped until it was compared against `ld`. Returns the offset just past
-    the command.
+    the last element is a `S_SYMBOL_STUBS` section's one-stub size and is 0 for
+    every other section. Returns the offset just past the command.
+
+    **The stub size goes in `reserved2`, not `reserved1`.** `<mach-o/loader.h>`
+    defines, for `S_SYMBOL_STUBS`, `reserved1` as the section's index into the
+    indirect symbol table and `reserved2` as the size in bytes of one stub;
+    these images carry no indirect symbol table (no `LC_DYSYMTAB`), so the index
+    is 0 and the size is the only thing reserved2 wants. `ld` emits exactly
+    `reserved1 0 / reserved2 <stub>` for the same section, and this used to have
+    the two the other way round.
     """
     def patch(off, fmt, *vals):
         struct.pack_into(fmt, file, off, *vals)
@@ -374,13 +376,13 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
         patch(s + 56, "<I", 0)      # reloff
         patch(s + 60, "<I", 0)      # nreloc
         patch(s + 64, "<I", flags)
-        patch(s + 68, "<I", 0)          # reserved1: indirect-symbol-table index
-        patch(s + 72, "<I", stub_size)  # reserved2: stub size (STUBS only)
+        patch(s + 68, "<I", 0)      # reserved1: indirect-symbol index (none)
+        patch(s + 72, "<I", stub_size)  # reserved2: one stub's size for __stubs
         s += 80
     return o + cmdsize
 
-# `mach-o/loader.h`'s header and segment flags, named because the numbers are
-# not self-describing and a wrong one is still a valid value.
+# `mach-o/loader.h`'s header, section and segment flags, named because the
+# numbers are not self-describing and a wrong one is still a valid value.
 MH_NOUNDEFS = 0x1
 MH_DYLDLINK = 0x4
 MH_TWOLEVEL = 0x80
@@ -407,6 +409,14 @@ MH_EXECUTE_FLAGS = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
 # `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS` for the same shape.
 MH_DYLIB_FLAGS = (MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
                   | MH_NO_REEXPORTED_DYLIBS)
+
+# MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_NO_REEXPORTED_DYLIBS — the flags
+# `ld` emits for a dylib. The literal this replaced was `0x800005`, which set
+# `MH_HAS_TLV_DESCRIPTORS` — a bit a library with no thread-local storage does
+# not mean — and omitted `MH_TWOLEVEL`; changing it to this value does not turn
+# any arm64 host red, and on real hardware the two-level namespace is what the
+# symbols were already linked against.
+MH_DYLIB_FLAGS = 0x1 | 0x4 | 0x80 | 0x100000
 
 
 def build_macho_executable(code: bytes, arch: str = "arm64",

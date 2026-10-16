@@ -707,7 +707,7 @@ tables are keyed on different things — what a fix would have to **CHANGE**
 that must classify a shape it has never seen) — so both need the row, and
 neither is a rounding error in a reader's judgement. The exact next step, the
 marker to quote and where to place it, is
-`FORMAL_the_sweep_family_table_has_no_row_for_the_export_rule_refusal.md`, which
+`FORMAL the sweep family table has no row for the export rule refusal`, which
 owns it and is the one document in this series a fix should not need to
 re-derive.
 
@@ -958,7 +958,7 @@ the reason those documents could be deleted rather than merged: a reader who
 starts at a refusal follows it to the refusal's own doc, not to a census that
 measured it three rounds ago. The exceptions are named:
 
-* `FORMAL_the_sweep_family_table_has_no_row_for_the_export_rule_refusal.md` —
+* `FORMAL the sweep family table has no row for the export rule refusal` —
   §1.12's next step in full. **Not** folded in here on purpose: it is a
   five-line change to one table with a marker to quote, and a map that carries
   another document's next step is how the twenty became twenty-one. **`b14`
@@ -969,7 +969,7 @@ measured it three rounds ago. The exceptions are named:
 * `FORMAL_known_limits.md` — the audit of which refusals in the residue are
   **true limits** rather than gaps, which is a different axis from ranking by
   files blocked. It is the counterpart to §2.6 and it is not superseded by it.
-* `FORMAL_the_interpolated_literal_reader_assumes_a_one_character_prefix.md` —
+* `FORMAL the interpolated literal reader assumes a one character prefix` —
   `b14` §1.11's `rf"…"` row, filed by that round and **FIXED and deleted
   2026-10-07** (`work/formal106-docs`): the reader took the prefix to be one
   character, so a two-letter `rf`/`fr` prefix was read as a missing quote. The

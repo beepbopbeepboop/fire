@@ -1416,22 +1416,26 @@ AXIOM_CLOSURE = {
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
     "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
-    # the same way on the same run.  Twelve askable declarations, of which EIGHT
+    # the same way on the same run.  Fourteen askable declarations, of which TEN
     # are kernel-checked and ONE reaches a decide axiom; the three
     # `closure_only` are theorems that reach no axiom themselves but rest on one
     # through another declaration in the module, which is the only module in
-    # `lib/` besides `ProofLib` where that column is non-zero.
+    # `lib/` besides `ProofLib` where that column is non-zero.  The 12→14/8→10
+    # move on 2026-10-05 is the x86-64 rule's two theorems
+    # (`x86_set_reg_self`, `peephole_x86_mov_self`), both proved with
+    # `omega`/`rw` and neither adding an axiom site — so the site count in
+    # `LIBRARY_TRUST` is unchanged and only the declaration census moved.
     #
     # **The one `reaches` is the finding, not a rounding error**, and it is the
     # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
-    # module: nine sites spread over twelve declarations, so most declarations
+    # module: nine sites spread over fourteen declarations, so most declarations
     # carry none, one carries the site's axiom and three inherit it.  The site
     # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
     # sites versus declarations — and the module's value is that the rewrites it
-    # licenses are proved about `Arm64State` with `omega`, so 8 of 12 are checked
-    # by the kernel and the pass's soundness does not rest on a single decision
-    # procedure call.
-    "Peephole": (12, 1, 8, 0, 3, 0),
+    # licenses are proved about `Arm64State` with `omega`, so 10 of 14 are
+    # checked by the kernel and the pass's soundness does not rest on a single
+    # decision procedure call.
+    "Peephole": (14, 1, 10, 0, 3, 0),
 }
 
 
@@ -3794,10 +3798,51 @@ def _modelled_subprocess_params(name):
     return None
 
 
+def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
+    """`subprocess.mojo` records WHY `run` returns the status word.
+
+    The decision is option 3 of the three costed in
+    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
+    a caller reads the status through `completed_process_returncode`, a shim
+    both engines can agree on, rather than through `r.returncode`, which is a
+    field read on a word.  This pins the recording, because the decision is
+    invisible in the code — it lives only in the module's prose — and a
+    docstring that said nothing would make the next reader re-cost all three
+    options.  The two load-bearing facts are checked rather than the sentence:
+    that `run`'s word IS the returncode, and that `r.stdout` (a captured
+    STREAM, which this target does not model) is why option 1 is unavailable.
+    """
+    from formal import imports as I
+    import fire_compiler as F
+    path = os.path.join(A.HOSTMODS_ROOT, "subprocess.mojo")
+    doc = ""
+    for st in I.module_statements(path):
+        if isinstance(st, F.ExprStmt) and isinstance(st.value, F.StringLiteral):
+            doc = st.value.value
+            break
+    check(doc, "subprocess.mojo has no module docstring, so the decision it is "
+               "supposed to record has nowhere to live")
+    for needle, why in (
+            ("WHAT `run` HANDS BACK", "the decision's own heading is gone"),
+            ("status word", "the docstring no longer says what `run` returns"),
+            ("completed_process_returncode",
+             "the option-3 shim the decision rests on is not named"),
+            ("r.stdout",
+             "the measurement that removes option 1 (a captured stream) is "
+             "gone, so the decision can be silently re-litigated")):
+        check(needle in doc,
+              f"subprocess.mojo's docstring is missing {needle!r}: {why}")
+    return True, ("subprocess.mojo records the return-shape decision: `run` "
+                  "hands back the status word, `r.returncode` is refused by "
+                  "name, and `.stdout` is why option 1 cannot move version.py")
+
+
 PURE = [("the emitted Lean is inert where nothing is admitted",
          test_a_file_that_reaches_none_generates_no_hole),
         ("the modelled surface covers what the tree spells",
          test_the_modelled_surface_covers_what_the_tree_spells),
+        ("the run return-shape decision is recorded",
+         test_the_run_return_shape_decision_is_recorded),
         ("every scope rule refuses and admits what it was written for",
          test_the_scope_probes_refuse_what_they_are_written_for),
         ("every admitted contract has a truth row",

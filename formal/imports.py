@@ -1112,6 +1112,123 @@ def is_frontend_provided(name: str) -> bool:
         or name.split(".")[0] in FRONTEND_PROVIDED_MODULES
 
 
+def _hand_kept_tier(name: str) -> str:
+    """The tier a name is IN, by table membership alone. `''` for no tier.
+
+    This is `host_module_tier` minus the one derived rule
+    (`capability_sibling_tier`), split out so the rule can ask the question
+    without asking itself: a derived answer must never be able to feed the
+    next derivation, or `_foo` → `foo` → … would be a cycle rather than a
+    derivation.
+    """
+    if not name:
+        return ""
+    top = name.split(".")[0]
+    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
+        return "unreachable"
+    if top in HOST_ADMITTED or name in HOST_ADMITTED:
+        return "admitted"
+    if top in HOST_MODELLED or name in HOST_MODELLED:
+        return "modelled"
+    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
+        return "not-a-module"
+    return ""
+
+
+# The two CLAIM tiers — the ones that assert something about the target rather
+# than about this tree's sources. They are what a derived answer is allowed to
+# pass on, and the pair is named rather than spelled twice so that a fifth tier
+# cannot be added without this rule having to say what it does with it.
+CLAIM_TIERS = ("modelled", "unreachable")
+
+
+def capability_sibling_tier(name: str) -> str:
+    """A private module's tier, DERIVED from the public module it accelerates.
+
+    **This is the one piece of the 216-name queue that is decidable without a
+    judgement about the target, and it is decidable from THIS repository.**
+    CPython splits a capability across a public module and a private C
+    accelerator for it — `hashlib` and `_hashlib`, `decimal` and `_decimal`,
+    `json` and `_json`, `struct` and `_struct`, `socket` and `_socket`,
+    `threading` and `_thread`. Implementing the private one is implementing the
+    public one's capability, so the tier that answers for the public name
+    answers for the private one, and there is nothing left to decide:
+
+    | the private name | the public one | why that is the whole argument |
+    |---|---|---|
+    | `_socket` | `socket` → `unreachable` | the socket is missing from the target, so the accelerator for it is too |
+    | `_locale` | `locale` → `unreachable` | ditto, and `locale` is already in the table for it |
+    | `_warnings` | `warnings` → `unreachable` | ditto |
+    | `_ctypes` | `ctypes` → `admitted` | a foreign-code loader this tree answers under declared contracts, so the capability is REACHABLE even though `ctypes` cannot be computed |
+    | `_hashlib` | `hashlib` → `written` | `formal/hostmods/hashlib.mojo` answers it here, so the capability needs no object at all |
+    | `_decimal` | `decimal` → `modelled` | arithmetic over a fixed decimal representation |
+
+    **The two rows at the bottom of that table are why this rule outranks the
+    EXTERNAL oracle, and they are measured rather than argued.** Read the dylib
+    a CPython extension happens to link and the answer flips:
+    `formal/stdlib`'s own measurement (`tools/formal_stdlib_reach.py`) says
+    `_hashlib` links `libcrypto.3.dylib` and `_decimal` links `libmpdec.4.dylib`,
+    neither of which is in libSystem — so a rule that read the dynamic
+    dependencies would call both `unreachable`, which contradicts what THIS TREE
+    already says (`hashlib` is answered by a source, `decimal` is
+    `HOST_MODELLED`) and what the tier means ("a Mojo-side implementation could
+    in principle provide this"). **A library outside libSystem is a fact about
+    CPython's packaging; an object the target does not have is a fact about the
+    target, and the tables already carry the second.** That is the whole reason
+    the rule reads the tables and not the interpreter, and the reason the
+    accelerator question is never asked.
+
+    Two deliberate restrictions, each because the obvious extension is wrong:
+
+    * **`'admitted'` and `'written'` become `'modelled'`, never themselves.**
+      `HOST_ADMITTED`'s own membership rule is "there is a `formal/hostmods/`
+      source" (`_admitted_tier_conflicts` asserts it in both directions against
+      the filesystem), and `_thread` has no source. Returning `admitted` for it
+      would claim a file that is not there; returning `written` would be worse,
+      because a consumer reading the verdict's detail would be handed `None` as
+      the path that answers the name. `modelled` is the honest reading of both:
+      the capability is reachable in principle, and nothing here implements it.
+    * **A public name derives nothing.** `host_module_tier` asks this only for a
+      name that is not in a tier, and the rule only fires on a leading-underscore
+      name, so `socket` never reaches it and can never answer with
+      `socket`'s own answer to something else.
+
+    `''` — nothing derived — is the answer for every other name, which is where
+    the rest of
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue lives. The
+    derivation is deliberately NOT applied to a name with a Mojo source: a name
+    this tree has written is answered by `host_module_verdict`'s own source arm,
+    and `host_module_tier`'s rule that "a name LEAVES a tier by being WRITTEN"
+    is about the hand-kept tables, which this does not touch.
+
+    **The resolver is asked with its DEFAULT search roots, deliberately, and
+    that is what keeps `host_module_tier` a function of the name.** Every caller
+    of this accessor — `tools/formal_sweep.py`, `tools/formal_sweep_causes.py`,
+    `tools/formal_host_import_wall.py`, `host_module_verdict` itself — calls it
+    without a base, and the rule has to give the same answer to all of them. The
+    question it asks the resolver is "does THIS TREE have a source for the
+    public name", which is the repository-root question, and asking it that way
+    is also the right one: a `hashlib.mojo` sitting beside one particular
+    importer is that importer's module and not a statement about the tree. If
+    that ever has to change it changes HERE, once, and not in four callers.
+    """
+    if not name or not name.startswith("_"):
+        return ""
+    public = name.lstrip("_")
+    if not public or public == name:
+        return ""
+    tier = _hand_kept_tier(public)
+    if tier in CLAIM_TIERS:
+        return tier
+    # `'admitted'`/`''` from the tables, and then the SOURCE — because a public
+    # module answered by a `formal/hostmods/` file has had its capability
+    # demonstrated, which is the strongest statement available here and is what
+    # `_hashlib` (via `hashlib`) is an instance of.
+    if tier == "admitted" or resolve_module_path(public):
+        return "modelled"
+    return ""
+
+
 def host_module_tier(name: str) -> str:
     """`'modelled'`, `'admitted'`, `'unreachable'`, `'not-a-module'`, or `''`.
 
@@ -1133,10 +1250,20 @@ def host_module_tier(name: str) -> str:
     all (`this`, `antigravity`, `turtledemo` — see `HOST_NOT_A_MODULE`). It is
     tested LAST and deliberately so: it is the weakest claim of the four (it
     asserts nothing about reachability), so a name that is in two tiers should
-    answer with the one that says something. `''` — no tier at all — remains the
-    answer for the CPython standard-library names nobody has judged, which is the
-    queue `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is, and the
-    tripwire that keeps it honest is
+    answer with the one that says something.
+
+    **A name in NO tier can still answer, and that is the fifth path: the
+    DERIVED one.** `capability_sibling_tier` above is asked last, after all four
+    tables, and it fires only on a private name whose public sibling this
+    repository has already classified — `_hashlib` answers `modelled` because
+    `hashlib` is answered here, `_socket` answers `unreachable` because `socket`
+    is in the table. It is a table of nothing and a rule, so a name it settles
+    is settled by the rule rather than remembered, and the 216-name queue in
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is 30 names shorter
+    for a reason no reader has to take on trust. What it deliberately does NOT
+    do is guess for the rest: `''` still means "CPython ships it and nothing
+    here says which of the two claim tiers it is", and the tripwire that keeps
+    that honest is
     `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
 
     `unreachable` is tested first, so a name in both tiers would resolve to the
@@ -1145,18 +1272,10 @@ def host_module_tier(name: str) -> str:
     `_admitted_tier_conflicts` doing the same for the admitted half plus its
     "has a source" rule.
     """
-    if not name:
-        return ""
-    top = name.split(".")[0]
-    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
-        return "unreachable"
-    if top in HOST_ADMITTED or name in HOST_ADMITTED:
-        return "admitted"
-    if top in HOST_MODELLED or name in HOST_MODELLED:
-        return "modelled"
-    if top in HOST_NOT_A_MODULE or name in HOST_NOT_A_MODULE:
-        return "not-a-module"
-    return ""
+    tier = _hand_kept_tier(name)
+    if tier:
+        return tier
+    return capability_sibling_tier(name)
 
 
 def _host_tier_conflicts() -> list:
@@ -1321,12 +1440,30 @@ def _is_host_module(name: str) -> bool:
     `is_cpython_stdlib`, and the two are different questions with different
     consumers. This one is `resolve_module_path`'s pass 2 and the tier tables'
     own membership test, so it answers "is this one of the names we have
-    CLASSIFIED", and a classified name includes every module with a
-    `formal/hostmods/` source, which is why `math`, `stat`, `shutil`, `fcntl`
-    and `platform` all answer False here and are pinned False by their own
-    suites: they are built here, so nothing refuses them.
+    CLASSIFIED", which includes every module with a `formal/hostmods/` source —
+    `math`, `stat`, `shutil`, `fcntl`, `platform` all answer False here and are
+    pinned False by their own suites: they are built here, so nothing refuses
+    them.
+
+    **A DERIVED tier counts as classified, and that is the only reason this
+    consults `host_module_tier` rather than the union.** `capability_sibling_tier`
+    settles 30 private names from the tables (see its docstring), and none of
+    them is in `HOST_MODULES`, so a predicate reading the union would report them
+    unclassified — and `unresolvable_import_error`'s arm for an unclassified name
+    says "no tier in `formal/imports.py` saying whether implementing it would
+    need an object this target does not have", which is then **false of a name
+    the tier accessor answers**. So the predicate asks the accessor, and
+    `_hashlib` gets the host-module sentence, which is true of it, instead of a
+    sentence about a tier it has.
+
+    **The OUTCOME does not change either way, and that is the property the tier
+    split rests on**: both arms of `unresolvable_import_error` REFUSE the
+    import, so what a derived name moves is the wording and the reach accounting
+    — the same two things the eleven names of 2026-10-05 moved, for the same
+    reason.
     """
-    return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+    return bool(host_module_tier(name)) or name in HOST_MODULES \
+        or name.split(".")[0] in HOST_MODULES
 
 
 def is_cpython_stdlib(name: str) -> bool:
@@ -1735,6 +1872,7 @@ def module_statements(path: str) -> list:
         return []
     digest = cas.hash_parts(raw)
     key = (os.path.abspath(path), digest)
+    _PARSED_DIGEST[key[0]] = digest
     hit = _PARSED.get(key)
     if hit is not None:
         return hit
@@ -1744,7 +1882,300 @@ def module_statements(path: str) -> list:
     except Exception:
         stmts = []
     _PARSED[key] = stmts
+    _PARSED_DIGEST[key[0]] = digest
     return stmts
+
+
+def _own_functions(stmts: list):
+    """`(exports, methods)` of a module: its top-level functions under their own
+    names, and its structs' methods under the LIFTED name each is exported by.
+
+    Two lists rather than one because the two are asked two DIFFERENT questions
+    cross-module, and merging them is what made the method question wrong the
+    first time: `mod.f(…)` is an exact lookup against `exports`, while `b.get(…)`
+    carries no receiver type and so must be answered by NAME — but only against
+    names that really are METHODS. Answered against the merged list, a plain
+    exported function called `read_file` made every `x.read(…)` in the corpus
+    look like a call into something that can end the process, which is 60-odd
+    files refused for a method name that appears in half of them.
+
+    A module's exports are its top-level functions and its structs' methods
+    (`reflect.collect_exports_src` is the rule that decides which, and a name it
+    does not export cannot be a cross-module callee); the lifted spelling is
+    `formal/model.py`'s `method_function_name`, which is what an export of a
+    method is keyed by.
+
+    Nested `def`s are reached through the function that contains them, because
+    `_call_keys` walks the whole body and a `raise` inside a closure is a
+    `raise` in the function that runs it.
+    """
+    exports, methods = [], []
+    for st in stmts or []:
+        if isinstance(st, F.FunctionDef) and getattr(st, "name", None):
+            exports.append(st)
+        elif isinstance(st, F.StructDef):
+            for meth in _struct_methods_of(st):
+                methods.append(_LiftedMethod(meth, st.name))
+    return exports, methods
+
+
+class _LiftedMethod:
+    """One struct method under the name it is exported and called by.
+
+    A stand-in rather than a mutated AST node because `module_statements` CACHES
+    the parse: setting `meth.name = "Bag_get"` on the cached node would rename
+    the method for every later reader of the same file — the export table and
+    the declaration table both — and this question is asked from a walk that has
+    no business changing what the module declares. Only `name` and `body` are
+    read (`RaiseGraph` reads those two and nothing else), so those are the two
+    this carries.
+    """
+
+    __slots__ = ("name", "bare", "body")
+
+    def __init__(self, meth, struct_name: str):
+        self.name = _model.method_function_name(struct_name, meth.name)
+        self.bare = meth.name
+        self.body = getattr(meth, "body", None)
+
+
+class ModuleRaises:
+    """What of one module's own surface can end the process, in two sets.
+
+    **`exports` and `methods` are separate because they answer separate
+    questions.** A module-qualified `mod.f(…)` names one export, so `exports` is
+    an exact lookup. A `b.get(…)` carries no receiver type at all — dispatch on
+    this path is by NAME — so `methods` is a set of BARE method names, and the
+    answer is whether any of them raises. Merging them (which is what a single
+    frozenset of lifted names does) makes an exported function called
+    `read_file` raise the question for every `x.read(…)` in the corpus, which is
+    a refusal bought against a coincidence in a name.
+
+    `methods` holds the BARE name rather than the lifted `<Struct>_<method>`
+    spelling because that is the question being asked: a call site writes
+    `b.get(…)` and nothing at the call site says which struct it meant.
+    """
+
+    __slots__ = ("exports", "methods")
+
+    def __init__(self, exports=frozenset(), methods=frozenset()):
+        self.exports = frozenset(exports)
+        self.methods = frozenset(methods)
+
+
+_EMPTY_RAISES = ModuleRaises()
+
+
+def module_raising_names(path: str, _seen=None) -> ModuleRaises:
+    """What of `path`'s own surface can end the process — `ModuleRaises`.
+
+    Cached per (path, content digest), like the parse it reads.
+
+    **The cross-module half of `formal/model.py`'s `RaiseGraph`, and it is asked
+    of a module this build did not compile.** A `raise` is `exit(1)` from
+    whatever frame holds it, so a function of a LINKED library ends the caller's
+    process exactly as one of the caller's own does — and the caller's own graph
+    cannot see it, which is how
+
+        from lib import boom
+        def main(n):
+            try:
+                boom()
+            except:
+                pass
+            print("caught")
+
+    built, exited 1 and printed nothing on both architectures where CPython
+    prints `caught` and exits 0. The refusal that closes that shape needs to
+    know which of `lib`'s functions raise, and `lib` has been parsed and thrown
+    away by the time the caller's `try` is examined.
+
+    So it is computed HERE, from `lib`'s own source, by asking `RaiseGraph` the
+    question it already answers for an in-file function — one implementation of
+    "can this function end the process", not two. The graph is built over
+    `lib`'s own exports with `lib`'s OWN import table, so `lib`'s functions that
+    call a third module's raising function are in the answer too, and it
+    recurses through that table with `_seen` so an import cycle terminates.
+
+    **The cache, and it is keyed on the CONTENT DIGEST for the reason
+    `module_statements` is.** This is a fixed point over the module's own call
+    graph — a walk of every function body in the file — and `RaiseGraph` is
+    asked about it once per `mod.f(…)` and once per method name in every
+    `try`-bearing unit in the tree. Uncached that is minutes of walking for a
+    question whose answer does not change, measured: the parse-only census over
+    this repository's 570 files went from seconds to not finishing inside 40
+    minutes when the method question added one graph build per call site. So the
+    answer is memoised per (absolute path, digest), which means an edited module
+    is re-read rather than served stale, exactly as the parse is.
+
+    `_seen` is deliberately NOT part of the key: it is a cycle guard, and a
+    module's answer does not depend on which module asked. The entry written for
+    a module reached inside a cycle is therefore the answer computed with the
+    cycle broken at that module — the same conservative direction as the guard
+    itself, since membership only grows and a `raise` is reached through the
+    chain that was cut.
+
+    **A module this cannot resolve contributes nothing rather than everything.**
+    That direction is the class's measured decision and it is unchanged here: the
+    certain tier is what refuses, and an unresolvable name is not certain. What
+    is left of the unplaceable tier is written down, with the measurement that
+    says which of its five shapes is a hazard and which four are not, in
+    `bugs/FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md`.
+    """
+    try:
+        stmts = module_statements(path)
+        # The digest AFTER the parse, so the key names the version this answer
+        # was computed from rather than whatever the file holds by the time the
+        # key is formed.
+        key = (os.path.abspath(path), module_statements_digest(path))
+    except (TypeError, ValueError):
+        return _EMPTY_RAISES
+    hit = _RAISING.get(key)
+    if hit is not None:
+        return hit
+    if key[0] in (_seen or ()):
+        return _EMPTY_RAISES
+    _seen = set(_seen or ()) | {key[0]}
+    if not stmts:
+        _RAISING[key] = _EMPTY_RAISES
+        return _EMPTY_RAISES
+    exports, methods = _own_functions(stmts)
+    graph = _model.RaiseGraph(
+        exports + methods, externs=_model.BARE_C_RETURN_KINDS,
+        bound_modules=_model.imported_module_bindings(stmts),
+        cross=CrossModuleRaises.from_module(path, _seen=_seen))
+    # The graph raises LIFTED names for methods, so the split back into the two
+    # sets is by membership in this module's own method list rather than by
+    # spelling: a `Struct_method` whose struct name contains `_` would be
+    # misfiled by a `partition("_")` and then asked about under the wrong name.
+    bare = {m.name: m.bare for m in methods}
+    out = ModuleRaises(
+        exports=frozenset(n for n in graph.raising if n not in bare),
+        methods=frozenset(bare[n] for n in graph.raising if n in bare))
+    _RAISING[key] = out
+    return out
+
+
+#: `module_raising_names`'s memo, on the same (absolute path, content digest)
+#: key as `_PARSED` above. Separate because the VALUES are different questions —
+#: one is the AST and one is a fixed point over it — and a shared dict would let
+#: one evict the other.
+_RAISING: dict = {}
+
+#: The digest each `(abspath, digest)` in `_PARSED` was parsed under, so a reader
+#: that needs to key ITS OWN cache on the same version reads it off the parse
+#: rather than re-hashing the file. A second read is a second version: the file
+#: can change between them, and a digest taken after the parse would key a stale
+#: answer under a fresh version and serve it to the next build.
+_PARSED_DIGEST: dict = {}
+
+
+def module_statements_digest(path: str) -> str:
+    """The content digest `module_statements` keyed its parse on, or "".
+
+    "" when the file has never been parsed, which is the answer for a missing or
+    unreadable file too — the same empty parse `module_statements` returns for
+    both, and so the same empty result.
+    """
+    try:
+        return _PARSED_DIGEST.get(os.path.abspath(path), "")
+    except (TypeError, ValueError):
+        return ""
+
+
+class CrossModuleRaises:
+    """The two questions `RaiseGraph` asks about a callee in ANOTHER image.
+
+    **One object rather than a pair of callables, because the two are one fact
+    read two ways and a caller that supplied only one of them would get an
+    answer that is right about `mod.f(…)` and silent about `b.f(…)` for the same
+    imported module — which is the bug this whole mechanism exists to close, in a
+    narrower dress.** Constructed by `from_module` for the module that OWNS the
+    imports, so one build's answers cannot be read by another's.
+
+    `function(module, name)` is exact: `lib`'s export `boom`. `method(name)` is
+    by NAME across every module this one imports, because that is the
+    over-approximation dispatch on this path already makes inside one image — a
+    call site carries no receiver type, so `b.get(…)` is answered by every
+    `get` — and extending it across the boundary is the SAME rule rather than a
+    second, looser one. The lifted spelling is `<Struct>_<method>`
+    (`formal/model.py`'s `method_function_name`), which is what an export of a
+    method is keyed by.
+    """
+
+    __slots__ = ("_base", "_modules", "_seen", "_cache")
+
+    def __init__(self, base: str, modules, _seen=frozenset(), _cache=None):
+        self._base = base
+        self._modules = tuple(modules)
+        self._seen = _seen
+        self._cache = {} if _cache is None else _cache
+
+    @classmethod
+    def from_module(cls, source_path: str, _seen=frozenset()):
+        """The resolver for the module at `source_path`'s own imports.
+
+        Resolving against `source_path` is what makes `.._syscalls` mean the
+        same module here as it does to the build: one `resolve_module_path`, so
+        the module this asks about is the module the linker will bind. The base
+        is carried on the object rather than passed to each question, because a
+        caller that resolved against a different file would be asking about a
+        different module under the same name — and the answer would still be a
+        boolean, so nothing downstream could see the substitution.
+        """
+        stmts = module_statements(source_path)
+        mods = []
+        for name in imported_modules(stmts):
+            if cls._resolve(name, source_path):
+                mods.append(name)
+        return cls(source_path, mods, _seen=_seen)
+
+    @staticmethod
+    def _resolve(module: str, base: str):
+        return resolve_module_path(module, relative_to=base,
+                                   project_root=base)
+
+    def function(self, module: str, name: str) -> bool:
+        """Can `module`'s export `name` end the process?"""
+        if not module or not name or module == name:
+            return False
+        path = self._resolve(module, self._base)
+        if path is None:
+            return False
+        return name in self._raises(path).exports
+
+    def method(self, name: str) -> bool:
+        """Can any imported module's METHOD called `name` end the process?
+
+        By BARE name across every module this one imports, because that is the
+        over-approximation dispatch on this path already makes inside one image
+        — a call site carries no receiver type, so `b.get(…)` is answered by
+        every `get` — and extending that one rule across the boundary is not a
+        second, looser one.
+
+        Bare and not `<Struct>_<method>` for the same reason `ModuleRaises`
+        keeps the two sets apart: an EXPORTED FUNCTION called `read_file` shares
+        its tail with a method called `read`, and answering the method question
+        from a merged list of names refuses every `x.read(…)` in the corpus
+        because of a coincidence in a name.
+        """
+        if not name:
+            return False
+        for mod in self._modules:
+            path = self._resolve(mod, self._base)
+            if path is None:
+                continue
+            if name in self._raises(path).methods:
+                return True
+        return False
+
+    def _raises(self, path: str) -> ModuleRaises:
+        key = os.path.abspath(path)
+        hit = self._cache.get(key)
+        if hit is None:
+            hit = module_raising_names(path, _seen=set(self._seen))
+            self._cache[key] = hit
+        return hit
 
 
 # Source TEXT, cached beside `_PARSED` on the same (path, content-digest) key and
@@ -4102,8 +4533,8 @@ def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
 def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
     """`{source_path: stmts}` for `compile_formal_dylib`, or `{}`.
 
-    The module's own top-level statements with its own instantiation CALL SITES
-    rewritten to the mangled names — the call-site half of
+    The module's own top-level statements with its own instantiation USES
+    rewritten to the mangled names — the use-site half of
     `_instantiated_sources`, which publishes the declaration half. Neither is
     useful alone and the pair is what "the declaration and the rewrite stay one
     table" means: a declaration with no rewrite is a module that publishes
@@ -4135,7 +4566,7 @@ def _rewritten_own_statements(source_path: str, demap: dict) -> dict:
     from formal import monomorph as MM            # lazy — pulls the middle tier
     from formal.build import parse_module         # lazy — cycle
     stmts = parse_module(module_source_text(source_path), filename=source_path)
-    MM.rewrite_instantiation_calls(stmts, demap)
+    MM.rewrite_instantiation_uses(stmts, demap)
     return {source_path: stmts}
 
 
@@ -4143,8 +4574,9 @@ def imported_instantiations(source_path: str, stmts: list,
                             project_root: str = None,
                             linked_paths=()) -> dict:
     """`{mangled name: StructDef}` for every generic template this file
-    instantiates out of a module it reaches — and REWRITES the call sites that
-    asked, in `stmts`.
+    instantiates out of a module it reaches — and REWRITES the USES that asked,
+    in `stmts`: the `Pair[Int]()` call sites and the `Pair.<attr>`
+    class-attribute reads alike.
 
     **The declaration and the rewrite come from ONE table, and that is the whole
     design.**  An importer writes `Pair[Int]()`; the boundary symbol it has to
@@ -4186,7 +4618,7 @@ def imported_instantiations(source_path: str, stmts: list,
     out.update(_own_instantiations(module_source_text(source_path), source_path,
                                    demap, project_root or source_path, stmts))
     if demap:
-        MM.rewrite_instantiation_calls(stmts, demap)
+        MM.rewrite_instantiation_uses(stmts, demap)
     return out
 
 
@@ -4315,7 +4747,7 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
 
     So the same derivation the imported half runs, with `own=()` and this file's
     own templates, and it goes through `instantiate_all` and
-    `rewrite_instantiation_calls` exactly as the imported half does — the
+    `rewrite_instantiation_uses` exactly as the imported half does — the
     declaration and the rewrite are still one table, which is the property
     `imported_instantiations` is built around.
 
