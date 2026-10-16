@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (537 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (541 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -195,7 +195,7 @@ list on a formal path is a frame blob whose first word IS its count".
 **That constant is gone**, and its docstring says why in the present tense: "a
 hand-kept list of prefixes is a list that rots". The diagnosis is now made per
 type by `_box_why` from `runtime_abi()`'s own `boxes` field, so it covers all
-687 entry points rather than the 40-odd names one prefix happened to cover.
+693 entry points rather than the 40-odd names one prefix happened to cover.
 `is_gimple_runtime_builtin` still answers "is this name the gimple runtime's",
 but the question that now gates a call is `gimple_runtime_callable`, and it asks
 the two questions phase 2 named: is every type crossing the boundary one word,
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **411** non-word entry points of §2.2 are not merely unwired — they have
+So the **414** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,14 +418,14 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 411
+Under (c) alone, the formal target's containers stay frame blobs and the 414
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 411 become callable **incrementally, one entry point at a time, each with
+and the 414 become callable **incrementally, one entry point at a time, each with
 its own proof** — rather than in one change to the value model that would disturb
 a proof library which is currently **hole-free**: zero `sorry`, zero `axiom` and
 zero vacuous declarations across all five `lib/` modules, measured by
@@ -524,19 +524,19 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 276 | 276 |
-| …of which the runtime dylib actually **exports** | 220 | 220 |
-| …reachable with no heap handle the formal path cannot obtain | **180** | **180** |
+| word-shaped entry points (`runtime_abi`) | 279 | 279 |
+| …of which the runtime dylib actually **exports** | 223 | 223 |
+| …reachable with no heap handle the formal path cannot obtain | **183** | **183** |
 
-So the honest statement of the surface is **180 word-shaped calls are callable
+So the honest statement of the surface is **183 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 276) of §2.2. The two gaps between 276 and 180
+was written, and not the 219 (now 279) of §2.2. The two gaps between 279 and 183
 are both deliberate and both named:
 
-- **40 of the 220** the library exports take a `void *` parameter the
+- **40 of the 223** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 276** the dylib does not export at all, because
+- **56 of the 279** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
@@ -546,13 +546,13 @@ are both deliberate and both named:
 
 The two architectures agree exactly, which is the property phase 2 was for.
 
-**The fourteen this table gained since it was first published are named, not
+**The seventeen this table gained since it was first published are named, not
 counted**, because a count that moves is a row nobody can check and an export
 nobody reaches is a promise the runtime makes and the link line does not keep.
-All fourteen are declared in `runtime/fire_runtime.h`, defined in
+All seventeen are declared in `runtime/fire_runtime.h`, defined in
 `runtime/fire_runtime.c`, word-shaped, and **none of them takes a `void *`** —
 so each one landed in all three rows at once, which is why the deltas are the
-same 14 and not three different numbers:
+same 17 and not three different numbers:
 
 | entry point | signature | landed |
 |---|---|---|
@@ -571,13 +571,16 @@ same 14 and not three different numbers:
 | `mojo_struct_tag_register` | `void mojo_struct_tag_register(int64_t tag)` | ″ |
 | `mojo_word_eq` | `int mojo_word_eq(int64_t a, int64_t b)` | ″ |
 | `int_normpath` | `int64_t int_normpath(int64_t marker, int64_t path)` | ″ |
+| `mojo_word_slice` | `int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)` | ″ |
+| `mojo_str_startswith_word` | `int mojo_str_startswith_word(char *s, int64_t p)` | ″ |
+| `mojo_str_endswith_word` | `int mojo_str_endswith_word(char *s, int64_t p)` | ″ |
 
 **The `40` and `56` gaps did not move, and that is a fact rather than a
-coincidence**: the fourteen added no `void *` parameter, so none of them joined
-the heap-handle set, and all fourteen are in `fire_runtime.c`, which the dylib
+coincidence**: the seventeen added no `void *` parameter, so none of them joined
+the heap-handle set, and all seventeen are in `fire_runtime.c`, which the dylib
 links on every path — so the *unexported* remainder stayed at 56 of a larger
-total. A reader who checks the arithmetic (`276 − 220 = 56`,
-`220 − 180 = 40`) is checking the two claims this table makes about WHY the
+total. A reader who checks the arithmetic (`279 − 223 = 56`,
+`223 − 183 = 40`) is checking the two claims this table makes about WHY the
 surface stops where it does, not just the numbers.
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
@@ -762,7 +765,7 @@ and made the optional units link on the gimple path ([1]: a program calling
 **The step that was still missing then has since landed, so the "0" this
 paragraph used to publish is wrong.** The formal path is now opted into the
 dylib: a formal image that names a word-shaped runtime entry point carries the
-per-architecture library on its link line, and the measured surface is **180
+per-architecture library on its link line, and the measured surface is **183
 callable entry points, identically on both architectures** (§6 phase 2 has the
 three-row table and where the other 96 go). `test_formal_runtime_link.py` is
 what measures it, and it goes further than "is not refused": it builds, links
@@ -771,7 +774,7 @@ refusal replaced by an image that builds and computes the wrong number is the
 failure this whole programme is about.
 
 **The one thing that has NOT moved is the honest boundary between "callable"
-and "provable".** 180 calls build and run; none of them is yet a call a *proof*
+and "provable".** 183 calls build and run; none of them is yet a call a *proof*
 can follow, because `arm64_step`'s `BL` still has no callee (§3.1, phase 3). A
 number that conflated the two would be the more comfortable one and the less
 true one.
@@ -1236,8 +1239,8 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **276 of 687** entry points are word-in/word-out
-(§2.2) and **180** of them are callable from a formal image today (§6 phase 2),
+yet for any actual export. **279 of 693** entry points are word-in/word-out
+(§2.2) and **183** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
 exports a caller can actually reach today.
