@@ -14468,14 +14468,56 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"e=%d\", isempty([]))\n"
      "    return 0\n", 0, "e=1"),
-    # The direction the rule must NOT take, and the shape is an argument this
-    # build cannot READ rather than two arguments of different kinds: a call site
-    # whose argument is a NAME claims nothing (`_parameter_argument_shape`'s None
-    # is one of the claims), so the parameter claims nothing and `len` refuses
-    # exactly as it did before the change. A table that answered from the
-    # majority, or that read the caller's flow, would answer here — and the
-    # caller's flow is a per-caller fact this compilation does not have.
-    ("len_of_a_list_parameter_needs_every_site_to_agree",
+    # …and the DIRECTION the rule must not take, which is still a veto and is
+    # now two vetoes rather than one. The row this replaces used a call site
+    # whose argument was a bare NAME, which claimed nothing and so vetoed the
+    # parameter — and that stopped being true when the reader began following a
+    # name to where it was bound (`formal/model.py::parameter_kinds_by_call_site`,
+    # and the same commit's `parameter_kind_reaches_a_callee_through_a_bare_name`).
+    # `var other = [9, 9]` IS a list, so the two sites DO agree and the program
+    # is right to build: `t=10u=18` on both architectures, which is
+    # CPython's `sum([1,2,3,4])` and `sum([9,9])`. **A veto that no longer vetos
+    # is a stale marker, so the rule is re-pinned with the two shapes that still
+    # veto** — two sites that disagree, and one site this image cannot read —
+    # because a table that answered from the majority, or that read the caller's
+    # flow, would answer both.
+    ("len_of_a_list_parameter_refuses_where_two_call_sites_disagree",
+     "def total(xs):\n"
+     "    var acc = 0\n"
+     "    var i = 0\n"
+     "    while i < len(xs):\n"
+     "        acc = acc + xs[i]\n"
+     "        i = i + 1\n"
+     "    return acc\n"
+     "def main(n):\n"
+     "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
+     "    printf(\"u=%d\", total(5))\n"
+     "    return 0\n",
+     "refuse:len(xs) is len() of a value classified as 'int'", None),
+    # The unreadable site, which is the OTHER half and the one a name-based
+    # reader would get wrong: an AUGMENTED assignment writes a word the image
+    # cannot state (`_binding_values`'s own rule), so `other` claims nothing and
+    # the veto is the conservative direction — a width taken from the site that
+    # does answer would be a guess about the one that does not.
+    ("len_of_a_list_parameter_refuses_where_one_site_cannot_be_read",
+     "def total(xs):\n"
+     "    var acc = 0\n"
+     "    var i = 0\n"
+     "    while i < len(xs):\n"
+     "        acc = acc + xs[i]\n"
+     "        i = i + 1\n"
+     "    return acc\n"
+     "def main(n):\n"
+     "    var other = [9, 9]\n"
+     "    other += [1]\n"
+     "    printf(\"u=%d\", total(other))\n"
+     "    return 0\n",
+     "refuse:len(xs) is len() of a value classified as 'int'", None),
+    # …and the positive the re-pinning is FOR: the same program with a plain
+    # binding, which used to be the veto and is now two sums that agree with
+    # CPython. `10` and `18` are `sum([1, 2, 3, 4])` and `sum([9, 9])`, so a
+    # width or a count read at the wrong place could not produce them.
+    ("len_of_a_list_parameter_reached_through_a_caller_local",
      "def total(xs):\n"
      "    var acc = 0\n"
      "    var i = 0\n"
@@ -14487,8 +14529,7 @@ WAVE6_TRUTHY_CASES = [
      "    var other = [9, 9]\n"
      "    printf(\"t=%d\", total([1, 2, 3, 4]))\n"
      "    printf(\"u=%d\", total(other))\n"
-     "    return 0\n",
-     "refuse:len(xs) is len() of a value classified as 'int'", None),
+     "    return 0\n", 0, "t=10u=18"),
 
     # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`
     # was TRUE before this — a fabricated truthiness in the same family, found

@@ -119,7 +119,17 @@ CLASSES — and why each is a different kind of fact
                       about the code generator, not about the proof layer; it
                       is counted because a caller of this census needs to know
                       how much of the corpus never reaches the proof layer at
-                      all.
+                      all. Two REFINEMENTS of it are counted apart, because
+                      each of them is a fact about something else wearing this
+                      class's name:
+  refused-builtin       …a call to a builtin this path does not lower. A gap
+                      in the backend, and `refused-builtin` names which.
+  refused-harness-call  …a construct the SYNTHESISED `main` made impossible:
+                      `_entry_call` passes the stub's integer to every
+                      parameter, so a field read through one of them is refused
+                      for a reason that is true of the harness's CALL. Nothing
+                      about the function would change if the harness could pass
+                      a struct.
   proof-refused       codegen produced an image and the proof generator
                       REFUSED: `NotImplementedError` from the generator, whose
                       29 raise sites are all deliberate ("the model has no
@@ -1119,6 +1129,36 @@ def _refusal_class(detail, source=""):
     `codegen-refused`: the marker says what KIND of refusal it is and the table
     is what says which builtin, and a class that guessed the second would be
     reporting a name it did not read.
+
+    **`refused-harness-call` is the SECOND refinement, and it is about the CALL
+    this census synthesised rather than about the function.** `_entry_call`
+    passes the startup stub's integer to every parameter of the function it
+    wraps, and a function whose body reads a FIELD through one of those
+    parameters is refused for a reason that is true of the harness's call and not
+    a statement about the code generator: `t.width` in a function the harness
+    reaches with `f(x, x)` cannot be lowered because `t` is the integer `x`, and
+    the same function called with a struct is a different program. **Measured on
+    this tree's 105-item sample: 4 items, 8 verdicts, all four bases a parameter
+    of the wrapped function** — the same family the census doc's §0.6.3 counts as
+    7 of 78 in the round-2 sample. It is the defect §0.9 records one layer out,
+    where the proof layer's own refusals were counted against the code generator,
+    and the same repair: a fact about the census travels on the verdict rather
+    than being inferred by a reader from a sentence that is true of something
+    else.
+
+    **The two must not be confused, and the discriminator is a NAME rather than
+    a shape.** The class applies when the unplaced base is a PARAMETER of the
+    function `_entry_call` calls, because that is the only parameter the harness
+    fills with the integer. A field read through a LOCAL, through a field, or
+    through a parameter of one of the transitively pulled-in helpers is a
+    refusal about the function, and it stays `codegen-refused`: the helper's
+    parameter is filled by the target's own call site, which is source the
+    harness did not write. That last case is a refusal the harness's integer
+    DOES reach — `f(p)` calling `helper(p)` hands it the same `x` — and it is
+    left in `codegen-refused` anyway, because the chain is not walked and
+    under-counting this class is the safe direction to be wrong in. Every one of
+    the census's own items is the direct case, which is why the class is a
+    refinement of a handful of rows and not of an unbounded chain.
     """
     text = str(detail or "")
     if "host module" in text or "imports '" in text or \
@@ -1127,7 +1167,138 @@ def _refusal_class(detail, source=""):
     if any(mark in text for mark in UNLOWERED_CALLEE_MARKS) \
             and _unlowered_builtins_in(source):
         return "refused-builtin"
+    if _harness_supplied_field_base(text, source):
+        return "refused-harness-call"
     return "codegen-refused"
+
+
+# The phrase `formal/model.py::field_access_refusal` publishes for its
+# UNPLACED arm, quoted rather than re-spelled: the model owns the sentence and
+# every existing case in `test_formal_run.py` pins it, so this is the one reader
+# of the fact and it cannot drift from the wording it reads. The other arm of the
+# same refusal ("is a field of `x`, which the build DOES recognise as a frame
+# receiver") is a compiler bug by the model's own sentence and is deliberately
+# NOT matched here — it is not in either direction.
+UNPLACED_FIELD_MARK = "is a field access through"
+
+
+def _unplaced_field_base(detail):
+    """The name a refusal says it cannot place a field access through, or ''.
+
+    One reader of the model's sentence, and it reads the BASE rather than the
+    field: the base is the name whose classification is missing, and it is the
+    name the two uses of this phrase have to agree about — the classifier below
+    asks whether the harness supplied it, and the report has nothing else to say
+    about it. `''` for anything else, which is the answer for every refusal that
+    is not this one.
+    """
+    marker = UNPLACED_FIELD_MARK
+    at = detail.find(marker)
+    if at < 0:
+        return ""
+    rest = detail[at + len(marker):].lstrip()
+    if rest[:1] != "'":
+        return ""
+    end = rest.find("'", 1)
+    return rest[1:end] if end > 0 else ""
+
+
+def _harness_supplied_field_base(detail, source):
+    """The base when `_entry_call` fills it with the stub integer, else ''.
+
+    **The parameters are read out of the SOURCE `_entry_call` wrote, and out of
+    it through `main`**, which is the one function in that text the harness
+    itself emitted and whose body names the function it wrapped. So this asks
+    "is this name a parameter of the function the census called with `x`" and
+    not "is this name a parameter somewhere in this file" — the wider question
+    has a false positive, because a transitively pulled-in helper's parameter is
+    filled by the TARGET's call site, which is source the harness did not write,
+    and a class that cannot tell those apart is the class
+    `_refusal_class`'s docstring says must not exist.
+
+    The parse is `_parse_item_source` and not `ast.parse`, and the reason is its
+    own docstring: the text is Mojo, so a CPython parser cannot read a program
+    that declares a struct, and `[]` would be indistinguishable from an empty
+    answer.
+    """
+    base = _unplaced_field_base(detail)
+    if not base:
+        return ""
+    params = _entry_target_parameters(source)
+    return base if base in params else ""
+
+
+def _entry_target_parameters(source):
+    """The parameter names `_entry_call` fills with the stub integer, or set().
+
+    Read back out of the emitted PROGRAM rather than carried alongside it: the
+    parameter list is a fact about the text this census built, and this file
+    keeps the text (`Workload.source`) rather than a second derivation of it.
+
+    **The parse is `_parse_item_source`, and it has to be a Mojo parse.** The
+    text is not CPython's Python: `ast.parse` raises `SyntaxError` on the very
+    first line of a `struct` declaration, which is the sibling defect
+    `_unlowered_builtins_in` had and this file's own comment records. The
+    parameter list itself is read with `formal/model.py::function_param_shape`,
+    the one reader of `params`/`kwonly`/the stars, so this file spells no second
+    reading of a function's signature.
+
+    `set()` for a source that is not the harness's shape — a hand-written
+    fixture, a file-level item from `formal/examples`, a text the parser could
+    not read — and `set()` is the answer that leaves the refusal where it was,
+    which is the direction `_refusal_class`'s docstring insists on.
+    """
+    import formal.model as FM
+    import fire_compiler as F
+    try:
+        stmts = _parse_item_source(source)
+    except Exception:                       # noqa: BLE001 — see the reader
+        return set()
+    by_name = {}
+    for st in stmts:
+        name = getattr(st, "name", None)
+        if name and isinstance(st, F.FunctionDef):
+            by_name.setdefault(name, st)
+    call = _sole_returned_call(by_name.get("main"))
+    if call is None:
+        return set()
+    target = by_name.get(call.func.name)
+    if target is None:
+        return set()
+    shape = FM.function_param_shape(target)
+    names = {n for n, _ptype in shape.fixed}
+    for starred in (shape.vararg, shape.kwarg):
+        if starred:
+            names.add(starred)
+    return names
+
+
+def _sole_returned_call(fn):
+    """The call a harness-shaped `main` returns, or None.
+
+    The shape `_entry_call` writes — `def main(x): return f(x, x)` — matched
+    STRUCTURALLY rather than by its text, because a `main` that computes
+    something and returns it is a DIFFERENT program (a `formal/examples` item,
+    whose `main` is the file's own) and matching its text would read that
+    file's signature as the harness's. A docstring is the one statement a
+    function of this shape may carry beside the return, so it is filtered and
+    nothing else is: a `main` with two statements is not the harness's.
+    """
+    if fn is None:
+        return None
+    import fire_compiler as F
+    body = []
+    for st in (getattr(fn, "body", None) or []):
+        value = getattr(st, "value", None)
+        if isinstance(st, F.ExprStmt) and isinstance(value, F.StringLiteral):
+            continue
+        body.append(st)
+    if len(body) != 1 or not isinstance(body[0], F.ReturnStmt):
+        return None
+    value = getattr(body[0], "value", None)
+    if not isinstance(value, F.CallExpr) or not isinstance(value.func, F.IdentExpr):
+        return None
+    return value
 
 
 def _unlowered_builtins_in(source):
@@ -1155,20 +1326,54 @@ def _unlowered_builtins_in(source):
     only when the refusal itself carries a builtin marker.
     """
     try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
+        stmts = _parse_item_source(source)
+    except Exception:                       # noqa: BLE001 — see the reader
         return []
+    import fire_compiler as F
     out = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    for node in _model.iter_nodes(stmts):
+        if not isinstance(node, F.CallExpr):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id in NOT_LOWERED_BUILTINS:
-            if _model.extremum_call_is_a_select(func.id, len(node.args),
-                                                len(node.keywords)):
+        if isinstance(func, F.IdentExpr) and func.name in NOT_LOWERED_BUILTINS:
+            if _model.extremum_call_is_a_select(
+                    func.name, len(getattr(node, "args", None) or []),
+                    len(getattr(node, "kwargs", None) or [])):
                 continue
-            out.add(func.id)
+            out.add(func.name)
     return sorted(out)
+
+
+def _parse_item_source(source):
+    """The statements of a program THIS TOOL wrote.
+
+    **Mojo, not CPython's Python, and that is the whole content of this
+    function.** It was `ast.parse` until 2026-10-05, and that was a silent
+    under-count rather than a crash: a `struct` declaration is a `SyntaxError` on
+    its first line, the caller's `except` answered `[]`, and `[]` is
+    indistinguishable from "this program calls no builtin this path does not
+    lower" — so `_refusal_class`'s `refused-builtin` arm could not fire on any
+    item whose program declares a struct and `builtin_frontier` printed nothing
+    for it. **Measured over this tree's 105-item sample: `ast.parse` could not
+    read 6 of the 105, the two readers agree on all 99 it could read (0
+    differences), and the class column does not move — because those 6 items call
+    no builtin this path does not lower.** So the fix is a guarantee rather than
+    a number: the arm was one `struct` away from mis-filing every row it exists
+    for, and the census's `refused-builtin` figures were a lower bound with no
+    stated floor.
+
+    `formal/build.py::parse_module` is the reader rather than a second call into
+    `fire_compiler`, because it is the one the build itself uses and it attaches
+    the per-file struct census every downstream reader of the statements expects.
+
+    The `ast` import elsewhere in this module STAYS and is still right for
+    everything else in it: the WORKLOAD selector reads this repository's own
+    `*.py`, which is CPython Python, and reading that with the Mojo parser would
+    be the mirror-image mistake. The two never overlap — one reads the corpus,
+    the other reads the program the census built out of it.
+    """
+    from formal.build import parse_module
+    return parse_module(source, "<census-item>")
 
 
 # The phrase `builtin_refusal_detail` leads a detail with, and `builtin_frontier`
@@ -1220,8 +1425,8 @@ def _bound_detail(detail):
 # ── Reporting ────────────────────────────────────────────────────────────────
 CLASS_ORDER = ["pass", "admitted", "lean-rejected", "bound-exceeded",
                "proof-emitted", "proof-refused", "proof-crash",
-               "refused-builtin", "codegen-refused", "refused-import",
-               "build-crash"]
+               "refused-builtin", "refused-harness-call", "codegen-refused",
+               "refused-import", "build-crash"]
 
 # Classes that name no CONSTRUCT: a pass, and the phase-A-only row. An item in
 # one of them has nothing to disagree about — see `disagreements`.
@@ -1273,13 +1478,13 @@ def report(results, arch_list):
             if counts.get(cls):
                 mark = ("   <- not a verdict: " + NOT_A_VERDICT[cls]
                         if cls in NOT_A_VERDICT else "")
-                lines.append(f"   {cls:16s} {counts[cls]:4d}{mark}")
+                lines.append(f"   {cls:20s} {counts[cls]:4d}{mark}")
         proven = counts["pass"] + counts["admitted"]
-        lines.append(f"   {'proved at all':16s} {proven:4d} "
+        lines.append(f"   {'proved at all':20s} {proven:4d} "
                      f"({100.0 * proven / max(1, len(vs)):.1f}%)")
         replayed = sum(1 for v in vs if v.cached)
         if replayed:
-            lines.append(f"   {'of which replayed':16s} {replayed:4d}  "
+            lines.append(f"   {'of which replayed':20s} {replayed:4d}  "
                          f"(a cached verdict, not a run — see the ledger's "
                          f"`cached` field)")
     lines.append("")
@@ -1374,8 +1579,8 @@ def disagreements(results, arch_list):
            f"same_function.md)"]
     for ident, va, vb in rows:
         out.append(f"   {ident}")
-        out.append(f"      {a:7s} {va.cls:16s} {va.detail[:150]}")
-        out.append(f"      {b:7s} {vb.cls:16s} {vb.detail[:150]}")
+        out.append(f"      {a:7s} {va.cls:20s} {va.detail[:150]}")
+        out.append(f"      {b:7s} {vb.cls:20s} {vb.detail[:150]}")
     return "\n".join(out)
 
 
@@ -1573,13 +1778,13 @@ def main(argv=None):
             ledger.write(json.dumps(v._asdict()) + "\n")
             ledger.flush()
             if v.cls != "pass":
-                print(f"{v.cls:16s} {v.arch:6s} {v.ident}", flush=True)
+                print(f"{v.cls:20s} {v.arch:6s} {v.ident}", flush=True)
             elif v.cached:
                 # A replayed PASS is the case the `cached` field exists for: it
                 # would otherwise be the only row of a run with nothing on the
                 # screen, which is exactly how `either.mojo` came to be recorded
                 # as covered.
-                print(f"{'pass (replayed)':16s} {v.arch:6s} {v.ident} "
+                print(f"{'pass (replayed)':20s} {v.arch:6s} {v.ident} "
                       f"[wall {v.wall_s}s — a cached verdict, not a run]",
                       flush=True)
             if interrupted["flag"]:

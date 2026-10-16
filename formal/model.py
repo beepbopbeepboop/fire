@@ -25533,6 +25533,79 @@ def _parameter_argument_shape(arg, rets=None):
     return None
 
 
+def _declared_value_shape(ann):
+    """The KIND a DECLARED annotation states, or None when it states none.
+
+    **The same two rows `_parameter_argument_shape` reads off a callee's
+    declared RETURN TYPE, asked of a PARAMETER's annotation instead**, because
+    the two are one claim about one word: `String`/`str` is a `char *` and a blob
+    type is a `[count][…]` frame whose first word is its count. A reader that
+    answered `-> String` and not `: String` would decide that a string is a fact
+    about how a function was WRITTEN and not about what it was handed, and
+    `def outer(s: str): return helper(s)` would be the shape that proved it.
+
+    `None` for an annotation that names nothing this path can represent a value
+    of, and it goes into the claim set rather than being dropped — see the veto
+    rule on `parameter_kinds_by_call_site`. `Pointer[T]` is deliberately not a
+    blob here, and `BLOB_TYPE_NAMES` is what says so; a pointer's width is
+    `pointer_pointee`'s question and a `list` kind here would move a `len` onto
+    the wrong reader.
+
+    An ABSENT annotation is not this function's business: an unannotated
+    parameter's evidence is its call sites, and `_param_list` reports it as a
+    missing annotation rather than as a declared type that states nothing.
+    """
+    if not ann:
+        return None
+    if annotation_base_name(ann) in STRING_TYPE_CTORS:
+        return STR_KIND
+    if return_type_is_blob(ann):
+        return LIST_PREFIX
+    return None
+
+
+def _agreed_parameter_kind(seen):
+    """The one kind a set of claims agrees on, or None.
+
+    A set with a `None` in it agrees on nothing — that is the veto rule, and it
+    is unchanged. Everything else is the pre-existing rule (`len(seen) == 1`)
+    with ONE addition, which the bare-name references made necessary rather than
+    optional: a claim set can now hold both `list` and `list:int`, because one
+    site may hand over a literal (which states its element kind) while another
+    reaches the value through a `: List[Int]` annotation (which cannot see inside
+    the callee's container and so states only the representation —
+    `_parameter_argument_shape`'s own reason for the BARE prefix).
+
+    Those two are not a disagreement: they are one representation stated at two
+    levels of detail, and the merge keeps the DETAIL the claims agree on. Sites
+    that disagree about the element kind keep the representation and withhold the
+    element kind, which is the same direction as the bare prefix — a reader that
+    needs an element kind (`subscript_element_kind`) gets `None` and refuses,
+    where a guess would be a wrong element. `list_kind` / `list_elem_kind` /
+    `is_list_kind` are the three readers this is spelled with, so it cannot drift
+    from how a kind is written down or read back.
+    """
+    if not seen or None in seen:
+        return None
+    if len(seen) == 1:
+        return next(iter(seen))
+    if all(is_list_kind(k) for k in seen):
+        elems = {list_elem_kind(k) for k in seen}
+        return list_kind(elems.pop()) if len(elems) == 1 else LIST_PREFIX
+    return None
+
+
+# How deep a chain of NAMES this reader will follow from a call site's argument to
+# the value the chain names.  A cycle is already an answer (`agreed`'s `active`
+# set), and this is the bound for the other shape the cycle guard cannot see: a
+# straight line of `var a2 = a1; var a3 = a2; …` long enough to exhaust the
+# interpreter's stack, which would be a traceback where every other undecidable
+# answer in this file is a refusal.  Sixteen is far past any real chain — the
+# longest this corpus needs is two hops — and the bound is enforced in
+# `agreed`, which is the one place the chain is walked.
+MAX_PARAMETER_KIND_DEPTH = 16
+
+
 def parameter_kinds_by_call_site(functions, rets=None) -> dict:
     """`{function: {parameter: kind}}` — agreed over EVERY call site.
 
@@ -25553,6 +25626,69 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
     direction and it is the one that matters here — this reader cannot claim a
     parameter is a list when some call this build cannot read passes it
     something else.
+
+    ## A BARE NAME at the call site is followed to where it was bound
+
+    `_parameter_argument_shape` reads the argument's own SHAPE, and a name has
+    none — so before this, `f(some_local)` claimed nothing and every name
+    reached through one was a word. Measured on both architectures, the shape
+    the sweep filed it on (`bugs/FORMAL_sweep_singles_second_half.md` §4's last
+    paragraph, and the limitation this module's own header listed first):
+
+        def helper(t):  return len(t)
+        def outer(s):   return helper(s)
+        main:          outer("qq")
+
+        build: len(t) is len() of a value classified as 'int', and an integer
+        has no length …                       # both architectures, byte-identical
+
+    A bare name is now a REFERENCE to the name in the CALLER, resolved by the
+    same unanimity rule and to the same evidence, so the chain is a fixpoint over
+    the image's names rather than a walk from inside one function — which is what
+    keeps the answer independent of which function the emitter reached first.
+    That order-dependence is the reason the header named this as not to be done
+    naively, and it is why the answer is computed here, in one reader, over the
+    whole `functions` dict both backends already pass in, rather than by asking
+    the CALLER's `ValueKinds` from inside the callee's.
+
+    A reference resolves by a DECLARATION if the name has one and by the SOURCE
+    if it does not, and which is which is a fact about the name rather than a
+    choice per site:
+
+      * **a declaration decides, and it decides ALONE** — a parameter's
+        annotation and a `var x: T` are one statement about the value, and
+        `_declared_annotations` (the reader `ValueKinds` asks for the same
+        question in the same function) is what sees both. An annotation this
+        path cannot map is a `None`, and a `None` is a veto, which is
+        `ValueKinds`'s own answer for the same name;
+      * **with no declaration, a PARAMETER is answered by its call sites** —
+        which is this function's own row, so `outer`'s parameter is answered by
+        whoever calls `outer` and the chain ends where the source states a
+        value;
+      * **and with no declaration, a LOCAL is answered by the statements that
+        bind it** (`_binding_values`) — the same reader `ValueKinds`' own
+        flow-insensitive map uses, and read the same way: a site with no stated
+        expression is a `None` and a `None` is a veto.
+
+    **The first rule is a bug this reader had, and the measurement is the reason
+    it is written down.** An initializer is not a type: `var q: Pointer[Int64] =
+    s` was read as whatever `s` held, so a `Pointer[Int64]` reached the reader as
+    a `char *` two hops later, `p.value()` stopped being intercepted as a
+    dereference (`DEREFERENCE_TRY_NAMES`) and was refused four questions from
+    the construct it is about. `ValueKinds._bind_value` takes the annotation for
+    exactly this reason, and now so does this.
+
+    A body rebinding of a PARAMETER is deliberately not evidence here, and the
+    asymmetry is the point: what the caller PASSES does not change because the
+    callee assigned to its own parameter afterwards, so unioning `_binding_values`
+    into a parameter's row would let `var u = t + 1` retract the kind of every
+    call site that passes a string.
+
+    A CYCLE claims nothing (`agreed`'s `active` set) and a chain deeper than
+    `MAX_PARAMETER_KIND_DEPTH` does too, which is the same answer a cycle gets in
+    `func_kind`'s depth limit and in every other recursion guard in this file: a
+    word is what an undecidable answer looks like, and it is the direction that
+    refuses rather than the one that guesses.
 
     It was `string_parameters_by_call_site` and returned only `STR_KIND`, which
     is the one row the truthiness of an unannotated `char *` parameter needed;
@@ -25583,8 +25719,18 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
         name = getattr(fn, "name", None)
         if name:
             by_name.setdefault(name, []).append(fn)
+    # `(callee, parameter) -> {kind | None}` — what the call sites' own ARGUMENT
+    # SHAPES say, which is the whole of the pre-existing walk.
     claims: dict = {}
+    # `(callee, parameter) -> {(caller, name)}` — the arguments that are a bare
+    # NAME, kept apart because they are not claims at all: they are references to
+    # a name in the caller, and resolving one is the fixpoint below. They stay out
+    # of `claims` so that a reference which resolves to nothing lands as the same
+    # `None` an unreadable expression lands as, and a reference which resolves
+    # RETRACTS that veto instead of being added beside it.
+    passed: dict = {}
     for caller in functions or ():
+        caller_name = getattr(caller, "name", None)
         for call in iter_nodes(getattr(caller, "body", None) or []):
             if not isinstance(call, F.CallExpr):
                 continue
@@ -25604,11 +25750,109 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
             pairs = list(zip(names, args)) if not kwargs else \
                 [(k[0], k[1]) for k in kwargs if k[0] in names]
             for pname, arg in pairs:
+                if isinstance(arg, F.IdentExpr) and caller_name:
+                    passed.setdefault((callee, pname), set()).add(
+                        (caller_name, arg.name))
+                    continue
                 claims.setdefault((callee, pname), set()).add(
                     _parameter_argument_shape(arg, rets))
-    return {callee: {pname: seen.pop() for (c, pname), seen in claims.items()
-                     if c == callee and len(seen) == 1 and None not in seen}
-            for callee in {c for c, _p in claims}}
+    # `(caller, name) -> {annotation | None}` — the DECLARATION of a name, for the
+    # node question "what does this name hold in the functions called `caller`".
+    # A name two definitions of `caller` disagree about (a parameter in one and a
+    # local in another, or two different annotations) is a set of more than one
+    # entry, which the unanimity rule below answers as "nothing" — the same
+    # answer `struct_frame_slot_candidates` gives a layout disagreement.
+    annotations: dict = {}
+    parameters: set = set()
+    for name, defs in by_name.items():
+        for fn in defs:
+            for p in _param_list(fn):
+                pname = p[0] if isinstance(p, (tuple, list)) else p
+                parameters.add((name, pname))
+            # `_declared_annotations` rather than the parameter list above, so a
+            # `var q: Pointer[Int64] = s` is a DECLARATION here for the same
+            # reason it is one in `ValueKinds` — see `agreed`'s own comment.
+            for pname, anns in _declared_annotations(fn).items():
+                annotations.setdefault((name, pname), set()).update(anns)
+    memo: dict = {}
+    sites_memo: dict = {}
+
+    def _binding_sites(fn, name):
+        key = (id(fn), name)
+        if key not in sites_memo:
+            sites_memo[key] = _binding_values(fn, name)
+        return sites_memo[key]
+
+    def agreed(node, active, depth=0):
+        """The kind `(caller, name)` holds, or None; memoised over the image.
+
+        The memo is what makes this a FIXPOINT rather than a walk: the same node
+        reached from two parameters is walked once, `active` is what makes a
+        cycle an answer rather than a recursion, and neither depends on the order
+        the emitter reached the functions in — which is the whole of the
+        objection the header raised to reading the caller's own kinds.
+        """
+        if node in memo:
+            return memo[node]
+        if node in active or depth > MAX_PARAMETER_KIND_DEPTH:
+            # A cycle, or a chain past the bound: both claim nothing, and both
+            # are refusals rather than a hang.
+            return None
+        active.add(node)
+        seen = set()
+        anns = annotations.get(node)
+        if anns is not None:
+            # A DECLARATION decides, and it decides alone. `_declared_annotations`
+            # is the reader `ValueKinds` reads for the same question in the same
+            # function, and it covers a parameter annotation AND a `var x: T`,
+            # because those are one statement about the value — so this branch
+            # answers `f(s: str)`, `f(s)` reached through a declared caller
+            # parameter, and `var q: Pointer[Int64] = s` the same way.
+            #
+            # **And that last one is a bug this branch was written to prevent.**
+            # The first version asked the BINDING of a local and never its
+            # annotation, so `var q: Pointer[Int64] = s` was read as whatever `s`
+            # held — measured on both architectures, `read_x(p)` reached through
+            # a chain of two such locals came out classified as a `str`, and
+            # `p.value()` stopped being intercepted as a dereference
+            # (`DEREFERENCE_TRY_NAMES`) and was refused as "a method this path
+            # cannot answer" four questions from the construct it is about. An
+            # initializer is not a type: `ValueKinds._bind_value` takes the
+            # annotation for exactly this reason.
+            if len(anns) == 1:
+                seen.add(_declared_value_shape(next(iter(anns))))
+            else:
+                seen.add(None)    # two declarations of one name: nothing
+        else:
+            # No declaration. A PARAMETER's value comes from its call sites —
+            # which is this function's own row, so the chain ends where the
+            # source states one — and a LOCAL's from the statements that bind
+            # it, which is `_binding_values`, the reader `ValueKinds` reads for
+            # that question in the same flow-insensitive way.
+            for ref in passed.get(node, ()):
+                seen.add(agreed(ref, active, depth + 1))
+            seen.update(claims.get(node, ()))
+            if node not in parameters:
+                for fn in by_name.get(node[0], ()):
+                    for site in _binding_sites(fn, node[1]):
+                        if site is None:
+                            seen.add(None)
+                        elif isinstance(site, F.IdentExpr):
+                            seen.add(agreed((node[0], site.name), active,
+                                            depth + 1))
+                        else:
+                            seen.add(_parameter_argument_shape(site, rets))
+        active.discard(node)
+        memo[node] = _agreed_parameter_kind(seen)
+        return memo[node]
+
+    rows: dict = {}
+    for node in list(claims) + list(passed):
+        kind = agreed(node, set())
+        if kind is None:
+            continue
+        rows.setdefault(node[0], {})[node[1]] = kind
+    return rows
 
 
 
@@ -33950,6 +34194,11 @@ def _binding_values(fn, name: str) -> list:
     here is the TARGET — `fire_compiler.for_target_names`, the parser's own
     representation reader — and nothing about the walk itself.
 
+    **The walk is `_binding_sites_index`'s and this function is its one-name
+    reader**, so the two cannot disagree about which statements bind a name and
+    the index is paid for once per function rather than once per name — the
+    cost that decided it, with the measurement, is in that function's docstring.
+
     **The residual is stated rather than implied**: a site shape this walk does
     not name is a site this walk does not see, and a name bound at one of those
     and at an integer elsewhere would be refused on the strength of the integer
@@ -33968,29 +34217,75 @@ def _binding_values(fn, name: str) -> list:
     the module-level binding's shape ended up, so a name asked about twice gets
     one answer.
     """
-    sites = []
+    return list(_binding_sites_index(fn).get(name) or ())
+
+
+def _binding_sites_index(fn) -> dict:
+    """`{name: [site, …]}` — every name `fn` binds, and what each site writes.
+
+    **One walk for the whole function, which is the whole point, and `_binding_values`
+    is the one-name reader over this table.** It was a walk PER NAME, so a reader
+    that follows a chain of names paid O(names × body) on a module with many
+    locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
+    `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
+    walk and 2.24 s with this one (best of three each), and the standard this is
+    measured against is `bugs/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    residues left open were 0.094 s and 0.003 s on the largest file in the
+    repository, and both were declined rather than taken.  There is one dispatch
+    below and `_binding_values` reads it, so the two cannot disagree about which
+    statements bind a name — the failure `_binding_values`'s own docstring names.
+
+    Cached on `fn` beside `_declared_annotations`'s own cache and for its reason:
+    the AST is fixed by the time any of this runs, so the answer cannot change,
+    and every caller would otherwise re-derive the same table.
+    """
+    cached = getattr(fn, "_binding_sites_index", None)
+    if cached is not None:
+        return cached
+    out: dict = {}
+
+    def add(name, site):
+        if name:
+            out.setdefault(name, []).append(site)
+
     for node in iter_nodes(getattr(fn, "body", None) or []):
         if isinstance(node, F.AssignStmt):
-            sites += _one_target_site(node.target, name, node.value)
+            for name in _sole_target_leaf(node.target):
+                add(name, node.value)
         elif isinstance(node, F.MultiAssignStmt):
             for target in node.targets or ():
-                sites += _one_target_site(target, name, node.value)
+                for name in _sole_target_leaf(target):
+                    add(name, node.value)
         elif isinstance(node, F.AugAssignStmt):
             # `f += 1` writes `f + 1`, so what lands in the name depends on what
             # was there — the one site whose result no single expression states.
-            if name in _target_leaves(node.target):
-                sites.append(None)
+            for name in _target_leaves(node.target):
+                add(name, None)
         elif isinstance(node, F.VarDecl):
-            if node.name == name:
-                sites.append(node.value)
+            add(node.name, node.value)
         elif isinstance(node, (F.ForStmt, F.ComptimeForStmt, F.Comprehension)):
-            if name in _target_leaves(getattr(node, "target", None)):
-                sites.append(None)
+            for name in _target_leaves(getattr(node, "target", None)):
+                add(name, None)
         elif isinstance(node, F.WithStmt):
             for item in node.items or ():
-                if name in _target_leaves(getattr(item, "alias", None)):
-                    sites.append(None)
-    return sites
+                for name in _target_leaves(getattr(item, "alias", None)):
+                    add(name, None)
+    fn._binding_sites_index = out
+    return out
+
+
+def _sole_target_leaf(target) -> list:
+    """`[name]` when the target binds exactly one name, else `[]`.
+
+    A target that binds SEVERAL names binds ELEMENTS, so the whole value is not
+    what any one of them receives and the site is undecided — which is why the
+    unpack case records nothing rather than recording the container. That was
+    `_one_target_site`'s rule asked one name at a time, and it is gone with the
+    per-name walk rather than left beside the index as a second copy of the same
+    test.
+    """
+    leaves = _target_leaves(target)
+    return leaves if len(leaves) == 1 else []
 
 
 class _ElementWrite(NamedTuple):
@@ -34153,19 +34448,6 @@ def _target_leaves(target) -> list:
         return [n.lstrip("*").strip() for n in F.for_target_names(target)]
     except Exception:
         return []
-
-
-def _one_target_site(target, name: str, value) -> list:
-    """`[value]` when `target` binds `name` to it outright, `[]` otherwise.
-
-    A target that binds SEVERAL names binds ELEMENTS, so the whole value is not
-    what any one of them receives and the site is undecided — which is why the
-    unpack case records nothing rather than recording the container.
-    """
-    leaves = _target_leaves(target)
-    if name not in leaves or len(leaves) != 1:
-        return []
-    return [value]
 
 
 # The shapes whose ELEMENT is a value the container itself was not: a subscript
