@@ -78,7 +78,7 @@ BARE_BASELINE = {
     'bugs/COMPILE_FAIL_importlib_metadata___init__.md': 1,
     'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/COMPILE_FAIL_zipfile___init__.md': 3,
-    'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md': 4,
+    'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md': 5,
     'bugs/DOCS_formal16_2_deleted_the_bit_test_doc_under_a_survey_another_worker_owns.md': 3,
     'bugs/DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md': 1,
     'bugs/FORMAL_a_conditional_value_in_a_dylib_export.md': 2,
@@ -128,6 +128,7 @@ BARE_BASELINE = {
     'test_coro_detached_async.py': 1,
     'test_coro_future_await.py': 1,
     'test_coro_nested_async_capture.py': 1,
+    'test_dangling_doc_refs.py': 2,  # fixture names (FORMAL_fixture.md) the test plants
     'test_gimple.py': 2,
     'test_gimple_async_runner.py': 1,
     'test_gimple_generator_runner.py': 1,
