@@ -3847,9 +3847,10 @@ dylib_exports: list = None, globals_base: int = None,
         leaves keep the star, and refuses the target at the identifier check
         with the one shared sentence the x86-64 site gives it. The rest-blob
         machinery this method used to own (`_emit_for_unpack_star_rest`) was
-        deleted with that refusal — the option (1) resolution of
-        `FORMAL a starred for target is broken on both backends` —
-        rather than left as dead code that reads as support."""
+        deleted with that refusal — the option (1) resolution, pinned by
+        `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target` and its
+        two sibling rows — rather than left as dead code that reads as
+        support."""
         if isinstance(tree, str):
             self._store_var(tree, 0)
             return

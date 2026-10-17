@@ -7044,8 +7044,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # The SHAPE's leaves, for the same reason the arm64 site asks for
             # them: a star leaf keeps its `*`, so a starred for-target is
             # refused HERE, by this identifier check, with the same sentence
-            # arm64 gives it — the option (1) refusal of
-            # `FORMAL a starred for target is broken on both backends`.
+            # arm64 gives it — the option (1) refusal, pinned by
+            # `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target`
+            # and its two sibling rows.
             leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(

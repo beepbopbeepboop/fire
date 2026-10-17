@@ -78,9 +78,9 @@ write):
   would otherwise reject a marker for a stem that now returns rc 0 — and
   `count` (still hard-red) moved from the epilogue x30 `rfl` to
   `maximum recursion depth` at `count_proof.lean:4305:58`, the
-  `arm64_ext_imm12`/`work_step_add_imm64` reduction owned by
-  `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`; it too now
-  admits one `sorry` at the x30 leaf. `bugs/FORMAL_three_examples_fail_their_
+  `arm64_ext_imm12`/`work_step_add_imm64` reduction — `f7bd05ea`'s
+  `first | (simp only [qT0, qS0] <;> done) | rfl` in place of the bare `rfl`
+  at a block start; it too now admits one `sorry` at the x30 leaf. `bugs/FORMAL_three_examples_fail_their_
   proofs_on_master.md`'s "the two frame cases are still red" is now half true and
   is that doc's to correct.
 * **`sgt8`/`sle8`/`ug8`**: the same fix closes
@@ -90,8 +90,10 @@ write):
   (9 failures without the fix over the five proof-generator classes, 8 with it,
   and no new one).
 
-**What is still a hard red, and whose it is.** `mod_by_var` has NO marker and is
-owned by `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`; the
+**What is still a hard red, and whose it is.** `mod_by_var` has NO marker; its
+`maxRecDepth` at a block start was the oct-7 proofgen reds' subject and is
+`f7bd05ea`'s half, but anything still red under that name is this census's row
+to re-measure; the
 declared families keep their `EXPECTED_FAILURES` markers and their owners
 (`sum_range` — which the generator now DECLINES rather than emitting the false
 contract, `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_

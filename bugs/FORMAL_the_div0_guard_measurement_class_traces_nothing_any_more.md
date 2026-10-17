@@ -44,9 +44,11 @@ at a call it cannot follow). So `_ADMIT` is absent, the class's
    the class would not yet get a residual.** The generated `q(a,b)` proof does
    not typecheck: `lean` on it fails at `q_b6_self1`'s
    `q_sr_86 (q_b6_qS0 st) (hpc0)` with `maximum recursion depth has been
-   reached` (`q_check.lean:4723:50`), the same merge-era red
-   `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` measures on
-   `mod_by_var` (its `b6_self1`).
+   reached` (`q_check.lean:4723:50`) — the same merge-era
+   `maxRecDepth`-at-a-block-start defect measured on `mod_by_var` (its
+   `b6_self1`), which `f7bd05ea` closes by discharging the block-start
+   `runs_cons_seq` side condition with `first | (simp only [qT0, qS0] <;> done)
+   | rfl` rather than a bare `rfl`.
 
 **What landed here, and it is a pin rather than a fix.**
 `TestTheZeroDivisorGuardAgainstLean`'s `blind` report now NAMES the
@@ -196,8 +198,10 @@ is new, and what blocks the fix this doc wants, is that (a) on master arm64's
 `compiler_traps` list is EMPTY because the emitter recording was dropped by a
 merge (`8df5b273`; the EMITTER half is landed again in `e632f228`, "arm64: record
 the compiler's own calls again", and the stack guard's `getrlimit` has since
-moved into the startup stub below `func_offset`, so the walk no longer sees
-it), so on master there is nothing to subtract, and (b) subtracting it is measured NOT to reach
+moved into the startup stub below `func_offset`, so it is subtracted by ADDRESS
+rather than published as a trap — pinned by `test_formal_call_proof_gen.py`'s
+`TestCompilerTrapIsNotAProgramCall`), so on master there is nothing to subtract,
+and (b) subtracting it is measured NOT to reach
 the div0 residual: with the recording restored and the traps filtered out of
 `_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion contract: the
 call in block 2 has to be below the source condition's negation`), not to the

@@ -5526,6 +5526,23 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
                           f"= some ({S}_qT{k} st) :=\n"
                           f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
+    # The `hseq` side condition of `runs_cons_seq` is discharged two ways, and
+    # the split is not stylistic.  For the block's FIRST instruction the source
+    # state is `S_qS0 st`, which is `st` (`def S_qS0 := st`), so the condition
+    # is `(S_qT0 st).pc = st.pc`; that is a `rfl`, but on `Arm64State` (36
+    # fields) the `rfl` defeq walk of `(S_qT0 st).pc` can exhaust Lean's
+    # `maxRecDepth` (100000) when the step's record update is on `sp` with a
+    # large `UInt64.ofNat` immediate -- measured on
+    # `formal/examples/mod_by_var.mojo` (block 6's `add sp, sp, #32, lsl #12`)
+    # and on `SAME_IMAGE_CALL["same_image_leaf"]` (block b3), both of which
+    # failed with "maximum recursion depth has been reached" at the `rfl` and
+    # typecheck once the condition is proved by
+    # `first | (simp only [S_qT0, S_qS0] <;> done) | rfl` (the `simp` arm folds
+    # the projection without the deep walk; the `rfl` arm is the fallback).
+    # Every LATER step's condition is a definitional identity between two
+    # generated defs that `simp`'s projection reduction does not close, so those
+    # keep `rfl` (which does, shallowly, because their updates are not the
+    # first-step `sp` one).
     # self_k theorems: arm64_runs code k st = some (qS_k st) for 1 <= k <= m-1
     for k in range(1, m):
         A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
@@ -5534,7 +5551,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(step_facts[:k]))
         if k == 1:
             A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
-              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
+              f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
             A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
@@ -5584,7 +5601,7 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A("\n".join(step_facts))
         if m == 1:
             A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
-              f"{_state_proof(_block_state_unfold(S, 1), paren=True)},")
+              f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
         else:

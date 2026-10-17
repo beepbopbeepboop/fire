@@ -53,10 +53,10 @@ scalar spelling there is.
 
 The class is exactly the one the `printf`-container guard exists to catch, one
 level of nesting away: the guard sees a name whose kind is a container and
-refuses the `%d`. It is also why the deleted
-`FORMAL_a_starred_for_target_is_broken_on_both_backends.md`'s own reproducer
+refuses the `%d`. It is also why the starred-for-target reproducer
 (`for a, *rest in [(1,)]: printf("%d", a)`) still refuses at generation — its
-star half is fixed, and this half is not.
+star half is fixed and pinned by `test_formal_run.py`'s three
+`both_arch_refuse_a_starred_*` rows, and this half is not.
 
 ## The boundary of it
 
