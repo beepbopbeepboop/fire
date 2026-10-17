@@ -7739,6 +7739,15 @@ def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: s
     return True
 
 
+def _mark_unknown_list_elem(gen, list_val: str, t: str) -> None:
+    """`xs[i]` of a list whose element kind was never recorded is a word of
+    unknown kind, for the reason `_mark_unknown_dict_value` gives: the
+    measured case is `_pnames[_i]` over a dict value holding unpacked
+    parameter NAMES, whose `key + '::' + _pnames[_i]` rendered the address."""
+    if gen._elem_types.get(list_val) is None:
+        gen._dyn_word_vals.add(t)
+
+
 def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
     """`d[k]` read through the int view of a dict whose VALUE type was
     never recorded is a word of unknown kind -- the measured case is the
@@ -7964,6 +7973,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if elem == 'MojoDict *' and ov in gen._dict_val_types:
                 gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
             return elem, cast_t
+        _mark_unknown_list_elem(gen, ov, t)
         return 'int64_t', t
 
     if ot == 'MojoStr *':
@@ -8151,6 +8161,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if elem == 'MojoDict *' and ov in gen._dict_val_types:
                 gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
             return elem, cast_t
+        _mark_unknown_list_elem(gen, lp, t)
         return 'int64_t', t
 
     # Struct pointer subscript: Span[i] → Span->_data[i] etc. Guarded to
