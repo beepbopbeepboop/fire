@@ -15345,6 +15345,20 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     which = ("the left operand" if on_left else
              "the right operand" if right_is_blob
              else "an operand")
+    # What the DIAGNOSTIC spells, which is not always `op`: the augmented
+    # emitters strip the `=` (`>=` arrives as `>`), and a message that told
+    # somebody their `>=` was a `>` would be a small lie about the line they are
+    # looking at. The same `spelled_op or op` every sibling below uses, and the
+    # same reason it cannot just be `op`.
+    #
+    # **This binding was missing, and its absence was a `NameError` rather than a
+    # wrong word**: every program that reached this message got a Python
+    # traceback out of the compiler instead of a diagnostic — so `len(max(a, 0))`
+    # on `a = [1, 2]` died inside the refusal rather than being refused with one.
+    # A diagnostic that cannot be built is the worst of the two answers, and
+    # nothing caught it because the arm that raises is only reached by a
+    # container operand on one side and one of the gated operators.
+    shown = spelled_op or op
     return (
         f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "
         f"blob on this path is a fixed block of the frame, so the word the "

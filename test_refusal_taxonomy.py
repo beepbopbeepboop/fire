@@ -1694,8 +1694,39 @@ def main() -> int:
             "is the link audit's, four stages late, about symbols")
     checks += 1
 
-    # The precedence rule, stated independently of the samples above so a
-    # future edit cannot satisfy SAMPLES by deleting a marker outright.
+    # ── a refusal that can be BUILT is one that still reads as a refusal ──────
+    # `container_operator_refusal`'s message interpolated a name it never bound,
+    # so every program that reached it got a Python `NameError` traceback out of
+    # the compiler instead of a diagnostic: `a = [1, 2]; len(max(a, 0))` died
+    # inside the refusal rather than being refused with one. The two
+    # comprehension-element samples in SAMPLES above are HAND-COPIED, so nothing
+    # in this file constructed that message and nothing noticed — which is the
+    # one thing this file's docstring says a sample must not be able to do.
+    #
+    # So it is asked here, from `model` and with no build, in both directions
+    # that matter: the message exists, and it names the operator the DIAGNOSTIC
+    # should say (`spelled_op or op`) rather than the bare one the table is keyed
+    # on. Both backends pass no `spelled_op`, so `op` is what a reader sees.
+    #
+    # The blob is on the RIGHT, which is the side `max(a, 0)` reaches: `max`
+    # lowers to a select whose test is `0 < a`, so the container is the
+    # `right` operand of the compare and this is the sentence the corpus rows
+    # above (`an_extremum_of_a_container_and_a_literal_…` in
+    # `test_formal_value_model.py`, `a_container_and_a_literal` in
+    # `test_formal_builtins_conformance.py`) are keyed on.
+    _blob_msg = FM.container_operator_refusal(
+        ">", FM.INT_KIND, FM.list_kind(FM.INT_KIND))
+    if _blob_msg is None:
+        failures.append(
+            "formal/model.py::container_operator_refusal no longer refuses a "
+            "container compared with a number, so the family the SAMPLES rows "
+            "above classify is one the backend cannot produce")
+    elif not _blob_msg.startswith("'>' is refused when the right operand is a"):
+        failures.append(
+            "container_operator_refusal's message does not lead with the "
+            "operator the source spelled, so the two families a reader and this "
+            f"file's markers key on cannot be told apart: {_blob_msg[:90]!r}")
+    checks += 1
     pre = ("a X receiver is passed to foo(), which is a name with no "
            "definition in hand")
     if S._refusal_family(pre) != "callee has no definition on this path":
