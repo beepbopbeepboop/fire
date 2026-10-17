@@ -3777,7 +3777,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int', gen._new_val('int', '0')
 
     if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
-        'keys', 'values', 'items', 'get', 'pop', 'copy',
+        'keys', 'values', 'items', 'get', 'pop', 'copy', 'setdefault',
         'append', 'extend', 'sort', 'reverse',
         'add', 'discard',
         'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
@@ -3805,7 +3805,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit(f"  {ip} = {ov_local};")  # same type, no cast
         else:
             gen._emit(f"  {ip} = (int64_t){ov_local};")
-        if method in ('keys', 'values', 'items', 'get'):
+        # `setdefault` exists on dict alone. Through the generic boxed-receiver
+        # stub it answered the RECEIVER itself, so `seen[g].setdefault(p,
+        # set()).add(k)` (coro's call-site scan) added a "set" element into
+        # the DICT and the stage2 binary corrupted its own heap.
+        if method in ('keys', 'values', 'items', 'get', 'setdefault'):
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
             if ov in gen._dict_val_types:
                 gen._dict_val_types[dp] = gen._dict_val_types[ov]
