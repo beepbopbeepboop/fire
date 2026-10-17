@@ -3718,7 +3718,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit(f"  {ip} = (int64_t){ov_local};")
         other_type, other_val = gen.lower_expr(node.args[0])
 
-        def _emit_set_update_loop(sp):
+        def _emit_set_update_loop(sp: str) -> None:
             lv = gen._materialize_as_list(other_type, other_val)
             _elem = gen._elem_of(lv)
             _suf = gimple_ctypes.TypeLattice.list_suffix(_elem) if _elem else 'int'
