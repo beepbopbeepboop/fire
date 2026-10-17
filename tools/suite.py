@@ -3766,11 +3766,17 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
+#
 # `deps=['preflight', 'prooflib']`: one assertion,
-# `test_library_state_agrees_with_the_question_it_asks`, requires all six
-# `lib/*.olean` to be present (it is what says a cache report is not reporting
-# about a missing library), so the job must not start before the shared library
-# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
+# `test_library_state_agrees_with_the_question_it_asks`, asks the same
+# library-state question the census above asks — it requires every
+# `formal/lean.py::LIBRARY_MODULES` key (all six of them) to have a
+# `lib/*.olean`, which is what says a cache report is not reporting about a
+# missing library — so the job must not start before the shared library build
+# when a parallel `proofs` bucket runs it beside `formal-proof-census`. It went
+# unnoticed because a warm tree already has the library: this job's own work
+# stays Lean-free and the dep only orders it behind the one build every proof
+# job shares.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so

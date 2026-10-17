@@ -2005,6 +2005,24 @@ def compile_formal(source_path: str, output: str = None,
     # declarations reach this file at all.
     linked = load_dylib_manifests(link_dylibs)
     imported_structs = _imported_structs(source_path, stmts, arch, linked)
+    # …and the FREE functions this file imports, which are the same evidence one
+    # module out: a callee's declared `-> T`. `_imported_structs` already brings
+    # the imported STRUCT declarations, so a `var r = make(7)` whose `make` is
+    # imported and whose declared return is a one-field struct can be recognised
+    # at the BINDING — the cross-module half of `_call_returns_one_word_struct`,
+    # which had only the same-image spelling until now. Gated on Mach-O for the
+    # same reason `_imported_structs` is: a target with no module concept has
+    # nothing to import and nothing to bind.
+    if fmt_wants_macho(arch):
+        from formal.imports import (imported_function_defs,
+                                    imported_module_function_defs)
+        imported_functions = imported_function_defs(source_path, stmts,
+                                                    project_root=source_path)
+        imported_module_functions = imported_module_function_defs(
+            source_path, stmts, project_root=source_path)
+    else:
+        imported_functions = {}
+        imported_module_functions = {}
     # …and the source's own GENERIC TEMPLATE bodies leave the statement list
     # here, after `_imported_structs` has APPENDED the instantiated ones. The
     # order is the whole content: an instantiated body is a top-level statement
@@ -2056,7 +2074,8 @@ def compile_formal(source_path: str, output: str = None,
     try:
         functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs,
-            source_path=source_path)
+            source_path=source_path, extra_functions=imported_functions,
+            extra_module_functions=imported_module_functions)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
@@ -4274,7 +4293,9 @@ def _one_word_return_structs(functions, structs_by_name, one_field=None) -> dict
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
                      star_imports: tuple = (),
-                     enum_structs=None, one_field=None) -> None:
+                     enum_structs=None, one_field=None,
+                     extra_functions: dict = None,
+                     extra_module_functions: dict = None) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -4346,6 +4367,15 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # call both need, so a callee's DECLARED return type is read from one table
     # rather than two that could disagree about which definition a name is.
     functions_by_name = _unique_functions_by_name(functions)
+    # …and the FREE functions this file IMPORTS, under the local name a call
+    # site spells. `extra_functions` is `formal/imports.py::
+    # imported_function_defs`, and it is a source of the SAME evidence (a
+    # callee's declared `-> T`) one module out; added only for names this unit
+    # does not already define, so a local definition wins and no existing
+    # answer moves. `setdefault` rather than `update`: a name already in the
+    # table is this unit's own, resolved by `_unique_functions_by_name` above.
+    for _n, _f in (extra_functions or {}).items():
+        functions_by_name.setdefault(_n, _f)
     if not framed:
         # A module with no framed struct has no frame anywhere in it, which is a
         # DEFINITE answer about every parameter — each is an ordinary word —
@@ -4378,7 +4408,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
                                     holders, hstruct, one_word, one_field,
-                                    functions_by_name=functions_by_name)
+                                    functions_by_name=functions_by_name,
+                                    module_functions=extra_module_functions)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -4705,7 +4736,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
                                 hstruct, one_word, one_field,
-                                functions_by_name=functions_by_name)
+                                functions_by_name=functions_by_name,
+                                module_functions=extra_module_functions)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -10139,7 +10171,7 @@ def _unique_functions_by_name(functions) -> dict:
 
 
 def _one_word_constructor_bindings(fn, structs_by_name, functions_by_name=None,
-                                   one_field=None) -> dict:
+                                   one_field=None, module_functions=None) -> dict:
     """`{name: [struct, …]}` for locals bound from a ONE-FIELD struct's
     construction — the case whose value is a plain word that IS the field.
 
@@ -10187,18 +10219,20 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions_by_name=None,
         elif isinstance(node, F.AssignStmt) and isinstance(node.target,
                                                           F.IdentExpr):
             target, value = node.target.name, node.value
-        if not target or not isinstance(value, F.CallExpr) \
-                or not isinstance(value.func, F.IdentExpr):
+        if not target or not isinstance(value, F.CallExpr):
             continue
-        st = (structs_by_name or {}).get(value.func.name)
-        if st is not None and (M.type_constructor_kind(value.func.name)
-                               is not None
-                               or M.struct_is_framed(st)
-                               or M.struct_field_count(st) != 1):
-            st = None
+        st = None
+        if isinstance(value.func, F.IdentExpr):
+            st = (structs_by_name or {}).get(value.func.name)
+            if st is not None and (M.type_constructor_kind(value.func.name)
+                                   is not None
+                                   or M.struct_is_framed(st)
+                                   or M.struct_field_count(st) != 1):
+                st = None
         if st is None:
             st = _call_returns_one_word_struct(
-                value, structs_by_name, functions_by_name, one_field)
+                value, structs_by_name, functions_by_name, one_field,
+                module_functions)
         if st is None:
             continue
         got = out.setdefault(target, [])
@@ -10208,8 +10242,8 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions_by_name=None,
 
 
 def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
-                            one_word, one_field=None, functions_by_name=None
-                            ) -> None:
+                            one_word, one_field=None, functions_by_name=None,
+                            module_functions=None) -> None:
     """Seed `one_word[fn]` for `fn`, and the HOLDER half of the same fact.
 
     A LOCAL construction, a CALL whose declared `-> T` names a one-field
@@ -10292,7 +10326,8 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
     """
     key = _fn_key(fn)
     bound = _one_word_constructor_bindings(fn, structs_by_name,
-                                           functions_by_name, one_field)
+                                           functions_by_name, one_field,
+                                           module_functions)
     one_word[key].update(bound)
     # …and the same bindings read for the FRAME half, which is the case the
     # one-word VALUE table above cannot see and the frame pass had no case for.
@@ -11442,7 +11477,8 @@ def _one_word_sole_field_chain(st, structs_by_name: dict,
 
 
 def _call_returns_one_word_struct(value, structs_by_name: dict,
-                                  functions_by_name: dict, one_field=None):
+                                  functions_by_name: dict, one_field=None,
+                                  module_functions=None):
     """The ONE-WORD struct a CALL's declared `-> T` names, or None.
 
     The third source of one-word evidence beside a construction and a declared
@@ -11458,6 +11494,20 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
     with several definitions claims nothing here — the same agree-or-refuse
     rule every other by-name reader in this file applies.
 
+    **A callee this unit IMPORTS is the same declaration one module out**, and
+    the two spellings are both read here: a bare `make(7)` under
+    `from libcp import make` (its declaration is folded into
+    `functions_by_name` by `_prepare_functions`' `extra_functions`) and a
+    module-qualified `libcp.make(7)` (`module_functions` is the
+    `{module local name: {function name: FunctionDef}}` table
+    `formal/imports.py::imported_module_function_defs` reads).  Without this a
+    local bound from an imported one-field-struct-returning call was refused at
+    its first field read — "a field access through 'r'" — even though the
+    image had the declaration in hand, which is the cross-module half of the
+    same-image fix the 2026-10-08 Status of
+    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`
+    records.
+
     Three refusals, and each is the direction that cannot produce a wrong
     number:
 
@@ -11470,10 +11520,21 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
         plain one-word value would read through the wrong lowering.  Left to
         the holder path rather than answered here, which is the safe direction.
     """
-    if not isinstance(value, F.CallExpr) \
-            or not isinstance(value.func, F.IdentExpr):
+    if not isinstance(value, F.CallExpr):
         return None
-    callee = (functions_by_name or {}).get(value.func.name)
+    callee = None
+    if isinstance(value.func, F.IdentExpr):
+        callee = (functions_by_name or {}).get(value.func.name)
+    elif isinstance(value.func, F.MemberExpr) \
+            and isinstance(value.func.obj, F.IdentExpr):
+        # A module-qualified call only: the base has to be a module THIS file
+        # imported, or a `recv.method()` whose receiver happens to share a
+        # module's name would be read as a free function. `module_functions` is
+        # exactly the set of module spellings this file bound, so the membership
+        # test is the discriminator.
+        mod = (module_functions or {}).get(value.func.obj.name)
+        if mod:
+            callee = mod.get(value.func.member)
     if callee is None:
         return None
     base = M.annotation_base_name(getattr(callee, "return_type", None))
@@ -11488,7 +11549,8 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
 
 
 def _one_word_field_map(fn, structs_by_name: dict, owner=None,
-                        one_field=None, functions_by_name=None) -> dict:
+                        one_field=None, functions_by_name=None,
+                        module_functions=None) -> dict:
     """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
@@ -11533,12 +11595,13 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
             target, value = node.target.name, node.value
         if not target or not isinstance(value, F.CallExpr):
             continue
-        if not isinstance(value.func, F.IdentExpr):
-            continue
-        st = structs_by_name.get(value.func.name)
+        st = None
+        if isinstance(value.func, F.IdentExpr):
+            st = structs_by_name.get(value.func.name)
         if st is None:
             st = _call_returns_one_word_struct(
-                value, structs_by_name, functions_by_name, one_field)
+                value, structs_by_name, functions_by_name, one_field,
+                module_functions)
         if st is not None and M.one_field_answer(st, one_field):
             mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
@@ -18050,7 +18113,9 @@ def _publish_imported_raisers(source_path, stmts) -> None:
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
                        as_dylib: bool = False,
-                       source_path: str = None) -> tuple:
+                       source_path: str = None,
+                       extra_functions: dict = None,
+                       extra_module_functions: dict = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
 
     ONE pipeline for both entry points, and it is one pipeline for the module
@@ -18749,6 +18814,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # The rule is `_unique_functions_by_name`, shared with the one-word binding
     # analysis so the two cannot disagree about which definition a callee is.
     _functions_by_name = _unique_functions_by_name(functions)
+    # …and the FREE functions this file imports, under the local name a call
+    # site spells (`_prepare_functions`' `extra_functions`, the same table the
+    # early-return path merges above). Added only for names this unit does not
+    # already define, so a local definition still wins and no existing answer
+    # moves: this is a source of the SAME evidence — a callee's declared
+    # `-> T` — for a callee that is a symbol in a library rather than a body
+    # here.
+    for _n, _f in (extra_functions or {}).items():
+        _functions_by_name.setdefault(_n, _f)
     for fn in functions:
         # A `match` is lowered to compares and branches HERE, before anything
         # else in this loop reads the body, and for the same reason the `with`
@@ -18849,7 +18923,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # either way.  One recognition of "this name is a one-word word", read
         # once.
         one_word = _one_word_field_map(fn, structs_by_name, st, one_field,
-                                       _functions_by_name)
+                                       _functions_by_name,
+                                       extra_module_functions)
         if st is not None and M.one_field_answer(st, one_field):
             one_word["self"] = st
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
@@ -19176,7 +19251,9 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     _widen_printf_integer_conversions(functions)
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), enum_structs, one_field)
+                     star_imported_modules(stmts), enum_structs, one_field,
+                     extra_functions=extra_functions,
+                     extra_module_functions=extra_module_functions)
     # …and the SECOND call of the `Optional` representation pass, for the one
     # shape the call above could not reach. `h.a` where `a` is a field of a
     # struct `h` holds needs the holder census `_frame_receivers` just

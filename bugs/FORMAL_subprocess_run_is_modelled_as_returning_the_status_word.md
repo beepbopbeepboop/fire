@@ -274,3 +274,43 @@ refused at the DYLIB stage instead (`libcp.mojo: make returns a frame address,
 so it cannot be compiled into a dylib`); the merged tree stops earlier, at the
 binding, so the dylib-stage sentence is a branch-tree fact and the binding
 refusal is the merged-tree one.
+
+## Status 2026-10-13 (`work/formal398-docs`): the cross-module BINDING half is
+## landed — a callee's declared `-> T` is now read across the import boundary
+
+The 2026-10-08 merge note above found the two cross-module shapes still refused
+at the BINDING and named them as what option 1 still needs. **That half is
+fixed**, as shared infrastructure rather than as this doc's symptom:
+
+* `formal/imports.py::imported_function_defs` reads `{bound name: FunctionDef}`
+  from the imported module's own source (`from libcp import make` binds `make`),
+  following a re-export to the module that defines the name.
+* `formal/imports.py::imported_module_function_defs` reads
+  `{module local name: {function name: FunctionDef}}` for the module-qualified
+  spelling (`import libcp; libcp.make`).
+* `formal/build.py::_call_returns_one_word_struct` now reads a callee from
+  either table, for a `MemberExpr` base that names an imported module and for a
+  bare name; `_prepare_functions` folds the free functions into its by-name
+  table (`extra_functions`, added only for names this unit does not define, so a
+  local definition still wins and no existing answer moves) and threads the
+  module table to the two binding analyses (`_seed_one_word_bindings` and
+  `_one_word_field_map`). Gated on Mach-O, like `_imported_structs`.
+
+Pinned by two rows, on both backends and against CPython:
+`test_formal_monomorph.py::test_a_one_field_struct_from_an_imported_bare_call_
+reads_through_its_field` and `…_from_a_module_qualified_call_reads_through_its_
+field` — a `struct CP: var returncode: Int` with a `def make(n) -> CP` in
+`pairlib.mojo`, read as `var r = make(7); print(r.returncode)` and as
+`var r = pairlib.make(9); print(r.returncode)`, each answering CPython's 7 / 9.
+
+**What this does NOT do, and the doc's symptom is untouched by it.** It removes
+the BINDING refusal for a callee whose declared `-> T` IS a one-field struct.
+`subprocess.run`'s declared return is still `int` — `formal/hostmods/
+subprocess.mojo`'s `CompletedProcess` is a word — so `r = subprocess.run(…)`
+is not a one-field-struct binding and `r.returncode` is refused exactly as
+before, by the same `_field_access_refusal`. Closing the doc's symptom is still
+option 1 (give `run` a `-> CompletedProcess` struct return), and its remaining
+blocker is the one the 2026-10-09 Status names: twelve `@admitted` contracts
+shaped `UInt64 → UInt64`, whose reshape is an integrator's Lean run and no light
+worker's. **This section is the cross-module half of option 1's groundwork, not
+option 1.**
