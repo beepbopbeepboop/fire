@@ -1213,7 +1213,17 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # they named were rewrites of an assertion that could no longer see the case
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
-    # wrong. `formal-x86-machine-model` is a FIFTH drop and the only one of the
+    # wrong. `formal-x86-parity` is a SIXTH drop, and the same shape as the
+    # three above rather than as `formal-x86-machine-model`: its marker said
+    # `1 of 83 ... printf_float_operand_read_from_an_xmm_register`, and the row
+    # it named now builds and runs on BOTH backends because its operands are
+    # declared `Float64` doubles instead of the integers whose bits happened to
+    # be a double's — the kind the printf conversion rule now refuses by name.
+    # 4ceb7603 (2026-10-13) removed the marker and the bug doc with that change;
+    # a later bulk merge reverted the test half and kept the doc deletion, which
+    # put the row back in the census's red list with nothing to cite (4ceb7603,
+    # restored 2026-10-16).
+    # `formal-x86-machine-model` is a FIFTH drop and the only one of the
     # five that was ever green: its marker said `1 of 45 WRONG: udivmod`, and
     # `formal/x86_64_model_test.py` has reported `agree 52  WRONG 0  NO-RUN 0`
     # since 2026-10-04, when `e54d2f4e` fixed the defect the marker named
@@ -1257,23 +1267,24 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # reason as the six async drops — a census that states a marker the registry
     # no longer has fails on the registry's own state. The branch's parallel
     # `formal-x86-64-parity` registration was likewise not taken in the
-    # 2026-10-12 merge; master's `formal-x86-parity` (1) stands in its place.
+    # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
+    # too, since 4ceb7603 removed its marker (see above).
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
                      # `formal-os-backing` (2) is the addition from the 2026-
-                     # 10-07 re-measurement, narrowed on the merged tree (above),
-                     # and `formal-x86-parity` (1)
-                     # the 2026-10-06 registration: the parity differential was
-                     # put in a bucket with a count-checked `expect=` for its
-                     # one pre-existing red, and a census that did not state
-                     # either marker would fail on the registry's own state.
-                     # The branch's parallel `formal-x86-64-parity` registration
-                     # (three reds, 2026-10-07) was not taken: its two 32-bit
-                     # pointer-load reds are not rows of this tree's file, and
-                     # master's registration carries the count.
+                     # 10-07 re-measurement, narrowed on the merged tree (above).
+                     # `formal-x86-parity` (1) was a SEVENTH drop, restored on
+                     # 2026-10-16: 4ceb7603 removed its marker and made its one
+                     # row `Float64` doubles instead of the integers whose bits
+                     # happen to be a double's, but a later bulk merge reverted
+                     # the TEST half of that fix while the doc deletion (the
+                     # other half) survived, so the row went red on both
+                     # backends again and the marker came back with it — a
+                     # half-applied fix, which is the same class of damage as
+                     # the dropped definitions in
+                     # `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`.
                      'formal-os-backing': 2,
-                     'formal-x86-parity': 1,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '

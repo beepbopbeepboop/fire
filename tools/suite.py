@@ -2153,21 +2153,19 @@ test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True, mem='ti
 # `tiny` from the measurement (30 s, 0.1 GB peak across the tree under
 # `tools/memslot.py --gb 8`, 83 cases x 2 backends), not from the shape: the
 # builds are `--formal --no-prove` single-file compiles, and the doc's guess of
-# `small`/`module` was not what the instrument said. The one remaining red is
-# the filed PRE-EXISTING arm64 float-operand refusal, and the marker states its
-# count so the harness's `PASS=82 FAIL=1` is checked against it.
+# `small`/`module` was not what the instrument said. `printf_float_operand_read_
+# from_an_xmm_register` was the one pre-existing red this row carried: it wrote
+# doubles' bit patterns as unannotated INTEGERS and passed THOSE to `%g`, which
+# the printf kind rule now refuses by name. The row is declared `Float64`
+# doubles now, so both backends build and run it and it is an ordinary parity
+# row again -- the `expect=` marker and the bug doc that recorded the refusal
+# are both gone with the fix (4ceb7603, 2026-10-13; the test-file half of that
+# fix was reverted by a later bulk merge and is restored here).
 test('formal-x86-parity', [PY, 'test_formal_x86_64_parity.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_x86_64_parity.py', 'formal/x86_64.py',
             'formal/arm64.py', 'formal/x86_64_codegen.py',
             'formal/arm64_codegen.py'],
-     expect="1 of 83: `printf_float_operand_read_from_an_xmm_register` — the "
-            "arm64 backend REFUSES a float operand read from an XMM register "
-            "rather than converting it, because the conversion is the source's "
-            "decision. PRE-EXISTING on master (filed at "
-            "bugs/TEST_a_parity_row_pins_an_xmm_float_operand_the_tree_refuses.md "
-            "when the file was measured ungated), and the marker's count is the "
-            "83 the harness now prints",
      desc='both backends answer every construct, and the CPython oracle')
 test('x86-containers', [PY, 'test_x86_64_containers.py'], mem='tiny',
      deps=['preflight'],

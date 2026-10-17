@@ -160,9 +160,10 @@ where the code does `+131072` and the condition proof emitted a
 ⊢ arm64_matches_condition 13`). They now share `_addsub_imm12`. That one fix is
 also what makes `sign`, `twoifs` and `elif3` elaborate again — examples the
 committed baseline records as `proved`, so this was a live regression outside
-this doc's table. See
-`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` for the
-model half.
+this doc's table. The model half is `5361903f` (`arm64 model: ADDS writes Rd,
+and the imm12 arms honour their shift`) — one `arm64_ext_imm12` helper decodes
+the `sh` field and all five `imm12` arms call it; its doc is deleted with the
+fix.
 
 Verified: `mod_by_var`, `same_image_leaf`, `sign`, `twoifs`, `elif3` and `sgt8`
 now elaborate; running `test_formal_call_proof_gen.py` drops from 8 failures to

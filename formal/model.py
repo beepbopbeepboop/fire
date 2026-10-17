@@ -15345,6 +15345,20 @@ def container_operator_refusal(op: str, left_kind, right_kind,
     which = ("the left operand" if on_left else
              "the right operand" if right_is_blob
              else "an operand")
+    # What the DIAGNOSTIC spells, which is not always `op`: the augmented
+    # emitters strip the `=` (`>=` arrives as `>`), and a message that told
+    # somebody their `>=` was a `>` would be a small lie about the line they are
+    # looking at. The same `spelled_op or op` every sibling below uses, and the
+    # same reason it cannot just be `op`.
+    #
+    # **This binding was missing, and its absence was a `NameError` rather than a
+    # wrong word**: every program that reached this message got a Python
+    # traceback out of the compiler instead of a diagnostic — so `len(max(a, 0))`
+    # on `a = [1, 2]` died inside the refusal rather than being refused with one.
+    # A diagnostic that cannot be built is the worst of the two answers, and
+    # nothing caught it because the arm that raises is only reached by a
+    # container operand on one side and one of the gated operators.
+    shown = spelled_op or op
     return (
         f"{shown!r} is refused when {which} is a list, tuple, set or dict. A "
         f"blob on this path is a fixed block of the frame, so the word the "
@@ -34601,9 +34615,42 @@ def comprehension_element_is_flat_container(element) -> bool:
     slice, a constructor call, and every non-container expression. Those are the
     cases whose per-iteration materialisation needs the runtime blob base the
     refusal's own document describes.
+
+    **Two arms were added 2026-10-16, and both are shapes whose blob this path
+    already knows the SIZE of — which is the whole of what a copy needs.**
+
+    * **A `+` on two containers whose operands are both flat.** A concat's result
+      blob holds its operands' WORDS in one block, so the shallow-copy argument
+      above is satisfied by the operands rather than by the node: `[0] + [y]`
+      produces `[count][0][y…]`, every word of which is a scalar. What is NOT
+      true of a concat is that the ledger delta is the result's size — the two
+      operands reserve first and the result last — so each emitter reads the
+      result's own size off `_emit_list_concat`, which is the one place that
+      reserved it, rather than off the span.
+    * **A CALL.** A callee that hands a container back has its block COPIED into
+      the caller's own scratch at the call's own site
+      (`container_returned_blob_sites`), so the caller's element site rewrites
+      one block per iteration exactly as a display does — and that block is
+      `[count][word…]` by the callee's own construction, or it is not copied at
+      all (`returned_container_blob_bytes`). The block is parked ABOVE the blob
+      region, which is why it does not move the ledger either, and the size comes
+      from that same table. A call that returns no container has no block and no
+      span, and falls out of the copy before this predicate is asked.
+
+    Both were REFUSED before, and the refusal was a coverage hole rather than a
+    soundness answer: `a_comprehension_whose_element_is_a_call_returning_a_`
+    `container_gives_each_one` and `a_comprehension_whose_element_is_a_concat_`
+    `of_displays_gives_each_one` in `test_formal_value_model.py` are CPython-
+    oracle rows, and each aliases every iteration onto one object — `[mk(y) for
+    y in ys]` answered `90` where CPython answers `60`.
     """
     if isinstance(element, F.Comprehension):
         return _comprehension_result_is_flat(element)
+    if isinstance(element, F.BinaryOp) and element.op == "+":
+        return (_expr_is_flat_container_operand(element.left)
+                and _expr_is_flat_container_operand(element.right))
+    if isinstance(element, F.CallExpr):
+        return True
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -34612,6 +34659,20 @@ def comprehension_element_is_flat_container(element) -> bool:
     else:
         children = list(element.elements)
     return not any(_expr_builds_a_container(c) for c in children)
+
+
+def _expr_is_flat_container_operand(node) -> bool:
+    """One operand of a CONCAT element: a container whose words the result carries.
+
+    The same question `comprehension_element_is_flat_container` asks of an
+    element, asked of a node the concat is holding up rather than of the concat
+    itself — and it must be that same question, or `[0] + [[y]]` would be
+    accepted because its LEFT operand is a flat display while its result carries
+    the address of a container the element position also built.
+    """
+    if isinstance(node, F.CallExpr):
+        return False
+    return comprehension_element_is_flat_container(node)
 
 
 def comprehension_result_is_flat(expr) -> bool:

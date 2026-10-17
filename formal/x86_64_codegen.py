@@ -871,6 +871,15 @@ class X86_64Codegen:
         # is this recorded reservation rather than the ledger delta (which also
         # carries the nested iterables). 0 means "no comprehension emitted here".
         self._last_compr_result_size = 0
+        # The SIZE of the result blob the last `_emit_list_concat` reserved, for
+        # the same reason and the same reader: a `+` whose element is a
+        # comprehension element reserves its two operands' blobs first and its
+        # result last, so the ledger delta is bigger than the blob RAX points at
+        # and the per-iteration copy has to be sized from the result alone.
+        # `_emit_list_concat` is the one place that reserved it. 0 means "no
+        # concat emitted here", and a 0 there is a refusal rather than a
+        # zero-byte copy.
+        self._last_concat_result_bytes = 0
         # The COMPREHENSION scope stack: `model.ValueKinds`.
         # `comprehension_generator_scopes` maps, outermost first, pushed by
         # `_emit_compr_gen` after each generator's target store. A comprehension
@@ -3698,21 +3707,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         element differently. RAX on entry holds the element's blob and on exit
         the per-iteration copy `_compr_append_elem` appends.
 
-        The blob size is the ledger delta for a literal (its own reservation) and
-        the nested comprehension's recorded RESULT size
+        The blob size is the ledger delta for a literal (its own reservation), the
+        nested comprehension's recorded RESULT size
         (`_last_compr_result_size`) for a comprehension, because the delta also
-        carries the nested iterables. `i` is the result blob's count word
-        (elements appended so far), the destination is
+        carries the nested iterables, the concat's OWN result size for a `+`,
+        because the delta also carries its two operands, and the delta PLUS a
+        returned block's size for a call — because `container_returned_blob_sites`
+        parks those blocks ABOVE the blob region precisely so they cannot collide
+        with the ledger, so one block is rewritten per iteration exactly as a
+        display is while the ledger does not move at all. `i` is the result blob's
+        count word (elements appended so far), the destination is
         `array_base + i * blob_size`, and the copy is `memcpy`, which returns the
         destination in RAX for free. `before` is the ledger position as the
         element's emission began, measured BEFORE the array below steps the same
         ledger.
         """
         bytes_ = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            bytes_ += ret[0]
         if not bytes_ or cap <= 1:
             return
         if M.comprehension_element_is_flat_container(element):
-            blob_size = bytes_
+            blob_size = (self._last_concat_result_bytes
+                         if isinstance(element, F.BinaryOp) else bytes_)
         elif M.comprehension_result_is_flat(element) \
                 and self._last_compr_result_size > 0:
             blob_size = self._last_compr_result_size
@@ -6544,7 +6562,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(M.frame_blob_refusal(
                 "a list concatenation", 16, avail))
         cap = min(want, (avail - 8) // 8)
-        offset = self._reserve_blob(8 + 8 * cap, "a list concatenation")
+        nbytes = 8 + 8 * cap
+        offset = self._reserve_blob(nbytes, "a list concatenation")
+        # The RESULT's own size, recorded here because this is the one place
+        # that reserved it. A comprehension whose element is a concat copies
+        # this blob per iteration (`_materialize_compr_element`) and must not
+        # size the copy from the ledger delta, which also carries the two
+        # operands this function reserved just above.
+        self._last_concat_result_bytes = nbytes
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
         self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR

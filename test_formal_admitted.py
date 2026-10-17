@@ -1377,7 +1377,24 @@ AXIOM_CLOSURE = {
     # Re-pinned by the bulk merge of the formal-worker branches: two more clean
     # theorems (153 = 2 + 150 + 0 + 1).
     "X86": (153, 2, 150, 0, 1, 0),
-    "work": (19, 0, 17, 0, 2, 0),
+    # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
+    # closed the contract ladder's last two unreached contracts and put the fact
+    # it needed in this module rather than in `ProofLib.lean` -- deliberately,
+    # because every generated arm64 proof already imports `work`, so it is a
+    # 1.2 s rebuild rather than the 27 MB `.olean` the proof suite pays per tree.
+    # The theorem is `work_u64_sign_zero_of_le`: `sKey x` is the signed-compare
+    # sign flip, and a context pinning a word to the sign bit from BOTH sides
+    # (`s ≤ n ^^^ s` and `n ^^^ s ≤ s`) says the word is `0`.
+    #
+    # The shape of the movement is the point, and it is the good one: `asked`
+    # and `clean` rise together and `reaches` does NOT move, because the proof
+    # is `UInt64.le_antisymm` and `UInt64.xor_left_inj` -- core lemmas, so the
+    # KERNEL checks it and `#print axioms` names no axiom.  This is the same
+    # signature as the `IEEE754` re-pin above (two comparison facts arriving as
+    # `decide` and being re-proved with it), and the opposite of what an arrival
+    # of `bv_decide`-proved step lemmas looks like, where `asked` and `reaches`
+    # rise together.  The partition still closes (20 = 0 + 18 + 0 + 2).
+    "work": (20, 0, 18, 0, 2, 0),
     # Read out of a real `#print axioms` run over all 24 declarations of
     # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
     # 5 are kernel-checked, and the 5 are exactly the COMPARISON section — the

@@ -76,8 +76,9 @@ value model), which is why this is filed rather than landed.
 ## Relationship to the other `imm12` work
 
 This is the same defect the `sp`-EXPRESSION trackers had
-(`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` is the
-model-side doc; the generator-side fix for the expression trackers landed
+(the model-side doc is deleted with its fix, `5361903f`: one
+`arm64_ext_imm12` helper decodes the `sh` field and all five `imm12` arms call
+it; the generator-side fix for the expression trackers landed
 2026-10-13).  These four are the remaining generator sites that read the field
 raw.  They were not reached by `fact`/`pow2`/`sqsum`/`sum` (whose proofs the
 fix turned green) because those are recursion examples, not methods.

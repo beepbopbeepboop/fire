@@ -1441,6 +1441,15 @@ dylib_exports: list = None, globals_base: int = None,
         # emission reaches, so after `_emit_expr(element)` this holds the size
         # to copy. 0 means "no comprehension emitted here".
         self._last_compr_result_size = 0
+        # The SIZE of the result blob the last `_emit_list_concat` reserved, for
+        # the same reason and the same reader: a `+` whose element is a
+        # comprehension element reserves its two operands' blobs first and its
+        # result last, so the ledger delta is bigger than the blob X0 points at
+        # and the per-iteration copy has to be sized from the result alone.
+        # `_emit_list_concat` is the one place that reserved it. 0 means "no
+        # concat emitted here", and a 0 there is a refusal rather than a
+        # zero-byte copy.
+        self._last_concat_result_bytes = 0
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
@@ -11312,7 +11321,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         `_compr_append_elem` appends. The three outcomes:
 
           * an element `M.comprehension_element_is_flat_container` accepts — a
-            container literal with no nested container in it, or a nested
+            container literal with no nested container in it, a `+` over two of
+            those, a call that handed a container back, or a nested
             comprehension whose produced values are words — gets a `cap`-slot
             array beside its scratch, and iteration `i`'s copy lands at slot `i`
             — `i` is the result blob's count word, which is the number of
@@ -11326,12 +11336,31 @@ ctor_field_value=self._ctor_field_value_for(name),
         `bytes_ = _list_cursor - before` is the element's own footprint — the
         ledger delta the refusal is asked of, measured BEFORE the array below
         steps the same ledger.
+
+        **The span is the ledger delta PLUS a block the ledger never moved
+        over**, which is the shape that made `[mk(y) for y in ys]` answer 90 where
+        CPython answers 60: a container a CALL handed back is copied into this
+        function's own scratch by `container_returned_blob_sites`, and that table
+        parks its blocks ABOVE the blob region precisely so they do not collide
+        with the ledger — so one block is rewritten per iteration exactly as a
+        display is, the ledger does not move, and a span read off the ledger
+        alone was zero and the element aliased. The block's own size is the size
+        of the copy, because that is the blob X0 points at.
         """
         bytes_ = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            bytes_ += ret[0]
         if not bytes_ or cap <= 1:
             return
         if M.comprehension_element_is_flat_container(element):
-            blob_size = bytes_
+            # A flat CONCAT's result is reserved AFTER its two operands, so the
+            # span is bigger than the blob X0 points at and copying `bytes_`
+            # bytes from it would read past the result into whatever the next
+            # reservation placed there. `_emit_list_concat` is the one place that
+            # reserved it and it recorded the size there.
+            blob_size = (self._last_concat_result_bytes
+                         if isinstance(element, F.BinaryOp) else bytes_)
         elif M.comprehension_result_is_flat(element) \
                 and self._last_compr_result_size > 0:
             blob_size = self._last_compr_result_size
@@ -13340,6 +13369,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         nbytes = 8 + 8 * cap
         offset = self._list_cursor
         self._list_cursor += nbytes
+        # The RESULT's own size, recorded here because this is the one place
+        # that reserved it. A comprehension whose element is a concat copies
+        # this blob per iteration (`_materialize_compr_element`) and must not
+        # size the copy from the ledger delta, which also carries the two
+        # operands this function reserved just above.
+        self._last_concat_result_bytes = nbytes
         # X0 = right ptr (top of stack); pop both into temps via loads.
         self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
         self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
