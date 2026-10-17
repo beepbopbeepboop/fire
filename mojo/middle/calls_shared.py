@@ -730,7 +730,14 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
     this compile registered, a method it actually emitted, a return type it
     actually registered as `char *` — and anything unproven falls through.
     """
-    _have = gen._struct_method_names.get(struct_name) or ()
+    # Not `... .get(struct_name) or ()`: the two arms are a SET and a tuple,
+    # and the compiled compiler typed the local from the join of the two --
+    # a list, so `'__repr__' in _have` searched the set as a list and no user
+    # `__repr__` was ever called. One container kind, whatever the lookup
+    # answered.
+    _have = gen._struct_method_names.get(struct_name)
+    if not _have:
+        _have = set()
     _local = gen._ensure_local(ctype, cval)
     for _dunder in prefer:
         if _dunder not in _have:
