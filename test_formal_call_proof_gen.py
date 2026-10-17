@@ -6662,22 +6662,39 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                              f"divisor: {p.stdout!r}")
 
     def test_the_symbolic_divisor_fixture_still_has_its_subject(self):
-        """Lean-free: the fixture yields the admission the class patches, or it
-        refuses — never a silently empty tail.
+        """Lean-free: the fixture's outcome is one the class RECOGNIZES, and
+        when it is not the admission that names the reason — never a SILENTLY
+        empty tail.
 
         `TestTheZeroDivisorGuardAgainstLean` needs a built `lib/ProofLib.olean`,
         so on a tree without one its mechanism check cannot run at all.  This
-        row is Lean-free and pins the same invariant one level down: the fixture
-        either produces a tail carrying `_ADMIT` (the class can trace a residual)
-        or it refuses outright (the class records why) — never a tail with no
-        admission, which is what turns the class's patch into a no-op and its
-        failure into a `fdiv64` diagnosis about a goal it never saw.  That is
-        `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
-        and this is the observable half of its step 1.
+        row is Lean-free and pins the same invariant one level down.  There are
+        THREE outcomes the zero-divisor fixture can have, and all three are
+        honest because each of them NAMES why the class cannot trace a residual:
+
+        1. the tail carries `_ADMIT` — the walk terminal exists, the class can
+           replace it with `trace_state` and read the `⊢ 1 = …` goal;
+        2. the fixture REFUSES with `this walk cannot follow` — the generator
+           declined instead of emitting a value theorem;
+        3. the universal theorem is replaced by the ANNOUNCED reachability
+           theorem `q_reaches_call_at_…` (the exit block's `fflush` is the one
+           out-of-image `BL`, so there is one halt address and the generator
+           substitutes rather than refusing), and the emitted note says so by
+           naming `q_compiles_correctly_universal` as NOT emitted.
+
+        Outcome 3 is the state on this tree and is why this row was RED before
+        it was taught about it: it demanded outcome 1 or 2, and the generator had
+        moved to a third state it does not take silently.  Outcome 3 still
+        leaves `_ADMIT not in tail`, which is exactly what makes the class set
+        `cls.blind` and fail its Lean row by NAME — so accepting it here is not
+        acceptance of a blind class, it is acceptance that the blindness is
+        ANNOUNCED.  What this row forbids is the fourth state: an empty tail with
+        no announcement at all, which is `bugs/FORMAL_the_div0_guard_measurement_
+        class_traces_nothing_any_more.md`'s subject.
         """
         from formal.build import FormalBuildError
         try:
-            _head, tail = _symbolic_divisor_proof(self.tmp)
+            head, tail = _symbolic_divisor_proof(self.tmp)
         except FormalBuildError as e:
             self.assertIn("this walk cannot follow", str(e),
                           "the div0 fixture now refuses for a different reason "
@@ -6686,12 +6703,69 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                           "class_traces_nothing_any_more.md before trusting "
                           "either of its next steps")
             return
-        self.assertIn(_ADMIT, tail,
-                      "the div0 fixture generated a proof whose tail carries "
-                      f"no {_ADMIT!r}, so the class's patch is a no-op and its "
-                      "rows would report a `fdiv64` diagnosis about a residual "
-                      "they never traced: whatever the div0 residual is today, "
-                      "the measurement class is not looking at it")
+        if _ADMIT in tail:
+            return                                       # outcome 1
+        emitted = head + tail
+        self.assertIn("_reaches_call_at_", emitted,
+                      "the div0 fixture generated no tail carrying "
+                      f"{_ADMIT!r} and no announced reachability theorem either: "
+                      "the generator neither traced a residual nor said in the "
+                      "file why it did not, which is the SILENT empty tail this "
+                      "row exists to forbid (bugs/FORMAL_the_div0_guard_"
+                      "measurement_class_traces_nothing_any_more.md)")
+        self.assertIn("q_compiles_correctly_universal", emitted,
+                      "the div0 fixture was substituted by a reachability "
+                      "theorem but the emitted note does not name the absent "
+                      "`q_compiles_correctly_universal`, so the substitution is "
+                      "not announced and the class would go blind without saying "
+                      "why")
+        self.assertIn("NOT emitted", emitted,
+                      "the div0 substitution's note does not say the universal "
+                      "theorem is NOT emitted; the announcement this row checks "
+                      "is that sentence, not merely the theorem's name (a name "
+                      "can appear in a comment that does not withdraw it)")
+
+    def test_a_literal_divisor_does_not_restore_the_classs_subject(self):
+        """The doc's step-2 option 2 is REFUTED by measurement, not argued.
+
+        `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+        offers two ways to make the class measure again, and its option 2 is
+        "change the fixture to a literal divisor, where the model can step the
+        divide".  Measured, that does NOT work: the arm64 code generator emits
+        the divide-by-zero arm — and its `_emit_exit` `fflush`, the one
+        out-of-image `BL` — for a CONSTANT non-zero divisor too, so the universal
+        theorem is substituted exactly as for the symbolic case and the class
+        still has no residual to trace.  Both options are therefore refuted, and
+        the class's subject stays unreachable until the walk can discharge a
+        call on a conditional path (the arm64 walk gap).  Pinned so option 2 is
+        not re-proposed as the cheap fix.
+        """
+        import formal.build as fb
+        src = os.path.join(self.tmp, "litdiv.mojo")
+        with open(src, "w") as f:
+            f.write("def q(a):\n    return a // 4\n")
+        out = os.path.join(self.tmp, "litdiv.aout")
+        info = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                                 check=False)
+        text = open(info["proof_path"]).read()
+        inner = info["info"]
+        self.assertIn("fflush",
+                      [c.get("sym") for c in (inner.get("extern_calls") or ())],
+                      "a `// 4` image carries no `fflush` any more: the div0 "
+                      "arm's exit flush is gone, so the doc's option 2 "
+                      "(a literal divisor) may restore the class's subject "
+                      "after all — re-measure and update it")
+        self.assertNotIn("theorem q_compiles_correctly_universal", text,
+                         "a `// 4` fixture now emits the UNIVERSAL theorem, so "
+                         "the doc's option 2 (a literal divisor) DOES restore "
+                         "the class's subject; update "
+                         "bugs/FORMAL_the_div0_guard_measurement_class_traces_"
+                         "nothing_any_more.md rather than leaving option 2 "
+                         "called refuted")
+        self.assertIn("_reaches_call_at_", text,
+                      "a `// 4` fixture emitted neither the universal theorem "
+                      "nor the announced substitution; re-measure the doc's "
+                      "two options before trusting either")
 
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
@@ -6857,6 +6931,12 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 cls.out[label] = ""
                 continue
             if _ADMIT not in tail:
+# Two ways to have no admission, and they are different news:
+                # the generator SUBSTITUTED the universal theorem (announced,
+                # one out-of-image call), or it did not and the tail is empty
+                # for a reason nothing names. Naming WHICH is what makes this
+                # failure message actionable.
+                #
                 # WHICH drift took the residual away, not just that one did.
                 # The walk substitutes a REACHABILITY theorem for a program
                 # whose run halts at a call it cannot follow, and `q(a, b)`'s
@@ -6864,30 +6944,36 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 # the trap `formal/arm64_codegen.py` records in
                 # `info["compiler_traps"]` — so the halt address is that call
                 # and no terminal value flow (and so no `_ADMIT`) is emitted.
-                # Naming the substitution is what makes the red actionable: it
-                # says the residual is not "moved", it is behind
+                # Naming the substitution says the residual is not "moved", it
+                # is behind
                 # `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
                 # conditional_path.md`, and this class goes green the way that
-                # doc's step 1 describes.  The substitution is pinned, Lean
+                # doc's step 1 describes: until the walk can discharge a call
+                # on a conditional path, there is no `_ADMIT` in the tail for
+                # `tail.replace(_ADMIT, _TRACE)` to patch, so nothing here can
+                # trace the div0 residual. The substitution is pinned, Lean
                 # free, by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`.
                 reach = re.search(r"^theorem (\w+)_reaches_call_at_", head + tail,
                                   re.M)
                 if reach:
                     cls.blind[label] = (
-                        f"the fixture substitutes a REACHABILITY theorem "
-                        f"(`{reach.group(0)[len('theorem '):]}`) for the "
-                        f"universal one: the div0 arm's `BL fflush` is the halt "
-                        f"address the walk stops at, so the terminal value flow "
-                        f"that states `{_ADMIT}` is never emitted and no goal "
-                        f"can be traced: whatever the div0 residual is today, "
-                        f"this class is not looking at it")
+                        f"the generator SUBSTITUTED `q_compiles_correctly_"
+                        f"universal` with the announced reachability theorem "
+                        f"(`{reach.group(1)}_reaches_call_at_…`), because the "
+                        f"div0 arm's `BL fflush` is the one out-of-image call "
+                        f"and one halt address cannot carry a value theorem: "
+                        f"there is no `{_ADMIT}` in the tail for "
+                        f"`tail.replace(_ADMIT, _TRACE)` to patch, so this class "
+                        f"cannot trace the div0 residual until the walk can "
+                        f"discharge a call on a conditional path")
                 else:
                     cls.blind[label] = (
                         f"the fixture generates no `q_compiles_correctly_"
-                        f"universal` carrying `{_ADMIT}`, so `tail.replace("
-                        f"_ADMIT, _TRACE)` is a no-op and no goal can be "
-                        f"traced: whatever the div0 residual is today, this "
-                        f"class is not looking at it")
+                        f"universal` carrying `{_ADMIT}` and does not announce "
+                        f"a substitution either, so `tail.replace(_ADMIT, "
+                        f"_TRACE)` is a no-op and no goal can be traced: "
+                        f"whatever the div0 residual is today, this class is "
+                        f"not looking at it")
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
