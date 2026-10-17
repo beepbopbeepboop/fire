@@ -4,10 +4,10 @@
 (fixing it is a `tools/suite.py` registry change, which this branch's task puts
 off limits deliberately).** Found 2026-10-12 on `work/formal307-docs`, while
 re-banking the `fact` row of `tools/formal_proof_census_baseline.json` (a
-DIFFERENT, now-fixed bug — the two stale-row docs
-`bugs/FORMAL_proof_census_baseline_has_a_stale_fact_row.md` and
-`bugs/FORMAL_the_committed_proof_baseline_is_stale_for_fact_mojo.md` are deleted
-with the fix, and this note is the part of the second one that is not them).
+DIFFERENT, now-fixed bug — the committed baseline's `fact` row was stale for
+`fact.mojo`, and BOTH documents that recorded it are deleted with the fix, so
+neither path resolves any more; this note is the part of that row's story that is
+not them).
 
 ## What I ran, and what I saw
 
