@@ -15422,6 +15422,18 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 # diverging by architecture is the same defect with a different subject.
 #
 # (name, mojo_source, want_exit, stderr_needles)
+#
+#: The FULL text `model.list_append_overflow_message` returns for the two rows
+#: below, as a needle. The message is NOT ASCII (an em dash and an ellipsis:
+#: 774 characters are 778 bytes) and `_emit_stop_diagnostic` used to tell
+#: `write(2)` the CHARACTER count, which wrote every run-time stop four bytes
+#: short — this one ended at "...the overflow follows the appe". The
+#: two-architecture byte-for-byte comparison cannot see that (both machines
+#: truncated the same), and every needle the rows carried was early in the
+#: text, so the model's own sentence is what pins the ending.
+_APPEND_OVERFLOW_TEXT = __import__(
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
+
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
     # One site, three executions, and the capacity is ONE — which is the whole
@@ -15435,6 +15447,17 @@ STDERR_CASES = [
     # overflow" would leave a reader unable to tell this from a frame-budget
     # refusal (`frame_blob_refusal`), which has a different and differently
     # fixable remedy.
+    #
+    # **AND THE WHOLE SENTENCE IS A NEEDLE, which is the half that was missing
+    # and is why a real defect lived here.** The three needles above are all
+    # early in the text; the message is NOT ASCII — it carries an em dash and an
+    # ellipsis, so its 774 characters are 778 BYTES — and both emitters told
+    # `write(2)` the CHARACTER count, so every run-time stop was written four
+    # bytes short and this one ended mid-word at "...the overflow follows the
+    # appe". The byte-for-byte two-architecture comparison below could not see
+    # it (both machines truncated identically) and no needle reached the end.
+    # `_APPEND_OVERFLOW_TEXT` is the whole message from the model, so the
+    # truncation is a FAILURE and not a sentence nobody read to the end.
     ("list_append_overflow_is_loud",
      "def main(n):\n"
      "    xs = []\n"
@@ -15444,7 +15467,8 @@ STDERR_CASES = [
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
+     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
+         _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
     # the capacity each one sees is its own", and that repair does not work: the
@@ -15474,7 +15498,8 @@ STDERR_CASES = [
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
      1, ["SITES outside any loop", "for … in range(n)",
-         "Moving the appends into a function of their own does NOT help"]),
+         "Moving the appends into a function of their own does NOT help",
+         _APPEND_OVERFLOW_TEXT]),
     # `d[k] = v` for a key the blob does NOT hold, which is CPython's INSERT and
     # used to be a key scan that missed and stopped the program having printed
     # nothing. The reservation is `formal/model.py`'s `dict_store_capacity` —

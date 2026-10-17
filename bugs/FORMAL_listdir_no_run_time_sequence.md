@@ -34,7 +34,15 @@ as long as they did. **`model.diagnostic_length` is the one reader now and both
 compares each stop's stderr against the message `formal/model.py` builds, byte for
 byte, captured as BYTES — `text=True` replaced the broken character with U+FFFD
 and every needle still matched, which is how a truncated diagnostic reads as a
-complete one. All four rows go red without the fix.
+complete one. All four rows go red without the fix. The five stderr rows that reach
+a message through `_emit_stop_diagnostic` (`list_append_overflow_is_loud`, the
+advice row, `dict_store_past_its_reservation_is_loud`,
+`blob_growth_concat_past_its_reservation_is_loud` and `subscript_out_of_range_is_loud`)
+are re-run green on both architectures with the fix. **The reader is called `diagnostic_length` and there is exactly ONE of them:**
+`work/formal402-docs` landed the same fix independently the same week under the
+name `diagnostic_byte_length`, and the 2026-10-17 merge deleted the second
+binding, because "two independent answers to one question is how the fourth word
+of a message diverges between architectures" is this document's own argument.
 
 **Step 2 is declined, and the measurement is the reason.** "Then the capacity
 itself … refuse a `list` whose length is not bounded by construction" would

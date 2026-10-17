@@ -738,11 +738,19 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # point, and a genuinely new dead-import row now fails it instead of waiting for
 # somebody to remember to widen a tuple.
 #
-# The tuple is EMPTY: fire_compiler.py's dead `from abc import abstractmethod`
-# was the tree's only dead host import (the text `@abstractmethod` is emitted into
-# GENERATED source, so the import itself was read by nothing) and it is gone, as
-# test_formal_host_import_shapes.py records. A name goes back here with its reason
-# if a dead import is ever left in on purpose.
+# **The exemption is EMPTY, and the mechanism stays so a future one is NAMED.**
+#
+# This tuple used to carry `abc`: `fire_compiler.py`'s
+# `from abc import abstractmethod` was read by nothing, because the file emits
+# the TEXT `@abstractmethod` into GENERATED source, so `abc` was a derived row
+# whose only files were dead imports. That import is GONE — deleted on
+# 2026-10-08 with the tree's other dead host imports
+# (`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3, which
+# is where the ratchet handed off) — so the `abc` row left the census and the
+# exemption became a claim about a row that is no longer there.
+# `test_a_named_dead_import_is_still_named` reported exactly that, which is the
+# anti-rot it exists for. The tuple is kept, empty, so a future dead import
+# still has to be named with its reason rather than silently excused.
 _ROWS_WITH_A_NAMED_DEAD_IMPORT = ()
 
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",

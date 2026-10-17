@@ -15045,6 +15045,14 @@ def list_repeat_operands_refusal(left: str, right: str) -> str:
         f"to concatenate, or `xs * n` with an integer count")
 
 
+# `diagnostic_byte_length` was a SECOND reader for the same question, landed by
+# `work/formal402-docs` in parallel with this one (`work/formal71-docs`), both
+# returning the same UTF-8 byte count.  It is deleted by the 2026-10-17 merge:
+# one reader is the entire point of this fix, and two of them is exactly the
+# "two independent answers to one question" this docstring names.  Nothing
+# referred to it but the emitters, which now ask this.
+
+
 def list_append_overflow_message(name: str, capacity: int) -> str:
     """The ONE text an over-capacity `xs.append(v)` writes to fd 2 before it
     stops the program — for BOTH backends, because two architectures printing

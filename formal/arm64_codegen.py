@@ -7672,6 +7672,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         byte for byte so the class is a red row rather than a shorter sentence.
         """
         label = self._intern_string(text)
+        # X2 is the interned blob's BYTE length, not `len(text)`; the text is
+        # UTF-8 and several of the stop messages are not ASCII, which is the
+        # truncation `model.diagnostic_length` documents.
         self.asm.emit_adrp_add(1, label)                   # X1 = text
         self.asm.emit(encode_movz_xd_imm(0, 2))            # X0 = fd = stderr
         self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))
