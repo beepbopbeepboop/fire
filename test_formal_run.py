@@ -18347,6 +18347,35 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      0, "11"),
+    # A CONCAT of two flat displays as the element, and the reason the copy is
+    # sized from the RESULT rather than from the ledger delta. A concat reserves
+    # its operands' blobs first and its own result last, so the delta across the
+    # element's emission is 56 bytes where the result blob is 24; sizing the copy
+    # from the delta would read 32 bytes past the result. Measured: refused on
+    # both architectures before this row existed, with the `opens a container`
+    # needle, because `comprehension_element_is_flat_container` had no `+` arm.
+    ("a_concat_of_displays_as_the_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[0] + [y] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][1], r[2][1])\n"
+     "    return 0\n",
+     0, "10 20 30"),
+    # A CALL that hands a container back, which is the same per-iteration
+    # aliasing by a different mechanism: `container_returned_blob_sites` parks
+    # the callee's block at the CALL's own site, above the blob region, so one
+    # block is rewritten per iteration while the ledger does not move AT ALL.
+    # That is why the span is the ledger delta PLUS that block's size and not the
+    # delta — a span read off the ledger alone was zero, the element aliased, and
+    # `[mk(y) for y in ys]` answered 90 where CPython answers 60.
+    ("a_call_returning_a_container_as_the_element_is_per_iteration",
+     "def mk(n):\n"
+     "    return [n]\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var r = [mk(y) for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "10 20 30"),
 ]
 
 
