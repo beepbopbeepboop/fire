@@ -2175,6 +2175,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                      or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
                 and gen.var_types.get(var) != 'int64_t'):
             gen._declare_var(var, 'int64_t', force=True)
+        # A list whose element kind nothing recorded yields words of unknown
+        # kind (see `_dyn_word_locals`): `for pname in d[k]:` over a dict
+        # value built from unpacked names has to stringify `pname` by asking
+        # the runtime, or `key + '::' + pname` renders its address.
+        if ((not elem or elem == 'int64_t')
+                and gen.var_types.get(var) == 'int64_t'):
+            gen._dyn_word_locals.add(_as_str(var))
+            if shadow_name:
+                gen._dyn_word_locals.add(_as_str(shadow_name))
         # AFTER every declaration above (each of which can re-type `var`) and
         # BEFORE the body is generated below, so a loop over `var` INSIDE the
         # body sees the inner element type. The doc's placement note.

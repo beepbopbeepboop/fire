@@ -3577,6 +3577,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # `_free_sv`: the conversion temp is freed by the cat only when it is a
         # `mojo_str_from_int` result; a `mojo_char_to_str` result is a shared
         # immortal string and must never be freed.
+        # A WORD of unknown kind is a string as often as an int (Python's
+        # `str + int` is a TypeError, so a word that reaches a concatenation
+        # is a string unless proven otherwise): the runtime renders it,
+        # and the rendering is borrowed for a string -- never freed here.
+        if lt2 == 'char *' and rt2 == 'int64_t' and gen._is_dyn_word(right_node, rv2):
+            sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', rv2)])
+            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), False)
+        if rt2 == 'char *' and lt2 == 'int64_t' and gen._is_dyn_word(left_node, lv2):
+            sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', lv2)])
+            return 'char *', gen._emit_str_cat(sv, rv2, False, gen._is_fresh_operand(right_node, rv2))
         if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
             _free_sv = True
             if gen._actual_types.get(rv2) == 'char':
