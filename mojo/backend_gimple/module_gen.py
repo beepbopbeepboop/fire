@@ -7412,6 +7412,17 @@ def gen_module_impl(self, stmts):
         prove is None — no-evidence, never wrong evidence, matching every
         sibling pass.
         """
+        if (isinstance(a, gimple_ctypes.IdentExpr) and caller_struct
+                and _as_str(a.name) == 'self'
+                and _as_str(caller_struct) in self.struct_field_types):
+            # `Gen(..., self, ...)` from inside a method: the receiver IS the
+            # owning struct, which needs no inference table to know. Read from
+            # those tables instead, the answer depended on whether the
+            # method's `self` happened to have an entry, and the self-hosted
+            # compiler's did not -- MojoGeneratorObject.interpreter stayed
+            # `int64_t` there and every `self.interpreter.scope` became a
+            # dynamic attribute dispatch.
+            return _as_str(caller_struct) + ' *'
         if isinstance(a, gimple_ctypes.IdentExpr):
             # All FIVE arguments passed explicitly, not just the two this
             # call needs: a call into a sibling nested closure from inside
