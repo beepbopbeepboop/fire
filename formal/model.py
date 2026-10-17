@@ -3524,6 +3524,68 @@ def external_call_spec(e):
     return (symbol, kind, None)
 
 
+def external_call_result_value_kind(call):
+    """The value KIND a lowered `external_call[…]` call's result HOLDS, or None.
+
+    `external_call_return_kind` answers what the return REGISTER means — a word,
+    an integer of a stated width, or nothing at all — and that is a marshalling
+    fact. This answers what the word holds, which is the question every consumer
+    of a KIND asks (`ValueKinds.kind_of`, and through it `print`, the string
+    methods, `String(x)` and `%s`). The two cannot be one answer: `EXTERN_RETURN_
+    WORD` is a 64-bit integer and a pointer alike, so a caller that reads the
+    marshalling kind as a value kind has to guess, and the guess this replaces
+    was the "a word is an integer" default.
+
+    Only POSITIVE evidence is returned, and None is the conservative direction
+    for the reason `string_conversion_refusal` gives: this is a value model that
+    refuses rather than misreads, but "this path cannot classify the result" is
+    the answer the existing default already gives and it is not made worse here.
+
+      * a declared STRING type is `char *`, so `STR_KIND`;
+      * a declared POINTER whose FIRST type argument is a byte (`BYTE_POINTER_
+        ELEMENTS`) is a `char *` too, so `POINTER_KIND` — the same
+        representation, the same `%s` and `strcmp`, with a truthiness that is
+        the pointer's own NULL test rather than a `strlen` (`POINTER_KIND`'s own
+        comment carries the measured SIGSEGV that separates the two);
+      * every other declaration (a wider pointee, an integer, a struct this path
+        cannot word) is None, which leaves the caller's existing answer exactly
+        where it was.
+
+    Measured on the defect this closes, both architectures: `var ptr =
+    external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)`
+    bound `ptr` to the integer default, so `String(unsafe_from_utf8_ptr=ptr)` was
+    refused as "the identity on one that is not [text]" about the one shape that
+    is — a `char *getenv(const char *)` — and `std/os/env.mojo`'s own transcribed
+    round trip
+    (`test_formal_external_call.py::env_round_trip`) stopped building.
+    """
+    if not isinstance(call, F.CallExpr):
+        return None
+    spec = external_call_spec(call.func)
+    if spec is None:
+        return None
+    _symbol, return_kind, why = spec
+    if why is not None or return_kind in (None, EXTERN_RETURN_VOID):
+        return None
+    items = (list(call.func.index.elements)
+             if isinstance(call.func.index, F.TupleExpr) else [call.func.index])
+    if len(items) < 2:
+        return None
+    text = type_expr_text(items[1])
+    if text is None:
+        return None
+    base = annotation_base_name(text)
+    if base is None:
+        return None
+    if base in STRING_TYPE_CTORS:
+        return STR_KIND
+    if base in POINTER_TYPE_CTORS:
+        if annotation_type_arg_base(text, 0) in BYTE_POINTER_ELEMENTS:
+            return POINTER_KIND
+        return None
+    return None
+
+
 def _non_literal_symbol_why(head) -> str:
     """The clause for an `external_call` bracket whose first element is not a
     string literal. Its own function so the one-element and the two-element
@@ -7706,6 +7768,30 @@ def is_foreign_bytes_kind(kind) -> bool:
     return kind == FOREIGN_BYTES_KIND
 
 
+#: A C POINTER a declared return type established — the `char *getenv(const char
+#: *)` an `external_call[…]` whose return type names a pointer to a byte hands
+#: back.  It is a kind for the one reason `FOREIGN_BYTES_KIND` is: the value's
+#: answer differs from a bare integer's in a place no consumer can recover from
+#: the word itself (a `String(ptr)` built from the address, a `%s` that
+#: dereferences it).
+#:
+#: **It is NOT `FOREIGN_BYTES_KIND`, and the difference is TRUTHINESS.** A
+#: foreign-bytes value models a CPython `str` the kernel wrote, so `if name:`
+#: asks whether the NAME is empty and `truthy_lowering` answers it with
+#: `strlen`. A C pointer models the ADDRESS the function returned, so `if not
+#: ptr:` asks whether it is NULL — and that is observable rather than academic:
+#: measured on `test_formal_external_call.py::env_round_trip`, classifying a
+#: `getenv` result as `FOREIGN_BYTES_KIND` made `if not ptr:` a `strlen(NULL)`
+#: and the image died of SIGSEGV (exit -11) on both architectures, for the one
+#: input the case exists for (an ABSENT variable). So the pointer's truthiness is
+#: `TRUTHY_NONZERO` — the address's own zeroness, which is the null test — while
+#: every other string-shaped question (`==`, `in`, `%s`, `print`, `String(ptr)`)
+#: is answered on the bytes through `string_operand_is_string`, and `len` is
+#: refused by `len_operand_lowering`, whose strlen answer would be a BYTE count
+#: on a value whose CPython length is characters.
+POINTER_KIND = "ptr"
+
+
 def is_number_kind(kind) -> bool:
     """Whether a value of this kind is printed as a NUMBER.
 
@@ -10058,19 +10144,40 @@ def string_operand_is_string(kind) -> bool:
     cannot end up disagreeing about which values are strings — the
     `string_method_yields_string` lesson, one level down.
 
-    **TWO kinds answer it, and the second one is why this is a function rather
-    than a comparison.** `FOREIGN_BYTES_KIND` is a `char *` too — the same
+    **THREE kinds answer it, and the second and third are why this is a function
+    rather than a comparison.** `FOREIGN_BYTES_KIND` is a `char *` too — the same
     representation, the same `strcmp`, the same `%s`, the same `strlen` — and
     the ONLY construct whose CPython answer is not a property of the bytes is a
-    CHARACTER COUNT, which `len_operand_lowering` refuses on its own row. So the
+    CHARACTER COUNT, which `len_operand_lowering` refuses on its own row.
+    `POINTER_KIND` is a C pointer a declared return type established, and it is a
+    `char *` for every question asked HERE; the one place it differs is
+    truthiness, which `truthy_lowering` asks before this predicate (a null test,
+    not `strlen`). So the
     admission has to be here rather than in each consumer: spelled `== STR_KIND`
-    in nine places, the second kind would have silently lost string methods,
+    in nine places, the other two kinds would have silently lost string methods,
     string equality, `%s` and `print` — and it would have lost them
     DIFFERENTLY on the two architectures the moment one copy was updated and the
     other was not, which is the failure `string_method_yields_string` was filed
     for. `subscript_element_kind` reads this same predicate for the same reason.
     """
-    return kind in (STR_KIND, FOREIGN_BYTES_KIND)
+    return kind in (STR_KIND, FOREIGN_BYTES_KIND, POINTER_KIND)
+
+
+def is_non_pointer_string(kind) -> bool:
+    """True when `kind` is a string THIS path reads as TEXT and not as a pointer.
+
+    `string_operand_is_string` admits `POINTER_KIND` so a C pointer answers
+    `String(ptr)`, `%s`, `print` and `==` on its bytes — the same questions a
+    `char *` answers — but there is exactly ONE place the two must be told
+    apart, and it is a METHOD call: a `POINTER_KIND` receiver's `value()` /
+    `unsafe_load()` / `unsafe_value()` is a DEREFERENCE, decided by
+    `dereference_lowering`, while a `str` or foreign-bytes receiver's is the
+    four-questions refusal (`IDENTITY_VALUE_METHODS`) or a string read. The two
+    backends' dereference intercept is the caller, so it asks this predicate
+    rather than the wider one; everywhere else the pointer IS a string.
+    """
+    return string_operand_is_string(kind) and kind != POINTER_KIND
+
 
 # ── `%s`, the one conversion that DEREFERENCES its argument ─────────────────
 #
@@ -15186,31 +15293,37 @@ CONTAINER_OP_MEANING = {
 #: that does, asked beside this one exactly as `container_union_refusal` is
 #: asked for `|`.  They stay in `CONTAINER_OP_MEANING` because that refusal's
 #: message quotes the same table.
+#:
+#: The three operators that are SET ALGEBRA, and the ones a backend may lower
+#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
+#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_OP_MEANING` and are dropped
+#: from `CONTAINER_GATED_OPS` below, because for every operand shape EXCEPT two
+#: blobs the gate's message is the right answer — but for two BLOBS
+#: `container_operator_refusal` DEFERS (returns None) and the backend decides,
+#: because whether the pair is a set algebra this path lowers is a fact about
+#: the backend and not about the operator.  arm64 lowers the three for two sets
+#: (see `_emit_set_op`, and `_emit_set_algebra` beside it); x86-64 has no emitter
+#: and refuses by name through `set_algebra_refusal`.  Keeping the gate's message
+#: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
+#: gate's "is refused when ... is a list" is exactly the right sentence for it.
+#:
+#: They also cannot simply be absent from `CONTAINER_OP_MEANING`, which is why
+#: this paragraph is here rather than folded into the table's own: they are the
+#: three operators whose CPython answer IS a lowering on this path when BOTH
+#: operands are SETS.  Set-ness is a flow-sensitive question each backend
+#: answers with its own `_set_vars`/`is_set_expr`, so a table which sees only
+#: KINDS cannot ask it; `container_set_algebra_refusal` below is the gate that
+#: does, asked beside `container_operator_refusal` exactly as
+#: `container_union_refusal` is asked for `|`.
+#:
+#: This is the ONE binding of the name, and it is the same tuple the 2026-10-17
+#: merge of `work/formal394-docs` found bound three times over in this file (two
+#: of them with the members in a different order, so which of them a reader
+#: believed the table to have depended on line number).  `test_formal_external_call.py`'s
+#: `no_module_level_name_is_bound_twice_in_model` is what pins the count at one.
 SET_ALGEBRA_OPS = ("-", "&", "^")
 CONTAINER_GATED_OPS = tuple(op for op in CONTAINER_OP_MEANING
                             if op not in SET_ALGEBRA_OPS)
-
-#: The three operators that are SET ALGEBRA, and the ones a backend may lower
-#: once it has a per-element scan: `&` INTERSECTION, `-` DIFFERENCE and `^`
-#: SYMMETRIC DIFFERENCE.  They stay in `CONTAINER_GATED_OPS`, because for every
-#: operand shape EXCEPT two blobs the gate's message is the right answer — but
-#: for two BLOBS `container_operator_refusal` DEFERS (returns None) and the
-#: backend decides, because whether the pair is a set algebra this path lowers
-#: is a fact about the backend and not about the operator.  arm64 lowers the
-#: three for two sets (see `_emit_set_op`); x86-64 has no emitter and
-#: refuses by name through `set_algebra_refusal`.  Keeping the gate's message
-#: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
-#: gate's "is refused when ... is a list" is exactly the right sentence for it.
-SET_ALGEBRA_OPS = ("-", "&", "^")
-
-
-#: The three operators that are SET ALGEBRA when both operands are sets:
-#: `&` INTERSECTION, `^` SYMMETRIC DIFFERENCE, `-` SET DIFFERENCE.  They are
-#: in `CONTAINER_GATED_OPS` for every other blob shape, and
-#: `container_operator_refusal` exempts the set-against-set shape so the
-#: backends can lower it — arm64 has the emitters, x86-64 refuses it by name
-#: through `set_algebra_refusal` below.
-SET_ALGEBRA_OPS = ("&", "^", "-")
 
 
 def set_operator_operand_refusal(shown: str, op: str, left_kind,
@@ -15735,6 +15848,15 @@ def truthy_lowering(kind, expr=None) -> str:
     here — the construction, not the count — and that is why this is a separate
     arm rather than a widening of `len_operand_lowering`.
     """
+    if kind == POINTER_KIND:
+        # A C pointer's truthiness is its own zeroness — the NULL test — and it
+        # is asked BEFORE `string_operand_is_string`'s `strlen` for the reason
+        # `POINTER_KIND`'s own comment gives: the two agree on a non-empty
+        # pointer and disagree on exactly the case the construct exists for, an
+        # absent one (`strlen(NULL)`, measured SIGSEGV).  `string_operand_is_
+        # string` admits this kind for every OTHER question, so the order here
+        # is the whole of the difference.
+        return TRUTHY_NONZERO
     if string_operand_is_string(kind):
         return TRUTHY_FROM_STRLEN
     if kind == FLOAT_KIND:
@@ -28347,6 +28469,15 @@ class ValueKinds:
             deref = self._deref_kind(e)
             if deref is not None:
                 return deref
+            # An `external_call[…]` result, asked before the arms below, which
+            # read a callee NAME and cannot see this construct at all (`_flat_
+            # callee` answers None for a subscript callee and the whole call
+            # then classified as nothing). The declared return type is the only
+            # statement of what the word holds — `external_call_result_value_
+            # kind` is that reader and its docstring carries the measurement.
+            extern = external_call_result_value_kind(e)
+            if extern is not None:
+                return extern
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
             # `List[Int]()` are the same construction and must be the same

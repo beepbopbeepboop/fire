@@ -11296,7 +11296,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # language failure this backend exists to prevent.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and not M.string_operand_is_string(
+                and not M.is_non_pointer_string(
                     self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:
