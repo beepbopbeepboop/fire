@@ -4920,11 +4920,11 @@ class GimpleGen:
         return gst._gen_stmt_AssertStmt(self, node)
     def _gen_stmt_RaiseStmt(self, node):
         return gst._gen_stmt_RaiseStmt(self, node)
-    def _handler_exc_name(self, h):
+    def _handler_exc_name(self, h) -> str:
         return gst._handler_exc_name(self, h)
     def _handler_exc_all_names(self, h):
         return gst._handler_exc_all_names(self, h)
-    def _handler_bind_name(self, h):
+    def _handler_bind_name(self, h) -> str:
         return gst._handler_bind_name(self, h)
     def _emit_except_handler(self, handler, node, bb_after: str):
         return gst._emit_except_handler(self, handler, node, bb_after)

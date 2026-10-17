@@ -390,7 +390,7 @@ def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
         if key and sn:
             out.append((key, sn + ' *', cond.args[0]))
 
-def _handler_exc_name(gen, h):
+def _handler_exc_name(gen, h) -> str:
     if h.exc_type is None:
         return None
     # `except (A, B):` stores a list of type-name strings; use the first
@@ -437,7 +437,7 @@ def _handler_exc_name(gen, h):
         return h.exc_type
     return None
 
-def _handler_bind_name(gen, h):
+def _handler_bind_name(gen, h) -> str:
     """The real local variable name this handler's body should bind the
     caught exception to, or None if it doesn't bind one at all. Usually
     just `h.name` (an explicit `except ... as e:`) — but Mojo's `except
