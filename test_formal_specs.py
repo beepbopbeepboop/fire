@@ -111,6 +111,56 @@ def test_the_specification_library_has_no_holes_and_no_axioms(tmpdir, shared):
           f"a specification whose own proof is a hole is a claim about a claim")
 
 
+def _elaborate_proof_lib_snippet(text: str, stem: str, tmpdir: str):
+    """Write a `ProofLib`-importing `.lean` file and run Lean on it.
+
+    `(ok, detail)`, or `(None, None)` when there is no Lean to run.  A text pin
+    can see that a lemma is PRESENT; only an elaboration can see that it is
+    PROVABLE, which is the distinction that matters for a library fact whose
+    whole purpose is to be applied in a proof that has not been written yet.
+    `check_proof_cached` runs `ensure_library` first, so a stale `.olean` is
+    rebuilt rather than recompiled inside the checker.
+    """
+    from formal.lean import find_lean, check_proof_cached
+    if not find_lean(HERE):
+        return None, None
+    path = os.path.join(tmpdir, stem + ".lean")
+    with open(path, "w") as f:
+        f.write(text)
+    ok, detail, _cached, _n = check_proof_cached(path, repo_root=HERE)
+    return ok, detail
+
+
+def test_the_all_inputs_refinement_has_its_multiplication_lemma(tmpdir, shared):
+    """`u64_ofNat_mul` is in the library, states the analogue of `u64_ofNat_add`,
+    and proves.
+
+    The layer's refinement is stated over a FINITE `List.range N` because the
+    ALL-INPUTS statement needs a `UInt64` multiplication lemma and the library
+    had no analogue of `u64_ofNat_add`/`u64_ofNat_sub`
+    (`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`).  The
+    text pin is against a later edit that silently weakens the statement; the
+    elaboration is what makes the pin mean "provable" rather than "present".
+    """
+    with open(os.path.join(LIB, "ProofLib.lean"), encoding="utf-8") as f:
+        lib = f.read()
+    check("theorem u64_ofNat_mul (a b : Nat) :\n"
+          "    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b)" in lib,
+          "lib/ProofLib.lean no longer states `u64_ofNat_mul` as the "
+          "unconditional analogue of `u64_ofNat_add`, so the library fact the "
+          "all-inputs refinement is waiting on is gone or weakened")
+    ok, detail = _elaborate_proof_lib_snippet(
+        "import ProofLib\n\n"
+        "example (a b : Nat) :\n"
+        "    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) :=\n"
+        "  u64_ofNat_mul a b\n",
+        "all_inputs_mul_lemma", tmpdir)
+    if ok is None:
+        print("    SKIP: no lean found (the lemma is not elaborated)")
+        return
+    check(ok, f"`u64_ofNat_mul` does not elaborate: {detail[:800]}")
+
+
 def test_every_annotated_example_names_a_spec_that_exists(tmpdir, shared):
     """Each `@refines` in `formal/examples/` names something `lib/Specs.lean` declares.
 
@@ -375,6 +425,8 @@ def test_the_x86_64_backend_gets_the_model_half_only(tmpdir, shared):
 TESTS = [
     ("the specification library has no holes and no axioms",
      test_the_specification_library_has_no_holes_and_no_axioms),
+    ("the all-inputs refinement has its multiplication lemma",
+     test_the_all_inputs_refinement_has_its_multiplication_lemma),
     ("every annotated example names a spec that exists",
      test_every_annotated_example_names_a_spec_that_exists),
     ("the annotation reader accepts both spellings",

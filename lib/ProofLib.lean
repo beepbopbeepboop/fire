@@ -758,6 +758,21 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
     exact Nat.mod_eq_of_lt hab
   exact this
 
+/-- Literal offset multiplication: `ofNat a * ofNat b = ofNat (a * b)`.
+
+    The analogue of `u64_ofNat_add`/`u64_ofNat_sub` for a product, and the
+    library fact the ALL-INPUTS refinement of
+    `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
+    waiting on: an induction over the emitted model's own recursion has a
+    `UInt64` multiplication as its arithmetic goal, and this is what reduces it
+    to the specification's `Nat` form.  Unconditional, exactly as
+    `u64_ofNat_add` is, because both sides are taken modulo `2^64`. -/
+theorem u64_ofNat_mul (a b : Nat) :
+    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) := by
+  apply UInt64.toNat.inj
+  rw [UInt64.toNat_mul, UInt64.toNat_ofNat', UInt64.toNat_ofNat', UInt64.toNat_ofNat']
+  exact (Nat.mul_mod a b (2^64)).symm
+
 /-- **Collapse a literal difference back into a single offset.**  `u64_sub_add`
     rewrites `(sp - a) + b` into `sp - (a - b)`, so an STP pair's second half
     (`(sp - 16) + 8`) comes out as `sp - (16 - 8)` rather than the
@@ -4384,6 +4399,19 @@ theorem arm64_flag_le_s (a b : UInt64) :
     arm64_matches_condition 13 (arm64_subs_flags a b) = true
       ↔ (a ^^^ 0x8000000000000000) ≤ (b ^^^ 0x8000000000000000) := by
   simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
+
+/-- The sign flip preserves the order of two words that are both BELOW the sign
+    bit: for `a b : UInt64` with `a < 2^63` and `b < 2^63`, flipping bit 63
+    keeps `a < b` true exactly when it was.  This is the OTHER direction from
+    `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
+    produced the flipped order states its hypothesis in that order, and this
+    turns it back into the plain `UInt64` order.  The reusable library fact
+    `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    signed_flag.md` names as step 1. -/
+theorem arm64_slt_iff_lt (a b : UInt64)
+    (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
+    (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
+  constructor <;> intro h <;> bv_decide
 
 theorem arm64_cset_eq (a b : UInt64) :
     (if arm64_matches_condition 0 (arm64_subs_flags a b) then (1 : UInt64) else 0)

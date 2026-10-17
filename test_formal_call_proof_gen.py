@@ -8688,5 +8688,51 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
                 self.assertTrue(ok, f"{name}: {detail}")
 
 
+class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
+    """`arm64_slt_iff_lt` is present, states the sign-flip equivalence, and proves.
+
+    `_gen_range_loop` refuses a signed loop test rather than emitting an
+    obligation that is FALSE about the machine, and lifting that refusal needs
+    this lemma (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_
+    against_a_signed_flag.md`, step 1).  Pinning the statement keeps a later
+    edit from weakening the fact the generator half is written against; the
+    elaboration is what makes the pin mean "provable" rather than "present".
+    """
+
+    STATEMENT = ("theorem arm64_slt_iff_lt (a b : UInt64)\n"
+                 "    (hr : a < 0x8000000000000000) "
+                 "(hb : b < 0x8000000000000000) :\n"
+                 "    (a ^^^ 0x8000000000000000) < "
+                 "(b ^^^ 0x8000000000000000) ↔ a < b")
+
+    def test_the_statement_is_in_the_library(self):
+        with open(os.path.join(HERE, "lib", "ProofLib.lean"),
+                  encoding="utf-8") as f:
+            lib = f.read()
+        self.assertIn(
+            self.STATEMENT, lib,
+            "lib/ProofLib.lean no longer states `arm64_slt_iff_lt` with the "
+            "equivalence the signed range-loop contract needs, so step 1 of "
+            "that document is undone")
+
+    def test_the_lemma_elaborates(self):
+        tmp = tempfile.mkdtemp(prefix="a2-slt-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "slt_lemma.lean")
+        with open(path, "w") as f:
+            f.write("import ProofLib\n\n"
+                    "example (a b : UInt64)\n"
+                    "    (hr : a < 0x8000000000000000)\n"
+                    "    (hb : b < 0x8000000000000000) :\n"
+                    "    (a ^^^ 0x8000000000000000) < "
+                    "(b ^^^ 0x8000000000000000) ↔ a < b :=\n"
+                    "  arm64_slt_iff_lt a b hr hb\n")
+        got = _check_proof(path)
+        if got is None:
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        ok, detail, _sorries = got
+        self.assertTrue(ok, detail)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
