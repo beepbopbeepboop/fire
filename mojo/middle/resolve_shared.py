@@ -1369,6 +1369,21 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     for pname, ptype in (func.params or []):
         if pname not in gen.var_types and ptype:
             gen.var_types[pname] = gimple_ctypes._mojo_type(ptype)
+    # An UNANNOTATED parameter whose type the parameter pass already
+    # inferred as a struct/container pointer is seeded too: otherwise every
+    # expression through it quick-types as the `int64_t` default, and a join
+    # with a container literal then picks the literal's kind -- `_have =
+    # gen._struct_method_names.get(sn) or ()` declared `_have` a `MojoList *`
+    # though the value is a SET, and `'__repr__' in _have` searched it as a
+    # list (the self-hosted compiler stopped calling user `__repr__`s).
+    _ipt = gen._inferred_param_types.get(_as_str(func.name)) if func.name else None
+    if _ipt:
+        for pname, ptype in (func.params or []):
+            if ptype or pname in gen.var_types:
+                continue
+            _it = _ipt.get(pname)
+            if isinstance(_it, str) and _it.endswith(' *'):
+                gen.var_types[pname] = _it
 
     def collect_assigned_types(nodes: list):
         """Recursively scan statements and collect types assigned to variables."""
