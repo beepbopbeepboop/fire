@@ -740,17 +740,25 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 #
 # **The exemption is EMPTY, and the mechanism stays so a future one is NAMED.**
 #
-# This tuple used to carry `abc`: `fire_compiler.py`'s
-# `from abc import abstractmethod` was read by nothing, because the file emits
-# the TEXT `@abstractmethod` into GENERATED source, so `abc` was a derived row
-# whose only files were dead imports. That import is GONE — deleted on
-# 2026-10-08 with the tree's other dead host imports
-# (`bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3, which
-# is where the ratchet handed off) — so the `abc` row left the census and the
-# exemption became a claim about a row that is no longer there.
-# `test_a_named_dead_import_is_still_named` reported exactly that, which is the
-# anti-rot it exists for. The tuple is kept, empty, so a future dead import
-# still has to be named with its reason rather than silently excused.
+# `abc` USED to be the one name in the derived set with no reader: the dead
+# `from abc import abstractmethod` in `fire_compiler.py`, which emitted the
+# TEXT `@abstractmethod` into GENERATED source (`fire_compiler.py:62`, read by
+# line 8401) and never used the name. So `abc` was a derived row whose only
+# files were dead imports, and it had to be exempted by name — which is what this
+# tuple is for.
+#
+# That import is GONE — deleted on 2026-10-08 with the tree's other dead host
+# imports (`73e03459`, "delete the tree's dead host imports"; the ratchet handed
+# off at `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
+# so `abc` is not in the derived census at all any more and the exemption became
+# a claim about a row that is no longer there, which is exactly what
+# `test_a_named_dead_import_is_still_named` catches; that anti-rot row is what
+# emptied this tuple rather than a person noticing. The tree now has no dead host
+# import at all, which `test_formal_host_import_shapes.py::
+# test_the_whole_tree_has_no_dead_host_import` asserts from the other side.
+#
+# The tuple is KEPT, empty, so a future dead import still has to be named with its
+# reason rather than silently excused.
 _ROWS_WITH_A_NAMED_DEAD_IMPORT = ()
 
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",

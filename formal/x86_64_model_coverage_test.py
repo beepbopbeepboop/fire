@@ -320,8 +320,8 @@ def samples():
     # `formal/x86_64_codegen.py` emits all of these, and until now `samples()`
     # named NONE of them, so `x86_step` was never asked the one question this
     # list exists to ask — `tools/formal_isa_census.py`'s LEAN column for x86-64
-    # IS this list, and it read `no` for each: the SSE2 scalar-double coverage
-    # gap, closed 2026-10-08.
+    # IS this list, and it read `no` for each.  That gap is what the rows below
+    # close.
     #
     # A HIGH XMM index is not available (SysV AMD64 names only XMM0-XMM7, and
     # every encoder asserts it), so unlike the GPR rows there is no r8-r15 pair
