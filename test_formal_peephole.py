@@ -399,12 +399,22 @@ class TestRules(unittest.TestCase):
         # The other direction of the same condition, and the one whose absence
         # made the rule unsound: `xa` is live after the window, so dropping the
         # write to it would change what a later instruction reads.
+        #
+        # Nothing is removed at all, and `mov x5, x1` survives: the rule's
+        # condition is that the intermediate register is read ONLY at the
+        # window's second instruction, and here it is read at the third too.
+        # (The bulk merge kept this test's NAME and comment while taking the
+        # sibling's assertions — `removed == 1` and a two-instruction image —
+        # which is a different claim: it asserts the rewrite HAPPENS on exactly
+        # the input this test is named for.)
         words = _w(encode_add_xd_xn_imm(1, 2, 0), encode_add_xd_xn_imm(3, 1, 0),
                    encode_add_xd_xn_imm(5, 1, 0), encode_ret())
         asm, removed = self._run_words(words)
-        self.assertEqual(1, removed)
-        self.assertEqual([_i(encode_add_xd_xn_imm(3, 2, 0)), _i(encode_ret())],
-                         asm.words())
+        self.assertEqual(0, removed,
+                         "x1 is read again after the window, so dropping the "
+                         "chain's first copy would change what `mov x5, x1` "
+                         "reads")
+        self.assertEqual(words, asm.words())
 
     def test_copy_chain_declines_when_a_LOOP_reads_the_register_again(self):
         # The shape that made the rule un-fireable, and the one that made it
@@ -627,13 +637,25 @@ class TestTables(unittest.TestCase):
         # A row whose value has bits outside its own mask can never match: the
         # `0xD10000000` shape, which is how that typo survived this long. And a
         # field that runs past bit 31 would silently lose its high bits.
-        for mask, value, field, shift, _kind in P._ARM64_BRANCHES:
+        #
+        # `_ARM64_BL_ROW` is in the set because it IS a re-patchable row and was
+        # not: it ended in the string `"call"` where every other row ends in the
+        # `keep` mask, so the first `BL` that reached `_repatch_branch` raised
+        # `TypeError: unsupported operand type(s) for &: 'int' and 'str'`. The
+        # `keep` check is what pins that: a string there fails the `&` below.
+        for mask, value, field, shift, keep in (P._ARM64_BRANCHES
+                                               + [P._ARM64_BL_ROW]):
             self.assertEqual(0, value & ~mask,
                              f"branch row {value:#x} has bits its mask "
                              f"{mask:#x} does not test, so it matches nothing")
             self.assertLessEqual(shift + field.bit_length() - 1, 31,
                                  f"branch row {value:#x}'s field runs past "
                                  f"bit 31")
+            self.assertIsInstance(keep, int,
+                                  f"branch row {value:#x}'s fifth field is the "
+                                  f"mask of everything that is NOT the "
+                                  f"displacement, so a string there is a "
+                                  f"`TypeError` in `_repatch_branch`")
 
     def test_a_sub_immediate_is_not_unknown(self):
         # The regression, named: this class answered all 31 registers for

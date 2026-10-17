@@ -236,6 +236,14 @@ _ARM64_WRITES = [
     (0xFFE0FC00, 0x93407C00, ("rd",)),
     (0xFFC0FC00, 0x92401C00, ("rd",)),
     (0xFFC0FC00, 0x92407C00, ("rd",)),
+    # …and `LSRV`, which `_ARM64_READS` lists between its two siblings and
+    # which this table was missing. A read row with no write row is not
+    # "writes nothing", it is UNKNOWN, and `writes_arm64` answers unknown with
+    # every register — the direction that makes a rewrite FIRE. Restored with
+    # the mask its two siblings carry; the branch version of this row came in
+    # with a comment naming a different class (`AND (immediate)`) and a merge
+    # dropped it while re-pinning the bit-test branches' masks above.
+    (0xFFC0FC00, 0x92403C00, ("rd",)),
     (0xFFE0FC00, 0x9AC00800, ("rd",)),
     (0xFFC0FC00, 0x9AC00C00, ("rd",)),
     (0xFFC0FC00, 0x9AC02000, ("rd",)),
@@ -406,11 +414,22 @@ _ARM64_BRANCHES = [
     (0x7F000000, 0x37000000, 0x003FFF, 5, 0xFFF8001F),      # TBNZ (W or X)
 ]
 
-#: `BL`, as a re-patchable row rather than a branch. Its `kind` is `call`, which
-#: `_successors` reads as "fallthrough only" — a call's target is another
-#: function's entry and control comes back — and which `_repatch_branches` reads
-#: as any other displacement to re-encode.
-_ARM64_BL_ROW = (0xFC000000, 0x94000000, 0x03FFFFFF, 0, "call")
+#: `BL`, as a re-patchable row rather than a branch. It is NOT in
+#: `_ARM64_BRANCHES` because it has no CFG edge: `arm64_control` answers
+#: `"call"` for it and `arm64_branch_target` answers `None`, because the callee
+#: is another function's region this pass does not walk into, so a call
+#: contributes only its fall-through. Its DISPLACEMENT is a real PC-relative
+#: field all the same, and a deletion above it invalidates it like any other's —
+#: `sqsum.mojo`'s recursion is one `BL`, and it was the whole of that program's
+#: wrong answer.
+#:
+#: **The row has `_ARM64_BRANCHES`'s five-field shape, `keep` included.** It
+#: used to end in the string `"call"` where every other row ends in the mask of
+#: everything that is not the displacement, which made the two rows the same
+#: tuple with two meanings and cost a `TypeError` the first time `BL` actually
+#: reached `_repatch_branch`. "call" was documentation for a reader who gets it
+#: from `arm64_control`, which is where the CFG reads it from.
+_ARM64_BL_ROW = (0xFC000000, 0x94000000, 0x03FFFFFF, 0, 0xFC000000)
 
 
 def _arm64_branch(word: int, index: int):
@@ -498,7 +517,7 @@ def arm64_branch_target(word: int, index: int):
     return index + disp
 
 
-def _repatch_branch(word: int, disp: int) -> int:
+def _repatch_branch(word: int, disp: int, row=None) -> int:
     """`word` with its PC-relative displacement replaced by `disp`.
 
     The inverse of `arm64_branch_target` over the same table row, and it
@@ -506,20 +525,30 @@ def _repatch_branch(word: int, disp: int) -> int:
     a `CBZ`, the BIT NUMBER of a `TBZ` — through `keep`, because a branch that
     jumps to the right place and tests the wrong thing is a wrong answer with a
     correct-looking displacement.
+
+    **`row` is the caller's ALREADY-DECODED row, and it is how a `BL` gets
+    here.** `_ARM64_BRANCHES` does not list `BL` because `BL` has no CFG edge
+    (`arm64_control` calls it a `call`, and `arm64_branch_target` answers `None`
+    for it), but its displacement is a real field that a deletion invalidates
+    like any other's — `sqsum.mojo`'s recursion is one `BL`, and it was the
+    whole of that program's wrong answer. Left out, the row is read back out of
+    `word` through `_arm64_branch`, the same decode everything else uses.
     """
-    slot = _branch_slot(word)
-    if slot is None:
-        raise CodegenError(
-            f"the peephole pass asked to re-displace {word:#010x}, which is "
-            "not a PC-relative branch")
-    field, lsb, keep = slot
+    if row is None:
+        decoded = _arm64_branch(word, 0)
+        if decoded is None:
+            raise CodegenError(
+                f"the peephole pass asked to re-displace {word:#010x}, which is "
+                "not a PC-relative branch or call")
+        row = decoded[0]
+    _mask, _value, field, shift, _keep = row
     width = field.bit_length()
     if not -(1 << (width - 1)) <= disp < (1 << (width - 1)):
         raise CodegenError(
             f"a branch displacement of {disp} instructions does not fit this "
             f"instruction's {width}-bit field ({word:#010x}); the image grew "
             "past what its branches can address")
-    return (word & keep) | ((disp & field) << lsb)
+    return (word & _keep) | ((disp & field) << shift)
 
 
 def arm64_control(word: int) -> str:
@@ -1276,6 +1305,15 @@ def _run(asm, arch, rules, stats=None) -> int:
                     "<I", new_bytes, 0)[0])
                 entries[i].writes = writes_arm64(struct.unpack_from(
                     "<I", new_bytes, 0)[0])
+                # The replaced instruction may be a branch the old one was not,
+                # and `Entry.branch` is what `_repatch_branches` reads — so it
+                # is re-decoded with the word it now carries, at the ORIGINAL
+                # index the entry still holds (`orig // 4`: a deletion above it
+                # means its position in `entries` is no longer its original
+                # one, and the record is in original coordinates).
+                entries[i].branch = _arm64_branch(
+                    struct.unpack_from("<I", new_bytes, 0)[0],
+                    entries[i].orig // 4)
                 del entries[i + consumed:i + len(window)]
                 removed += len(window) - consumed
             else:
@@ -1292,8 +1330,14 @@ def _run(asm, arch, rules, stats=None) -> int:
             break
     if not counts:
         return 0
+    # **No second `_repatch_branches` here, and the absence is the point.**
+    # Every mutation is followed immediately by one, and `entries` is not
+    # touched after the last of them — the loop's exits are all "no rule
+    # fired", which mutates nothing — so the layout the in-loop call used IS
+    # the final layout. A second call was harmless once the target came from
+    # `Entry.branch` and was silently WRONG before that, because it re-read the
+    # displacement the first call had just written and translated it again.
     new_text, at = _rebuild(text, entries, code_end)
-    _repatch_branches(entries, at, arch)
     _Remap(asm, at).apply()
     asm.sections["text"] = bytearray(new_text)
     return removed
@@ -1360,19 +1404,32 @@ def _repatch_branches(entries, at: list, arch: str) -> None:
     """
     if arch == "arm64":
         for e in entries:
-            if len(e.raw) != 4:
+            if e.branch is None or len(e.raw) != 4:
+                continue
+            row, target = e.branch
+            # **The target is read from the RECORD, not from the word.** The
+            # word's displacement may already have been rewritten by an earlier
+            # call — this runs again after the next deletion, and a target read
+            # back out of an already-translated word is compared against
+            # `at`, which is indexed by ORIGINAL offsets: two coordinate systems
+            # in one expression. Measured: with a target read from the word, a
+            # branch below TWO deletions came out one word SHORT of its target,
+            # because the first call's translation was translated a second time.
+            # `Entry.branch` is recorded once, at decode time, in original
+            # coordinates and is never moved.
+            old_target = target * 4
+            if not (0 <= old_target < len(at) and 0 <= e.orig < len(at)):
+                # A target outside the ORIGINAL image is left alone: the branch
+                # left the decoded region, and inventing a displacement for it
+                # would be a miscompiled image rather than a refusal.
                 continue
             word = struct.unpack_from("<I", e.raw, 0)[0]
-            slot = _branch_slot(word)
-            if slot is None:
-                continue
-            field, lsb, _keep = slot
-            at_here = at[e.orig]
-            # The word's displacement is the OLD offset of its target, because that
-            # is the only target it can still name. `at` maps it forward.
-            old_target = e.orig + _sign_extend((word >> lsb) & field,
-                                               field.bit_length()) * 4
-            new = _repatch_branch(word, (at[old_target] - at_here) // 4)
+            # `at` is the ONE authority for "where did an old offset go", and it
+            # is the same table a LABEL naming a deleted instruction lands
+            # through, so a branch and a label cannot disagree about where a
+            # deleted byte went: `at` fills the deleted range with where the
+            # deletion collapsed to.
+            new = _repatch_branch(word, (at[old_target] - at[e.orig]) // 4, row)
             if new != word:
                 e.raw = struct.pack("<I", new)
         return
