@@ -9624,9 +9624,16 @@ def gen_module_impl(self, stmts):
                     if i >= len(pnames):
                         break
                     _skey = struct_name + '::' + _as_str(pnames[i])
-                    st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
+                    # The struct-pointer observer FIRST: it answers only a
+                    # proven `<Struct> *` (the method's own `self`, a
+                    # constructor call), and the scalar observer's IdentExpr
+                    # arm answers whatever an inference table holds for the
+                    # name -- for `self` that is no entry under the reference
+                    # compiler and a default `int64_t` under the self-hosted
+                    # one, which then shadowed the real `Interpreter *`.
+                    st = _arg_struct_ptr_type(_cname, a, _cstruct)
                     if not st:
-                        st = _arg_struct_ptr_type(_cname, a, _cstruct)
+                        st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
                     if not st:
                         continue
                     _sprev = _ctor_scalar_obs.get(_skey, '')
