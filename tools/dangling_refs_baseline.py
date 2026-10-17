@@ -33,17 +33,13 @@ honestly bound.
 BASELINE = {
     'bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md': 1,
     'bugs/FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md': 1,
-    'bugs/FORMAL_arm64_the_method_frame_depth_helpers_mis_scale_imm12.md': 1,
-    'bugs/FORMAL_arm64_the_proof_generators_sp_trackers_drop_the_imm12_shift.md': 1,
-    'bugs/FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md': 1,
-    'bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md': 2,
+    'bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md': 1,
     'bugs/FORMAL_proof_census_tool_has_no_prooflib_dep.md': 2,
     'formal/arm64_proof_gen.py': 2,
     'formal/contracts.py': 4,
-    'test_formal_call_proof_gen.py': 5,
+    'test_formal_call_proof_gen.py': 3,
     'test_formal_contracts.py': 2,
     'test_suite.py': 6,
-    'tools/suite.py': 1,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
@@ -90,7 +86,6 @@ BARE_BASELINE = {
     'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/COMPILE_FAIL_zipfile___init__.md': 3,
     'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md': 5,
-    'bugs/DOCS_formal16_2_deleted_the_bit_test_doc_under_a_survey_another_worker_owns.md': 3,
     'bugs/DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md': 1,
     'bugs/FORMAL_a_conditional_value_in_a_dylib_export.md': 2,
     'bugs/FORMAL_a_tuple_for_targets_element_is_the_iterables_kind.md': 1,
@@ -109,7 +104,6 @@ BARE_BASELINE = {
     'bugs/FORMAL_sweep_singles_second_half.md': 1,
     'bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/FORMAL_time_struct_shaped_answers.md': 1,
-    'bugs/OPEN_WORK.md': 5,
     'bugs/PERF_selfhost_memory_leak_hunt.md': 1,
     'bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md': 7,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md': 4,
@@ -133,7 +127,7 @@ BARE_BASELINE = {
     'test_coro_detached_async.py': 1,
     'test_coro_future_await.py': 1,
     'test_coro_nested_async_capture.py': 1,
-    'test_dangling_doc_refs.py': 2,  # fixture names (FORMAL_fixture.md) the test plants
+    'test_dangling_doc_refs.py': 2,
     'test_gimple.py': 2,
     'test_gimple_async_runner.py': 1,
     'test_gimple_generator_runner.py': 1,

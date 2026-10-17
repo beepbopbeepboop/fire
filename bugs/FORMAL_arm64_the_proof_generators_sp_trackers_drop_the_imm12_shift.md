@@ -93,8 +93,8 @@ def arm64_ext_imm12 (insn : UInt32) : Nat :=
   (((insn >>> 10) &&& 0xfff).toNat) <<< (12 * (((insn >>> 22) &&& 0x1).toNat))
 ```
 
-(`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` is the
-model-side fix, landed). `formal/arm64_proof_gen.py`'s `_step_rhs` mirrors it
+The model-side fix is landed and its doc is deleted with it (`5361903f`).
+`formal/arm64_proof_gen.py`'s `_step_rhs` mirrors it
 (`:3409`/`:3415`), so an emitted STEP lemma states the shifted value — but the
 `sp`-TRACKING decoders still read `(w >> 10) & 0xfff` and drop bits 23:22:
 

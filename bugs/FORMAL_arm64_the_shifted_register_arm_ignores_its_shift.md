@@ -5,13 +5,14 @@ arms in `lib/ProofLib.lean`; the `0x8b000000` arm is the one an image reaches).
 **Status: OPEN, MEASURED on the CPU, and it is a SOUNDNESS defect rather than an
 incompleteness — `arm64_step` returns a state the machine never reached.** Not
 fixed: every arm here is a `lib/ProofLib.lean` change and that build breaches a
-bounded worker's 8 GB ceiling (the sibling measurements are
-`bugs/FORMAL_arm64_the_extended_immediate_arms_ignore_their_shift.md` §Status and
-`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md`'s build wall), so
-landing it without typechecking it would put a `sorry`-shaped hole in the tree
-whose Lean gate is disabled. It is the third "the model is LOUD and WRONG"
-defect, after the `CMN` destination-register one (fixed, its doc deleted) and
-the `#imm12` shift one (fixed) — a bucket no `NOSTEP` tally can see.
+bounded worker's 8 GB ceiling (the sibling measurement is
+`bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md`'s build wall, and
+the `#imm12` shift arm — the same class of change — is now FIXED by `5361903f`
+with its doc deleted), so landing it without typechecking it would put a
+`sorry`-shaped hole in the tree whose Lean gate is disabled. It is the third
+"the model is LOUD and WRONG" defect, after the `CMN` destination-register one
+(fixed, its doc deleted) and the `#imm12` shift one (fixed) — a bucket no
+`NOSTEP` tally can see.
 
 ## What I ran, and what it printed
 
