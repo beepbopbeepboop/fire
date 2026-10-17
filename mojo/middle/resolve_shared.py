@@ -1709,9 +1709,20 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
             i += 1
             depth = 1
             expr_chars = []
+            # A quoted string inside the field (`{"!= 0" if c else "== 0"}`)
+            # is opaque to both scans below: its braces do not nest and its
+            # `!` / `:` are not a conversion or a spec. Read as syntax, the
+            # `!` of `"!= 0"` split the field into the expression `"` and a
+            # conversion, and the literal came out as the text `{"}`.
+            _q = ''
             while i < len(inner) and depth > 0:
                 ch = inner[i]
-                if ch == '{': depth += 1
+                if _q != '':
+                    if ch == _q:
+                        _q = ''
+                elif ch == '"' or ch == "'":
+                    _q = ch
+                elif ch == '{': depth += 1
                 elif ch == '}': depth -= 1
                 if depth > 0:
                     expr_chars.append(ch)
@@ -1722,8 +1733,14 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
             _spec = ''
             _conv = ''
             _depth = 0
+            _q = ''
             for _k, _ch in enumerate(expr_src):
-                if _ch in '([{':
+                if _q != '':
+                    if _ch == _q:
+                        _q = ''
+                elif _ch == '"' or _ch == "'":
+                    _q = _ch
+                elif _ch in '([{':
                     _depth += 1
                 elif _ch in ')]}':
                     _depth -= 1
@@ -1731,7 +1748,9 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
                     _spec = expr_src[_k + 1:]
                     expr_src = expr_src[:_k]
                     break
-                elif _ch == '!' and _depth == 0:
+                elif (_ch == '!' and _depth == 0
+                      and not expr_src[_k + 1:_k + 2] == '='):
+                    # `!=` is the operator, not a `!r` conversion.
                     _conv = expr_src[_k + 1:]
                     expr_src = expr_src[:_k]
                     break

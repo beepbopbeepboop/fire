@@ -3944,7 +3944,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             and (gen._is_dyn_word(left_node, lv) or gen._is_dyn_word(right_node, rv))):
         eq_t = gen._call_expr('int', 'mojo_word_eq', [('int64_t', lv), ('int64_t', rv)])
         t = gen._new_temp('_Bool')
-        gen._emit(f'  {t} = {eq_t} {"!= 0" if op == "==" else "== 0"};')
+        _cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f'  {t} = {eq_t} {_cmp};')
         return '_Bool', t
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
