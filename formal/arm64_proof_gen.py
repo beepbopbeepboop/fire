@@ -3696,9 +3696,20 @@ def _step_rhs(w: int, idx: int):
         return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
                 f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
     if idx == 13:  # CMP immediate
+        # The EFFECTIVE immediate, not the raw 12-bit field: `sh` (bit 22)
+        # scales it by 4096, which is the rule `lib/ProofLib.lean::arm64_ext_imm12`
+        # implements and `_imm12_scaled` is the Python side of.  This arm read
+        # `{ext}` — a name nothing in this module binds — from 2026-10-08 until
+        # the 2026-10-17 merge, so every CMP-immediate word raised NameError out
+        # of the emitter: `test_formal_call_proof_gen.py`'s
+        # `TestStepOkDerivesFromStepResult::test_the_derivation_is_total_over_the_
+        # step_table (entry=13)` ERRORed, and `test_formal_dylib.py`'s
+        # `a conditional value is not a branch` ERRORed for the same reason.  A
+        # half-applied rename: the line above computed the right value and the f-string
+        # below interpolated a different, nonexistent one.
         imm12 = _imm12_scaled(w)
         return (f"some {{ s with nzcv := arm64_subs_flags "
-                f"(arm64_reg {rn} s) (UInt64.ofNat {ext}) }}")
+                f"(arm64_reg {rn} s) (UInt64.ofNat {imm12}) }}")
     if idx == 14:  # B
         imm = w & 0x03ffffff
         off = (f"(if (({imm} : UInt32) &&& 0x02000000) ≠ 0 then "
@@ -8710,8 +8721,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 _fls = [f for f in _fls if f is not None]
                 _fl = _COND_LEMMA.get(_cnd)
                 # **A `B.cond` BLOCK HAS NO CSET, so `_fls` came out EMPTY for it
-                # while `_fl` did not — and that asymmetry is the whole of
-                # `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.**
+                # while `_fl` did not — and that asymmetry was a real defect:
+                # every conditional branch's chain closed with no flag lemma
+                # (found 2026-10-04 and fixed in §0 of the order work, whose
+                # order half landed `ad54fc2f6`).**
                 # `_cset_cond` reads the raw hardware condition field off the
                 # block's terminator when it finds no CSET (its own docstring says
                 # so, and it is what `_fl` above is derived from), while
@@ -8877,8 +8890,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         b)` can never match again — so a closer whose `simp` set
                         names that lemma still hands `bv_decide` an opaque
                         `arm64_reg`/`arm64_matches_condition` term, which is the
-                        "potentially spurious counterexample" of
-                        `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.
+                        "potentially spurious counterexample" the `B.cond`-with-
+                        no-`CSET` defect produced on a conditional branch.
                         The lemma has to fire FIRST, which is the order
                         `_cond_flag_lines` already uses for a loop's exit test,
                         and this is the same recipe for a branch.

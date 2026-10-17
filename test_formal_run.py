@@ -18249,11 +18249,17 @@ COMPREHENSION_ELEMENT_CASES = [
     #
     # A nested comprehension whose produced values are words is accepted too
     # (`a_nested_comprehension_whose_result_is_words_is_per_iteration`), by the
-    # same copy over the shared predicate. The rows after the nested acceptance
-    # are the shapes whose per-iteration materialisation is still refused — a
-    # nested comprehension whose own result holds containers, a list of lists,
-    # and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_
-    # blob_base.md`) a slice or a constructor call, whose runtime blob base is
+    # same copy over the shared predicate. A SLICE is accepted on the same
+    # reasoning one node further out — a slice copies element words out of its
+    # base, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site — and its own rows
+    # (`…_that_is_a_slice_of_a_name_…`, `…_of_a_literal_…`, `…_of_a_list_of_
+    # lists_…`, `a_slice_element_is_a_distinct_object_per_iteration`) sit beside
+    # the nested ones. The rows after them are the shapes whose per-iteration
+    # materialisation is still refused — a nested comprehension whose own result
+    # holds containers, a list of lists, a slice whose base carries a scratch
+    # address, and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_
+    # runtime_blob_base.md`) a constructor call, whose runtime blob base is
     # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
     # so a refusal about anything else fails the case.
     #
@@ -18298,6 +18304,61 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      0, "63"),
+    # A SLICE element is materialised per iteration on the same reasoning one
+    # node further out: a slice copies element words out of its BASE into a blob
+    # of its own, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site. `a[0:y]` under a
+    # NAME is the measured shape, and the length read is the one a content read
+    # cannot fake: an aliased element would carry the LAST iteration's slice, so
+    # three of these would read `3 3 3`.
+    ("a_comprehension_element_that_is_a_slice_of_a_name_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", len(r[0]), len(r[1]), len(r[2]))\n"
+     "    return 0\n",
+     0, "1 2 3"),
+    # The same slice read through MUTATION, which is the other half of "distinct
+    # objects": writing element 0 must not be visible through element 1. CPython
+    # gives `99 10 10`; an aliased result would give `99 99 99`.
+    ("a_slice_element_is_a_distinct_object_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    r[0][0] = 99\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "99 10 10"),
+    # A slice of a base that PERSISTS and holds containers — `b[0:2]` where `b`
+    # is a name — is sound for the same reason the literal arms accept `[a, b]`:
+    # the copied words are addresses of the persistent inner lists, which is what
+    # CPython's own slice shares, not addresses of a blob built per iteration.
+    ("a_slice_of_a_list_of_lists_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var b = [[1, 2], [3, 4], [5, 6]]\n"
+     "    var r = [b[0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][0][0], r[1][1][1], r[2][0][1])\n"
+     "    return 0\n",
+     0, "1 4 2"),
+    # A slice whose base is a display of scalars: the base IS built here, but a
+    # `[1, 2, 3]` display contributes only words, so the copy carries no scratch
+    # address and the element is materialised.
+    ("a_comprehension_element_that_is_a_slice_of_a_literal_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[1, 2, 3][0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][0], r[2][1])\n"
+     "    return 0\n",
+     0, "2 1 2"),
+    # …and the boundary a slice does NOT cross: a base built here that ITSELF
+    # holds a container carries the address of one scratch blob into every
+    # iteration's copy, so `[[1, 2]][0:1]` stays refused. This is the row that
+    # keeps the slice arm from being "accept every slice".
+    ("a_slice_whose_base_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[1, 2]][0:1] for y in [1, 2, 3]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:the element `[[1, 2]][0:1]` opens a container", None),
     # …and the boundary the nested acceptance does NOT cross: an inner
     # comprehension whose OWN result holds containers carries those containers
     # as addresses, so copying it per iteration would share one scratch blob —

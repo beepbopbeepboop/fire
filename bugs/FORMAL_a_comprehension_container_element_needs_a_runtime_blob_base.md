@@ -5,10 +5,11 @@
 `formal/x86_64_codegen.py`'s `_emit_comprehension` / `_emit_list` / `_emit_dict`,
 and the frame blob allocator they share (`_reserve_blob`, `_list_cursor`).
 
-**Status: the FLAT-container half of the relocation has LANDED (2026-10-06) and
-a NESTED comprehension whose produced values are words is now materialised too
-(2026-10-08), on BOTH backends, and the runtime-blob-base half has not — but it
-is a smaller half than this document originally drew.** A comprehension whose
+**Status: the FLAT-container half of the relocation has LANDED (2026-10-06), a
+NESTED comprehension whose produced values are words is now materialised too
+(2026-10-08), and the SLICE element is materialised as well (2026-10-13) — all
+three on BOTH backends, and the runtime-blob-base half has not — but it is a
+smaller half than this document originally drew.** A comprehension whose
 element is a list / tuple / set / dict LITERAL with no nested container-building
 sub-expression is materialised per iteration: the element's blob is copied into a
 slot of a `cap`-sized array indexed by the result count, so the aliasing is gone
@@ -29,6 +30,62 @@ of what is left" reading of the nested row. What is STILL refused is the element
 whose per-iteration copy is UNSOUND because it carries an ADDRESS: a list of
 lists, a nested comprehension whose own result holds containers, a slice, a
 constructor call. Read "What landed" first.
+
+## What landed 2026-10-13: the SLICE element, by the same copy, on both backends
+
+**This document's other named shape — "a slice … whose runtime blob base is
+genuinely needed" — did not need one either, and the "exact next step" section
+below had already predicted it** ("a slice and a constructor call build their
+blob through a DIFFERENT site than a literal, so each may be answerable by
+extending the predicate to the site it uses rather than by the register
+discipline"). The prediction is right for the slice: a slice copies element words
+out of its BASE into a new blob of its own, so the per-iteration copy is sound
+exactly when the base's produced values are not ADDRESSES of a blob built at the
+element site. `model.comprehension_element_is_flat_container` grew one
+`F.SliceExpr` arm that asks the base the same question the literal arms ask their
+children, and nothing else changed — the emitters, the ledger delta, the
+`cap`-sized array and the `memcpy` are the 2026-10-06 code.
+
+| program | CPython 3.14 | before | after |
+|---|---|---|---|
+| `[a[0:y] for y in [1, 2, 3]]` (`a = [10, 20, 30]`), `len` of each | `1 2 3` | refused | **`1 2 3`** |
+| the same, then `r[0][0] = 99` | `99 10 10` | refused | **`99 10 10`** |
+| `[b[0:2] for y in [1, 2, 3]]` (`b = [[1, 2], [3, 4], [5, 6]]`) | `1 4 2` | refused | **`1 4 2`** |
+| `[[1, 2, 3][0:2] for y in [1, 2, 3]]` | `2 1 2` | refused | **`2 1 2`** |
+| `[[[1, 2]][0:1] for y in [1, 2, 3]]` (base built here holds a container) | — | refused | refused |
+
+**The boundary is a base built HERE that itself holds a container, and it is the
+same aliasing one node out.** `[[1, 2]][0:1]`'s base is an outer scratch list
+holding the address of an inner scratch list; slicing copies that address into
+the slice result, so a per-iteration copy would give every element the same
+inner list. The `SliceExpr` arm therefore recurses into the base with
+`comprehension_element_is_flat_container` — a name, a member read or a subscript
+persists and is accepted; a display of scalars is accepted; a base the copy
+cannot make flat is not. `a[0:2][0:1]` is the recursion applied twice and is
+accepted on the same terms.
+
+**`expr_spelling` gained a `SliceExpr` arm with it**, because the refusal a
+base-built-here slice still gets quoted `SliceExpr` — the AST type name — where
+the reader has `[[1, 2]][0:1]` open; the same argument the `Comprehension` arm
+above was added for. The refusal needle in the new row is the source text, not
+the node name.
+
+**Pinned in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**:
+`a_comprehension_element_that_is_a_slice_of_a_name_is_per_iteration` (`1 2 3` —
+the length read, which an aliased element would answer `3 3 3`),
+`a_slice_element_is_a_distinct_object_per_iteration` (`99 10 10`, the mutation
+read that pins distinct objects), `a_slice_of_a_list_of_lists_is_per_iteration`
+(a persistent base that holds containers), `a_comprehension_element_that_is_a_
+slice_of_a_literal_is_per_iteration` and the boundary refusal
+`a_slice_whose_base_opens_a_container_is_refused`. Every positive row was built
+and run under `--backend=arm64` **and** `--backend=x86_64` (the shared predicate
+and the one copy shape in each emitter, so the two cannot disagree); all 1239
+checks of `test_formal_run.py` pass.
+
+**What this does NOT do.** The runtime blob base is still owed to a list of
+lists, a constructor call, and a slice whose base itself carries a scratch
+address, which is the `[0:1]` row above — none of those is answered by a byte
+copy of the element's own blob.
 
 ## What landed 2026-10-08: a nested comprehension whose result is words, by the SAME copy
 
@@ -103,7 +160,8 @@ about which elements are representable; the message stays
 | `[{y, y + 1} for y in [10, 20, 30]]`, `r[i][0]` | `10 20 30` | refused | **`10 20 30`** |
 | `[[x + y for x in [1, 2]] for y in [10, 20, 30]]`, sum `v[0]` | `63` | refused | **`63`** (2026-10-08) |
 | `[[[y]] for y in [10, 20, 30]]` (a list of lists) | — | refused | refused (shallow copy) |
-| `[a[0:2] for y in …]` (a slice) | — | refused | refused (shallow copy) |
+| `[a[0:2] for y in …]` (a slice of a name) | — | refused | **materialised** (2026-10-13) |
+| `[a[0:1] for y in …]` (a slice whose base opens a container) | — | refused | refused (shallow copy) |
 | `[[x + y for x in [1, 2]] for y in [10]]` (one outer iteration) | `11` | `11` | `11` |
 
 **Why the shallow copy is sound here and not for the rest.** The copy carries
@@ -132,8 +190,9 @@ purpose, because `[inner for y in ys]` where `inner` is one object gives N
 references to ONE list in CPython too, so aliasing a name is the right answer
 and only a container the element position BUILDS is the bug. On this tree the
 copy serves the flat-DISPLAY share of those 323 (a display of scalars, or a dict
-display of scalars); the shapes above it — including the nested comprehension —
-are the refusal that remains.
+display of scalars) and, since 2026-10-13, the slice of a base whose produced
+values are words; the shapes above them — a container inside a container, and a
+slice whose base itself carries a scratch address — are the refusal that remains.
 
 **The machinery is not in the wrong place, and that is what this doc
 establishes.** There is no per-element-site allocator to use: a
@@ -364,12 +423,13 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
 
 ## The exact next step
 
-**The nested reproducer this section used to be about is CLOSED (2026-10-08, see
-"What landed 2026-10-08"), so the runtime base is now only what a list of lists,
-a slice or a constructor call needs** — the three shapes the flat predicate still
-returns False for. Steps 1-3 above remain the shape of that work, on **both**
-backends, and the acceptance set is those three shapes plus the whole of the
-other doc's table as cases a fix must NOT break:
+**The nested reproducer this section used to be about is CLOSED (2026-10-08) and
+so is the slice (2026-10-13), so the runtime base is now only what a list of
+lists, a constructor call, or a slice whose base itself carries a scratch address
+needs** — the shapes the flat predicate still returns False for. Steps 1-3 above
+remain the shape of that work, on **both** backends, and the acceptance set is
+those shapes plus the whole of the other doc's table as cases a fix must NOT
+break:
 
 * one outer iteration (`for y in [10]` → 11),
 * an element that does not depend on the loop variable (→ 3, correct today only
@@ -386,11 +446,15 @@ and the `nested_comprehension_in_a_generator_iterable` /
 `comprehension_body_is_not_a_container_position` rows.
 
 **The 2026-10-08 landing also re-prices this: the nested case needed no allocator
-change at all, only the predicate.** That is evidence the remaining three shapes
-are not one feature either — a slice and a constructor call build their blob
-through a DIFFERENT site than a literal, so each may be answerable by extending
-the predicate to the site it uses rather than by the register discipline steps
-1-3 describe. The next reader should measure that before writing the relocation.
+change at all, only the predicate — and the 2026-10-13 slice landing CONFIRMS the
+prediction for the second of the three.** That is evidence the remaining shapes
+are not one feature either — a constructor call builds its blob through a
+DIFFERENT site again, so it may be answerable by extending the predicate to the
+site it uses rather than by the register discipline steps 1-3 describe. The next
+reader should measure that before writing the relocation, and the slice is the
+worked example: its arm is 3 lines and no allocator change, and the boundary it
+must respect (`[[1, 2]][0:1]`) is a property of the BASE, asked with the same
+recursion the literal arms use.
 
 **A refusal is the alternative and it is cheap**, which is the trade the other
 doc names and measures (6 of the 610 stdlib modules contain a comprehension

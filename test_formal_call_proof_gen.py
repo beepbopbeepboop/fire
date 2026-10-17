@@ -4299,8 +4299,7 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
     enumerates `CSET`s and finds none. So the chain carried
     `simp [h, Arm64State.init]` with **no flag lemma at all**, and the raw
     `arm64_matches_condition 11 (arm64_subs_flags …) = true` had nothing to
-    reduce it. That is
-    `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`,
+    reduce it. That is the `B.cond`-with-no-`CSET` defect,
     and it is pinned here rather than in `test_formal.py` because the thing
     under test is the text the generator emits — which is this file's whole
     subject, and which is checkable with no Lean run at all.
@@ -4325,12 +4324,16 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
     set is necessary and not sufficient, because the chain's earlier
     `simp only` unfolds `arm64_subs_flags` / `arm64_matches_condition` — and
     `simp only` is irreversible, so a lemma in a LATER `simp` can never match
-    the term the earlier line expanded. `sum_range.mojo`'s own `hcond_4` is the
-    measured case (`0 ^^^ 0x8000… < n ^^^ 0x8000…`, a RANGE, which
-    `by_cases` + `simp [h]` cannot ground because it leaves `n` free on both
-    branches), and the chain order that would let the lemma fire is written down
-    there rather than landed here — it changes 26 of the 49 generated arm64
-    proofs and a light worker cannot Lean-verify that.
+    the term the earlier line expanded. **That order landed 2026-10-09
+    (`ad54fc2f6`), and
+    `test_the_flag_lemma_fires_before_the_flags_are_unfolded` below is its pin**:
+    the emitted chain is now `simp only [<block chain>]` → `rw [<spill pair>]` →
+    `try rw [<flag lemma>]` → `try (simp only [arm64_subs_flags,
+    arm64_matches_condition])` → `by_cases … <;> simp [h, <flag lemma>, …] <;>
+    bv_decide`, which is the order `_cond_flag_lines` already uses for a loop's
+    exit test. `sum_range.mojo`'s own `hcond_4` was the measured case; the range
+    shape is now a named refusal (see `test_both_shapes_generate`), and the
+    EQUALITY shape is what carries the order pin.
     """
 
     RANGE = ("def sum_range(n):\n"
@@ -4379,6 +4382,77 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                     out.append((pending, line.strip()))
                     pending = None
         return out
+
+    @staticmethod
+    def _hcond_blocks(text):
+        """`[(hid, [body lines])]` for every `hcond` block in a proof.
+
+        The block opens at a `have hcond_<bi> : … := by` line and runs until
+        the indentation returns to the `have` line's own level — the same "the
+        block's extent is not this file's business" rule `_hcond_closers` uses,
+        spelled as indentation rather than as two string anchors because the
+        ORDER assertion needs the whole body, not just the closer.
+        """
+        lines = text.splitlines()
+        blocks = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if "have hcond_" in line:
+                hid = line.strip().split()[1]
+                indent = len(line) - len(line.lstrip())
+                body = []
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j]
+                    if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                        break
+                    body.append(nxt)
+                    j += 1
+                blocks.append((hid, body))
+                i = j
+            else:
+                i += 1
+        return blocks
+
+    def test_the_flag_lemma_fires_before_the_flags_are_unfolded(self):
+        """The ORDER of a `hcond` chain, which a presence check cannot see.
+
+        `simp only` is IRREVERSIBLE: the moment `arm64_subs_flags` /
+        `arm64_matches_condition` are unfolded, the `arm64_flag_*` lemma's LHS
+        is gone and no later `simp` can match it. So a chain that NAMES the flag
+        lemma in its closing `simp` (the thing
+        `test_every_hcond_chain_closes_with_a_flag_lemma` pins) still hands
+        `bv_decide` an opaque `arm64_matches_condition` term — and gets the
+        "potentially spurious counterexample" this file's sibling docstring
+        describes — unless the lemma is emitted as an explicit `try rw` BEFORE
+        the `simp only` that unfolds the flags. This is the `_cond_flag_lines`
+        order applied to a branch; it landed 2026-10-09 (`ad54fc2f6`), and this
+        is the pin the sibling docstring used to say was not landed.
+        """
+        with open(self.equal) as fh:
+            text = fh.read()
+        blocks = self._hcond_blocks(text)
+        self.assertTrue(blocks, f"no hcond block in {self.equal}")
+        for hid, body in blocks:
+            flag_at = [k for k, line in enumerate(body)
+                       if "try rw [arm64_flag_" in line]
+            unfold_at = [k for k, line in enumerate(body)
+                         if "simp only [arm64_subs_flags" in line
+                         or "simp only [arm64_matches_condition" in line]
+            self.assertTrue(flag_at,
+                            f"{hid}: the chain emits no `try rw [arm64_flag_…]`, "
+                            f"so the flag lemma is left to a `simp` that runs "
+                            f"after the flags are unfolded and can never match")
+            self.assertTrue(unfold_at,
+                            f"{hid}: the chain never unfolds "
+                            f"`arm64_subs_flags`/`arm64_matches_condition`")
+            self.assertLess(
+                flag_at[0], unfold_at[0],
+                f"{hid}: `arm64_subs_flags`/`arm64_matches_condition` are "
+                f"unfolded (line {unfold_at[0]}) before the flag lemma fires "
+                f"(line {flag_at[0]}), so the lemma can never match and "
+                f"`bv_decide` is handed an opaque predicate")
 
     def test_both_shapes_generate(self):
         """The RANGE shape is now a REFUSAL, and that is the fix, not a gap.

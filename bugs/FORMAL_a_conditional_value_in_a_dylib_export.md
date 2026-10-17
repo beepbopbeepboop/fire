@@ -15,6 +15,7 @@ owned it, and a reader could not tell which half was settled:
 | modelling `CSEL` turns a NAMED OBLIGATION into a build failure, and it is not a budget question | §2 below |
 | the `hprior_*` cost centre and the certificate's Lean bound | **`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`** (live claim) |
 | the `CSEL` model row itself | **`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`** (live claim) |
+| the last export's unprovable `_semantics_total` (the two red rows below, §1.4) | **`FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`** (live, 2026-10-13) |
 | the loop-fuel obligation (`OPUS-4`) | **`FORMAL_dylib_export_loops_and_frame_bounds.md`** (live claim) |
 
 The two documents it replaces were the dylib block-layer doc (deleted in f40f9eaf)
@@ -157,78 +158,61 @@ and two cases in `test_formal_call_proof_gen.py`'s `TestBitTestBranches` pin it
 (a TBZ and a CBZ whose two bits disagree).
 
 **That fix is necessary for this document's test but not sufficient for it
-then**: with the step lemmas compiling,
-the two tests failed one assertion later, on a HOLE COUNT — `dylib_export_N_
-…_semantics_total` was emitted as a `sorry`. The diagnosis here said the
-export's CFG contained a `bl`, the arm64 stack-floor guard's `getrlimit` call in
-every prologue, and named
-`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`'s fix (move the read
-into the startup stub) as what would make the tests green.
+today**, and the rest is not this document's. With the step lemmas compiling,
+the two tests now fail one assertion later, on a HOLE COUNT. **That attribution
+was measured WRONG on 2026-10-13 (`work/formal404-docs`), and the correction is
+the useful part:** the extra hole is the LAST export's `dylib_export_N_…
+_semantics_total`, and its cause is not a `bl` at all — the regression the
+earlier reading named (`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`)
+has since been FIXED and its doc deleted,
+`TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath` passes, and there is no `bl`
+in the last export's extent. The real cause is that the last export's
+`DylibExport.exportEnd` is `base + codeSize`, and `code` carries the image's
+interned strings past the last function's `RET`, so the constant-fuel CFG walk
+decodes string bytes, finds a spurious back edge, and declines. It is measured and
+filed in full — with the test to reproduce it and the only two honest fixes — as
+`bugs/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`.
+So the block layer's half of THIS document is landed and pinned; the two red
+rows are a separate, now-named defect that reaches into `lib/ProofLib.lean`'s
+export-table fold and is not this document's to close.
 
-**2026-10-12: the startup-stub fix landed and the two tests stayed red, so that
-diagnosis was incomplete — the cause was a SECOND, independent thing, and it is
-now fixed and pinned.** The `bl` is gone (`emit_startup=False` for a dylib, so
-`_emit_stack_floor_init` is not emitted at all), but the LAST export of an image
-still failed its `Total` walk and its contract for a different reason: interned
-strings live in `__TEXT` AFTER the code, `DylibExport.exportEnd` for the last
-export is `base + codeSize`, and a `Block` or a CFG walk over `[entry,
-exportEnd)` therefore decoded the string as instructions. Measured on the
-`csetval` image: `exportEnd` is `0x…69c` while the last `RET` is at `0x…350`,
-and the bytes between are `RecursionError: …` decoding as a `cbz` whose target is
-below `base` — a back edge that is not there. `formal/arm64_proof_gen.py`'s new
-`_export_body_end` gives the walk/`Block` its own range (past the export's last
-`RET`), while `exportEnd` — the address the facts and `startState`/`runExport`
-are stated at — stays `base + codeSize`, and `_dylib_contract_proof` gained an
-explicit `exit_pc` so the block range and the exit are two arguments rather than
-one. Measured after: `test_formal_dylib.py` is **27 PASS / 0 FAIL**, including a
-new case `a last export's contract stops at its own RET` (a recursive `rec`
-followed by a straight-line LAST export `add1` in an image that carries the
-trap message; `add1`'s contract is PROVED and the only hole left is `rec`'s
-named `Total`), and the two cases this section is about go green. **So the block
-layer's half of this document is landed AND its test is green**, and what is
-left is §2's CSEL model row and the certificate bound, which are unchanged.
+**A 2026-10-17 correction to this section, measured, because the reading it
+replaces is what a reader finds first.** An earlier §1.5 on this file recorded
+the defect as FIXED — "`formal/arm64_proof_gen.py`'s new `_export_body_end` gives
+the walk/`Block` its own range (past the export's last `RET`) …
+`_dylib_contract_proof` gained an explicit `exit_pc` … `test_formal_dylib.py` is
+**27 PASS / 0 FAIL**" — and none of that is in the tree:
 
-### 1.5 2026-10-12: the startup-stub fix landed, the tests stayed red, and the residual cause was NOT a `bl` but the IMAGE TAIL
+```console
+$ grep -c _export_body_end formal/arm64_proof_gen.py
+0
+$ grep -n 'def _export_extent' -A9 formal/arm64_proof_gen.py
+12964: def _export_extent(exports, entry, base, code_size):
+          The end of one export's OWN code: the next export's entry, or the end of
+          the image for the last one.
+12978:     later = sorted(e["entry"] for e in exports if e["entry"] > entry)
+12979:     return later[0] if later else base + code_size
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_dylib.py
+  PASS  the last export's walk ignores the image tail
+  …
+formal dylib: PASS=28 FAIL=1
+```
 
-The getrlimit read did move into the startup stub (`formal/arm64` — commit
-`f8ff50f2`, "read RLIMIT_STACK once in the startup stub, restore the arm64
-value theorem"), and the §1.4 prediction was **false**: both tests stayed red,
-each one hole over its expectation, and **the hole is not a `bl` at all.**
-Measured on this tree, `_cfg_decomposition_refusal` for the offending export
-(`test_formal_dylib.py`'s `several` `pick`) says *"every instruction in its own
-code has a step, so the cause is not an unmodelled word"*, and the export's own
-words contain no `bl`.
+`_dylib_contract_proof`'s `exit_pc` DID land, so the half that went missing is
+`_export_body_end` and whichever call site read it: the prose and the fix went in
+separately and a bulk merge kept one. `test_the_last_exports_walk_ignores_the_
+image_tail` passes, but for a reason this section does not give — the walk judges
+only blocks REACHABLE from the export's entry, so the image tail is not read at
+all. That is a different fix and it leaves the `semantics_total` hole open. The
+row that shows it is `a conditional value is not a branch`, and until 2026-10-17
+it was ERRORing rather than failing, on an unrelated half-applied rename in
+`formal/arm64_proof_gen.py::_step_rhs` (its CMP-immediate arm interpolated a name
+nothing binds); that rename is corrected in this merge's commit, so the row now
+fails for the reason stated here rather than for a `NameError`.
 
-**The cause is `_export_extent` and the last export.** `_export_extent` is the
-next export's entry, or `base + code_size` for the LAST one (the library's
-`DylibExport.exportEnd`; `exportEnd_last` proves the two agree). So the last
-export's CFG extent does not stop at its own `ret` — it runs on through the
-stack-floor handler, the runtime routines, and then the image's **DATA**.
-`_gen_universal_e2e_cfg`'s constant-fuel guard read **every** block
-`_cfg_blocks` finds in `[entry, func_end)`, and the tail broke it twice over:
-its back edges made `_acyclic` false, and `_gen_run_cert` returns `None` for the
-first data word (`0x6e612034` here — not an instruction), which made the whole
-walk `None`. `_dylib_total_proof` renders `None` as a named `sorry`, so the last
-export's `semantics_total` was a `sorry` over a termination claim that is true.
-
-**The fix asks the CFG the RUN uses.** The constant-fuel guard, the per-block
-runs certificate loop, and the loop-contract discovery now judge the blocks
-**REACHABLE from `func_entry`** (the successor relation `_cfg_blocks` itself
-encodes: `targets` for a branch, the next block in pc order for a `seq`, none
-for a `ret`) rather than every block in the extent. An unreachable block gets a
-placeholder `run_info` entry and no certificate, and an unreachable loop is not
-contracted. The change is gated on `fuel is not None`, which only
-`_dylib_total_proof` sets, so **every ordinary proof is byte-identical** — and
-for a non-last export the extent is already the next entry, so only the last
-export's verdict moves.
-
-**Measured after: `test_formal_dylib.py` is 27/27** (was 24/2), including the two
-tests above, whose `n_sorries` assertions (0 and 1) now hold. Pinned by
-`test_formal_dylib.py::test_the_last_exports_walk_ignores_the_image_tail`, which
-puts the BRANCHING export LAST (only the last extent reaches the tail) and
-requires its `semantics_total` to be the proved `total_of_halts` shape rather
-than `sorry`.
-
+So: the `_export_body_end` fix is NOT on the tree, and
+`bugs/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`
+is the live record of the defect.
 ---
 
 ## 2. Modelling `CSEL` turns a NAMED OBLIGATION into a BUILD FAILURE

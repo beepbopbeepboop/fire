@@ -34749,15 +34749,42 @@ def comprehension_element_is_flat_container(element) -> bool:
     to relocate the inner comprehension's own base, which is why the nested case
     does not need the runtime blob base the flat case does not need either.
 
+    A SLICE is accepted exactly when its BASE's produced values carry no address
+    of a blob this site built, which is the same question the literal arms ask
+    of their children one level down. A slice copies element words out of its
+    base into a new blob of its own, so a base that persists (`a[0:2]` under a
+    NAME, a member read, a subscript) contributes only values or addresses of
+    persistent objects — what CPython's own slice shares — and a base that is a
+    display of scalars (`[1, 2, 3][0:2]`) contributes only words. A base built
+    here that itself holds containers (`[[1, 2]][0:1]`) carries the ADDRESS of
+    one scratch blob into every iteration's copy, so it stays refused, as does
+    the slice of any base a byte copy cannot make flat. The slice of a SLICE is
+    the recursion applied twice and is accepted on the same terms.
+
     The shapes that return False keep `comprehension_element_blob_refusal`:
     a comprehension whose produced values are containers, a list of lists, a
-    slice, a constructor call, and every non-container expression. Those are the
-    cases whose per-iteration materialisation needs the runtime blob base the
-    refusal's own document describes.
+    The shapes that return False keep `comprehension_element_blob_refusal`:
+    a comprehension whose produced values are containers, a list of lists, a
+    slice whose base carries a scratch address, a constructor call, and every
+    non-container expression. Those are the cases whose per-iteration
+    materialisation needs the runtime blob base the refusal's own document
+    describes.
 
-    **Two arms were added 2026-10-16, and both are shapes whose blob this path
-    already knows the SIZE of — which is the whole of what a copy needs.**
+    **Three arms were added (the concat and the call on 2026-10-16, the slice on
+    2026-10-13), and all three are shapes whose blob this path already knows the
+    SIZE of — which is the whole of what a copy needs.**
 
+    * **A SLICE, when its BASE carries no scratch address.** A slice copies
+      element words out of its base blob into a NEW blob of its own, so the
+      per-iteration copy is sound exactly when the base's produced values are not
+      ADDRESSES of a blob this site built. A base that persists (a name, a member,
+      a subscript) contributes only values or addresses of persistent objects,
+      which is what CPython's own slice shares; a base built here contributes the
+      same words a flat container literal would (`[1, 2, 3][0:2]` is a display of
+      scalars) and is asked the same question as one. A base built here that
+      itself holds containers (`[[1, 2]][0:1]`) carries one scratch ADDRESS into
+      every iteration's copy — the aliasing the literal arms refuse — so it
+      recurses into `element.obj` and keeps the refusal above.
     * **A `+` on two containers whose operands are both flat.** A concat's result
       blob holds its operands' WORDS in one block, so the shallow-copy argument
       above is satisfied by the operands rather than by the node: `[0] + [y]`
@@ -34776,15 +34803,29 @@ def comprehension_element_is_flat_container(element) -> bool:
       from that same table. A call that returns no container has no block and no
       span, and falls out of the copy before this predicate is asked.
 
-    Both were REFUSED before, and the refusal was a coverage hole rather than a
-    soundness answer: `a_comprehension_whose_element_is_a_call_returning_a_`
-    `container_gives_each_one` and `a_comprehension_whose_element_is_a_concat_`
-    `of_displays_gives_each_one` in `test_formal_value_model.py` are CPython-
+    All three were REFUSED before, and each refusal was a coverage hole rather
+    than a soundness answer: `a_comprehension_whose_element_is_a_call_returning_
+    a_container_gives_each_one` and `a_comprehension_whose_element_is_a_concat_
+    of_displays_gives_each_one` in `test_formal_value_model.py` are CPython-
     oracle rows, and each aliases every iteration onto one object — `[mk(y) for
     y in ys]` answered `90` where CPython answers `60`.
     """
     if isinstance(element, F.Comprehension):
         return _comprehension_result_is_flat(element)
+    if isinstance(element, F.SliceExpr):
+        # A slice copies element words out of its base blob into a NEW blob of
+        # its own, so the per-iteration copy is sound exactly when the base's
+        # produced values are not ADDRESSES of a blob this site built. A base
+        # that persists (a name, a member, a subscript) contributes only values
+        # or addresses of persistent objects, which is what CPython's own slice
+        # shares; a base built here contributes the same words a flat container
+        # literal would (`[1, 2, 3][0:2]` is a display of scalars) and is asked
+        # the same question as one. A base built here that itself holds
+        # containers (`[[1, 2]][0:1]`) carries one scratch ADDRESS into every
+        # iteration's copy — the aliasing the literal arms refuse.
+        if _expr_builds_a_container(element.obj):
+            return comprehension_element_is_flat_container(element.obj)
+        return True
     if isinstance(element, F.BinaryOp) and element.op == "+":
         return (_expr_is_flat_container_operand(element.left)
                 and _expr_is_flat_container_operand(element.right))
@@ -34870,9 +34911,9 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     because a byte copy of its result is sound. What reaches this refusal is
     the element that a byte copy of would STILL alias or that this path cannot
     size, the same shapes the predicate's docstring names: a nested
-    comprehension, a list of lists, a slice, a constructor call, and every
-    non-literal expression — a call, a subscript or a member read whose result
-    this path cannot type among them.
+    comprehension, a list of lists, a slice whose base carries a scratch
+    address, a constructor call, and every non-literal expression — a call, a
+    subscript or a member read whose result this path cannot type among them.
     `comprehension_element_is_flat_container` is the shared predicate and
     `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
     pins both sides.
@@ -34895,10 +34936,18 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     `comprehension_element_is_flat_container`, so this message fires only on the
     shapes whose per-iteration copy is unsound: a container literal with a nested
     container in it, a nested comprehension whose produced values are containers,
-    a list of lists, a slice and a constructor call. The paragraph above is the
+    a list of lists, a slice whose base carries a scratch address and a
+    constructor call. The paragraph above is the
     measurement that made the refusal the right answer for THEM; the two
     reproducers are kept because they are what a copy must answer, and are the
     rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
+
+    **A slice was in that list and is not any more** — the same re-reading that
+    closed the nested row applies to it: a slice copies element words out of its
+    base, so the copy is sound whenever the base's produced values are not
+    addresses of a blob built at this site. Only the base that itself holds a
+    container stays here (`[[1, 2]][0:1]`); `a[0:2]` and `[1, 2, 3][0:2]` are
+    materialised and answer CPython.
 
     For the nested case the second row is the one that says a refusal was
     necessary rather than tidy: it exits 1 as well as answering wrongly, because
@@ -53090,6 +53139,18 @@ def expr_spelling(node) -> str:
         kind = {"dict": "{…}", "set": "{…}"}.get(getattr(node, "kind", None),
                                                  "[…]")
         return f"{kind} for …"
+    if isinstance(node, F.SliceExpr):
+        # `a[0:2]` and not `SliceExpr`, for the same reason the Comprehension
+        # arm above exists: a slice IS a comprehension element often enough to
+        # matter, and `comprehension_element_blob_refusal` fires on the one whose
+        # base carries a scratch address. `SliceExpr` names the AST and sends the
+        # reader looking for it rather than at the line. An omitted bound is left
+        # blank (`a[1:]`), which is how the source spells it.
+        bounds = ["" if b is None else expr_spelling(b)
+                  for b in (node.start, node.stop, node.step)]
+        body = (f"{bounds[0]}:{bounds[1]}:{bounds[2]}" if bounds[2]
+                else f"{bounds[0]}:{bounds[1]}")
+        return f"{expr_spelling(node.obj)}[{body}]"
     for attr in ("value", "name"):
         v = getattr(node, attr, None)
         if isinstance(v, (str, int, float, bool)):

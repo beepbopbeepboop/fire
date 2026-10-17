@@ -879,9 +879,9 @@ _MASK = (1 << 64) - 1
 # export contract `hreg`, which is where the diagnosis and the fix both live
 # (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
 # memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
+# records the same failure on a conditional branch's `hcond` chain and why it is
+# an artefact of the abstraction rather than a false goal; that defect is fixed
+# by the flag-lemma/order work (`ad54fc2f6`).  If a clause over `BitVec` is
 # ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`
