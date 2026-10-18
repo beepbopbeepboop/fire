@@ -6661,6 +6661,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
 
+    def _refuse_foreign_bytes_into_text_parameter(self, name, e: F.CallExpr) -> None:
+        """Raise when KERNEL BYTES are passed into a parameter the callee `len`s.
+
+        The `FOREIGN_BYTES_KIND` kind is attached to the expression that read the
+        kernel's bytes and not to the word, so it is dropped the moment a value
+        crosses a call boundary: the DIRECT `len(x)` is refused, and
+        `def nchars(s: String): return len(s)` emitted a `strlen` that answered
+        6 for `héllo` where CPython answers 5. This is the call boundary's half
+        of that refusal, and the decision and the words are
+        `model.foreign_bytes_into_text_parameter_refusal`, read by x86-64 from
+        the same one, so the two architectures cannot disagree about one call.
+
+        A no-op unless the callee is a function THIS image declares and its body
+        indeed measures the parameter as text — so it can only fire where a
+        kernel string is handed to a `len`, which is exactly the wrong answer it
+        exists to stop. The TRANSITIVE and RETURNED spellings are NOT covered;
+        `model.codepoint_measured_parameters`' comment says why and the refusal's
+        own text says so to the reader.
+        """
+        callee = self._functions.get(name)
+        if callee is None:
+            return
+        reason = M.foreign_bytes_into_text_parameter_refusal(
+            name, callee, list(e.args or ()), self._expr_str_kind)
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _refuse_return_annotation_kind_mismatch(self, value) -> None:
         """Raise when this function returns a double under an integer annotation.
 
@@ -10762,6 +10789,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         # pattern plus one on both architectures where the interpreter answers
         # 4.9; `model.call_argument_kind_refusal` says why in the words.
         self._refuse_word_position_kind_mismatch(name, e)
+        # …and a KERNEL-BYTES argument reaching a parameter the callee measures
+        # as TEXT. Beside the check above and for the same reason — this is the
+        # last point where the resolved callee and its arguments are both in
+        # hand — and a different rule: that one reads the DECLARATION, this one
+        # reads the callee's own BODY, because a `String` annotation is the
+        # honest type and the foreignness is a fact about the bytes.
+        self._refuse_foreign_bytes_into_text_parameter(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return

@@ -4527,6 +4527,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if reason is not None:
             raise CodegenError(reason)
 
+    def _refuse_foreign_bytes_into_text_parameter(self, name, e) -> None:
+        """Raise when KERNEL BYTES are passed into a parameter the callee `len`s.
+
+        Delegation, and the same words arm64 reads:
+        `model.foreign_bytes_into_text_parameter_refusal` is the whole of the
+        rule, and the input it needs is the callee's BODY rather than its
+        declaration — a `String` parameter is the honest type, so only what the
+        body does with it says whether a byte count would be a wrong answer. A
+        no-op for a callee this image does not declare.
+        """
+        callee = self._functions.get(name)
+        if callee is None:
+            return
+        reason = M.foreign_bytes_into_text_parameter_refusal(
+            name, callee, list(e.args or ()), self._expr_str_kind)
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _refuse_return_annotation_kind_mismatch(self, value) -> None:
         """Raise when this function returns a double under an integer annotation.
 
@@ -11411,6 +11429,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         # and a different rule: that one reads the FORMAT, this one reads the
         # DECLARATION. `model.call_argument_kind_refusal`, shared with arm64.
         self._refuse_word_position_kind_mismatch(name, e)
+        # …and a KERNEL-BYTES argument reaching a parameter the callee measures
+        # as TEXT. Beside the check above and for the same reason — this is the
+        # last point where the resolved callee and its arguments are both in
+        # hand — and a different rule: that one reads the DECLARATION, this one
+        # reads the callee's own BODY (`model.
+        # foreign_bytes_into_text_parameter_refusal`, shared with arm64).
+        self._refuse_foreign_bytes_into_text_parameter(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return

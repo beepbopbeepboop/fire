@@ -7833,6 +7833,109 @@ def is_foreign_bytes_kind(kind) -> bool:
 #: refused by `len_operand_lowering`, whose strlen answer would be a BYTE count
 #: on a value whose CPython length is characters.
 POINTER_KIND = "ptr"
+# ── A FOREIGN-BYTE VALUE THROUGH A CALL BOUNDARY ────────────────────────────
+#
+# `FOREIGN_BYTES_KIND` is a compile-time fact about a value's PROVENANCE — what
+# the kernel wrote into it — attached to the EXPRESSION that reads it (a
+# `listdir` element, a loop target, a `getcwd()` call).  It is not a runtime tag
+# on the word, so a call boundary drops it: `len(x)` where `x` is a directory
+# entry is refused, but `nchars(x)` for `def nchars(s: String): return len(s)`
+# emits a `strlen` INSIDE `nchars` and answers in BYTES.  The `String`
+# annotation is the honest type and CPython agrees with it, and the call-site
+# parameter table (`parameter_kinds_by_call_site`) asks about an UNANNOTATED
+# parameter only, by design — so the annotated spelling had no reader at all.
+#
+# Measured 2026-10-14 on both architectures, over a directory holding `plain`
+# and `héllo`, exit 0 and nothing on stderr — the same wrong number the direct
+# refusal exists to prevent, reached one call further out:
+#
+#     [plain] chars=5    [héllo] chars=6        CPython: [plain] 5, [héllo] 5
+#
+# The refusal below is the safe direction for the DIRECT spelling: a call that
+# passes a foreign-bytes value into a parameter the callee measures as TEXT.
+# What it does NOT cover, and what a future session must, is the TRANSITIVE and
+# RETURNED spellings — `f(s)` calling `g(s)`, and `y = ident(x)` then `len(y)`
+# — both of which need the foreign kind to propagate through parameters and
+# returns, which is a whole-image fixed point rather than a call-site test.
+# Measured wrong on both architectures, so this is a real remainder and not a
+# theoretical one.
+_CODEPOINT_MEASURED_METHODS = ("find",)
+
+
+def _bare_ident_name(expr):
+    """The name a bare `IdentExpr` spells, else None."""
+    return expr.name if isinstance(expr, F.IdentExpr) else None
+
+
+def codepoint_measured_parameters(fn) -> frozenset:
+    """The parameter NAMES `fn`'s body asks a CODE POINT question about.
+
+    `len(p)` and `p.find(...)` — the two constructs `string_codepoint_verdict` /
+    `string_position_verdict` answer, where a byte answer is not CPython's. Every
+    other string operation this path lowers is a property of the BYTES that
+    CPython agrees with (a compare, `count`, `startswith`, `%s`, a print), so
+    nothing else is collected. A nested `def`'s body is NOT descended into: its
+    names are a different scope, and a same-named local there would otherwise
+    refuse a call that is fine.
+
+    A NAME rather than a parameter list, because the caller intersects this with
+    the callee's parameter names — the two questions ("what does the body
+    measure" and "which of those is a parameter") live in two places on purpose.
+    """
+    measured = set()
+    for node in iter_nodes(getattr(fn, "body", None) or [],
+                           skip=(("FunctionDef", "body"),)):
+        if not isinstance(node, F.CallExpr):
+            continue
+        func = node.func
+        if isinstance(func, F.IdentExpr) and func.name == "len":
+            for a in (node.args or ()):
+                nm = _bare_ident_name(a)
+                if nm is not None:
+                    measured.add(nm)
+        elif isinstance(func, F.MemberExpr) \
+                and func.member in _CODEPOINT_MEASURED_METHODS:
+            nm = _bare_ident_name(func.obj)
+            if nm is not None:
+                measured.add(nm)
+    return frozenset(measured)
+
+
+def foreign_bytes_into_text_parameter_refusal(fn_name, callee, args, kind_of):
+    """Why a call passing KERNEL BYTES into a text-measured parameter is refused.
+
+    `callee` is the callee's AST, `args` the call's positional arguments and
+    `kind_of(expr)` the CALLER's kind reader, so this asks the same question the
+    `len` lowering asks (is the operand's kind foreign?) one node earlier — at
+    the call — because inside the callee the kind is gone. Returns None when the
+    callee is not measured or no foreign argument reaches a measured parameter.
+    """
+    measured = codepoint_measured_parameters(callee)
+    if not measured:
+        return None
+    names = _positional_parameter_names([callee])
+    for pname, arg in zip(names, args or ()):
+        if pname not in measured:
+            continue
+        if is_foreign_bytes_kind(kind_of(arg)):
+            return (
+                f"the call to {fn_name} passes {spelled(arg)}, whose bytes are "
+                f"the KERNEL's, into its parameter `{pname}`, and {fn_name} "
+                f"measures `{pname}` as TEXT (`len`/`find`), which is refused: "
+                f"on this path it would answer in BYTES where CPython answers in "
+                f"CHARACTERS. The two agree only while the text is ASCII, and a "
+                f"kernel-supplied name need not be: measured on both "
+                f"architectures over a directory holding `plain` and `héllo`, "
+                f"`len` of an entry through a `String` parameter answered 6 "
+                f"where CPython answers 5, exit 0 and nothing on stderr. Print "
+                f"or compare the bytes, or take the BYTE count on purpose with "
+                f"`os.str_len({spelled(arg)})`; a CHARACTER count of a kernel "
+                f"string is not answerable on this path. The kind rides on the "
+                f"expression that READ the kernel bytes, not on the word, so "
+                f"this refusal is the DIRECT spelling only — a foreign value "
+                f"reaching the same `len` through a further call, or returned "
+                f"from one, is a separate and larger gap.")
+    return None
 
 
 def is_number_kind(kind) -> bool:

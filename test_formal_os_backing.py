@@ -636,6 +636,102 @@ def main(n):
 ))
 
 
+# ── 2d. THE SAME KIND, THROUGH A CALL BOUNDARY ─────────────────────────────
+#
+# `FOREIGN_BYTES_KIND` rides on the EXPRESSION that read the kernel's bytes, not
+# on the word, so it is dropped the moment a value crosses a call. `len(x)` is
+# refused above; `len(x)` inside a helper called with `x` was not, and the image
+# answered in BYTES. Measured 2026-10-14, both architectures, over the `@@UTF8@@`
+# directory (exit 0, nothing on stderr):
+#
+#     [plain] chars=5    [héllo] chars=6        CPython: [plain] 5, [héllo] 5
+#
+# The `String` annotation is the honest type and CPython agrees with it, and the
+# call-site parameter table (`parameter_kinds_by_call_site`) asks about an
+# UNANNOTATED parameter only — so the annotated spelling had no reader. The fix
+# refuses the DIRECT spelling by name; the TRANSITIVE (`f` calling `g`) and
+# RETURNED (`y = ident(x)` then `len(y)`) spellings are a larger gap and are
+# named in the message rather than pinned here.
+CASES.append(Case(
+    "a_kernel_name_into_a_len_parameter_is_refused",
+    '''\
+from os import listdir, listdir_free
+
+
+def chars(s: String) -> int:
+    return len(s)
+
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    for x in names:
+        printf("%d@@", chars(x))
+    listdir_free(names)
+    return 0
+''',
+    refusal="whose bytes are the KERNEL's, into its parameter",
+))
+
+# …and the SIBLING construct, because `len` alone would leave a `find` (a byte
+# OFFSET where CPython answers a character offset) building.
+CASES.append(Case(
+    "a_kernel_name_into_a_find_parameter_is_refused",
+    '''\
+from os import listdir, listdir_free
+
+
+def at(s: String, ch: String) -> int:
+    return s.find(ch)
+
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    for x in names:
+        printf("%d@@", at(x, "l"))
+    listdir_free(names)
+    return 0
+''',
+    refusal="whose bytes are the KERNEL's, into its parameter",
+))
+
+# THE CONTROL, and it is what keeps the rule narrow: a kernel string passed to a
+# `String` parameter that only PRINTS it must keep building and running. Without
+# this row a rule that refused every foreign value at every call boundary would
+# pass the two above — and would take `show(name)` away from every program.
+CASES.append(Case(
+    "a_kernel_name_into_a_printing_parameter_still_runs",
+    '''\
+from os import listdir, listdir_free
+
+
+def show(i, s: String):
+    printf("v%d=[%s]@@", i, s)
+
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    i = 0
+    for x in names:
+        show(i, x)
+        i = i + 1
+    listdir_free(names)
+    return 0
+''',
+    None,
+    oracle=lambda: _string_parameter_oracle(),
+))
+
+
+def _string_parameter_oracle():
+    """CPython's answers for `a_kernel_name_into_a_printing_parameter_still_runs`.
+
+    The same directory the image walked, entry by entry and in order, so a rule
+    that printed the wrong element or dropped one shows up as a mismatch rather
+    than as a crash.
+    """
+    return {f"v{i}": f"[{x}]" for i, x in enumerate(os.listdir(_UTF8[0]))}
+
+
 # ── 3. The refusals ───────────────────────────────────────────────────────
 #
 # A wrong answer is worse than a diagnostic, so each of these has to be a BUILD
