@@ -12073,6 +12073,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         refines_text = ("\n\n" + SPECS.refines_section(
             func_name, f"{func_name}_prog", refines,
             machine_half=_opaque is None,
+            go_defs=go_defs,
             missing_reason=(
                 "this function calls out of the image, so `arm64_step` "
                 "returns `none` at the call and no execution in this file "

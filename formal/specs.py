@@ -308,9 +308,172 @@ def _closed_range(rng: int) -> str:
     return f"∀ n ∈ List.range {rng}, "
 
 
+# ---------------------------------------------------------------------------
+# The ALL-INPUTS refinement: the model half, without the range
+#
+# `main_model_refines_spec` is `native_decide` over `List.range N`, so it needs
+# nothing about the specification beyond its name.  Its all-inputs companion
+# does: the proof is an induction on the PROGRAM's own model (`<func>_go`) and
+# its arithmetic step is the SPECIFICATION's own equation, so the generator has
+# to be told which `Nat` function a `…64` word reading truncates and which
+# equation unfolds it.  That is what a row of `ALL_INPUTS` carries, and it is
+# why a specification with no row gets no all-inputs theorem rather than a
+# guessed one — the same refusal-not-a-guess rule the annotation reader keeps.
+#
+# The row also carries the model SHAPE the induction is written for.  The shape
+# is checked against the emitted model text before the theorem is written, so a
+# program annotated with a registered specification but modelled some other way
+# gets the finite-range theorem it always had and no false all-inputs claim.
+# ---------------------------------------------------------------------------
+
+#: How to apply the model named `<func>_go`/`<func>_model`; the reader both
+#: generators share (`formal/arm64_proof_gen.py::_model_shape`) reports the same
+#: two candidate names, and this reproduces the candidate ORDER only.
+_MODEL_NAME_RE = r"^def %s\b"
+
+
+class AllInputs:
+    """What an all-inputs refinement needs beyond the finite-range one.
+
+    `kind` is the model shape the induction is written for — ``"identity"`` for
+    a `UInt64 → UInt64` model that is `n`, ``"recursive"`` for a `Nat → UInt64`
+    structural recursion whose step is `(ofNat (k+1)) <op> <go> k`.  `nat` is
+    the `Nat` function the word reading truncates, `succ` its step equation and
+    `lemma` the word-product fact the step rewrites through.
+    """
+
+    __slots__ = ("word", "nat", "kind", "op", "succ", "lemma")
+
+    def __init__(self, word: str, nat: str, kind: str, op: str = "",
+                 succ: str = "", lemma: str = ""):
+        self.word = word
+        self.nat = nat
+        self.kind = kind
+        self.op = op
+        self.succ = succ
+        self.lemma = lemma
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return f"AllInputs({self.word!r}, {self.nat!r}, {self.kind!r})"
+
+
+#: The word readings the all-inputs emitter can prove, keyed by the name the
+#: annotation writes.  A row exists only where the induction has been written
+#: and checked; every other `@refines(…)` spec gets the finite-range theorem and
+#: no more.  See `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+ALL_INPUTS = {
+    "Specs.id64": AllInputs(word="Specs.id64", nat="Specs.idNat",
+                            kind="identity"),
+    "Specs.factorial64": AllInputs(
+        word="Specs.factorial64", nat="Specs.factorial", kind="recursive",
+        op="*", succ="Specs.factorial_succ", lemma="Specs.u64_ofNat_mul"),
+}
+
+
+def _model_def_name(func_name: str, go_defs: str) -> str:
+    """`<func>_model` if the model text declares one, else `<func>_go`, else "".
+
+    The two candidate names and their order are `_model_shape`'s; a tree model
+    is `<func>_model` and an applied one `<func>_go`, and a model that is
+    neither is a shape this emitter cannot read, so it says so with "".
+    """
+    src = go_defs or ""
+    for cand in (func_name + "_model", func_name + "_go"):
+        if re.search(_MODEL_NAME_RE % re.escape(cand), src, re.M):
+            return cand
+    return ""
+
+
+def _identity_shape(go_defs: str, go: str) -> bool:
+    """Is `<go>` the applied identity — `def <go> (n : UInt64) : UInt64 := n`?"""
+    return bool(re.search(
+        r"^def %s \(n : UInt64\) : UInt64 :=\n  n$" % re.escape(go),
+        go_defs or "", re.M))
+
+
+def _recursive_shape(go_defs: str, go: str, op: str) -> bool:
+    """Is `<go>` a `Nat → UInt64` recursion with the `<op>` step this row wants?
+
+    Exact rather than approximate on purpose: the induction below rewrites the
+    step, so a different step body is a different proof, and a row that claimed
+    one it did not have would emit a theorem that does not elaborate.  Anything
+    that does not match is no row — the finite-range theorem stands unchanged.
+    """
+    return bool(re.search(
+        r"^def %s : Nat → UInt64\n"
+        r"  \| 0 => [^\n]*\n"
+        r"  \| k \+ 1 => \(\(UInt64\.ofNat \(k \+ 1\)\) %s %s k\)$"
+        % (re.escape(go), re.escape(op), re.escape(go)),
+        go_defs or "", re.M))
+
+
+def all_inputs_section(func_name: str, ref: Refines, go_defs: str) -> str:
+    """The Lean text of the all-inputs refinement, or "" when it cannot be made.
+
+    "" is the ordinary case and is not a failure: only a registered
+    specification whose model has the registered shape gets the theorem, and for
+    everything else the finite-range section is the whole of what this layer
+    claims.  That boundary is stated in the emitted file's own comment.
+    """
+    row = ALL_INPUTS.get(ref.spec)
+    if row is None:
+        return ""
+    go = _model_def_name(func_name, go_defs)
+    if not go:
+        return ""
+    _load_bearing = (
+        f"\n\n  The no-wrap hypothesis is not decoration: outside it the "
+        f"equation is false, which is what makes `{row.word}` a truncation of a "
+        f"mathematical value rather than that value."
+        if row.kind == "recursive" else "")
+    head = (
+        f"/-- `main_refines_all_inputs`: the MODEL computes `{row.word}` for "
+        f"EVERY input, not only the {ref.rng} the finite check enumerates.\n\n"
+        f"  The finite theorem beside this one is `native_decide` over "
+        f"`List.range {ref.rng}`, which EVALUATES both sides for each input and "
+        f"so says nothing about an input nobody enumerated.  This one reasons "
+        f"about the model's own definition instead of enumerating it."
+        + _load_bearing + f" -/\n")
+    if row.kind == "identity":
+        if not _identity_shape(go_defs, go):
+            return ""
+        return (
+            head
+            + f"theorem main_refines_all_inputs (w : UInt64) :\n"
+            + f"    mojo w = {row.word} w := by\n"
+            + f"  show {go} w = {row.word} w\n"
+            + f"  simp [{go}, {row.word}]\n")
+    if row.kind == "recursive":
+        if not _recursive_shape(go_defs, go, row.op):
+            return ""
+        return (
+            head
+            + f"theorem main_refines_all_inputs (w : UInt64)\n"
+            + f"    (hfits : {row.nat} w.toNat < 2 ^ 64) :\n"
+            + f"    mojo w = {row.word} w := by\n"
+            + f"  have hall : ∀ n, {row.nat} n < 2 ^ 64 →\n"
+            + f"      {go} n = UInt64.ofNat ({row.nat} n) := by\n"
+            + f"    intro n\n"
+            + f"    induction n with\n"
+            + f"    | zero => simp [{go}, {row.nat}]\n"
+            + f"    | succ k ih =>\n"
+            + f"      intro h\n"
+            + f"      have hk : {row.nat} k < 2 ^ 64 := by\n"
+            + f"        have hle : {row.nat} k ≤ (k + 1) * {row.nat} k :=\n"
+            + f"          Nat.le_mul_of_pos_left _ (by omega)\n"
+            + f"        have hs := {row.succ} k\n"
+            + f"        omega\n"
+            + f"      simp only [{go}]\n"
+            + f"      rw [ih hk, {row.lemma}, {row.succ} k]\n"
+            + f"  show {go} w.toNat = UInt64.ofNat ({row.nat} w.toNat)\n"
+            + f"  exact hall w.toNat hfits\n")
+    return ""
+
+
 def refines_section(func_name: str, prog_name: str, ref: Refines,
                     machine_half: bool = True,
-                    missing_reason: str = "") -> str:
+                    missing_reason: str = "",
+                    go_defs: str = "") -> str:
     """The Lean text of the refinement section for one annotated program.
 
     `prog_name` is the `runProg` name the universal theorem is about — the same
@@ -328,6 +491,12 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
     reader of the specification can check; the missing half is NAMED in a
     comment rather than left as an absence, because an absent half and a
     forgotten half read the same in a diff.
+
+    `go_defs` is the emitted model text, and it is optional only because a
+    caller that has none is a caller that cannot write an all-inputs refinement:
+    the induction is an induction on the PROGRAM's model, so its body has to be
+    read from what was emitted (`all_inputs_section`).  An absent `go_defs`
+    therefore drops that theorem and changes nothing else.
     """
     spec = ref.spec
     rng = ref.rng
@@ -335,6 +504,13 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
         f"theorem main_model_refines_spec :\n"
         f"    {_closed_range(rng)}mojo (UInt64.ofNat n) = {spec} (UInt64.ofNat n) := by\n"
         f"  native_decide\n")
+    # The all-inputs strengthening, when this specification has a row and the
+    # program's model has the shape that row names.  Emitted beside the finite
+    # one so the two readings of the same specification sit together; "" is the
+    # ordinary case and leaves the file exactly as it was.
+    _all_inputs = all_inputs_section(func_name, ref, go_defs)
+    if _all_inputs:
+        model = model + "\n" + _all_inputs
     if not machine_half:
         return (
             f"/- SPECIFICATION REFINEMENT: `{spec}`, over the {rng} inputs "
@@ -348,6 +524,20 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
             f"the specification on every one of the {rng} inputs — the half "
             f"that does not need the machine. -/\n"
             + model)
+    _range_para = (
+        f"  The claim is over a RANGE and not over all inputs, and the range is "
+        f"the author's: a word reading is `UInt64.ofNat` of a mathematical "
+        f"value, so the equation is false wherever that value does not fit in "
+        f"a word."
+        + (
+            f"  `main_refines_all_inputs`, beside `main_model_refines_spec`, is "
+            f"that same claim for EVERY input in the no-wrap region, so the "
+            f"range below is where the finite instrument stops rather than the "
+            f"edge of what is proved."
+            if _all_inputs else
+            f"  Stating it for all inputs needs an induction over this "
+            f"program's own loop structure, which is a different proof per "
+            f"program and is not attempted here."))
     return (
         f"/- SPECIFICATION REFINEMENT: `{spec}`, over the {rng} inputs "
         f"`0 … {rng - 1}`.\n\n"
@@ -359,19 +549,12 @@ def refines_section(func_name: str, prog_name: str, ref: Refines,
         f"is a definition written by hand in Lean's own `Nat` in "
         f"`lib/Specs.lean`, with no reference to this file, to `ProofLib`'s "
         f"machine model, or to `mojo`.\n\n"
-        f"  The claim is over a RANGE and not over all inputs, and the range is "
-        f"the author's: a word reading is `UInt64.ofNat` of a mathematical "
-        f"value, so the equation is false wherever that value does not fit in "
-        f"a word.  Stating it for all inputs needs an induction over this "
-        f"program's own loop structure, which is a different proof per program "
-        f"and is not attempted here.\n\n"
+        + _range_para + "\n\n"
         f"  The check has teeth: `native_decide` EVALUATES both sides for every "
         f"one of the {rng} inputs, so a specification that does not match the "
         f"program makes the build fail with a `false` goal instead of being "
         f"believed. -/\n"
-        f"theorem main_model_refines_spec :\n"
-        f"    {_closed_range(rng)}mojo (UInt64.ofNat n) = {spec} (UInt64.ofNat n) := by\n"
-        f"  native_decide\n\n"
+        + model + "\n"
         f"/-- `main_refines_spec`: the COMPILED program returns the "
         f"specification's value, on every input in the range.\n\n"
         f"  The composition is the whole point.  "

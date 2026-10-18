@@ -336,6 +336,127 @@ def test_the_emitter_writes_the_two_theorems(tmpdir, shared):
           "specification, so it is stating something else")
     check(re.search(r"List\.range 64", text),
           "the refinement theorem does not mention the annotated range")
+    check(re.search(r"^theorem main_refines_all_inputs\b", text, re.M),
+          "the generated file has no `main_refines_all_inputs`: the model is "
+          "compared with the specification only over the finite range, and the "
+          "all-inputs half is the claim a reader of the example actually wants")
+    check(re.search(r"\bmojo w = Specs\.id64 w\b", text),
+          "`main_refines_all_inputs` does not state `mojo w = Specs.id64 w`, so "
+          "it is the all-inputs theorem for some other program or "
+          "specification")
+    # It has TEETH, and this is what says so: the whole file was typechecked
+    # (rc == 0 above), so the all-inputs theorem ELABORATED rather than being a
+    # comment. A `List.range`-shaped theorem would also be true, so the theorem
+    # being about the whole word (`(w : UInt64)`) is the part that separates it.
+    check(re.search(r"^theorem main_refines_all_inputs \(w : UInt64\)", text, re.M),
+          "`main_refines_all_inputs` is not stated over the whole word domain, "
+          "so it is another ranged theorem wearing an all-inputs name")
+
+
+def test_the_all_inputs_emitter_is_registered_and_shape_checked(tmpdir, shared):
+    """`all_inputs_section` writes a theorem only for the shapes a row names.
+
+    The emitter is the half of the layer that knows how to prove the all-inputs
+    claim, and it is the half that can be wrong quietly: a specification with a
+    row whose model is a DIFFERENT shape would get a theorem that does not
+    elaborate, and an unregistered specification would get one against a
+    specification the generator cannot unfold.  Both are refusals here, and the
+    registered recursive shape's output is checked to name the arithmetic fact
+    its step rewrites through.
+    """
+    identity_model = "def identity_go (n : UInt64) : UInt64 :=\n  n\n"
+    fact_model = (
+        "def fact_go : Nat → UInt64\n"
+        "  | 0 => (UInt64.ofNat 1)\n"
+        "  | k + 1 => ((UInt64.ofNat (k + 1)) * fact_go k)\n")
+    # The registered identity shape: emitted, and about the whole word.
+    sec = SPECS.all_inputs_section(
+        "identity", SPECS.Refines("Specs.id64", 64), identity_model)
+    check("main_refines_all_inputs (w : UInt64)" in sec and
+          "mojo w = Specs.id64 w" in sec,
+          f"the registered identity spec emitted {sec!r}")
+    # The registered recursive shape: emitted, carries the no-wrap hypothesis
+    # and cites the multiplication fact its induction rewrites through.
+    sec = SPECS.all_inputs_section(
+        "fact", SPECS.Refines("Specs.factorial64", 20), fact_model)
+    check("main_refines_all_inputs" in sec, f"factorial64 emitted {sec!r}")
+    check("hfits : Specs.factorial w.toNat < 2 ^ 64" in sec,
+          "the factorial all-inputs theorem has no no-wrap hypothesis, so it "
+          "claims the equation outside the region where it is true")
+    check("Specs.u64_ofNat_mul" in sec,
+          "the factorial induction does not cite the multiplication fact its "
+          "step needs, so it would not elaborate")
+    # A registered spec on the WRONG model shape refuses rather than emitting a
+    # theorem that cannot elaborate.
+    check(SPECS.all_inputs_section(
+              "fact", SPECS.Refines("Specs.factorial64", 20), identity_model) == "",
+          "a factorial64 annotation on an identity-shaped model still emitted "
+          "an all-inputs theorem: it would fail to elaborate and take the whole "
+          "proof file with it")
+    # An unregistered spec is not given one either.
+    check(SPECS.all_inputs_section(
+              "absval", SPECS.Refines("Specs.abs64", 64), identity_model) == "",
+          "an unregistered specification got an all-inputs theorem, which can "
+          "only be a guessed statement about a function the generator cannot "
+          "unfold")
+    # No model text at all is the caller that cannot write the theorem.
+    check(SPECS.all_inputs_section(
+              "fact", SPECS.Refines("Specs.factorial64", 20), "") == "",
+          "the emitter wrote an all-inputs theorem with no model to read")
+
+
+def test_the_recursive_all_inputs_theorem_typechecks(tmpdir, shared):
+    """The recursive all-inputs theorem is real Lean, on the real model.
+
+    The example that carries `@refines(Specs.factorial64; …)` is the one the
+    bug doc names, and its proof file is currently red in `fact`'s END-TO-END
+    section for a reason that is not this layer's (a signed-flag leaf on the
+    `if n == 0:` test).  So the theorem cannot be shown to elaborate by
+    typechecking that whole file.  What CAN be checked is the theorem itself:
+    the model the generated file emitted is read back out of it, the emitter's
+    clause is laid beside that model with the same imports, and Lean is asked
+    about that.  It is the narrowest thing that shows the emitted clause is a
+    proof rather than text.
+    """
+    import formal.build as fb
+    from formal.lean import find_lean, ensure_library, run_lean
+
+    lean = find_lean(HERE)
+    if not lean:
+        print("    SKIP: no lean found (the clause is not elaborated)")
+        return
+    # `check=False`: this test is about the emitted CLAUSE, and the enclosing
+    # file's end-to-end section is red for an unrelated reason, so asking Lean
+    # about the whole file would report that reason and not this one.
+    src = os.path.join(EXAMPLES, "fact.mojo")
+    built = fb.compile_formal(
+        src, arch="arm64", output=os.path.join(tmpdir, "fact_clause.aout"),
+        prove=True, check=False)
+    proof_path = built["proof_path"]
+    check(os.path.isfile(proof_path),
+          f"the factorial-annotated program wrote no proof: {built}")
+    with open(proof_path, encoding="utf-8") as f:
+        text = f.read()
+    go = re.search(r"def \w+_go : Nat → UInt64\n(?:  .*\n)+", text)
+    mojo = re.search(r"def mojo \(n : UInt64\) : UInt64 :=\n  .*\n", text)
+    check(go and mojo,
+          "the generated factorial proof does not carry the `_go` model and "
+          "`mojo` this test reads, so there is nothing to lay the clause beside")
+    clause = SPECS.all_inputs_section(
+        "fact", SPECS.Refines("Specs.factorial64", 20),
+        (go.group(0) + "\n" + mojo.group(0)))
+    check(clause, "the emitter wrote no all-inputs clause for the factorial "
+                  "model it just read")
+    isolated = os.path.join(tmpdir, "refines_fact_clause.lean")
+    with open(isolated, "w", encoding="utf-8") as f:
+        f.write("import ProofLib\nimport work\nimport Refine\nimport Specs\n\n"
+                + go.group(0) + "\n" + mojo.group(0) + "\n" + clause)
+    ensure_library(lean, LIB)
+    result = run_lean(lean, [isolated],
+                      env={**os.environ, "LEAN_PATH": LIB})
+    check(result.returncode == 0,
+          f"the emitted all-inputs clause did not elaborate: "
+          f"{(result.stdout or '')[-800:]}{(result.stderr or '')[-800:]}")
 
 
 def test_a_wrong_specification_is_rejected(tmpdir, shared):
@@ -435,6 +556,10 @@ TESTS = [
      test_a_malformed_annotation_is_refused),
     ("the emitter writes the two theorems",
      test_the_emitter_writes_the_two_theorems),
+    ("the all-inputs emitter is registered and shape-checked",
+     test_the_all_inputs_emitter_is_registered_and_shape_checked),
+    ("the recursive all-inputs theorem typechecks",
+     test_the_recursive_all_inputs_theorem_typechecks),
     ("a wrong specification is rejected",
      test_a_wrong_specification_is_rejected),
     ("an unannotated program is unchanged",
