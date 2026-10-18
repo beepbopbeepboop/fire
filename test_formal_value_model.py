@@ -53,6 +53,7 @@ import sys
 import tempfile
 
 import fire_compiler as F
+from formal import model as M
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -978,7 +979,50 @@ LAYOUT_CASES = [
      "main", None),
 ]
 
-# ── the tuple-store target shapes ──
+# ── the static-initializer walk, at the MODEL level and with no image ───────
+#
+# `model._static_container_words` is the reader that decides a module-level
+# container literal's blob, and `model.container_element_without_a_word` asks it
+# WHICH element it could not answer so the refusal can quote it.  Both are pure
+# functions over an AST node, so they are checked here without a build: the
+# bug this pins was a `NameError` out of the reader (the two arms appended to a
+# local `missing` that stopped existing when the walk became a `ContextVar`),
+# which no build-and-run row can see — the reader raises before anything is
+# compiled, and the only caller that can reach it was added with the variable.
+UNIT_CHECKS = [
+    ("a_list_element_the_build_cannot_fold_is_NAMED_not_a_traceback",
+     lambda: _missing_element_named(
+         F.ListExpr(elements=[F.IntLiteral(value=1), F.IdentExpr(name="q")])),
+     "q"),
+    ("a_dict_key_the_build_cannot_fold_is_NAMED_not_a_traceback",
+     lambda: _missing_element_named(
+         F.DictExpr(pairs=[[F.IntLiteral(value=1), F.IdentExpr(name="q")]])),
+     "q"),
+    ("a_dict_key_that_IS_a_word_is_no_missing_element",
+     lambda: _missing_element_named(
+         F.DictExpr(pairs=[[F.IntLiteral(value=1), F.IntLiteral(value=2)]])),
+     None),
+    ("the_walk_is_still_None_with_no_reporter_listening",
+     lambda: _static_words(F.ListExpr(
+         elements=[F.IntLiteral(value=1), F.IdentExpr(name="q")])),
+     None),
+    ("the_walk_still_lays_out_an_all_word_literal",
+     lambda: _static_words(F.ListExpr(elements=[F.IntLiteral(value=1),
+                                               F.IntLiteral(value=2)])),
+     [2, 1, 2]),
+]
+
+
+def _missing_element_named(node):
+    """The NAME of the element `container_element_without_a_word` reports."""
+    element = M.container_element_without_a_word(node)
+    return getattr(element, "name", None)
+
+
+def _static_words(node):
+    """`_static_container_words` with nobody listening, as the hot path calls it."""
+    return M._static_container_words(node)
+
 #
 # `a, b = rhs` is one construct with four target shapes, and the two
 # architectures used to disagree about two of them.  arm64's `_tup_slot` already
@@ -2875,6 +2919,21 @@ def main():
         return 2
 
     passed = failed = 0
+    # The model-level rows first, and they are the only ones that need no image:
+    # a reader that raises cannot be reached by a build, which is the whole point
+    # of the first two rows.
+    for name, thunk, want in UNIT_CHECKS:
+        try:
+            got = thunk()
+        except Exception as e:
+            got, want = f"{type(e).__name__}: {e}", "<no exception>"
+        if got == want:
+            passed += 1
+            if args.verbose:
+                print(f"  PASS  {name}")
+        else:
+            failed += 1
+            print(f"  FAIL  {name}: got {got!r}, want {want!r}")
     with tempfile.TemporaryDirectory() as tmpdir:
         for entry, kind in selected:
             try:

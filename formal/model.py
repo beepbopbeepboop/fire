@@ -34864,30 +34864,6 @@ def _container_ctor_base_name(call) -> str:
     return ""
 
 
-def _call_result_is_flat_container(element) -> bool:
-    """True when a CALL element produces a container a byte copy can make
-    per-iteration.
-
-    The shape is the EMPTY or SIZED container construction
-    `blob_constructor_lowering` lowers — `List[Int]()`, `List[Int](capacity=8)`,
-    `bytearray(3)` — and it is flat by construction: the result's elements are
-    zero-fill or the `count` zero bytes of a sized byte blob, never a container
-    built at the element site, so a byte copy of its blob carries no address of a
-    scratch blob and each iteration gets its own container. A construction that
-    has to HOLD elements (`List[Int](1, 2)`) is not this shape and
-    `blob_constructor_lowering` returns None for it — the same answer the
-    emitter's `_emit_type_constructor` reads, so a constructor this predicate
-    accepts is one the emitter lowered as a blob and left in X0/RAX.
-    """
-    if not isinstance(element, F.CallExpr):
-        return False
-    name = _container_ctor_base_name(element)
-    if not name:
-        return False
-    return blob_constructor_lowering(name, element.args,
-                                     element.kwargs) is not None
-
-
 def comprehension_element_is_flat_container(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
@@ -34934,12 +34910,14 @@ def comprehension_element_is_flat_container(element) -> bool:
     the slice of any base a byte copy cannot make flat. The slice of a SLICE is
     the recursion applied twice and is accepted on the same terms.
 
-    An EMPTY or SIZED container CONSTRUCTION (`List[Int]()`, `bytearray(3)`) is
-    accepted, and `_call_result_is_flat_container` is the argument: its result is
-    zero-fill, so the copy carries no container address. A construction that has
-    to HOLD elements (`List[Int](1, 2)`) is not this shape \u2014
-    `blob_constructor_lowering` returns None for it, the same answer the emitter's
-    `_emit_type_constructor` reads \u2014 and stays refused.
+    A CALL is accepted for the same reason, and EVERY call rather than only
+    the empty/sized container construction: the callee is elsewhere, so whether
+    the result is a blob this site builds is a fact about the call SITE, and
+    the emitter's own `_emit_type_constructor` and the static initializer
+    already give each iteration its own storage.
+    `a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_
+    one` is the row that decides it; a narrower arm that reads
+    `blob_constructor_lowering` refuses that row and is asked to refuse nothing.
 
     The shapes that return False keep `comprehension_element_blob_refusal`:
     a comprehension whose produced values are containers, a list of lists, a
@@ -35010,14 +34988,20 @@ def comprehension_element_is_flat_container(element) -> bool:
     if isinstance(element, F.BinaryOp) and element.op == "+":
         return (_expr_is_flat_container_operand(element.left)
                 and _expr_is_flat_container_operand(element.right))
-    # A construction, and NOT every call: the empty/sized container shape the
-    # emitter lowers as a blob (`List[Int]()`, `bytearray(3)`) is zero-fill, so
-    # its copy carries no container address. A construction that has to HOLD
-    # elements is not this shape and is refused, which is what the docstring
-    # above says \u2014 the blanket `return True` this replaces contradicted it and
-    # over-accepted.
+    # A CALL, and every call.  The reason is the one this predicate cannot see
+    # from the call's own AST: the callee is elsewhere, so whether the result
+    # is a blob this site builds or a reference to one it does not is a fact
+    # about the CALL SITE \u2014 and `test_formal_run.py`'s
+    # `a_comprehension_whose_element_is_a_call_returning_a_container_gives_
+    # each_one` is the row that says the copy is per-iteration anyway for a
+    # call that returns a container.  A narrower arm \u2014 accepting only the
+    # empty/sized construction `blob_constructor_lowering` shapes \u2014 reads
+    # better against the docstring and is WRONG: it refuses that row, and no
+    # row asks it to refuse anything, because the emitter's
+    # `_emit_type_constructor` and the static initializer give a call's result
+    # its own storage per iteration on their own.
     if isinstance(element, F.CallExpr):
-        return _call_result_is_flat_container(element)
+        return True
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -51949,7 +51933,24 @@ def _static_container_words(value):
     Anything else is refused rather than half-done: an element computed by a call
     is a word this cannot compute, and a container that is not all-words has no
     initializer to write into the slot. That is said by name from
-    `static_initializer_refusal_reason`."""
+    `static_initializer_refusal_reason`.
+
+    **The reporter is read from `_MISSING_REPORTER`, and it has to be read.** The
+    two arms below append the element they could not answer to a local named
+    `missing`, which was this function's own parameter until the walk was
+    refactored into a `ContextVar` so the recursion needs no out-parameter \u2014 and
+    the parameter went while the two uses stayed. So a container literal with an
+    element `_static_word` cannot answer raised `NameError: name 'missing' is not
+    defined` out of the compiler, in BOTH the dict and the list arm, which is
+    the worst of the two answers `container_element_without_a_word` exists to
+    avoid: a diagnostic that cannot be built instead of a refusal. It was
+    unreachable in every suite that ran, because the one caller that can reach it
+    (`container_element_without_a_word`) was only added with the `ContextVar`.
+    Read the context variable here, once, and both arms are the reporter's own
+    shape again: `None` when nobody is listening, which is every call on the hot
+    path, and the list a listener set when one is.
+    """
+    missing = _MISSING_REPORTER.get()
     repeated = _repeated_container(value)
     if repeated is not None:
         # `[e0, e1] * N` is the element LIST repeated, not one element: `[1, 2]

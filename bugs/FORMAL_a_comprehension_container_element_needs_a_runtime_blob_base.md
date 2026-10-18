@@ -75,12 +75,17 @@ iteration's slice references the same inner lists `a` owns.
 `model.blob_constructor_lowering` as a blob whose elements are ZERO-FILL — an
 empty blob, or the `count` zero bytes of a sized byte blob — so a byte copy of
 it per iteration carries no container address and gives each iteration its own
-container. `model._call_result_is_flat_container` is the arm: it asks the SAME
-`blob_constructor_lowering` the emitters' `_emit_type_constructor` asks, so a
-construction this predicate accepts is one the emitter lowered as a blob and
-left in X0/RAX. A construction that has to HOLD elements (`List[Int](1, 2)`)
-returns None from that function and is not this shape; the emitter refuses it
-before a comprehension ever sees it.
+container. **The arm accepts EVERY call, not just that construction**, and that is
+a measured correction to the 2026-10-14 reading: whether a call's result is a
+blob this site builds is a fact about the CALL SITE \u2014 the callee is
+elsewhere \u2014 and
+`test_formal_value_model.py`'s `a_comprehension_whose_element_is_a_call_
+returning_a_container_gives_each_one` is the row that says the copy is
+per-iteration for a call that returns a container, with the emitter's own
+`_emit_type_constructor` and the static initializer giving each iteration its
+own storage. Narrowing the arm to what `blob_constructor_lowering` shapes
+(`List[Int](1, 2)`, which returns None, would then be refused) buys nothing,
+because no row asks this predicate to refuse anything.
 
 **Pinned by five rows in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**:
 `a_slice_element_of_a_name_is_per_iteration`,

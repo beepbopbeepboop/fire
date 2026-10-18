@@ -18367,18 +18367,20 @@ COMPREHENSION_ELEMENT_CASES = [
     # accepted by the same copy and no relocation at all
     # (`a_slice_element_of_a_name_is_per_iteration`): a slice copies its base's
     # element WORDS into a fresh blob, so the copy is sound exactly when the base
-    # does not build the containers they reference — the base owns them and keeps
-    # them, which is what CPython's slice shares too. The rows after the accepted
-    # An EMPTY or SIZED container CONSTRUCTION (`List[Int]()`, `bytearray(3)`) is
-    # accepted too, by the same copy: its result is zero-fill, so the copy carries
-    # no container address (`_call_result_is_flat_container`). The rows after the
-    # accepted shapes are the ones whose per-iteration materialisation is still
-    # refused — a nested comprehension whose own result holds containers, a list
-    # of lists, a slice whose BASE builds a container, and a construction that has
-    # to HOLD elements (see `bugs/FORMAL_a_comprehension_container_element_needs_a
-    # _runtime_blob_base.md`), whose runtime blob base is genuinely needed. The
-    # refusal needle is the CONSTRUCT and not the remedy, so a refusal about
-    # anything else fails the case.
+    # does not build the containers they reference \u2014 the base owns them and keeps
+    # them, which is what CPython's own slice shares too. A CALL is accepted too,
+    # and every call rather than only the empty/sized container construction: the
+    # callee is elsewhere, so whether the result is a blob this site builds is a
+    # fact about the call SITE, and `test_formal_value_model.py`'s
+    # `a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_
+    # one` is the row that decides it. The rows after the accepted shapes are the
+    # ones whose per-iteration materialisation is still refused \u2014 a nested
+    # comprehension whose own result holds containers, a list of lists, and a
+    # slice whose BASE builds a container (see
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`),
+    # whose runtime blob base is genuinely needed. The refusal needle is the
+    # CONSTRUCT and not the remedy, so a refusal about anything else fails the
+    # case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
