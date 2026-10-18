@@ -1356,7 +1356,17 @@ AXIOM_CLOSURE = {
     # The partition still closes (312 = 61 + 243 + 0 + 8).
     # Re-pinned by the bulk merge of the formal-worker branches: one more theorem
     # asked, four more kernel-checked clean, three fewer closure-only.
-    "ProofLib": (313, 61, 247, 0, 5, 0),
+    # +2 asked and +1 reaching with the `bunny-merge26` merge, and BOTH are the
+    # two library facts that merge added to `lib/ProofLib.lean`, named here so
+    # the row can be read rather than only diffed:
+    #   `u64_ofNat_mul`   is `clean` — proved by `UInt64.toNat.inj`, three
+    #                     rewrites and `Nat.mul_mod`, so it reaches no axiom.
+    #   `arm64_slt_iff_lt` REACHES, because its proof is `bv_decide` over the
+    #                     sign bit, which is the same decide-axiom arrival the
+    #                     `arm64_flag_*` facts beside it already record.
+    # The partition still closes exactly (315 = 62 + 248 + 0 + 5), which is the
+    # assertion that makes this a measurement rather than a number somebody typed.
+    "ProofLib": (315, 62, 248, 0, 5, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
