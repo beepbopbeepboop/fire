@@ -51,6 +51,17 @@ because `tools/formal_sweep_causes.py::_host_declared_names` scanned
 test in `test_refusal_taxonomy.py`. No part of its queue is open, which is why
 it is deleted rather than kept as a second census of the same wall.
 
+Merged 2026-10-13 (`work/formal255-docs`): the deleted doc carried one
+correction outside its own queue, folded here rather than lost — its §2
+`zlib` row and §5 item 3's "`zlib`, 27 files" (from its 2026-10-08
+`work/formal180-docs` Status) are FALSE: `zlib` is 0 files and 0 uses,
+measured in `formal/imports.py`'s `HOST_UNREACHABLE` comment (the 27 files
+were closure through `coro.py`'s `import zlib as _zlib`,
+`gimple_codegen.py`'s `mojo_zlib_*` signature table — runtime entry points it
+never calls — and a `types.py` docstring, and the three DEAD `import zlib`
+lines are deleted); §0.1's census not listing `zlib` is the same measurement
+from the other side.
+
 **Status 2026-10-04 (`work/formal28-6`): the walk is a TOOL — §5 is DONE — and
 §3 has been re-measured on this tree by it. The queue itself is unchanged: 20
 names, six capabilities, and every one of them still a project rather than a
