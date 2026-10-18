@@ -2615,6 +2615,8 @@ dylib_exports: list = None, globals_base: int = None,
                 return
             if isinstance(stmt.target, F.MemberExpr):
                 slot = _member_slot_key(stmt.target)
+                if slot is None and self._try_member_frame_aug(stmt):
+                    return
                 if slot is None:
                     # A base that is an EXPRESSION has no name to key on, and
                     # that is a question about the BINDING of the base rather
@@ -7156,6 +7158,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         else:
             self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))  # pop the value back into X0
+
+    def _try_member_frame_aug(self, stmt) -> bool:
+        """`p.value().b <op>= v` — a member of a frame a POINTER names.
+
+        The plain store `p.value().b = v` already resolves the frame
+        (`model.pointer_frame_expression`, the same decision the read arm
+        makes), so the augmented form DESUGARS onto the two arms that exist —
+        `p.value().b = p.value().b <op> v` — rather than growing a second
+        read-modify-write that would have to restate every operator's lowering
+        a third time. That is the same desugaring the named-holder arm already
+        does for the operators it delegates to `_emit_binop`.
+
+        It is offered only when the dereference's receiver is a NAME, because
+        the desugaring emits the base once for the read and once for the store,
+        and a receiver that is a CALL would run twice. A name is a register
+        read, so both emissions are the same load.
+
+        Returns True when the statement was emitted; False when the base is not
+        this shape, so the caller keeps its own refusal instead.
+        """
+        base = M.member_base_node(stmt.target)
+        if not (isinstance(base, F.CallExpr)
+                and isinstance(base.func, F.MemberExpr)
+                and isinstance(base.func.obj, F.IdentExpr)):
+            return False
+        st, _why = M.pointer_frame_expression(
+            self._cur_fn, base, self._structs, self._structs)
+        if st is None:
+            return False
+        op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
+            else stmt.op
+        self._emit_stmt(F.AssignStmt(
+            target=stmt.target,
+            value=F.BinaryOp(op=op, left=stmt.target, right=stmt.value)))
+        return True
 
     # A STORE into a frame a POINTER names — `p.value().field = v`, the store
     # half of the member-read arm's `p.value().field`.  It exists because the

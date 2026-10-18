@@ -16804,6 +16804,28 @@ POINTER_DEREF_CASES = [
      "    if t.b != 5:\n"
      "        return 90 + got\n"
      "    return got\n", 5, None),
+    # `p.value().b += 5` — the augmented form with the frame as an EXPRESSION,
+    # and the last shape of this family that used to be refused.  The plain
+    # store above answers `p.value().b = 41` by resolving the frame through
+    # `model.pointer_frame_expression`, so the augmented form DESUGARS onto the
+    # read and that store — `p.value().b = p.value().b + 5` — rather than
+    # growing a third read-modify-write of its own.  The caller check is the
+    # named row's, for its reason: the write has to reach `t.b`, not a scratch
+    # copy in the callee.
+    ("deref_struct_pointee_augmented_directly_is_one_slot_read_modify_write",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b += 5\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 5:\n"
+     "        return 90 + got\n"
+     "    return got\n", 5, None),
     # `return p.value()` — the frame-LIFETIME half, and the case that says why
     # the answer above is safe rather than merely reachable.  Without
     # `_frame_return_status` recognising it, `give` was classified
@@ -16937,39 +16959,6 @@ POINTER_DEREF_REFUSALS = [
      "    return store_bad(t)\n",
      "refuse:stores into 'zz' of a P3 this pointer points at, and that struct's",
      None),
-    # `p.value().b += 5` — the ONE shape of this family that is still refused,
-    # and it is pinned so it is a recorded limit rather than a surprise.  The
-    # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
-    # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
-    # on, so both backends refuse it — but they refuse it with ONE sentence,
-    # `model.member_access_refusal`, because the real premise is the BINDING of
-    # the base and not the shape of the target.  The named spelling is answered:
-    # `deref_struct_pointee_augmented_through_a_name`.
-    #
-    # **This row carried `refuse_either:` until arm64 caught up** (its augmented
-    # arm raised a literal of its own, "unsupported augmented assignment target
-    # on the formal arm64 path", while x86-64 raised `_refuse_member_target`).
-    # Both sentences were about the same construct and the arm64 one was FALSE
-    # about its own file — a `MemberExpr` target IS lowered on both machines
-    # when the member is a frame slot (`a.n += 1` builds and answers 5 on both).
-    # The `refuse_either:` is GONE rather than narrowed, which is the point of
-    # removing it: a two-needle row goes green either way, so it would have
-    # survived the fix and reported the divergence forever after it was over.
-    # The needle is the clause that names the BASE rather than the whole
-    # sentence, for the reason every other needle in this file is a clause: the
-    # sentence is one function's and the clause is the fact.
-    ("deref_refuse_augmented_through_a_pointer_frame",
-     "struct P3:\n"
-     "    var a: Int64\n"
-     "    var b: Int64\n"
-     "    var c: Int64\n"
-     "def bump(p: Pointer[P3]) -> Int:\n"
-     "    p.value().b += 5\n"
-     "    return Int(p.value().b)\n"
-     "def main(n: Int) -> Int:\n"
-     "    var t = P3()\n"
-     "    return bump(t)\n",
-     "refuse:is a field access through 'p.value(...)'", None),
     # A FLOAT pointee.  A formal value has no float kind distinct from an int
     # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
     # would put IEEE binary32 bits in a register the program then treats as an
