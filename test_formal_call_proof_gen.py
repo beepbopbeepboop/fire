@@ -1811,6 +1811,96 @@ class TestFloorCorrectionDecodes(unittest.TestCase):
                                      f"model reads as a different instruction")
 
 
+class TestAddSubImmediateShift(unittest.TestCase):
+    """The `sp` trackers read an ADD/SUB immediate's `sh` bit, not its 12 bits.
+
+    `_sp_stores`, `_frame_ldp_addrs`, `_frame_read_addrs` and `_hcond_mem_rws`
+    all tracked `sp` through the prologue's ADD/SUB immediate, and all four read
+    the immediate's 12 bits alone.  That is right while every immediate fits
+    `#4095`; the codegen's 128KB scratch is `sub sp, sp, #32, lsl #12` — whose
+    own encoder docstring (`formal/arm64.py::encode_sub_xd_xn_imm_sh`) says the
+    backend subtracts it at the top of every list base, dict, comprehension and
+    container append — and a tracker that read the immediate as 32 named a slot
+    the store was not at.  A `hcond`'s spill peel then emitted
+
+        rw [mem_read_two_writes_adj_uint _ ((s_0.sp - 32) - 16) _ _]
+
+    for a store at `s_0.sp - 131072 - 16`, and Lean's `rw` found no occurrence:
+    the red on `ifonly`, `condassign`, `elif3` and `sgt8`, where the message
+    names the goal's head (`arm64_matches_condition`) and reads like a missing
+    flag lemma rather than a stale address.
+
+    Lean-free and image-free by construction: every word is an encoder's own, so
+    this is a decode test and not a program that happens to have a large frame.
+    """
+
+    #: 32 << 12: the 128KB scratch, the first immediate this backend reaches
+    #: that does not fit the 12-bit field.
+    SCRATCH = 32 << 12
+
+    def setUp(self):
+        import formal.arm64 as A
+        self.sub = struct.unpack("<I", A.encode_sub_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        self.add = struct.unpack("<I", A.encode_add_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        self.sub_plain = struct.unpack("<I",
+                                       A.encode_sub_xd_xn_imm_sh(31, 31, 16, 0))[0]
+        self.stp = struct.unpack("<I", A.encode_stp_sp_pre(0, 1, 16))[0]
+        self.ldp = struct.unpack("<I", A.encode_ldp_sp_post(0, 1, 16))[0]
+        self.words = {0x100: self.sub, 0x104: self.stp, 0x108: self.ldp}
+
+    def test_the_decode_reads_the_shift(self):
+        """The one reader, on both the plain and the `lsl #12` spelling."""
+        import formal.arm64_proof_gen as G
+        self.assertEqual(G._imm12_scaled(self.sub), self.SCRATCH)
+        self.assertEqual(G._imm12_scaled(self.add), self.SCRATCH)
+        self.assertEqual(G._imm12_scaled(self.sub_plain), 16,
+                         "an `sh = 0` immediate must NOT be scaled")
+        # The form the codegen actually emits for the scratch is a SUB, and the
+        # index is what routes it to this decode.
+        self.assertEqual(G._step_branch_index(self.sub), 12)
+
+    def test_the_sp_stores_tracker_uses_it(self):
+        import formal.arm64_proof_gen as G
+        stores = []
+        off = G._sp_stores(dict(self.words), [0x100, 0x104], 0, stores)
+        self.assertEqual(off, -(self.SCRATCH + 16),
+                         "the frame depth must be the scratch plus the pair, "
+                         "not the 12-bit field alone")
+        self.assertEqual(sorted(stores), [self.SCRATCH + 8, self.SCRATCH + 16])
+
+    def test_the_frame_read_trackers_use_it(self):
+        import formal.arm64_proof_gen as G
+        for tracker in (G._frame_read_addrs, G._frame_ldp_addrs):
+            with self.subTest(tracker=tracker.__name__):
+                if tracker is G._frame_ldp_addrs:
+                    addrs = tracker([{"instrs": [0x100, 0x104, 0x108]}],
+                                    self.words, "s_0")
+                else:
+                    addrs = tracker({"instrs": [0x100, 0x104, 0x108]},
+                                    self.words, "s_0")
+                self.assertEqual(len(addrs), 1)
+                self.assertIn(f"UInt64.ofNat {self.SCRATCH}", addrs[0],
+                              f"the LDP address does not carry the scratch: "
+                              f"{addrs[0]}")
+
+    def test_the_hcond_peel_uses_it(self):
+        """The emitted peel must name the slot the store is at.
+
+        This is the assertion the red failed: the peel's address and the
+        composed store's address have to be the same term, or `rw` finds no
+        occurrence and reports it against the goal's head.
+        """
+        import formal.arm64_proof_gen as G
+        rws = G._hcond_mem_rws([0x100, 0x104, 0x108], [0x108], self.words, "s_0")
+        self.assertTrue(rws, "a spill read in the current block produced no peel")
+        joined = ", ".join(rws)
+        self.assertIn(f"UInt64.ofNat {self.SCRATCH}", joined,
+                      f"the peel names the wrong slot, so `rw` will not find the "
+                      f"store: {joined}")
+        self.assertNotIn(f"UInt64.ofNat 32)", joined,
+                         f"the peel is reading the raw 12-bit field: {joined}")
+
+
 # Lean's `=` and `\u2260`, spelled once so the pattern and the expectation
 # below cannot be two different characters.
 BIT_TEST_EQ, BIT_TEST_NE = "=", "\u2260"
