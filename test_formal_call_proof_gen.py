@@ -1429,6 +1429,22 @@ the text; it does not find out whether any word can arrive there.  So:
                          "modelling `subs xd, xn, xm` as a flag-only CMP")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+        # The SHIFTED-register `imm6` field, on BOTH the generator and the
+        # model. `add x7, x1, x2, lsl #3` is `0x8b020c27` (imm6 = 3) and
+        # `sub x7, x1, x2, lsl #4` is `0xcb021027` (imm6 = 4); the generator
+        # spells the shift CONCRETELY (the `arm64_reg_or_sp` argument above) and
+        # the model reads it through the shared `arm64_shifted_reg`, and the two
+        # have to agree or `exact work_step_add_reg` does not close.
+        self.assertIn("<<< UInt64.ofNat 3", G._step_rhs(0x8b020c27, 2),
+                      "`_step_rhs`'s ADD-register arm dropped the shift again")
+        self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
+                      "`_step_rhs`'s SUB-register arm dropped the shift again")
+        self.assertEqual(
+            self.lib.count("arm64_shifted_reg insn s xm"), 2,
+            "the model's ADD and SUB (shifted register) arms must BOTH read "
+            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
+            "arm and dropped in the other is the duplicate-decoder defect this "
+            "replaces")
 
     def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
         """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
@@ -7321,6 +7337,18 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # mismatch), so the sum is byte-identical on both sides.
         ("adds x7, x1, x15", lambda A: A.encode_adds_xd_xn_xm(7, 1, 15)),
         ("cmn x1, x15", lambda A: A.encode_cmn_xn_xm(1, 15)),
+        # The SHIFTED-register `ADD`: `imm6` (bits 15:10) is the shift count and
+        # `arm64_step` read `Xm` and added it UNSHIFTED, so every
+        # `add Xd, Xn, Xm, lsl #3/#4` — the list/dict element and key strides
+        # `formal/arm64_codegen.py` emits at 38 sites — stepped a state the
+        # machine never reached. `lsl #3` and `lsl #4` are the two the emitter
+        # produces, and the UNSHIFTED row is the anti-rot: a fix that always
+        # shifted would pass the first two and fail this one.
+        ("add x7, x1, x2, lsl #3",
+         lambda A: A.encode_add_xd_xn_xm_lsl3(7, 1, 2)),
+        ("add x7, x1, x2, lsl #4",
+         lambda A: A.encode_add_xd_xn_xm_lsl4(7, 1, 2)),
+        ("add x7, x1, x2", lambda A: A.encode_add_xd_xn_xm(7, 1, 2)),
         # The `#imm12` forms with their `sh` field (`LSL #12`), on BOTH classes
         # (ADD and SUB), plus an UNSHIFTED row: the decode used to read the
         # 12-bit field and drop its shift, and a fix that always shifted would

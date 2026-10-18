@@ -17009,6 +17009,25 @@ POINTER_DEREF_REFUSALS = [
      "    printf(\" [%d]\", trunc(b))\n"
      "    return 0\n",
      0, "[1.000000] [1]"),
+    # …and the STORE half of the same pointee, which the LOAD's enablement did
+    # not carry: `p.value() = 1.5` writes 1.5's own 64 bits into the double
+    # slot, which is exact, and `p.value() = 1` (the row in the REFUSALS group)
+    # would write 0x1, a denormal, because the slot has no kind at run time.
+    # The decision is the VALUE's kind, asked of the same reader
+    # (`_expr_str_kind`) the load's consumers ask, so the two sides agree.
+    ("deref_a_binary64_pointee_store_of_a_double_is_exact",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p.value() = 1.5\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g]\", p.value())\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    store(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[1.5]"),
     # …and the SAME kind reaches the two consumers that were already refused by
     # name, which is what makes the load safe rather than merely emittable: a
     # double in WORD position and a double returned under `-> Int`.  Both are
@@ -17495,6 +17514,21 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return at(s, 0)\n",
      "refuse:reads an element of a FLOAT pointee", None),
+    # The `.value()` STORE of a value this path cannot establish as a double:
+    # `p.value() = 1` writes 0x1, a denormal rather than 1.0, and the refusal
+    # names the value's own kind. Its answering twin is
+    # `deref_a_binary64_pointee_store_of_a_double_is_exact` above; the two are
+    # the two halves of the kind check, so a rule that refused every store
+    # through a double pointee would fail the first, and one that answered
+    # every store would fail this.
+    ("deref_refuse_a_binary64_value_store_of_an_integer",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p.value() = 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b)\n",
+     "refuse:would write 0x1, a denormal rather than 1.0", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A

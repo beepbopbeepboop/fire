@@ -21314,21 +21314,23 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # float pointee refused", and the two would drift.
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
     if inner in POINTEE_FLOAT_NAMES:
-        # A float pointee's LOAD lowers (`dereference_lowering`'s `"float"`
-        # answer); its STORE does not, and the asymmetry is the kind check that
-        # the load has and the store does not.  What a store needs is the RHS's
-        # kind — `p.value() = 3.9` writes a double's bits, `p.value() = 5` writes
-        # an integer where the source means `5.0` — and no rule here reads it,
-        # so a store through a float pointer is refused rather than written at
-        # the load's width on the strength of the pointer's declaration alone.
-        return (None, f"the pointee is {inner}, and the LOAD of one lowers (the "
-                      f"word's kind is carried by `pointer_deref_kind`), but a "
-                      f"STORE through it is refused: a store needs the kind of "
-                      f"the value on the right, so `p.value() = 5` would write "
-                      f"an integer's word where the source means `5.0`, and "
-                      f"nothing on this path reads that kind yet. Store the "
-                      f"element through an integer-typed view, or build the "
-                      f"value where it lives")
+        # A BINARY64 pointee, and the STORE half of the load's enablement: a
+        # store through a `Pointer[Float64]` writes the 64 bits of the VALUE's
+        # word into a slot the program declared a DOUBLE.  The KIND CHECK above
+        # is what decides it — `pointer_store_kind_disagreement` refuses a
+        # stated disagreement in BOTH directions with the same evidence — so this
+        # arm only has to answer the agreeing case at the load's own width.
+        # A value whose kind this path cannot establish is not a disagreement
+        # and is answered here, which is the permissive direction the two
+        # sibling boundaries (`call_argument_kind_refusal`,
+        # `printf_kind_conversion_refusal`) also take; the wrong answer that
+        # direction permits — `p.value() = 1` writing 0x1 — is the stated case
+        # the check above refuses, not this one.
+        width, signed = 8, False
+        scaled, scale_why = _offset_scale(fn, obj, width)
+        if not scaled:
+            return (None, scale_why)
+        return (("store", width, signed), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
         scaled, scale_why = _offset_scale(fn, obj, width)
@@ -21397,8 +21399,17 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
              f"function bound to an integer")
     want = ("a double is what that slot is read back as" if pointee_is_float
             else "an integer is what that slot is read back as")
+    # The clause the other half of the same defect was worded with, kept so one
+    # message carries both measurements rather than two messages carrying one:
+    # a store through a `Pointer[Float64]` writes the value's own BITS, so the
+    # integer 1 is 0x1 — a denormal, not 1.0 — and the answer the reader is
+    # given is `Int(x)`, which is `FCVTZS`.
+    bits = ("" if pointee_is_float else
+            " So a store through a `Float64` pointee writes the value's own "
+            "BITS: `p.value() = 1` would write 0x1, a denormal rather than "
+            "1.0.")
     return (
-        f"the pointee is `{pointee}` and this store writes {where}. "
+        f"the pointee is `{pointee}` and this store writes {where}.{bits} "
         f"{spelled(value)} is a different kind of word from the one the "
         f"declaration says is there, and a store has no way to say so: it moves "
         f"one 64-bit word, so {want} and the number that comes back is the "
@@ -27335,8 +27346,9 @@ class ValueKinds:
         blob, keeps its kind: printing one of those as a number would print a
         frame address."""
         kind = self.kind_of(value)
-        if kind is None and not _is_container_literal(value):
-            return INT_KIND
+        if kind is None:
+            if not _is_container_literal(value):
+                return INT_KIND
         return kind
 
     def _bind_for_target(self, target, kind, own=None) -> None:
@@ -28482,6 +28494,17 @@ class ValueKinds:
                 return list_kind(self.kind_of(e.element, scopes))
             return list_kind(self.kind_of(e.element, scopes))
         if isinstance(e, F.CallExpr):
+            # A LOWERED `external_call["sym", RetType](…)`, asked FIRST and
+            # before the deref arm, because its declared return type is the only
+            # thing that says what the word in the return register holds and the
+            # generic arms below cannot see it: `_flat_callee` finds no callee
+            # NAME in a bracketed template and the extern default answers
+            # `INT_KIND`.  A pointer return must NOT be that — see
+            # `external_call_result_value_kind`, which carries the measurement
+            # and answers a `char *` declaration POINTER_KIND.
+            extern = external_call_result_value_kind(e)
+            if extern is not None:
+                return extern
             # A POINTER DEREFERENCE, asked FIRST: `p.value()` is a call whose
             # callee is a member and whose receiver is a pointer, so the arms
             # below (which read a callee NAME) cannot classify it and would
@@ -28492,15 +28515,6 @@ class ValueKinds:
             deref = self._deref_kind(e)
             if deref is not None:
                 return deref
-            # An `external_call[…]` result, asked before the arms below, which
-            # read a callee NAME and cannot see this construct at all (`_flat_
-            # callee` answers None for a subscript callee and the whole call
-            # then classified as nothing). The declared return type is the only
-            # statement of what the word holds — `external_call_result_value_
-            # kind` is that reader and its docstring carries the measurement.
-            extern = external_call_result_value_kind(e)
-            if extern is not None:
-                return extern
             callee = _flat_callee(e)
             # The empty-container constructor, in EITHER spelling — `List()` and
             # `List[Int]()` are the same construction and must be the same
@@ -50156,7 +50170,7 @@ RLIMIT_STACK = 3
 # inside this case on a stock host.
 #
 # **TWO arm64 frames, and the second one is load-bearing.** The guard runs before
-# the frame reservation (`stack_floor_charge` below), so a budget of a single
+# the frame reservation (`stack_floor_budget_for_limit`'s frame term below), so a budget of a single
 # frame would put the floor exactly at the current SP, where `SP >= floor` is true
 # by construction and the guard never fires — the silent-crash failure mode this
 # whole mechanism exists to prevent, reached by the clamp meant to prevent it.
@@ -50183,8 +50197,9 @@ def stack_floor_budget_for_limit(limit_bytes: int,
     conservative direction: the budget never exceeds what the policy is willing
     to spend, it never claims more of the stack than the kernel leaves usable,
     and it never claims a whole frame the first call has not taken yet. That last
-    term is the one that was missing, and it is what
-    `stack_floor_charge`'s table measures.
+    term is the one that was missing, and it is now INSIDE the budget both
+    emitters charge directly — `floor = SP - budget`, with no second frame
+    subtraction anywhere.
 
     `frame_bytes` defaults to the largest frame either backend emits
     (`ARM64_CONTAINER_BUDGET`), which is the conservative choice for a caller
@@ -50209,62 +50224,21 @@ def stack_floor_budget_for_limit(limit_bytes: int,
     return min(STACK_FLOOR_BUDGET_BYTES, usable)
 
 
-def stack_floor_charge(budget_bytes: int, frame_bytes: int) -> int:
-    """What the guard SUBTRACTS from the SP it reads to get the floor.
-
-    **The budget LESS one frame, and getting this wrong was a two-step
-    measurement in both directions — so both are here, because the second is only
-    visible once the first is fixed.**
-
-    * **The guard has to run BEFORE the frame it guards is reserved.** It used to
-      be emitted immediately after `sub sp, #_SCRATCH` (arm64) / `sub rsp,
-      #_frame_bytes` (x86-64), and then two things were wrong. The threshold was a
-      frame too generous; and — fatally — **by the time the guard ran, the frame
-      had already been reserved and the saved registers already pushed**, so the
-      frame that crossed the real limit had already TOUCHED the memory below it.
-      No arithmetic in the guard could have prevented that. Measured, arm64,
-      `deep(n)`, `ulimit -s 2048`: `n=13` exits 0, `n=14` dies with SIGSEGV and no
-      output, while the same binary under `ulimit -s 8176` refuses at depth 59
-      with a status and never crashes — because 8 372 224 is not a multiple of
-      131 072 and the extra frame lands inside `STACK_FLOOR_MARGIN_BYTES`. That
-      is the whole reason this survived: the default stack hides it and only an
-      exact multiple exposes it.
-
-    * **With the guard in front, the charge is `budget - frame`.** Not the
-      budget, and not the budget plus a frame. The guard is emitted after the
-      `stp x29, x30` / `push rbp` that saves the frame pointer — so the SP it
-      reads is already one frame below the SP the ENTRY prologue inherited, which
-      is the point the budget is defined against. `deep(k)` therefore sits at
-      `SP_entry - (k+1)*frame`, and it passes when `(k+1)*frame <= charge`.
-
-      Measured, arm64, `deep(n)`, over four stack limits, the deepest `n` that
-      still ANSWERS, against each candidate charge:
-
-          ulimit -s   budget     deepest n that answers   budget-frame   budget+frame
-            8176 KiB   60 frames            59               59  ok          60  too deep
-            4096 KiB   30 frames            29               29  ok          30  too deep
-            2048 KiB   14 frames            13               13  ok          14  too deep
-            1024 KiB    6 frames             5                5  ok           6  too deep
-
-      `budget - frame` is right in every row, and every row where the other two
-      are wrong is a depth CPython answers and this used to answer too.
-
-    `frame_bytes` is what makes the relation checkable: `charge / frame_bytes` is
-    the deepest depth the guard admits, so a test states that number and MEASURES
-    it rather than trusting it. It is per-function and per-backend — `_SCRATCH` on
-    arm64, `_frame_bytes` on x86-64, which counts that function's own spills —
-    which is the sense in which the guard's threshold really is derived from each
-    function's frame size: a function with many locals has a larger frame, so
-    `charge / frame` is a smaller depth for it.
-
-    Clamped at one frame, for `STACK_FLOOR_MIN_BUDGET_BYTES`'s reason: a charge
-    of zero would put the floor at the current SP, where `SP >= floor` is true by
-    construction and the guard never fires — the silent-crash failure mode this
-    whole mechanism exists to prevent, reached by the clamp meant to prevent it.
-    """
-    charge = int(budget_bytes) - int(frame_bytes)
-    return charge if charge > frame_bytes else frame_bytes
-
+# **THERE IS NO `stack_floor_charge` ANY MORE, AND THAT IS THE CORRECTION RATHER
+# THAN A TIDY-UP.** A function of that name once answered `budget - frame`, and
+# it was removed because it was UNCALLED and WRONG if called: the frame term
+# moved INTO the budget (`stack_floor_budget_for_limit` computes
+# `limit - MARGIN - frame` above), so both emitters now charge the budget
+# DIRECTLY — `arm64_codegen._emit_stack_floor_guard`'s `floor = SP - budget` and
+# `x86_64_codegen._emit_stack_floor_init`'s `budget = limit - (MARGIN + frame)`.
+# Routing them through a helper that subtracted the frame AGAIN would have put
+# the floor one frame lower and let the guard fire one frame LATE — the
+# `budget + frame` column of the four-limit measurement, which is the crash
+# direction. The measurement itself lives at
+# `_emit_stack_floor_guard`'s sibling `_emit_stack_floor_init`: over
+# `ulimit -s` 8176/4096/2048/1024 KiB the deepest depth that answers is one less
+# than `budget / frame`, and every row where a `budget - frame` charge was used
+# was a depth CPython answers and this path stopped answering.
 
 def stack_trap_message() -> str:
     """The ONE text a stack overflow writes to fd 2 before it stops the program.
@@ -50470,8 +50444,8 @@ def call_graph_depth(edges: dict) -> int:
 
     **The depth the budget affords is PER ARCHITECTURE, because the budget is
     bytes and the frame is not.** `STACK_FLOOR_BUDGET_BYTES` is one 7.5 MiB
-    constant on both machines, but `(BUDGET - frame) // frame` — what
-    `stack_floor_charge` measures — is 59 on arm64 against a 128 KiB frame
+    constant on both machines, but `(BUDGET - frame) // frame` — the depth the
+    guard's direct `budget` charge admits — is 59 on arm64 against a 128 KiB frame
     (`ARM64_CONTAINER_BUDGET`) and 479 on x86-64 against a 16 KiB one
     (`X86_64_CONTAINER_BUDGET`) before the function's own spills, which is why
     the measured x86-64 edge is 471 and not 479 (`tools/formal_recursion_depth.py`,

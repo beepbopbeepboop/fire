@@ -1489,7 +1489,7 @@ class X86_64Codegen:
         # **The stack-floor guard goes FIRST, before the `sub` below, and that
         # position is load-bearing rather than tidy** — the same fix and the same
         # reasoning as arm64's (`_emit_stack_floor_guard` there, and
-        # `model.stack_floor_charge` for the measurement). It used to be emitted
+        # `model.stack_floor_budget_for_limit` for the measurement). It used to be emitted
         # immediately after `sub rsp, _frame_bytes`, so by the time it compared
         # anything this function's frame had been reserved and the frame pointer
         # pushed: the frame that crossed the real stack limit had already TOUCHED
@@ -1897,7 +1897,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the floor is an ABSOLUTE SP and every caller after this one is deeper
         # than this one: a floor that ignored its own frame would let one more
         # frame through than the budget allows. That is the same correction
-        # `model.stack_floor_charge` makes on the arm64 side.
+        # `model.stack_floor_budget_for_limit` makes on the arm64 side.
         self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MARGIN_BYTES + self._frame_bytes)
         self.asm.emit(encode_sub_r64_r64(Reg.R10, Reg.R10, Reg.R9))
         # MAX with MIN: `cmp r10, r9` computes `r10 - r9`, so carry is set
@@ -4905,6 +4905,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     # ADDRESS by the time the store is emitted.
     def _emit_pointer_store(self, target, value) -> None:
         obj = target.func.obj
+        # The VALUE's kind decides whether a store through a DOUBLE pointee is
+        # exact (a double: store its bits) or a silent wrong answer (an integer:
+        # `p.value() = 1` writes a denormal). `_expr_str_kind` is the same
+        # reader the LOAD's consumers ask, so the two sides agree.
         how, why = M.pointer_store_lowering(
             self._cur_fn, target, self._structs, self._functions, self._structs,
             value=value, class_of=self._printf_arg_conversion_class)

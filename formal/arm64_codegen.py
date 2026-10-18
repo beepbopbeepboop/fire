@@ -1503,8 +1503,8 @@ dylib_exports: list = None, globals_base: int = None,
         # default `ulimit -s 8176` the same binary refuses at depth 59 with a
         # status and never crashes, because 8 372 224 is not a multiple of
         # 131 072 and the extra frame lands inside `STACK_FLOOR_MARGIN_BYTES`.
-        # See `model.stack_floor_charge`, which is the arithmetic and the
-        # measurement; `model.stack_floor_guarded_names` is which prologues get
+        # See `model.stack_floor_budget_for_limit`, which is the arithmetic and
+        # the measurement; `model.stack_floor_guarded_names` is which prologues get
         # this at all, and `model.stack_floor_address` is the sequence.
         #
         # It is safe here because it touches no stack memory: the floor word and
@@ -2077,7 +2077,7 @@ dylib_exports: list = None, globals_base: int = None,
         register to be polite about. That is also why this is only sound at the
         guard's current position — after the prologue has set up its frame there
         WOULD be live values here, which is the same placement argument
-        `stack_floor_charge` carries.
+        `_emit_stack_floor_guard`'s own docstring carries.
 
         The text is interned like any other string, so it is a `__TEXT` address
         and the ADRP/ADD pair is the addressing this backend already proves.
@@ -7130,6 +7130,10 @@ ctor_field_value=self._ctor_field_value_for(name),
     # next statement reads.
     def _emit_pointer_store(self, target: F.CallExpr, value) -> None:
         obj = target.func.obj
+        # The VALUE's kind decides whether a store through a DOUBLE pointee is
+        # exact (a double: store its bits) or a silent wrong answer (an integer:
+        # `p.value() = 1` writes a denormal). `_expr_str_kind` is the same
+        # reader the LOAD's consumers ask, so the two sides agree.
         how, why = M.pointer_store_lowering(
             self._cur_fn, target, self._structs, self._functions, self._structs,
             value=value, class_of=self._printf_arg_conversion_class)
