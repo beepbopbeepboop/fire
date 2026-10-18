@@ -62,8 +62,8 @@ find them and a gate job's anti-rot did.
   held; the fix is theirs (or their branch's merge's), not this one's.
 * **`ARM64Codegen._emit_set_union` does not exist and `_emit_binop` calls it**, so
   `s | t` on two sets raises `AttributeError` out of the compiler. Filed as
-  `MERGE_arm64_set_union_emitter_is_gone_and_a_set_union_raises_AttributeError.md`
-  and NOT fixed here: `formal407-docs` holds
+  a doc of its own (since deleted with the fix, in `498f72fd`) and NOT fixed
+  here: `formal407-docs` holds
   `FORMAL_container_operators_that_need_a_per_element_stride`, which is that
   area. It is found by `test_formal_run.py`'s `blob-growth-guard` row, which
   cannot report anything about a site that does not compile.

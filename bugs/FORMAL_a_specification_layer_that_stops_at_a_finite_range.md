@@ -88,8 +88,9 @@ theorem it always had and no false all-inputs claim. `ALL_INPUTS` has two rows:
 | `Specs.factorial64` | `Nat → UInt64`, `(ofNat (k+1)) * go k` | emitted; the CLAUSE is checked by an isolated `run_lean`, because `fact`'s own proof file is `lean-rejected` on master for an unrelated reason |
 
 **Why the factorial row's check is not the whole file.** `fact` is
-`lean-rejected` in `tools/formal_proof_census_baseline.json` (recorded in
-`bugs/FORMAL_the_committed_proof_baseline_is_stale_for_fact_mojo.md`), so asking
+`lean-rejected` in `tools/formal_proof_census_baseline.json` \u2014 a row that was
+stale and has since been re-pinned on master (3941dade), so the doc that recorded
+the staleness is deleted \u2014 so asking
 Lean about `fact_proof.lean` reports THAT and not this layer. So
 `test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks` reads
 the model back out of the generated file, lays the emitter's clause beside it

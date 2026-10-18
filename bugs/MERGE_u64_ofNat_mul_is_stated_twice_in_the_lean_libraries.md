@@ -98,5 +98,8 @@ the shim was written there in the first place.
 * `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` — the
   layer this lemma unblocks; its Status now names this doc as the duplicate's
   home.
-* `bugs/MERGE_arm64_set_union_emitter_is_gone_and_a_set_union_raises_AttributeError.md`
-  — the other merge artefact in this batch, fixed in the same merge series.
+* The other merge artefact in this batch was arm64's `_emit_set_union` being
+  DROPPED while `_emit_binop` still called it, so `s | t` on two sets raised
+  `AttributeError` out of the compiler. Its doc is deleted with the fix, which
+  landed in `498f72fd` (the `work/formal407-docs` merge) by restoring the
+  definition from the last tree that had one.
