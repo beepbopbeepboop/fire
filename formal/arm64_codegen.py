@@ -13777,36 +13777,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_set_algebra(self, op, left, right) -> None:
-        """`a & b`, `a - b`, `a ^ b` over list blobs, both operands SETS.
-
-        Element-wise over an element membership scan, which is the whole of why
-        these were refused rather than ported: a set on this path is a list blob
-        (`model.is_set_expr`), so the operator is a per-element stride and not an
-        address arithmetic.  `&` keeps each LEFT element the RIGHT holds; `-`
-        keeps each LEFT element the RIGHT does not; `^` is `-` in both
-        directions, so it runs the difference pass once from each side into the
-        SAME result.
-
-        Only the elements that survive are stored, and the count word is written
-        from the append loop's own counter rather than from an operand length —
-        the failure the union emitter's count word had for a long time (`nL +
-        nR` where the answer was `nL`), and a set operation has the same one.
-
-        The reservation is `nL + nR` whatever the operator, because that is the
-        worst case for `^` and a safe over-estimate for `&`/`-`; the run-time
-        guard (`_emit_blob_growth_guard`) checks the operand counts against it
-        before anything is written, so an estimate that is low stops loudly
-        rather than overrunning the frame.
-        """
+    def _emit_set_union(self, left, right) -> None:
+        """`a | b` as set union over list blobs (right deduped into left
+        copy). Result is a fresh list blob of unique elements in X0."""
+        # Build via concat then… for sweep purposes concat is enough to
+        # compile; full dedup would need a membership scan per element.
+        # Dedup: append left as-is, then for each right elem scan result.
         legacy = max(1, self._blob_est(left) + self._blob_est(right))
         exact = max(1, self._blob_est(left, exact=True)
-                    + self._blob_est(right, exact=True))
+                   + self._blob_est(right, exact=True))
         want = self._blob_site_growth(legacy, exact, left, right)
         avail = self._blob_cap - self._list_cursor
         if avail < 8:
             raise CodegenError(
-                "a set operation exceeds the formal frame "
+                "set union exceeds the formal frame "
                 f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
         cap = min(want, (avail - 8) // 8)
         if cap < 1:
@@ -13819,7 +13803,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         avail = self._blob_cap - self._list_cursor
         if avail < 8:
             raise CodegenError(
-                "a set operation exceeds the formal frame "
+                "set union exceeds the formal frame "
                 f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
         cap = min(want, (avail - 8) // 8)
         if cap < 1:
@@ -13829,93 +13813,112 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._list_cursor += nbytes
         self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
         self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop right
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
-        # The guard: `^` can write every element of both sides, so the total is
-        # nL + nR and the reservation above is a static estimate of it.  Placed
-        # before anything is stored, exactly as the union's is.
-        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))
-        self._emit_blob_growth_guard("a set operation", 4, cap, "set")
-        self.asm.emit(encode_movz_wd_imm(4, 0))          # result count = 0
-        # X7 = left base, X2 = nL, X8 = right base, X3 = nR, X4 = out count.
-        self._emit_set_keep(offset, 7, 2, 8, 3, keep_found=(op == "&"))
-        if op == "^":
-            self._emit_set_keep(offset, 8, 3, 7, 2, keep_found=False)
+        # THE COUNT IS nL, NOT nL + nR, and the two are indistinguishable in
+        # every shape that only ITERATES the result — which is why the wrong one
+        # was here so long.  The result starts out holding the nL left-hand
+        # elements and NOTHING else, so the count that describes it is nL; the
+        # dedup loop below grows it by one per element it actually appends.
+        #
+        # With nL + nR written here, `len` and a subscript both read a number no
+        # store produced: `{1,2} | {2,3}` had count 4 over the three words
+        # [1, 2, 3] and two unwritten ones, then appended `3` at index 4 and
+        # made the count 5.  Measured, `printf("len=%d", len({1,2}|{2,3}))`:
+        # arm64 5, CPython 3; `c[0], c[1], c[2]` was 1, 2, 0.  Iterating the
+        # same blob read all five slots and summed 6, which is the right answer
+        # from the right three elements and two zeros — so a case that walks the
+        # union cannot see this, and the existing one could not either.
+        #
+        # `once` above stays the sum, because it is a RESERVATION: nL + nR is
+        # how many words the result can need, and the reservation is what keeps
+        # the append loop's `result[count]` store inside the blob.  **And it is
+        # a reservation with no run-time check against it**, which is the third
+        # site this guard closes: the append loop below writes one element per
+        # right-hand element that is not already present, so its worst case is
+        # nL + nR — and `nL`/`nR` are the operands' own run-time count words,
+        # read two instructions above, which the static estimate cannot see.
+        # The guard is emitted here, before the copy loops and before anything
+        # is stored, with the sum in X4 exactly as a concatenation computes it.
+        # See `_emit_blob_growth_guard`.
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))        # nL + nR (reservation)
+        self._emit_blob_growth_guard("a set union", 4, cap, "uni")
+        self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
-        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))     # count = append count
-        self.asm.emit(encode_mov_zr_xn(0, 9))
-
-    def _emit_set_keep(self, offset, src_base: int, src_count: int,
-                       other_base: int, other_count: int,
-                       keep_found: bool) -> None:
-        """Append each element of `src` whose membership-in-`other` matches.
-
-        One element-wise pass, shared by all of `&`/`-`/`^` (the union walks the
-        same shape for its right-hand dedup): for each source element, scan the
-        other blob for an equal WORD, then append it to the result iff
-        `found == keep_found`.  `keep_found=True` is intersection, False is
-        difference; symmetric difference runs it twice, once from each side.
-
-        Register contract, and it is what makes the shared pass safe to call
-        twice: `X{src_base}`/`X{src_count}` and `X{other_base}`/`X{other_count}`
-        are read-only, `X4` is the OUTPUT element count and is updated in place,
-        and `X9` is recomputed from `offset` at every use.  `X0`, `X1`, `X5`,
-        `X6`, `X16` and `X17` are scratch.
-        """
-        self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
+        # copy all of left into result[0..nL)
+        self.asm.emit(encode_movz_wd_imm(5, 0))
         self._while_counter += 1
-        loop = f"{self.func_name}_sa{self._while_counter}"
-        done = f"{loop}d"
-        scan = f"{loop}s"
-        found = f"{loop}f"
-        scan_done = f"{loop}e"
-        skip = f"{loop}k"
-        self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(5, src_count))
+        ul = f"{self.func_name}_sul{self._while_counter}"
+        uld = f"{self.func_name}_sud{self._while_counter}"
+        self.asm.label(ul)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 0))              # i >= nS → done
-        self.asm.emit_label_rel(done, here_offset=-4)
-        # X6 = src[8 + 8i]
-        self.asm.emit(encode_add_xd_xn_imm(6, src_base, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 6, 0))
-        # scan `other` for X6; X0 = found (0/1)
-        self.asm.emit(encode_movz_wd_imm(1, 0))          # k = 0
-        self.asm.emit(encode_movz_wd_imm(0, 0))          # found = 0
-        self.asm.label(scan)
-        self.asm.emit(encode_cmp_xn_xm(1, other_count))
-        self.asm.emit(encode_cset_xd_cond(17, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 17))             # k >= nO → not found
-        self.asm.emit_label_rel(scan_done, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_imm(16, other_base, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(16, 16, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))   # other[k]
-        self.asm.emit(encode_cmp_xn_xm(16, 6))
-        self.asm.emit(encode_cset_xd_cond(17, "eq"))
-        self.asm.emit(encode_cbnz_xn(0, 17))             # equal → found
-        self.asm.emit_label_rel(found, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))     # k += 1
-        self._emit_b_to(scan)
-        self.asm.label(found)
-        self.asm.emit(encode_movz_wd_imm(0, 1))          # found = 1
-        self.asm.label(scan_done)
-        # append iff found == keep_found
-        if keep_found:
-            self.asm.emit(encode_cbz_xn(0, 0))           # found == 0 → skip
-        else:
-            self.asm.emit(encode_cbnz_xn(0, 0))          # found != 0 → skip
-        self.asm.emit_label_rel(skip, here_offset=-4)
+        self.asm.emit(encode_cbnz_xn(0, 0))          # i >= nL → done
+        self.asm.emit_label_rel(uld, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
         self._emit_list_base(offset)
-        self.asm.emit(encode_add_xd_xn_imm(1, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 4))
-        self.asm.emit(encode_str_xt_xn_imm(6, 1, 0))     # result[count] = elem
-        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))     # count += 1
-        self.asm.label(skip)
-        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))     # i += 1
-        self._emit_b_to(loop)
-        self.asm.label(done)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ul)
+        self.asm.label(uld)
+        # append right elements not already in result[0..count)
+        # X2=nL, X3=nR, X5=j; result count reloaded each inner scan
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # j = 0
+        self._while_counter += 1
+        ur = f"{self.func_name}_sur{self._while_counter}"
+        ur_next = f"{self.func_name}_sun{self._while_counter}"
+        urd = f"{self.func_name}_srd{self._while_counter}"
+        urs = f"{self.func_name}_sus{self._while_counter}"
+        urd2 = f"{self.func_name}_su2{self._while_counter}"
+        self.asm.label(ur)
+        self.asm.emit(encode_cmp_xn_xm(5, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(urd, here_offset=-4)     # j >= nR → done
+        # elem = right[j]
+        self.asm.emit(encode_add_xd_xn_imm(0, 8, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))     # X6 = elem
+        # scan result[0..count)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))     # count
+        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
+        self.asm.label(urs)
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(urd2, here_offset=-4)    # not found → append
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))
+        self.asm.emit(encode_cmp_xn_xm(4, 6))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(ur_next, here_offset=-4)  # found → next j
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(urs)
+        self.asm.label(urd2)
+        # append: result[count] = elem; count++
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(ur_next)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ur)
+        self.asm.label(urd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.

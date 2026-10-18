@@ -14341,37 +14341,6 @@ def container_union_refusal(left: str, right: str, left_is_set: bool,
         f"with an explicit membership test")
 
 
-def set_union_refusal(left: str, right: str) -> str:
-    """Why `{left} | {right}` is not lowered on the backend that asks.
-
-    The SECOND question, asked only once `container_union_refusal` above has
-    said the operator really is a set union between two sets: it is CPython's
-    union, and this backend has no emitter for it. The second one used to lower
-    the operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]`
-    with `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython
-    says 6. Measured on the pre-change tree: it built, it ran, it exited 0, and
-    it was wrong, which is the outcome this file exists to replace with a
-    refusal.
-
-    The message lives here, beside the other refusal texts, so the two backends
-    cannot word it differently on the day the second one grows the emitter —
-    and it says which backend does lower it, because "this is not supported" is
-    the answer that sends a reader looking for a spec when the answer is an
-    emitter. That sentence names arm64's `_emit_set_union` FOR SETS ONLY, and
-    the qualification is the point: the same emitter is what answered
-    `{"a": 1} | {"b": 2}` with 1 before `container_union_refusal` above started
-    refusing a pair blob, so a claim that arm64 "lowers this operator correctly"
-    without the qualification was a false statement about this tree.
-    """
-    return (
-        f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
-        f"containers as a concatenation: the result would keep every element "
-        f"of both sides, repeats included, which is not a set and answers a "
-        f"different program than the source writes. Use `+` if a "
-        f"concatenation is what you want, or build the union with an explicit "
-        f"membership test. arm64 lowers this operator correctly, for two SETS")
-
-
 def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
     """Why `xs * n` is refused because its COUNT is not a compile-time constant.
 
@@ -15352,9 +15321,10 @@ CONTAINER_OP_MEANING = {
 #: blobs the gate's message is the right answer — but for two BLOBS
 #: `container_operator_refusal` DEFERS (returns None) and the backend decides,
 #: because whether the pair is a set algebra this path lowers is a fact about
-#: the backend and not about the operator.  arm64 lowers the three for two sets
-#: (see `_emit_set_op`, and `_emit_set_algebra` beside it); x86-64 has no emitter
-#: and refuses by name through `set_algebra_refusal`.  Keeping the gate's message
+#: the backend and not about the operator.  BOTH backends lower the three for
+#: two sets (`_emit_set_op`: arm64's and x86-64's, beside their `_emit_set_union`
+#: for `|`), and each refuses a not-two-sets pair by name through
+#: `set_algebra_refusal`.  Keeping the gate's message
 #: for one-blob operands matters: `[1] & 0` is a CPython `TypeError` and the
 #: gate's "is refused when ... is a list" is exactly the right sentence for it.
 #:
@@ -15407,7 +15377,8 @@ def set_operator_operand_refusal(shown: str, op: str, left_kind,
         f"pair is neither: {which} is a container blob (a list, tuple, set or "
         f"dict) and {other} is not a set. CPython raises `TypeError` for this "
         f"source, so there is no correct program to lower. A set here is a list "
-        f"blob and the two-SET shape IS lowered (arm64); write both operands as "
+        f"blob and the two-SET shape IS lowered on BOTH backends (`_emit_set_op` "
+        f"beside their `_emit_set_union` for `|`); write both operands as "
         f"sets, or compare the element you mean")
 
 
@@ -15456,9 +15427,10 @@ def container_operator_refusal(op: str, left_kind, right_kind,
 
     **The one per-element STRIDE that IS now written is SET ALGEBRA, and it is
     exempted rather than refused.**  `&`, `^` and `-` between two SETS have a
-    lowering on arm64 (`_emit_set_op`), so when `left_is_set` and
-    `right_is_set` this function returns `None` and lets the backend lower it;
-    a backend without the emitters asks `set_algebra_refusal`.  Every OTHER
+    lowering on BOTH backends (`_emit_set_op`, beside `_emit_set_union` for
+    `|`), so when `left_is_set` and `right_is_set` this function returns `None`
+    and lets the backend lower it; a site with no whole-set emitter (the
+    SUBSCRIPT augmented target) asks `set_algebra_refusal`.  Every OTHER
     blob shape of those three operators is still refused here, by
     `set_operator_operand_refusal` — a LIST `&` list is a CPython `TypeError`,
     not a set.  So the message below reaches only the shapes with no lowering
@@ -15487,9 +15459,9 @@ def container_operator_refusal(op: str, left_kind, right_kind,
             and container_operand_is_blob(right_kind)):
         # Two blobs: whether this is a set algebra THIS BACKEND lowers is a
         # question for the backend (see `SET_ALGEBRA_OPS`), and
-        # `set_algebra_refusal` is where the two answers are worded.  Defer
-        # rather than refuse, so arm64 can reach `_emit_set_op` and x86-64
-        # can reach its own named refusal.  `aug_assign_operands_are_blobs`
+        # `set_algebra_refusal` is where a not-two-sets answer is worded.
+        # Defer rather than refuse, so each backend can reach its own
+        # `_emit_set_op`.  `aug_assign_operands_are_blobs`
         # then routes the augmented spelling through `_emit_binop`, which is
         # the second emitter the desugaring exists for.
         return None
@@ -15558,35 +15530,33 @@ def set_algebra_refusal(op: str, left: str, right: str, left_is_set: bool,
 
     The SECOND question for `&`/`-`/`^` on two blobs, asked only once
     `container_operator_refusal` has been reached and DEFERRED (it returns
-    None for `SET_ALGEBRA_OPS` on two blobs), the same way `set_union_refusal`
-    is the second question for `|`.  There are two answers and the caller's
-    `backend_has_emitter` decides which one is true:
+    None for `SET_ALGEBRA_OPS` on two blobs).  There are two answers and the
+    caller's `backend_has_emitter` decides which one is true:
 
     * **not two sets** — Python defines `&`/`-`/`^` (as set algebra) for two
       sets and for nothing else, so `[1] & [2]` is a `TypeError`, and the
-      refusal names that rather than pretending a lowering was missing.  Both
-      backends reach this branch when they cannot establish that both operands
-      are sets; each has an emitter for the two-set case, so `backend_has_emitter`
-      is True at both call sites.
+      refusal names that rather than pretending a lowering was missing.  This
+      is the answer BOTH backends give when they cannot establish both
+      operands are sets (each passes `backend_has_emitter=True` at its
+      `_emit_binop`, because it does have an emitter for the two-set case).
     * **two sets, no emitter** — the operator really is the set operation the
       source writes, and the machine simply does not lower it.  The message
       says which machine does, so the reader is not sent looking for a spec.
-      No backend reaches this branch today (arm64 grew the emitters first,
-      x86-64 second); it is kept for the machine that would, and the wording is
-      still what `|`'s split names.
+      The one caller left with `backend_has_emitter=False` is a SUBSCRIPT
+      target (`a[0] &= b`), where the shape is not two whole sets at all.
 
-    The wording lives here, beside the other refusal texts and beside
-    `set_union_refusal`, so the two backends cannot word the same state
-    differently.
+    The wording lives here, beside the other refusal texts, so the two backends
+    cannot word the same state differently.
     """
     if left_is_set and right_is_set and not backend_has_emitter:
         return (
             f"{left} {op} {right} is a SET operation and this backend has no "
             f"emitter for it: both operands are sets, so Python's `{op}` is "
             f"{CONTAINER_OP_MEANING[_bare_operator(op)]}, and that needs a "
-            f"per-element scan this machine does not lower yet. arm64 lowers "
-            f"`&`, `-` and `^` for two sets; on this backend write the "
-            f"operation as a loop over `in` tests instead")
+            f"per-element scan this machine does not lower yet. Both backends "
+            f"lower `&`, `-` and `^` for two WHOLE sets; this site has no "
+            f"whole-set emitter because the operands are element positions, so "
+            f"write the operation as a loop over `in` tests instead")
     which = ("the left operand" if not left_is_set else
              "the right operand" if not right_is_set else "an operand")
     return (
@@ -15615,8 +15585,10 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     | `a += [3]` | **0 on arm64, SIGSEGV on x86-64** | 3 |
     | `a = a * 3` | 3, both backends | 3 |
     | `a *= 3` | **SIGSEGV on both** | 3 |
-    | `s = {1, 2}` then `s` union-assigned `{3}` | 3 on arm64, refused on x86-64 | 3 |
-    | `s` union-assigned `{3}` | **1 on arm64, 0 on x86-64** | 3 |
+    | `s = {1, 2}` then `s` union-assigned `{3}` | 3 on both backends (measured
+      before the x86-64 `_emit_set_union` landed; x86-64 refused it by name
+      then) | 3 |
+    | `s` union-assigned `{3}` | **1 on arm64, 0 on x86-64** (same tree) | 3 |
 
     which is the whole of it: the binary form is right where it is lowered at
     all, and the augmented form reached the integer ALU holding the receiver's
@@ -15633,8 +15605,8 @@ def aug_assign_operands_are_blobs(target_kind, value_kind) -> bool:
     container operator except `+`, `|` and — on two blobs — the set-algebra
     three.  `s += t` and `s |= t` desugar here onto the binary emitter; so do
     `s -= t`, `s &= t` and `s ^= t` now that the gate DEFERS the three on two
-    blobs, which is what routes them to `_emit_set_op` on arm64 and to
-    `set_algebra_refusal` on x86-64 rather than to the integer ALU.
+    blobs, which is what routes them to each backend's `_emit_set_op` rather
+    than to the integer ALU.
     """
     return (container_operand_is_blob(target_kind)
             or container_operand_is_blob(value_kind))

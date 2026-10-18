@@ -1,15 +1,45 @@
 # The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store
 
-**Status: PARTIALLY FIXED — item 3 (set algebra) is LANDED on BOTH backends
-(`&`, `^`, `-` between two sets; x86-64 landed 2026-10-12, see §"2026-10-12");
-items 1 (container `==`/`!=`), 2 (ordering) and 4 (a length-changing slice
-store) are unchanged.** The one gap item 3 still has is `|` on x86-64, which is
-a SEPARATE pre-existing emitter (`set_union_refusal`) and not item 3's three
-operators. `test_formal_container_methods.py` measures the whole surface
-against CPython on both architectures and is green; this doc is about the rows
-in it that are green *as refusals*, which is a different thing from green as
-answers. The set-algebra rows are answers on arm64 now (six of them — five
-moved, one added); x86-64 still refuses each by name.
+**Status 2026-10-13 (`work/formal407-docs`): item 3 — SET ALGEBRA — is now
+LANDED ON BOTH BACKENDS, INCLUDING THE UNION, so the split this file has carried
+since 2026-10-06 is gone.** x86-64 grew `_emit_set_union`,
+`_emit_set_op` and `_emit_set_filter_pass` — the same copy-then-dedup union and
+the same per-element membership scan (parameterised by a keep/drop predicate,
+run twice for the symmetric difference) that arm64 runs, sized by the same
+shared `_blob_site_growth`/`_blob_growth_guard`. The operator gate is unchanged
+in shape: `container_operator_refusal` still defers the three operators on two
+blobs, and each backend's `_emit_binop` now lowers the two-set case and refuses
+a not-two-sets pair with `backend_has_emitter=True` (CPython's `TypeError`).
+`set_union_refusal` is DELETED — with both backends lowering `|` on two sets it
+had no caller left. What that moved, measured by `test_formal_container_methods.py`:
+
+* the `set` group's `s_union`, `s_union_elems`, `s_union_str`, `s_union_ior`,
+  `s_intersection_r`, `s_intersection_str`, `s_difference_r`, `s_symdiff_r`,
+  `s_sub_r` and `s_andassign_r` lost their `BACKEND_ONLY = "x86_64"` rows and
+  run as ANSWERS on both architectures (the `set` group is 14 answers / 9
+  refusals on each);
+* the operator group's `o_set_sub`, `o_set_and` and `o_set_xor` moved from
+  `probe=None` x86-64-refusal rows to probes, so the two-set answers are also
+  pinned from the operator group (12 answers each backend);
+* `test_formal_run.py`'s `SET_UNION_CASES` runner now requires BOTH backends to
+  reproduce CPython (it used to require x86-64 to refuse), and
+  `_BLOB_GROWTH_PROBES` gained the four x86-64 set sites (`uni`, `sin`, `sdf`,
+  `ssd`), so each is checked to emit its run-time capacity guard on both
+  machines.
+
+Still open are items 1 (container `==`/`!=`), 2 (ordering) and 4 (a
+length-changing slice store); the paragraphs below are the record of what led
+here and the historical statements about "x86-64 refuses" describe the tree
+before this change.
+
+**Status (as it stood before 2026-10-13 — the x86-64 half is now landed, see
+the paragraph above): PARTIALLY FIXED — item 3 (set algebra) is LANDED on
+arm64; items 1 (container `==`/`!=`), 2 (ordering) and 4 (a length-changing
+slice store) are unchanged.** `test_formal_container_methods.py` measures the
+whole surface against CPython on both architectures and is green; this doc is
+about the rows in it that are green *as refusals*, which is a different thing
+from green as answers. On the pre-change tree the set-algebra rows were answers
+on arm64 and refusals on x86-64; the dated paragraphs below are that record.
 
 **2026-10-08 (`formal162-docs`), merged 2026-10-12: the x86-64 half of item 3
 was BUILT on the branch, and the merge kept the arm64-only mechanism.** The
@@ -393,28 +423,32 @@ the second reason this is a project rather than a rewrite.
 
 ## What to do, in order
 
-1. **`&`, `^`, `-` between two sets** (item 3) — **DONE on arm64
-   (2026-10-06).** The rows moved to probes and the augmented forms desugar onto
-   the binary lowering; x86-64 still refuses all three, so the rows carry
-   `BACKEND_ONLY`. What did NOT happen is the prescribed removal from
-   `CONTAINER_GATED_OPS`: that table is shared, and dropping an operator there
-   would send x86-64 into the ALU on two addresses. The backend intercepts
-   first, the way `|` already splits `_emit_set_union` from
-   `set_union_refusal`. The remaining x86-64 half is item 3's second half and is
-   not started (the `formal162-docs` branch built it in 2026-10-08 and the
-   2026-10-12 merge recorded it in the Status above; its emitter is the
-   blueprint for that half). See the Status at the top for the measurements
-   and the emitters.
-2. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
+1. **`&`, `^`, `-` between two sets** (item 3) — **DONE on arm64 (2026-10-06)
+   and on x86-64 (2026-10-13).** The rows moved to probes and the augmented
+   forms desugar onto the binary lowering; both backends now run the same
+   emitters. What did NOT happen is the prescribed removal from
+   `CONTAINER_GATED_OPS`: that table is shared, so dropping an operator there
+   would have sent a backend with no set-else answer into the ALU on two
+   addresses. Each backend intercepts first, the way `|` already split its
+   emitter from the gate. `test_formal_container_methods.py`'s `set` and
+   `operator` groups are the pins on both architectures. See the Status at the
+   top for the measurement and the emitters.
+2. **The UNION (`|`) on x86-64** — the same item, and it landed with the three:
+   x86-64's `_emit_set_union` is arm64's copy-then-dedup loop, so `s | {2, 3}`
+   is an answer on both backends and `SET_UNION_CASES` in `test_formal_run.py`
+   now diffs both against CPython. (This half is listed separately from item 3
+   only because the union was the pre-existing arm64-only lowering rather than
+   one of the three this file opened on.)
+3. **`==` / `!=` between two containers** (item 1). Both backends. Bigger than
    item 3 because the answer may be a recursive descent over nested blobs and a
    content compare over `char *` elements, so it is a value-model question and
    not only an emitter one. It also has a proof obligation the others do not:
    the loop is data-dependent, where every current container loop is
    count-bounded.
-3. **Ordering** (item 2). Both backends. Strictly after item 1, and it reuses
+4. **Ordering** (item 2). Both backends. Strictly after item 1, and it reuses
    item 1's compare — a three-way element compare is the same inner loop with a
    different exit.
-4. **A length-changing slice store** (item 4). arm64 first (it is the backend
+5. **A length-changing slice store** (item 4). arm64 first (it is the backend
    that has the store), and only then x86-64, which needs a slice to stop being
    a materialized copy before the store can mean anything. **The SHORTER half
    landed 2026-10-11** (`l_slice_store_shrink_empty`/`_mid`, and the growing

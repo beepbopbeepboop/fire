@@ -15656,14 +15656,15 @@ STDERR_CASES = [
          "IndexError: bytearray index out of range"]),
     # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
     # limitation worth stating rather than a gap. `run_stderr_case` requires the
-    # program to build on BOTH architectures, and x86-64 refuses `a | b` by name
-    # (`model.set_union_refusal` — lowering it as a concatenation answers
-    # `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-    # comparison has nothing to compare. What is checkable for all three sites
-    # on both backends is the question this row's mechanism cannot ask — does
-    # the site have a guard at all — and that is
-    # `check_blob_growth_guards` / `_BLOB_GROWTH_PROBES`, which is where `*`
-    # and `|` are pinned. `*` builds on both, so the difference there is that
+    # program to build on BOTH architectures, and x86-64 used to refuse `a | b`
+    # by name (`model.set_union_refusal` — lowering it as a concatenation
+    # answers `[1,2] | [2,3]` with four elements).  x86-64 grew the union
+    # emitter on 2026-10-13, so the refusal half is gone, but the site still
+    # cannot be a stderr row: what is checkable for all three sites on both
+    # backends is the question this row's mechanism cannot ask — does the site
+    # have a guard at all — and that is `check_blob_growth_guards` /
+    # `_BLOB_GROWTH_PROBES`, which is where `*` and `|` are pinned (both
+    # architectures now). `*` builds on both, so the difference there is that
     # its reservation is exact for a literal operand: the run-time total cannot
     # exceed the estimate without a name in one of them.
     #
@@ -18646,22 +18647,24 @@ REPEAT_CASES = [
 
 
 # `|` on two containers is a SET UNION (`{1,2} | {2,3}` in CPython — a LIST
-# pair is a TypeError there, so the operands below are set literals), and the
-# two backends now DISAGREE
-# HONESTLY about it: arm64 lowers it (`_emit_set_union`, whose left-copy loop was
-# leaving on its first iteration for the same reason concat's did, so
-# `[1,2] | [2,3]` summed to 5), and x86-64 has no union emitter and used to
-# lower it as a plain concatenation — which builds, runs, exits 0 and answers
-# `[1, 2, 2, 3]` for a set, 8 where CPython says 6. That is a wrong answer, so
-# x86-64 now refuses and names the reason.
+# pair is a TypeError there, so the operands below are set literals), and BOTH
+# backends lower it as of 2026-10-13: arm64's `_emit_set_union` was the first
+# emitter, and x86-64 grew the same copy-then-dedup loop (`_emit_set_union` /
+# `_emit_set_op`), so the "one answers and one says it cannot" end state this
+# group was written for is gone.  The group stays because it is a CPython-diff
+# runner over three shapes a shared image would hide — a walk, the count read
+# as a value through a name, and the count read through literals — and because
+# the reservation the union makes depends on which of those two spellings the
+# operand is.
 #
-# It cannot be one of the four-column cases: those require BOTH backends to
-# refuse (`refuse_either:`) or both to answer, and this construct is the one
-# place where "one answers and one says it cannot" is the correct end state.
-# Hence its own runner, which asserts exactly that — and which fails if either
-# side changes, because the failure it is watching for is the silent one.
+# It cannot be one of the four-column cases for a reason that outlives the
+# disagreement: `run_case` diffs the two backends against EACH OTHER (and, for
+# the CPython-pair shape, one image per backend), while these rows ask CPython
+# for the answer and require both machines to reproduce it, which is the
+# stronger statement and the one the count-word row needs (a walk reads three
+# elements even when the count word is wrong).
 SET_UNION_CASES = [
-    ("set_union_is_a_set_on_arm64_and_refused_on_x86_64",
+    ("set_union_is_a_set_on_both_backends",
      "def main() -> Int:\n"
      "    var a = {1, 2}\n"
      "    var b = {2, 3}\n"
@@ -19972,14 +19975,15 @@ PRINTF_CONTAINER_REFUSALS = [
 
 
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
-    """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
+    """BOTH backends must ANSWER CPython's set union.
 
-    Both halves are load-bearing and they fail differently. If x86-64 builds
-    this again, it is answering with a concatenation and the case says so
-    instead of a reader discovering `[1, 2, 2, 3]` where a set belongs. If
-    arm64 refuses, the construct has been lost on the backend that can lower it
-    — which is the over-refusal this project treats as a regression just as
-    much as a wrong answer.
+    The runner was a disagreement check while x86-64 had no union emitter (it
+    lowered `a | b` as a concatenation and answered `[1, 2, 2, 3]`).  Now that
+    both machines lower it, each half is still load-bearing: a backend that
+    builds and answers the wrong count word fails here rather than a reader
+    discovering `[1, 2, 2, 3]` where a set belongs, and a backend that refuses
+    the construct has lost a lowering it has — which is the over-refusal this
+    project treats as a regression just as much as a wrong answer.
     """
     py = os.path.join(tmpdir, name + ".py")
     with open(py, "w") as f:
@@ -19992,29 +19996,20 @@ def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     want = ref.stdout
     with open(os.path.join(tmpdir, name + ".mojo"), "w") as f:
         f.write(source)
-    out = os.path.join(tmpdir, f"{name}.arm64")
-    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
-                            backend="arm64")
-    if rc != 0:
-        return False, (f"arm64 REFUSED a set union it lowers: "
-                       f"{text.strip()[-300:]}")
-    run = subprocess.run([out], capture_output=True, text=True,
-                         timeout=RUN_TIMEOUT)
-    if run.stdout != want:
-        return False, (f"arm64 answered {run.stdout.strip()!r}, CPython "
-                       f"{want.strip()!r}")
-    out = os.path.join(tmpdir, f"{name}.x86_64")
-    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
-                            backend="x86_64")
-    if rc == 0:
-        return False, ("x86_64 BUILT `a | b`, which it lowers as a "
-                       "concatenation — that is the wrong answer this case "
-                       "exists for, and it is silent")
-    if "SET UNION" not in text:
-        return False, (f"x86-64 refused, but not by naming the union: "
-                       f"{text.strip()[-200:]}")
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
+                                backend=backend)
+        if rc != 0:
+            return False, (f"{backend} REFUSED a set union it lowers: "
+                           f"{text.strip()[-300:]}")
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.stdout != want:
+            return False, (f"{backend} answered {run.stdout.strip()!r}, CPython "
+                           f"{want.strip()!r}")
     if verbose:
-        print(f"      arm64 answered {want.strip()!r}; x86-64 refused by name")
+        print(f"      arm64 and x86-64 both answered {want.strip()!r}")
     return True, ""
 
 
@@ -26208,11 +26203,13 @@ def check_stack_floor_decision(verbose=False):
 #
 # This is the structural half of `STDERR_CASES`'s blob-growth row, and it exists
 # because the row cannot cover the set. A run-time stop is only observable on a
-# program whose estimate is wrong, and for two of the three sites there is no
-# such program that builds on BOTH machines: x86-64 refuses `a | b` outright
-# (`model.set_union_refusal`, and it is right — lowering it as a concatenation
-# answers `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-# comparison has nothing to compare. What is left is the question the run cannot
+# program whose estimate is wrong, and the sites are reached by programs that
+# were not all buildable on BOTH machines until 2026-10-13: x86-64 used to
+# refuse `a | b` outright (`model.set_union_refusal` — lowering it as a
+# concatenation answers `[1,2] | [2,3]` with four elements), so a
+# two-architecture stderr comparison had nothing to compare for the set sites.
+# x86-64 grew the four set emitters and the refusal half is gone, but the check
+# is still what pins the guards. What is left is the question the run cannot
 # ask: **does this site have a guard at all.** Before this, `*` had none on
 # either backend and `|` had none on either backend, and only `+` had one on
 # x86-64 — and that one was a bare `exit(1)`, which is why it is in
@@ -26294,6 +26291,25 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
      {"a set symmetric difference"}),
+    # x86-64 grew the SAME four set sites on 2026-10-13 (`_emit_set_union` /
+    # `_emit_set_op` / `_emit_set_filter_pass`), so each is now a blob-producing
+    # site on BOTH backends and each carries its own guard with the same `what`
+    # noun phrase.  They are separate probes rather than four more arm64 rows
+    # because the check is per (backend, site): the point of naming the backend
+    # is that a site can exist on one machine and not the other, which is
+    # exactly what these four were until the x86-64 emitters landed.
+    ("x86_64", "uni",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a | b\n    return len(u)\n",
+     {"a set union"}),
+    ("x86_64", "sin",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a & b\n    return len(c)\n",
+     {"a set intersection"}),
+    ("x86_64", "sdf",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a - b\n    return len(c)\n",
+     {"a set difference"}),
     ("x86_64", "ssd",
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
@@ -27209,10 +27225,7 @@ def main():
                     traceback.print_exc()
             if ok:
                 passed += 1
-                print(f"  PASS  {name} ("
-                      + ("arm64 == CPython, x86-64 refused by name"
-                         if name in set_union_names
-                         else "== CPython, both architectures") + ")")
+                print(f"  PASS  {name} (== CPython, both architectures)")
             else:
                 failed += 1
                 print(f"  FAIL  {name}: {detail}")
