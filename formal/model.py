@@ -5748,7 +5748,8 @@ def _cfg_literal_effects(stmts, consts: dict) -> dict:
     return out
 
 
-def _preheader_facts(blocks: list, head_index: int, entry: int) -> tuple:
+def _preheader_facts(blocks: list, head_index: int, entry: int,
+                     entry_facts: dict = None) -> tuple:
     """`({name: int}, {name: literal-node})` decided on EVERY path into the header.
 
     **The second source of evidence `_loop_body_always_runs` reads.** "Did the
@@ -5758,6 +5759,22 @@ def _preheader_facts(blocks: list, head_index: int, entry: int) -> tuple:
     time — `head_index`'s predecessors, and everything that reaches them,
     which is every block on some path to the header and no block after it — and
     carries a "definitely this value" table along each edge.
+
+    **`entry_facts` is the state the walk STARTS from, and it is a different
+    source of evidence from the preheader's own statements.** A name the
+    function never binds is a MODULE-LEVEL constant, and its value is fixed for
+    the whole program (`module_entry_literal_facts` decides which names qualify
+    and why), so every block's IN set begins with those facts and a local
+    binding can only OVERRIDE one. Before this, the walk started empty, so a
+    `for` over a module-level literal sequence (`XS = []` at file level, then
+    `for q in XS`) was `'maybe'`, the header's definition of the loop target
+    survived, and a read after the loop answered the caller's leftover where
+    CPython raises `UnboundLocalError` — the second residual of
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    The facts are seeded at the ROOTS (a block with no in-region predecessor is
+    reached only from the function entry), and the ordinary intersection then
+    drops one wherever a path binds the name to something else, so a function
+    that shadows the module's name is unaffected.
 
     **One walk, two tables**, because the two facts are established by the same
     intersections along the same edges and a second walk would be the same
@@ -5796,6 +5813,11 @@ def _preheader_facts(blocks: list, head_index: int, entry: int) -> tuple:
         return {}, {}
     order = sorted(region)
     out: dict = {i: {} for i in order}
+    # The state the walk starts from: module-level constants hold at the
+    # function ENTRY, so a block with no in-region predecessor (only the entry
+    # block has none) begins with them and the intersection below drops one
+    # wherever a path binds the name to something else. See the docstring.
+    seed_facts = dict(entry_facts or {})
     changed = True
     rounds = 0
     while changed:
@@ -5813,7 +5835,7 @@ def _preheader_facts(blocks: list, head_index: int, entry: int) -> tuple:
                     n: v for n, v in merged.items()
                     if n in p_out and p_out[n] == v}
             if merged is None:
-                merged = {}
+                merged = dict(seed_facts)
             for n in b.seed:
                 merged.pop(n, None)
             nxt[i] = _cfg_literal_effects(b.stmts, merged)
@@ -5887,7 +5909,7 @@ def _loop_body_always_runs(s, consts=None, seqs=None) -> bool:
     return False
 
 
-def _build_cfg(body) -> tuple:
+def _build_cfg(body, entry_facts: dict = None) -> tuple:
     """`(blocks, entry index, condition names)` for a function body.
 
     `condition names` is `{canonical condition: the names it reads}`, collected
@@ -5929,6 +5951,16 @@ def _build_cfg(body) -> tuple:
     """
     blocks: list = []
     cond_names: dict = {}
+    # `entry_facts` arrives as `{name: literal-node}` (what
+    # `module_entry_literal_facts` publishes) and the preheader walk works in
+    # the `(int, node)` lattice `_cfg_literal_fact` produces, so the conversion
+    # happens once here. A node the lattice cannot carry is dropped rather than
+    # guessed at.
+    lattice_facts: dict = {}
+    for _n, _node in (entry_facts or {}).items():
+        _fact = _cfg_literal_fact(_node)
+        if _fact is not None:
+            lattice_facts[_n] = _fact
     # `{header block index: the condition whose FALSE edge leaves it}`, consumed
     # by `open_block` as it wires each pending exit to its predecessor. See
     # `_Block.false_from`.
@@ -6171,7 +6203,7 @@ def _build_cfg(body) -> tuple:
                 # second cannot is a loop whose body and whose target disagree
                 # about the same `range`.
                 loop_consts, loop_seqs = _preheader_facts(blocks, head.index,
-                                                          entry)
+                                                          entry, lattice_facts)
                 # The LATCH is the node the loop is in only because its body
                 # ran at least once, and it is what keeps "the condition failed
                 # immediately" (the `head` -> join edge below) apart from "the
@@ -6996,7 +7028,8 @@ def _definitely_stored(blocks: list, entry: int, seed: set,
     return out, facts, guarded_in
 
 
-def read_before_store(fn, params: set = None, placed: set = None):
+def read_before_store(fn, params: set = None, placed: set = None,
+                      entry_facts: dict = None):
     """The first (name, line) a function reads that nothing stores first, or
     None.
 
@@ -7005,6 +7038,15 @@ def read_before_store(fn, params: set = None, placed: set = None):
     `placed` restricts the answer to names that have a home at all — a name
     with no home is `check_module_symbols`' refusal to make, and this one
     would be a second, worse message about the same name.
+
+    `entry_facts` is `{name: literal-node}` for the MODULE-LEVEL constants that
+    hold at the function's first instruction (`module_entry_literal_facts`), and
+    it is what decides a loop whose iterable is a module-level literal sequence
+    or whose range bound is a module-level integer: without it the preheader
+    walk starts empty and such a loop is `'maybe'`, so its target stays defined
+    and a read after it answers the caller's leftover. A name the function
+    itself binds must NOT be passed — see the caller, and
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
 
     **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
     over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
@@ -7243,7 +7285,8 @@ def read_before_store(fn, params: set = None, placed: set = None):
                 else:
                     walk_expr(v, live)
 
-    blocks, entry, cond_names = _build_cfg(getattr(fn, "body", None) or [])
+    blocks, entry, cond_names = _build_cfg(getattr(fn, "body", None) or [],
+                                           entry_facts)
     stored_in, facts_in, guarded_in = _definitely_stored(blocks, entry, params,
                                                          cond_names)
     # Blocks in index order, so the finding is the FIRST in SOURCE order rather
@@ -49849,11 +49892,11 @@ class GlobalSlot:
     """
 
     __slots__ = ("name", "index", "init", "site", "filled_by_body", "body_site",
-                 "kind", "is_dict", "mutable")
+                 "kind", "is_dict", "mutable", "entry_literal")
 
     def __init__(self, name: str, index: int, init, site=None,
                  filled_by_body=False, body_site=None, kind=None,
-                 is_dict=False, mutable=False):
+                 is_dict=False, mutable=False, entry_literal=None):
         self.name = name
         self.index = index
         self.init = init
@@ -49863,6 +49906,15 @@ class GlobalSlot:
         self.kind = kind
         self.is_dict = is_dict
         self.mutable = mutable
+        # The container literal a FUNCTION's entry may assume for this name, or
+        # None. Set for a static-container slot that no statement writes AND
+        # that no statement uses in a position that could mutate it in place —
+        # see `_module_container_entry_literals`, which is where those two
+        # questions are answered together because it is the only place with the
+        # unit's statements AND its function bodies in hand. Read by
+        # `module_entry_literal_facts`; None for every other slot, which is the
+        # safe direction.
+        self.entry_literal = entry_literal
 
     @property
     def is_address(self) -> bool:
@@ -51129,6 +51181,61 @@ def module_slot_for(name: str, local_names):
     return module_slot(name)
 
 
+def _module_container_entry_literals(stmts, functions, candidates: dict) -> dict:
+    """`{name: literal-node}` for the module containers a function entry may assume.
+
+    `candidates` is `{name: (initializer statement, literal node)}` — the
+    static-container slots `collect_global_slots` found. A name is dropped when
+    it occurs ANYWHERE in the unit other than as its own initializer's TARGET or
+    as the ITERABLE of a `for`, because those two are the only positions in which
+    a container is neither stored nor passed where a callee could change it.
+
+    This is the half `mutable`/`filled_by_body` do not cover: both key on a
+    STORE, and a container changes in place without one — `XS.append(1)`,
+    `helper(XS)` for a helper that mutates, `XS[i] = v`. The store spellings that
+    this path lowers (`XS[0] = 9` at module level, or under `global XS`) are
+    already `mutable`/`filled_by_body`, so this catches the RESIDUAL, the
+    method-call spelling the bind audit refuses later: with the fact seated
+    first, `XS = [] / XS.append(1) / for q in XS` reported "`q` is read before
+    anything stores it", a sentence FALSE about a program CPython runs and less
+    useful than the real finding (`XS.append` has no provider).
+
+    Conservative in the direction that only ever WITHHOLDS a fact, because a
+    false refusal is the error this analysis must not make: a name used only as
+    a `for` iterable is seated, and any other mention (`len(XS)`, `print(XS)`,
+    `XS + ys`) withholds it rather than reason about whether that particular use
+    mutates. One walk over the module's own statements and every function body,
+    through `iter_nodes_with_parent`, because the position is the whole question
+    and a bare `iter_nodes` cannot see it.
+    """
+    safe = {name: lit for name, (_stmt, lit) in candidates.items()}
+    if not safe:
+        return {}
+    seen: set = set()
+
+    def note(node, parent) -> None:
+        if not isinstance(node, F.IdentExpr) or node.name not in safe:
+            return
+        if node.name in seen:
+            return
+        _stmt, literal = candidates[node.name]
+        if getattr(parent, "target", None) is node \
+                and getattr(parent, "value", None) is literal:
+            return
+        if isinstance(parent, F.ForStmt) \
+                and getattr(parent, "iterable", None) is node:
+            return
+        seen.add(node.name)
+        del safe[node.name]
+
+    for node, parent in iter_nodes_with_parent(stmts or []):
+        note(node, parent)
+    for fn in (functions or []):
+        for node, parent in iter_nodes_with_parent(getattr(fn, "body", None) or []):
+            note(node, parent)
+    return safe
+
+
 def collect_global_slots(stmts: list, functions: list, int_names=(),
                          string_names=(), dict_names=(),
                          frame_slots: dict = None) -> dict:
@@ -51237,6 +51344,16 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         if name not in finals:
             order.append(name)
         finals[name] = stmt
+    # The container literals a FUNCTION's entry may assume: the static-container
+    # slots, minus every name any statement uses in a position that could mutate
+    # the value in place. One computation for the whole unit and read back per
+    # slot, because `_module_container_entry_literals` is the only place with the
+    # statements and the bodies in hand — see its own docstring.
+    entry_containers = _module_container_entry_literals(
+        stmts, functions,
+        {name: (finals[name], getattr(finals[name], "value", None))
+         for name in order
+         if _is_static_container(getattr(finals[name], "value", None))})
     slots = {}
     for index, name in enumerate(order):
         stmt = finals[name]
@@ -51253,7 +51370,8 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
                                  body_site=body_sites.get(name),
                                  kind=kind, is_dict=is_dict,
                                  mutable=(name in written
-                                          or name in body_written))
+                                          or name in body_written),
+                                 entry_literal=entry_containers.get(name))
     return slots
 
 
@@ -52470,6 +52588,57 @@ def global_slot_kind(name: str):
         elem = container_literal_elem_kind(getattr(slot.site, "value", None))
         return list_kind(elem)
     return slot.kind
+
+
+def module_entry_literal_facts() -> dict:
+    """`{name: literal node}` a FUNCTION's entry may treat as already known.
+
+    The one reader of "which module-level names are constants whose value a
+    function body may assume at its first instruction", and the evidence is two
+    PUBLISHED tables rather than a re-walk:
+
+      * `module_symbols()`' folded literal for a name with no `__DATA` slot —
+        the int/str constant `_substitute_module_constants` puts at a read, so a
+        function's entry may assume the same value;
+      * a `module_slots()` entry whose `init` is a container `blob`, that no
+        function writes and the module body does not fill (`mutable` and
+        `filled_by_body` both false), whose `entry_literal` the slot carries —
+        and that field is None unless every mention of the name in the unit is
+        its own initializer or a `for` iterable, which is what rules out an
+        in-place mutation (`XS.append(1)`, `f(XS)`). See
+        `_module_container_entry_literals`.
+
+    A name that fails either test is ABSENT, and absence is the answer that
+    keeps the previous behaviour: a name a function writes through `global` has
+    a value that changes while the program runs (`_module_constant_sites`'
+    docstring records the measured `G=5` where CPython says `G=7`), and a name
+    the module body fills is not there yet when the body's first statement runs.
+    A name bound more than once at module level is the LAST binding, which is
+    the value that holds when the first function runs (`collect_module_symbols`
+    folds the last one exactly).
+
+    Consumed by `read_before_store`'s `entry_facts`, which seeds the preheader
+    walk at the function entry — so a `for` over a module-level literal
+    sequence is decided by the same predicate a function-local literal is
+    (`_for_emptiness`). It is deliberately NOT `_module_constant_sites`: that
+    table excludes a container constant because a blob has no literal to put at
+    a READ, and this asks the weaker question "what is the value", which a blob
+    answers. See
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
+    slots = module_slots()
+    out: dict = {}
+    for name, sym in module_symbols().items():
+        literal = getattr(sym, "literal", None)
+        if literal is not None and name not in slots:
+            out[name] = literal
+    for name, slot in slots.items():
+        if getattr(slot, "mutable", True) \
+                or getattr(slot, "filled_by_body", False):
+            continue
+        value = getattr(slot, "entry_literal", None)
+        if _is_container_literal(value):
+            out[name] = value
+    return out
 
 
 def module_slot_frame_struct(name: str):

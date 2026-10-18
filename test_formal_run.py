@@ -23280,6 +23280,50 @@ REFUSAL_CASES = [
      "    return f(0)\n",
      "refuse:is read at line 6 before anything in this function stores it",
      None),
+    # ── A MODULE-LEVEL literal sequence is the same emptiness a function-local
+    # one is, and it was `'maybe'` until `_preheader_facts` was seeded with
+    # `model.module_entry_literal_facts`: the walk started empty, the header's
+    # definition of the loop target survived, and the read after the loop
+    # answered the caller's leftover where CPython raises `UnboundLocalError`.
+    # The value is a module CONSTANT, so it holds at the function's first
+    # instruction; the refusal is the same on both architectures, which
+    # `refuse:` checks by running both.
+    ("module_level_empty_list_target_is_not_a_definition",
+     "XS = []\n"
+     "def f():\n"
+     "    for q in XS:\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 5 before anything in this function stores it",
+     None),
+    # …and the non-empty half, which is the direction that keeps the rule from
+    # refusing a loop that runs: the target is bound, and 20 is the last element
+    # CPython prints.
+    ("module_level_nonempty_list_target_is_still_a_definition",
+     "XS = [10, 20]\n"
+     "def f():\n"
+     "    for q in XS:\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n"
+     "f()\n",
+     0, "q=20"),
+    # The INT half of the same seed, and it reaches a DIFFERENT consumer:
+    # `_range_is_nonempty` reads the integer table rather than `_for_emptiness`'
+    # sequence one, so a fix that seeded only sequences would pass the rows
+    # above and fail this one. CPython raises for a zero trip count.
+    ("module_level_zero_int_bound_is_not_a_definition",
+     "K = 0\n"
+     "def f():\n"
+     "    for i in range(0, K):\n"
+     "        pass\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 5 before anything in this function stores it",
+     None),
     # THE CONTROLS, and they are the reason the three above are believable:
     # each is a name that IS stored before it is read, in a shape close
     # enough to the refused ones that a check which refused them would be

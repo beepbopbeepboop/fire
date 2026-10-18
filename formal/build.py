@@ -16837,7 +16837,18 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
            ) - params - set(frame_slots)
     if not own:
         return None
-    hit = M.read_before_store(fn, params, own)
+    # Module-level constants hold at the function's first instruction, so the
+    # loop-emptiness predicate can read a module-level literal sequence the same
+    # way it reads a function-local one (`M.module_entry_literal_facts`). A name
+    # the function itself binds — a parameter, an ordinary local, a `comptime`
+    # binding — SHADOWS the module's binding, so it is dropped here rather than
+    # seeded: inside such a body the name is local from the first line, and the
+    # module's value is the wrong answer for a read of it.
+    entry_facts = M.module_entry_literal_facts()
+    if entry_facts:
+        shadow = _function_locals(fn) | _comptime_bound_names(fn)
+        entry_facts = {n: v for n, v in entry_facts.items() if n not in shadow}
+    hit = M.read_before_store(fn, params, own, entry_facts or None)
     return None if hit is None else (hit[0], hit[1], fn.name)
 
 
