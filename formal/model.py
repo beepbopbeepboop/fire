@@ -48726,10 +48726,22 @@ def nonlocal_write_refusal(functions) -> str:
     failure class this whole file's refusals exist to prevent.
 
     A write is decided by asking whether the declaration's names are STORED in
-    the function that declares them, not by whether the enclosing frame has an
-    assignment: `nonlocal c` followed by `c = c + 1` inside the nested function
-    is the case, and a `nonlocal` with no assignment to any of its names is the
-    read-only spelling that must keep building.
+    the function that declares them, **at or AFTER the declaration**, not by
+    whether the enclosing frame has an assignment: `nonlocal c` followed by
+    `c = c + 1` inside the nested function is the case, and a `nonlocal` with no
+    assignment after it is the read-only spelling that must keep building.
+
+    **The "after the declaration" half is what makes the read-only case
+    answerable, and it is the same fact the branch that added the emitters'
+    `NonlocalStmt` arm wrote as "ask each frame about its own writes".** By the
+    time this runs, `_extract_functions` has already lifted the nested `def`'s
+    body into its caller, so the frame reads as one statement list in which the
+    ENCLOSING function's own initializers come FIRST and the declaration
+    follows them. Those initializers are not writes through the `nonlocal` — they
+    are the cell's first value, and no later reader of the lifted copy can see
+    them change. Measured on both architectures: `outer` writes `c` twice and
+    `get` only READS it through `nonlocal`, and counting the enclosing frame's
+    writes refused that program where CPython answers 8.
 
     **The reader is `callee_is_a_bound_value`, and it was `_names_bound_in` until
     2026-10-05 — which does not exist in this file and never did.**
@@ -48783,20 +48795,29 @@ def nonlocal_write_refusal(functions) -> str:
     must keep building (CPython prints 5); the second has one and is refused.
     A reader that asked the ENCLOSING function — which is what `iter_nodes` does,
     because it descends into a nested `def`'s body — cannot tell them apart: both
-    names are locals of `main`.
+    names are locals of `main`. Nor can one that counts the WHOLE flattened
+    frame, which is what the `_extract_functions` lifting above makes the only
+    frame there is: the third program, `outer` writing `c` twice and `get`
+    reading it through `nonlocal`, is the same shape as the first with the
+    enclosing frame's initializers in front.
     """
     for fn in (functions or []):
         frame = list(iter_statement_nodes(getattr(fn, "body", None) or [],
                                          enter_nested_defs=False))
         if not any(type(node).__name__ == "NonlocalStmt" for node in frame):
             continue
-        stored = {name for node in frame for name in assignment_target_names(node)}
-        for node in frame:
+        for i, node in enumerate(frame):
             if type(node).__name__ != "NonlocalStmt":
                 continue
             names = list(getattr(node, "names", None) or ())
             if not names:
                 continue
+            # `frame[i:]` and not `frame`: see the docstring's "at or AFTER the
+            # declaration". A store before the declaration belongs to the frame
+            # the nested `def` was lifted INTO, and it is not a write through
+            # the cell.
+            stored = {name for later in frame[i:]
+                      for name in assignment_target_names(later)}
             written = [n for n in names if n in stored]
             if not written:
                 continue

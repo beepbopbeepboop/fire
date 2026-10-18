@@ -2491,12 +2491,20 @@ dylib_exports: list = None, globals_base: int = None,
         if isinstance(stmt, F.PassStmt):
             return
 
-        if isinstance(stmt, F.GlobalStmt):
+        if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
             # `global NAME` is a binding declaration only — it emits no
             # runtime operation. formal's locals are callee-saved registers
             # (or stack slots); there is no separate module-global storage
             # to redirect subsequent stores into, so the declaration is a
             # no-op and the following AssignStmt still targets the local.
+            #
+            # `nonlocal NAME` is the same kind of declaration for the capture
+            # ABI: a READ resolves to the by-value parameter `_flatten_closures`
+            # prepends, so the statement emits nothing, and a WRITE never
+            # reaches here — `model.nonlocal_write_refusal` refuses it in the
+            # shared pipeline, because a write would change only the lifted
+            # copy. So the only `nonlocal` that gets this far is the read-only
+            # spelling, and it lowers to nothing exactly as `global` does.
             return
 
         if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):

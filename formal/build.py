@@ -18417,10 +18417,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         raise CodegenError(why_generator)
     # A `nonlocal` that WRITES a captured cell, refused here for the same
     # reason and with the same two-part shape as the two above. Both emitters
-    # reach the statement as `unsupported statement NonlocalStmt on the formal
-    # arm64/x86-64 path`, which names the AST node and nothing else — and the
-    # two spellings are the only thing that differs, so a reader is told which
-    # machine refused without being told what was refused.
+    # now treat a `nonlocal` declaration as a NO-OP (`GlobalStmt`'s arm), so the
+    # only thing that used to refuse it anywhere was their shared
+    # `unsupported statement NonlocalStmt` arm, which named the AST node and
+    # nothing else — and the two spellings were the only thing that differed, so
+    # a reader was told which machine refused without being told what was
+    # refused.
     #
     # The capture ABI has no cell for this to write to, and that is the whole
     # of it: `_flatten_closures` captures by VALUE and prepends the captured
@@ -18429,8 +18431,10 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # still read its own, which is precisely the wrong answer the refusal
     # prevents. A `nonlocal` that only READS is not refused: the read resolves to
     # the by-value parameter, which is what `nonlocal_no_write`-shaped programs
-    # rely on, and the row that pins it is in
-    # `test_formal_closures.py`.
+    # rely on, and the rows that pin both halves are in
+    # `test_formal_closures.py`
+    # (`a_read_only_nonlocal_builds_when_the_enclosing_frame_writes_the_cell`
+    # and `nonlocal_writes_to_a_captured_cell`).
     why_nonlocal = M.nonlocal_write_refusal(functions)
     if why_nonlocal is not None:
         raise CodegenError(why_nonlocal)

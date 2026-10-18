@@ -2513,6 +2513,21 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     check("collections" in I.HOST_MODULE_ADVICE,
           "the `collections` advice was deleted; the five files that stop there "
           "are back to a message that names the module and nothing else")
+    # The `functools` advice named a missing capability that EXISTS. A function
+    # value is a CODE ADDRESS on this path, and `reduce`'s own shape builds and
+    # answers CPython on both architectures (test_formal_specialization.py's
+    # `functools.reduce's own shape runs, on both`), so "a callable this path has
+    # no representation for" sends a reader to add what is already there. The
+    # gate on the module is the DECORATOR half, which is a real and different
+    # defect — checked here because a message that names the wrong capability is
+    # the failure this whole table exists to avoid.
+    _ft = I.HOST_MODULE_ADVICE["functools"]
+    check("callable this path has no representation" not in _ft,
+          f"the `functools` advice claims a callable has no representation, "
+          f"which is false: {_ft!r}")
+    check("decorator" in _ft.lower(),
+          f"the `functools` advice does not name the decorator gate, which is "
+          f"what actually stops the module: {_ft!r}")
     # A dotted name asks for the same answer, which is the rule that makes a
     # per-spelling table wrong by omission.
     check(I.host_module_advice("collections.abc") ==

@@ -123,7 +123,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_method_frame_depth_helpers_mis_scale_imm12.md` | **unclaimed** | The method-frame depth helpers mis-scale `ADD/SUB SP, SP, #imm12` |
 | `FORMAL_arm64_the_proof_generators_sp_trackers_drop_the_imm12_shift.md` | **unclaimed** | the model shifts, the generator does not, so `hcond` rewrites miss |
 | `FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md` | **unclaimed** | The shifted-REGISTER arms read `Rn` and `Rm` and drop the shift, so `add xD, xN, xM, lsl #3` models as `xN + xM` |
-| `FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot.md` | **unclaimed** | FORMAL_arm64_the_two_writes_peel_names_a_path_state_that_did_not_write_the_slot |
+| `FORMAL_arm64_three_frame_depth_trackers_still_drop_the_addsub_immediate_shift.md` | **unclaimed** | FORMAL_arm64_three_frame_depth_trackers_still_drop_the_addsub_immediate_shift |
 | `FORMAL_the_contract_slot_trackers_scale_the_addsub_immediate_by_eight.md` | **unclaimed** | four contract-slot `sp` trackers read the `ADD`/`SUB` immediate and multiply it by 8 |
 | `FORMAL_the_hprior_fact_growth_bound_is_exceeded.md` | **unclaimed** | `TestNestedConditionFactSharing`'s x2.2 bound is red on master |
 | `FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md` | **unclaimed** | the last export of every dylib gets an unprovable `_semantics_total`, and the two `test_formal_dylib.py` hole-count rows are red for it |

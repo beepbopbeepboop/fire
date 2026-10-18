@@ -1301,7 +1301,9 @@ optional in practice — the five `REFUSAL-DIVERGES` it produces are the
 container-budget pair, and the shrinker cannot reduce a construct that is not in
 the program, so it spends the whole budget finding that out.
 
-**The corpus cannot produce:** a function with no `return` (§3.3), a dict store
+**The corpus cannot produce:** a function with no `return` (§3.3 — NOW
+GENERATED, `--mix noreturn`, §4.11a, so this row was removed from the list), a
+dict store
 of a new key
 (NOW GENERATED and measured: `d[k] = v` is CPython's INSERT on both backends,
 `formal/model.py`'s `dict_store_capacity`, so this row was removed from the
