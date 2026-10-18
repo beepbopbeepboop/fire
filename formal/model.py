@@ -34847,6 +34847,47 @@ def _comprehension_result_is_flat(comp) -> bool:
     return not any(_expr_builds_a_container(p) for p in parts)
 
 
+def _container_ctor_base_name(call) -> str:
+    """The base name of a call's callee, or "" — `List[Int]()` → `List`.
+
+    The same two spellings `subscript_callee_names` recognises, reduced to the
+    base STRING because `blob_constructor_lowering` is keyed on the name: a bare
+    ident (`bytearray()`) and a subscript whose base is an ident (`List[Int]()`).
+    A member callee (`m.List[Int]()`) is not a container constructor this path
+    lowers, so it is left out rather than guessed at.
+    """
+    func = getattr(call, "func", None)
+    if isinstance(func, F.IdentExpr):
+        return func.name
+    if isinstance(func, F.SubscriptExpr) and isinstance(func.obj, F.IdentExpr):
+        return func.obj.name
+    return ""
+
+
+def _call_result_is_flat_container(element) -> bool:
+    """True when a CALL element produces a container a byte copy can make
+    per-iteration.
+
+    The shape is the EMPTY or SIZED container construction
+    `blob_constructor_lowering` lowers — `List[Int]()`, `List[Int](capacity=8)`,
+    `bytearray(3)` — and it is flat by construction: the result's elements are
+    zero-fill or the `count` zero bytes of a sized byte blob, never a container
+    built at the element site, so a byte copy of its blob carries no address of a
+    scratch blob and each iteration gets its own container. A construction that
+    has to HOLD elements (`List[Int](1, 2)`) is not this shape and
+    `blob_constructor_lowering` returns None for it — the same answer the
+    emitter's `_emit_type_constructor` reads, so a constructor this predicate
+    accepts is one the emitter lowered as a blob and left in X0/RAX.
+    """
+    if not isinstance(element, F.CallExpr):
+        return False
+    name = _container_ctor_base_name(element)
+    if not name:
+        return False
+    return blob_constructor_lowering(name, element.args,
+                                     element.kwargs) is not None
+
+
 def comprehension_element_is_flat_container(element) -> bool:
     """True when a comprehension element is a container a byte copy can make
     per-iteration.
@@ -34886,12 +34927,19 @@ def comprehension_element_is_flat_container(element) -> bool:
     of their children one level down. A slice copies element words out of its
     base into a new blob of its own, so a base that persists (`a[0:2]` under a
     NAME, a member read, a subscript) contributes only values or addresses of
-    persistent objects — what CPython's own slice shares — and a base that is a
+    persistent objects \u2014 what CPython's own slice shares \u2014 and a base that is a
     display of scalars (`[1, 2, 3][0:2]`) contributes only words. A base built
     here that itself holds containers (`[[1, 2]][0:1]`) carries the ADDRESS of
     one scratch blob into every iteration's copy, so it stays refused, as does
     the slice of any base a byte copy cannot make flat. The slice of a SLICE is
     the recursion applied twice and is accepted on the same terms.
+
+    An EMPTY or SIZED container CONSTRUCTION (`List[Int]()`, `bytearray(3)`) is
+    accepted, and `_call_result_is_flat_container` is the argument: its result is
+    zero-fill, so the copy carries no container address. A construction that has
+    to HOLD elements (`List[Int](1, 2)`) is not this shape \u2014
+    `blob_constructor_lowering` returns None for it, the same answer the emitter's
+    `_emit_type_constructor` reads \u2014 and stays refused.
 
     The shapes that return False keep `comprehension_element_blob_refusal`:
     a comprehension whose produced values are containers, a list of lists, a
@@ -34952,17 +35000,24 @@ def comprehension_element_is_flat_container(element) -> bool:
         # or addresses of persistent objects, which is what CPython's own slice
         # shares; a base built here contributes the same words a flat container
         # literal would (`[1, 2, 3][0:2]` is a display of scalars) and is asked
-        # the same question as one. A base built here that itself holds
-        # containers (`[[1, 2]][0:1]`) carries one scratch ADDRESS into every
-        # iteration's copy — the aliasing the literal arms refuse.
+        # the same question as one \u2014 which is why this RECURSES rather than
+        # refusing every base the element site builds. A base built here that
+        # itself holds containers (`[[1, 2]][0:1]`) carries one scratch ADDRESS
+        # into every iteration's copy \u2014 the aliasing the literal arms refuse.
         if _expr_builds_a_container(element.obj):
             return comprehension_element_is_flat_container(element.obj)
         return True
     if isinstance(element, F.BinaryOp) and element.op == "+":
         return (_expr_is_flat_container_operand(element.left)
                 and _expr_is_flat_container_operand(element.right))
+    # A construction, and NOT every call: the empty/sized container shape the
+    # emitter lowers as a blob (`List[Int]()`, `bytearray(3)`) is zero-fill, so
+    # its copy carries no container address. A construction that has to HOLD
+    # elements is not this shape and is refused, which is what the docstring
+    # above says \u2014 the blanket `return True` this replaces contradicted it and
+    # over-accepted.
     if isinstance(element, F.CallExpr):
-        return True
+        return _call_result_is_flat_container(element)
     if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
                                 F.DictExpr)):
         return False
@@ -53333,6 +53388,18 @@ def expr_spelling(node) -> str:
         # comptime specialization prints `SubscriptExpr(r, 1)`, which is the AST
         # and not the source, and the reader has to go and find the call.
         return subscript_chain_text(node)
+    if isinstance(node, F.SliceExpr):
+        # `a[0:2]`, because a slice is an ELEMENT of a comprehension often
+        # enough to reach `comprehension_element_blob_refusal`, and quoting
+        # `SliceExpr` there named the AST rather than the reader's own line —
+        # the same reason the Comprehension arm below exists. Omitted bounds
+        # print empty, which is how the source spells them.
+        def _bound(v):
+            return "" if v is None else expr_spelling(v)
+        inner = f"{_bound(node.start)}:{_bound(node.stop)}"
+        if node.step is not None:
+            inner += f":{expr_spelling(node.step)}"
+        return f"{expr_spelling(node.obj)}[{inner}]"
     if isinstance(node, (F.ListExpr, F.TupleExpr)):
         inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
         return (f"[{inner}]" if isinstance(node, F.ListExpr)

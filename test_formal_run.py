@@ -18363,6 +18363,22 @@ COMPREHENSION_ELEMENT_CASES = [
     # runtime_blob_base.md`) a constructor call, whose runtime blob base is
     # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
     # so a refusal about anything else fails the case.
+    # same copy over the shared predicate. A SLICE whose base is a NAME is
+    # accepted by the same copy and no relocation at all
+    # (`a_slice_element_of_a_name_is_per_iteration`): a slice copies its base's
+    # element WORDS into a fresh blob, so the copy is sound exactly when the base
+    # does not build the containers they reference — the base owns them and keeps
+    # them, which is what CPython's slice shares too. The rows after the accepted
+    # An EMPTY or SIZED container CONSTRUCTION (`List[Int]()`, `bytearray(3)`) is
+    # accepted too, by the same copy: its result is zero-fill, so the copy carries
+    # no container address (`_call_result_is_flat_container`). The rows after the
+    # accepted shapes are the ones whose per-iteration materialisation is still
+    # refused — a nested comprehension whose own result holds containers, a list
+    # of lists, a slice whose BASE builds a container, and a construction that has
+    # to HOLD elements (see `bugs/FORMAL_a_comprehension_container_element_needs_a
+    # _runtime_blob_base.md`), whose runtime blob base is genuinely needed. The
+    # refusal needle is the CONSTRUCT and not the remedy, so a refusal about
+    # anything else fails the case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -18460,6 +18476,67 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
      "refuse:the element `[[1, 2]][0:1]` opens a container", None),
+    # A SLICE whose base is a NAME, which the copy makes per-iteration with no
+    # runtime blob base: the slice copies `a`'s element words into a fresh blob,
+    # the copy lands that blob in its own array slot, and `a` keeps the words
+    # stable so no iteration aliases another. Measured against CPython 3.14
+    # (10 10 10) and refused before this with "the element `SliceExpr` opens a
+    # container".
+    ("a_slice_element_of_a_name_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30, 40]\n"
+     "    var r = [a[0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "10 10 10"),
+    # …and the same slice over a list of LISTS, which is the shape that says the
+    # copy shares the base's INNER objects rather than copying them: CPython's
+    # slice shares `a`'s inner lists too, so every iteration's slice references
+    # the same inner lists `a` owns. Measured (1 4 1 4), and a fix that copied
+    # the inner blobs instead of their references would answer 1 4 1 4 here by
+    # accident only if it also kept the sharing.
+    ("a_slice_element_over_a_list_of_lists_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [[1, 2], [3, 4]]\n"
+     "    var r = [a[0:2] for y in [1, 2]]\n"
+     "    printf(\"%d %d %d %d\", r[0][0][0], r[0][1][1], r[1][0][0], "
+     "r[1][1][1])\n"
+     "    return 0\n",
+     0, "1 4 1 4"),
+    # …and the boundary the slice acceptance does NOT cross: a slice whose BASE
+    # is built at the element site. `[1, 2][0:1]`'s referenced word is a scalar
+    # here, but the rule is the base's own container, and it is the same rule the
+    # literal case asks one node type in — so this stays refused, and the refusal
+    # names the source's own spelling (`[1, 2][0:1]`) rather than `SliceExpr`.
+    ("a_slice_element_whose_base_builds_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[1, 2][0:1] for y in [1, 2]]\n"
+     "    printf(\"%d %d\", r[0][0], r[1][0])\n"
+     "    return 0\n",
+     "refuse:the element `[1, 2][0:1]` opens a container", None),
+    # An EMPTY/SIZED container CONSTRUCTION as the element, which is flat by
+    # construction: `bytearray(3)` reserves a `[3][0][0][0]` blob and the copy
+    # lands it per iteration, so the two elements are DISTINCT containers. The
+    # assertion writes through one element and reads the other — the read that
+    # distinguishes a per-iteration copy from the one shared blob, which a `len`
+    # check could not (both are 3). Measured: `9 0`, CPython's answer.
+    ("a_container_construction_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [bytearray(3) for y in [1, 2]]\n"
+     "    r[0][0] = 9\n"
+     "    printf(\"%d %d\", r[0][0], r[1][0])\n"
+     "    return 0\n",
+     0, "9 0"),
+    # …and an EMPTY `List[Int]()`, the zero-operand form the emitter lowers as
+    # the eight-byte zero-count blob. As observable as the row above and for the
+    # same reason: each element's `len` is 0 either way, so the count is not the
+    # claim — the build success is, and that each element is its own blob.
+    ("an_empty_list_construction_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [List[Int]() for y in [1, 2]]\n"
+     "    printf(\"%d %d\", len(r[0]), len(r[1]))\n"
+     "    return 0\n",
+     0, "0 0"),
     # …and the boundary the nested acceptance does NOT cross: an inner
     # comprehension whose OWN result holds containers carries those containers
     # as addresses, so copying it per iteration would share one scratch blob —

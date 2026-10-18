@@ -28,8 +28,77 @@ iteration and the nested case never needed the runtime blob base after all — s
 "What landed 2026-10-08" below, which corrects this document's "that is the whole
 of what is left" reading of the nested row. What is STILL refused is the element
 whose per-iteration copy is UNSOUND because it carries an ADDRESS: a list of
-lists, a nested comprehension whose own result holds containers, a slice, a
-constructor call. Read "What landed" first.
+lists, a nested comprehension whose own result holds containers, a slice whose
+BASE builds a container, a construction that has to hold elements. **A slice
+whose base is a NAME and an EMPTY/SIZED container construction are no longer
+refused (2026-10-14, the next section): neither needs a runtime blob base.**
+Read "What landed" first.
+
+## What landed 2026-10-14: a slice whose BASE does not build a container, and an EMPTY/SIZED construction
+
+**The measurement this document asked the next reader to take before writing the
+relocation, and it says two of the remaining rows need no relocation at all** —
+the same
+verdict the nested row got on 2026-10-08, for the same reason one node type out.
+A slice copies its base's element WORDS into a fresh `[count][element…]` blob, so
+a byte copy of that blob per iteration is sound exactly when the base does not
+BUILD a container at the element site: a base that is a NAME owns and keeps the
+containers its element words reference, and CPython's own slice shares those
+references too, so the copy MATCHES CPython rather than aliasing a scratch blob.
+A base the element position builds itself (`[[1, 2][0:1]`, a nested slice, a
+comprehension, a call) puts the referenced containers in that site's
+reuse-every-iteration scratch, and the copy would share them — so that stays
+refused, at the literal case's own rule one node type out.
+
+`model._slice_result_is_flat` is the predicate arm and
+`comprehension_element_is_flat_container` grew a `F.SliceExpr` branch that calls
+it; the emitters' `_materialize_compr_element`, the `cap`-sized array and the
+`memcpy` are all the 2026-10-06 code, unchanged. `model.expr_spelling` also grew
+a `SliceExpr` arm, because the refusal quoted the AST node name `SliceExpr` and
+now names the reader's own line.
+
+**Measured, both architectures** (`fire.py build --formal --no-prove` then run
+under `arch -x86_64`, CPython 3.14 on the same source):
+
+| program | CPython | before | after |
+|---|---|---|---|
+| `[a[0:2] for y in [1, 2, 3]]` with `a = [10, 20, 30, 40]`, read `r[i][0]` | `10 10 10` | refused | **`10 10 10`** |
+| `[a[0:2] for y in [1, 2]]` with `a = [[1, 2], [3, 4]]`, read four corners | `1 4 1 4` | refused | **`1 4 1 4`** |
+| `[[1, 2][0:1] for y in [1, 2]]` (base builds a container) | — | refused | refused (`the element `[1, 2][0:1]` opens a container`) |
+
+The second row is the one that says the copy shares the base's INNER objects
+rather than duplicating them, which is what CPython's slice does: every
+iteration's slice references the same inner lists `a` owns.
+
+**The CONSTRUCTION row is the second, and it is flat by construction.**
+`List[Int]()`, `List[Int](capacity=8)` and `bytearray(3)` are lowered by
+`model.blob_constructor_lowering` as a blob whose elements are ZERO-FILL — an
+empty blob, or the `count` zero bytes of a sized byte blob — so a byte copy of
+it per iteration carries no container address and gives each iteration its own
+container. `model._call_result_is_flat_container` is the arm: it asks the SAME
+`blob_constructor_lowering` the emitters' `_emit_type_constructor` asks, so a
+construction this predicate accepts is one the emitter lowered as a blob and
+left in X0/RAX. A construction that has to HOLD elements (`List[Int](1, 2)`)
+returns None from that function and is not this shape; the emitter refuses it
+before a comprehension ever sees it.
+
+**Pinned by five rows in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**:
+`a_slice_element_of_a_name_is_per_iteration`,
+`a_slice_element_over_a_list_of_lists_is_per_iteration`,
+`a_slice_element_whose_base_builds_a_container_is_refused` (the `[1, 2][0:1]`
+needle, which pins the new spelling as well as the refusal),
+`a_container_construction_element_is_per_iteration` — which WRITES through
+`r[0][0]` and reads `r[1][0]`, the read a shared blob would answer `9` to and a
+copy answers `0` to — and `an_empty_list_construction_element_is_per_iteration`.
+
+**What is left is now smaller than this document's title says**, and the same
+predicate question has answered it three times in a row: the nested comprehension
+(2026-10-08), the slice whose base is a name, and the empty/sized construction
+(both 2026-10-14). What genuinely remains is a LIST OF LISTS — `[[y]]`, where the
+INNER literal is built at the element site, so the copy would share it — and a
+construction that holds elements, if it is ever typed. Those are the cases whose
+result genuinely carries an address of a scratch blob, and they are what the
+runtime blob base is still for.
 
 ## What landed 2026-10-13: the SLICE element, by the same copy, on both backends
 
@@ -344,8 +413,9 @@ row there reproduces.)
 the runtime base, and that belief is now measured false — the array fix DOES
 handle a nested comprehension whose own element does not open a container, and
 the reason is in "What landed 2026-10-08" above. What follows is the original
-reading, kept because the runtime base is still what a list of lists, a slice or
-a constructor call needs, and the three steps are still that work.**
+reading, kept because the runtime base is still what a list of lists needs (the
+slice and the empty/sized construction were closed by a predicate arm on
+2026-10-14 — see the top section), and the three steps are still that work.**
 
 The natural implementation — reserve `cap` slots of the element's own size and
 index them by the iteration counter — **works for a list-literal and a
@@ -424,12 +494,12 @@ The arm64 half of steps 1-3 was written (a `_compr_elem_arrays` map,
 ## The exact next step
 
 **The nested reproducer this section used to be about is CLOSED (2026-10-08) and
-so is the slice (2026-10-13), so the runtime base is now only what a list of
-lists, a constructor call, or a slice whose base itself carries a scratch address
-needs** — the shapes the flat predicate still returns False for. Steps 1-3 above
-remain the shape of that work, on **both** backends, and the acceptance set is
-those shapes plus the whole of the other doc's table as cases a fix must NOT
-break:
+so are the slice whose base is a NAME and the empty/sized construction
+(2026-10-14, see the top section)**, so the runtime base is now only what a list
+of lists needs, and a construction that holds elements if it is ever typed — the
+shapes the flat predicate still returns False for. Steps 1-3 above remain the
+shape of that work, on **both** backends, and the acceptance set is those shapes
+plus the whole of the other doc's table as cases a fix must NOT break:
 
 * one outer iteration (`for y in [10]` → 11),
 * an element that does not depend on the loop variable (→ 3, correct today only
@@ -446,15 +516,14 @@ and the `nested_comprehension_in_a_generator_iterable` /
 `comprehension_body_is_not_a_container_position` rows.
 
 **The 2026-10-08 landing also re-prices this: the nested case needed no allocator
-change at all, only the predicate — and the 2026-10-13 slice landing CONFIRMS the
-prediction for the second of the three.** That is evidence the remaining shapes
-are not one feature either — a constructor call builds its blob through a
-DIFFERENT site again, so it may be answerable by extending the predicate to the
-site it uses rather than by the register discipline steps 1-3 describe. The next
-reader should measure that before writing the relocation, and the slice is the
-worked example: its arm is 3 lines and no allocator change, and the boundary it
-must respect (`[[1, 2]][0:1]`) is a property of the BASE, asked with the same
-recursion the literal arms use.
+change at all, only the predicate.** That is evidence the remaining shapes are not
+one feature either — and **the 2026-10-14 slice landing is the second such
+measurement**: a slice whose base is a NAME needed only a predicate arm too (see
+the top section), so the prediction this paragraph made was right twice. A
+constructor call builds its blob through a DIFFERENT site again and may or may
+not be answerable by extending the predicate to the site it uses rather than by
+the register discipline steps 1-3 describe. The next reader should measure that
+before writing the relocation.
 
 **A refusal is the alternative and it is cheap**, which is the trade the other
 doc names and measures (6 of the 610 stdlib modules contain a comprehension
