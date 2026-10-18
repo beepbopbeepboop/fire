@@ -849,6 +849,78 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # …and the FALSY end of the EXPRESSION cases the refusal rows below catch: a
+    # constant COMPARISON that is false, which the same fold reads as 0, so the
+    # exception still propagates exactly as `return False` does.  The pair is
+    # load-bearing in the direction the module-level folder's own docstring gives:
+    # a gate that refused every expression it could not read as a single literal
+    # would pass the refusal while breaking this program.
+    ("an_exit_returning_a_false_comparison_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 1 > 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the same boundary for `len(<string literal>)`: an EMPTY text has a
+    # zero length, so `return len("")` does not suppress and the program lowers.
+    ("an_exit_returning_len_of_the_empty_string_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", 'return len("")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", 'return len("")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and the FALSY ends of the two container/chained cases the refusal rows
+    # below catch: an EMPTY display is falsy, and a chained comparison is false
+    # when any link is, so both let the exception propagate exactly as
+    # `return False` does.
+    ("an_exit_returning_an_empty_display_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return []") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return []") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    ("an_exit_returning_a_false_chained_comparison_still_runs_the_protocol",
+     SUPPRESSING_EXIT.replace("return True", "return 1 > 2 > 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     SUPPRESSING_EXIT_PY.replace("return True", "return 1 > 2 > 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # …and the SECOND declaration matters as much as the first: a parameter with
     # no struct annotation names no struct, so this stays a refusal and the
     # refusal is the honest answer.  It is checked as a REFUSAL below, and this
@@ -1171,6 +1243,112 @@ REFUSALS = [
     # same value behind a `UnaryOp` and is covered by the same reader.
     ("an_exit_returning_a_truthy_float_is_refused_for_the_same_reason",
      SUPPRESSING_EXIT.replace("return True", "return 0.5") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # ── a truthy return the build folds out of an EXPRESSION, not a literal ─
+    # **These are the same wrong answer as `return True`, reached through a
+    # constant the build could read perfectly well and the gate simply did not
+    # ask about.**  `_literal_return_truthiness` used to fold only
+    # `fold_literal_expr`, so a truthy return built from a COMPARISON, a
+    # boolean, a select, a bitwise op, `len(<string literal>)` or a remainder
+    # was not seen as truthy: measured on both architectures, each of the rows
+    # below BUILT and printed `enter / body / exit`, exited 1 and never reached
+    # `after`, where CPython suppresses and exits 0.  The fix composes the three
+    # constant folders the module-level reader already trusts, so each shape is
+    # decided by the folder that owns it rather than by a second operator table.
+    ("an_exit_returning_a_comparison_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_boolean_operator_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 and 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_select_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 if 1 else 0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_bitwise_operator_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 | 2") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_len_of_a_literal_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", 'return len("abc")') +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_constant_remainder_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 7 % 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    # …and three shapes the int/str folders decline for a WORD reason rather than
+    # a truthiness one, which the recursion and the value reader close: a
+    # CONTAINER (truthy iff non-empty), a CHAINED comparison (its own node, so it
+    # needs values rather than truthinesses), and a branch or operand that is a
+    # FLOAT (no folder carries a float, because a float is not a word).
+    ("an_exit_returning_a_non_empty_display_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return [1]") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_chained_comparison_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 < 2 < 3") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_float_select_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 2.5 if 1 else 0.0") +
+     "def main(n):\n"
+     "    with Suppressor() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     "SUPPRESSING the exception in flight", "it declares no __enter__"),
+    ("an_exit_returning_a_boolean_over_a_float_is_refused_for_the_same_reason",
+     SUPPRESSING_EXIT.replace("return True", "return 1 and 2.5") +
      "def main(n):\n"
      "    with Suppressor() as v:\n"
      "        print('body', v)\n"

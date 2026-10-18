@@ -38,6 +38,53 @@ all still lower. Pinned by `test_formal_with.py`'s
 `an_exit_returning_a_false_comparison_still_runs_the_protocol`. **§2's
 computed case is untouched and is still the whole of what is left.**
 
+**Update 2026-10-13 (`work/formal408-docs`): the FOLDABLE half was STILL
+incomplete after 2026-10-07, and the gap was measured and closed.** The
+2026-10-07 note below widened the gate from `isinstance(value, int)` to the
+folded value's truthiness, but `_literal_return_truthiness` still consulted only
+`fold_literal_expr`, which folds literals and four arithmetic operators. A truthy
+`__exit__` return built from a COMPARISON, a boolean (`and`/`or`/`not`), a select
+(`a if c else b`), a bitwise op, `len(<string literal>)` or `a % b` / `a / b`
+therefore was not read as truthy, and the suppression it names was dropped —
+the SAME wrong answer as `return True`, reached through a constant the build
+could read perfectly well. Measured on **both** architectures (`return 1 < 2`,
+`return 1 and 2`, `return 1 if 1 else 0`, `return 1 | 2`, `return len("abc")`,
+`return 7 % 3`): each BUILT, printed `enter / body / exit` and exited 1 where
+CPython prints `after` and exits 0.
+
+The fix composes the three constant folders `fold_module_value` already trusts —
+`fold_literal_expr`, `fold_module_select_expr` (a comparison, `and`/`or`/`not`,
+`a if c else b`) and `fold_module_int_expr` (bitwise and shift) — and adds the two
+things no folder carries: `len(<string literal>)` (whose truthiness is "the text
+is non-empty", encoding-free) and the two arithmetic operators `/` and `%`
+(folded for TRUTHINESS only, which is one-sided in the safe direction: a constant
+the fold reads as truthy is one CPython suppresses, and `a % b` is zero exactly
+when `b` divides `a` under either floor). Three shapes the int/str folders
+decline for a WORD reason rather than a truthiness one are also read, by
+recursing on the operand that decides the result: a CONTAINER display (truthy iff
+non-empty, and only when its arity is static — a `[*a]` or `{**a}` spread is left
+undecided), a `not`/`and`/`or`/`a if c else b` whose operand is a FLOAT or a
+STRING (the module-level folder is deliberately int-only in a condition, because
+the empty string is a non-null `char *` on the machine), a CHAINED comparison
+(`a < b < c`, its own node, read through a value reader that adds the float the
+word folders lack), and a constant display element (`(1, 2)[0]`). Asking more of
+the folders can only move a constant from "undecided" to "decided as truthy",
+never the reverse, so the gate stays one-sided rather than becoming a refusal of
+every computed return (which would refuse `nullcontext`). Pinned by ten REFUSAL
+rows and four falsy ANSWERED siblings in `test_formal_with.py`
+(`an_exit_returning_a_comparison_is_refused_for_the_same_reason`,
+`…a_boolean_operator…`, `…a_select…`, `…a_bitwise_operator…`,
+`…len_of_a_literal…`, `…a_constant_remainder…`,
+`…a_non_empty_display…`, `…a_chained_comparison…`, `…a_float_select…`,
+`…a_boolean_over_a_float…`, and
+`an_exit_returning_a_false_comparison_still_runs_the_protocol`,
+`an_exit_returning_len_of_the_empty_string_still_runs_the_protocol`,
+`an_exit_returning_an_empty_display_still_runs_the_protocol`,
+`an_exit_returning_a_false_chained_comparison_still_runs_the_protocol`) — 471/0,
+up from 387. **§2's computed case — a return that depends on a RUN-TIME value,
+which is cross-field flow — is untouched and is still the whole of what is
+left.**
+
 **Update 2026-10-07 (`work/formal121-docs`): the FOLDABLE half was itself
 incomplete, and is now complete.** The gate's own docstring said the test was the
 returned value's truthiness, but the code tested `isinstance(value, int)` over
@@ -217,21 +264,31 @@ this one is the smaller of the two and is the one to build first.
     python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py \
         an_exit_returning_true_is_refused_as_a_suppression_it_cannot_perform \
         an_exit_returning_one_is_refused_for_the_same_reason \
-        an_exit_returning_not_zero_is_refused_as_a_suppression \
-        an_exit_returning_a_true_comparison_is_refused_for_the_same_reason \
-        an_exit_returning_a_truthy_logic_and_is_refused_for_the_same_reason \
-        an_exit_returning_a_truthy_ternary_is_refused_for_the_same_reason \
-        an_exit_returning_a_true_string_equality_is_refused_for_the_same_reason \
-        an_exit_returning_none_equality_is_refused_for_the_same_reason \
-        an_exit_returning_len_of_a_string_is_refused_for_the_same_reason \
+        an_exit_returning_a_truthy_string_is_refused_for_the_same_reason \
+        an_exit_returning_a_truthy_float_is_refused_for_the_same_reason \
+        an_exit_returning_a_comparison_is_refused_for_the_same_reason \
+        an_exit_returning_a_boolean_operator_is_refused_for_the_same_reason \
+        an_exit_returning_a_select_is_refused_for_the_same_reason \
+        an_exit_returning_a_bitwise_operator_is_refused_for_the_same_reason \
+        an_exit_returning_len_of_a_literal_is_refused_for_the_same_reason \
+        an_exit_returning_a_constant_remainder_is_refused_for_the_same_reason \
+        an_exit_returning_a_non_empty_display_is_refused_for_the_same_reason \
+        an_exit_returning_a_chained_comparison_is_refused_for_the_same_reason \
+        an_exit_returning_a_float_select_is_refused_for_the_same_reason \
+        an_exit_returning_a_boolean_over_a_float_is_refused_for_the_same_reason \
+        an_exit_returning_false_still_runs_the_protocol \
+        an_exit_returning_an_empty_string_still_runs_the_protocol \
+        an_exit_returning_zero_point_zero_still_runs_the_protocol \
+        an_exit_returning_len_of_the_empty_string_still_runs_the_protocol \
         an_exit_returning_a_false_comparison_still_runs_the_protocol \
-        an_exit_returning_a_falsy_not_still_runs_the_protocol \
-        an_exit_returning_a_falsy_and_still_runs_the_protocol \
-        an_exit_returning_a_falsy_string_inequality_still_runs_the_protocol \
-        an_exit_returning_len_of_an_empty_string_still_runs_the_protocol \
-        an_exit_returning_false_still_runs_the_protocol
+        an_exit_returning_an_empty_display_still_runs_the_protocol \
+        an_exit_returning_a_false_chained_comparison_still_runs_the_protocol
 
-§1's two refusals, the boolean/comparison/equality/`len` arms the 2026-10-13
-update added, and §3's falsy boundary. The `nullcontext` consumer that §3 is
+Every row name above is checked against `test_formal_with.py` before it was put
+here (the 2026-10-18 merge of `work/formal408-docs` replaced six of them, which
+had been named in prose by a spelling no test ever carried). §1's two refusals,
+the two truthiness arms the 2026-10-07 update added, the fourteen expression arms
+the three 2026-10-13 updates added, and §3's falsy boundary. The `nullcontext`
+consumer that §3 is
 about is `python3 tools/memslot.py --gb 8 --label t -- python3
 test_formal_core_hostmods.py ctx` (three CPython pairs, both backends).

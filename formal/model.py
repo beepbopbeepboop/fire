@@ -54030,24 +54030,83 @@ def struct_is_context_manager(struct_def) -> bool:
     return not context_exit_returns_truthy(exit_)
 
 
+#: "this operand is not a constant", which is NOT `None`: the `None` LITERAL is a
+#: real scalar (`None < 1` is a `TypeError` in CPython, so a comparison of it must
+#: be declined rather than answered), and a reader that could not tell the two
+#: apart would either answer a comparison of `None` or decline one without it.
+_UNKNOWN_CONSTANT = object()
+
+
+def _constant_scalar(node):
+    """The Python scalar `node` denotes when it is a constant, else `_UNKNOWN_CONSTANT`.
+
+    The VALUE reader `_literal_return_truthiness` needs for a chained comparison
+    (`a < b < c`), which compares values rather than truthinesses.  It is the
+    three word folders plus exactly one thing they do not carry — a FLOAT, which
+    no folder reads because a float is not a word — and it keeps `None` as a real
+    scalar so a `None` operand reaches Python's own `TypeError` and is declined.
+    """
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return float(node.value)
+        except (TypeError, ValueError):
+            return _UNKNOWN_CONSTANT
+    if is_none_expr(node):
+        return None
+    value = fold_literal_expr(node)
+    if value is None:
+        value = fold_module_int_expr(node)
+    if value is None:
+        value = fold_module_select_expr(node)
+    if value is None:
+        return _UNKNOWN_CONSTANT
+    return value
+
+
 def _literal_return_truthiness(node):
-    """CPython's truthiness of a `return`'s value when it is a literal, else None.
+    """CPython's truthiness of a `return`'s value when the build can DECIDE it, else None.
 
     The one reader `context_exit_returns_truthy` asks, and it exists because
-    "which literals can this build decide" is not the same question for a
-    TRUTHINESS as it is for a WORD.  `fold_literal_expr` is the word reader: it
-    folds the integers, the `bool`s (to 0/1) and the strings, and it has no
-    float arm on purpose — that folder is also the struct-field, class-constant
-    and default-parameter reader, where a float is not an integer word.
-    `fold_module_value` is the one that turns a float literal into a word, by
-    `int(...)`, and that truncation is exactly what must NOT be used here:
-    `int(0.5)` is 0 while CPython reads the returned 0.5 as TRUE, so a gate
-    built on it would answer the wrong way for every fraction.  So a float
-    literal is decided from its own value here, a unary `+`/`-` over one
-    following it (`-0.5` is a `UnaryOp`, `-0.0` is falsy in CPython), and
-    everything else is None — which every caller reads as "not decided" and
-    leaves the return where it was, the one-sided direction this gate is
-    deliberately in.
+    "which constants can this build decide" is not the same question for a
+    TRUTHINESS as it is for a WORD — so this is where the build's constant
+    folders are COMPOSED and the one place the answer is a truthiness rather
+    than a word:
+
+      * a FLOAT literal is read from its own value, because `fold_literal_expr`
+        is the word reader and has no float arm on purpose — that folder is also
+        the struct-field, class-constant and default-parameter reader, where a
+        float is not an integer word.  `fold_module_value` is the one that turns
+        a float literal into a word, by `int(...)`, and that truncation is
+        exactly what must NOT be used here: `int(0.5)` is 0 while CPython reads
+        the returned 0.5 as TRUE, so a gate built on it would answer the wrong
+        way for every fraction.  A unary `+`/`-` over one follows it (`-0.5` is
+        a `UnaryOp`, `-0.0` is falsy in CPython).
+      * `len(<string literal>)` is a constant length, and its truthiness is "the
+        text is non-empty" — which is the same answer for every encoding this
+        path interns, because only an EMPTY text has zero bytes.
+      * everything else is the three folders `fold_module_value` already
+        composes: `fold_literal_expr` (literals and arithmetic, including
+        `len(<display>)`), `fold_module_select_expr` (a comparison, `and`/`or`/
+        `not`, `a if c else b`) and `fold_module_int_expr` (bitwise and shift).
+        A folded int's truthiness is `!= 0` and a folded string's is non-empty,
+        which is CPython's rule.
+
+    **The three folders are asked rather than restated, and that is the fix.** A
+    previous version folded only `fold_literal_expr`, so a truthy return built
+    out of a COMPARISON (`return 1 < 2`), a boolean (`return 1 and 2`), a
+    bitwise op (`return 1 | 2`), a select (`return 1 if 1 else 0`) or
+    `len("abc")` was not seen as truthy at all, and the suppression it names was
+    dropped — measured on both architectures, the same `enter / body / exit`,
+    exit 1, no `after` wrong answer as `return True`, reached through a constant
+    the build could read perfectly well.  Composing the folders the module-level
+    reader already trusts keeps the two from drifting and is why this is not a
+    second operator table.
+
+    `None` means "not decided", which every caller reads as "leave the return
+    where it was": this gate is deliberately one-sided — only a return it can
+    read as truthy is refused, because refusing every computed return would
+    refuse `nullcontext` — and asking more of the folders can only move a
+    constant from the undecided side to the decided one, never the reverse.
     """
     if isinstance(node, F.FloatLiteral):
         try:
@@ -54056,10 +54115,125 @@ def _literal_return_truthiness(node):
             return None
     if isinstance(node, F.UnaryOp) and node.op in ("+", "-"):
         return _literal_return_truthiness(node.operand)
+    # `len(<string literal>)`: a constant length, and `fold_literal_expr`'s own
+    # `len` arm reads a DISPLAY (`len([x, y])` is 2 whatever the elements are)
+    # rather than a string's byte count, so the string case is answered here.
+    # Only the EMPTINESS matters for a truthiness and that is encoding-free.
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr) \
+            and node.func.name == "len" and not (node.kwargs or []) \
+            and len(node.args or []) == 1:
+        arg = node.args[0]
+        if isinstance(arg, F.StringLiteral) \
+                and not getattr(arg, "is_bytes", False) \
+                and isinstance(arg.value, str):
+            return F.decoded_literal(arg) != ""
+    # A constant ELEMENT of a constant display — `(1, 2)[0]`, `[1, 2][1]` — and
+    # only over a display: the element's value is the only thing asked of it, and
+    # a name's or a call's is not knowable here.  A starred element makes the
+    # positions unknowable, so it refuses; an out-of-range index is CPython's own
+    # run-time error and not a value, so it leaves the return undecided.
+    if isinstance(node, F.SubscriptExpr) \
+            and isinstance(node.obj, (F.TupleExpr, F.ListExpr)):
+        index = fold_literal_expr(node.index)
+        if isinstance(index, int) and not isinstance(index, bool):
+            elements = list(getattr(node.obj, "elements", None) or ())
+            if not any(isinstance(e, F.UnaryOp) and e.op == "*"
+                       for e in elements):
+                try:
+                    return _literal_return_truthiness(elements[index])
+                except IndexError:
+                    return None
+    # The two arithmetic operators no folder carries: `/` (whose Python answer is
+    # a FLOAT, so it is not a word) and `%`.  Both are folded here and only here,
+    # because the question is the RESULT's truthiness and not its value, and that
+    # is one-sided in the safe direction: `a % b` is zero exactly when `b`
+    # divides `a`, which is the same fact for Python's floored `%` and the
+    # machine's word, and `a / b` is truthy whenever `a` is — so a constant this
+    # arm reads as truthy is one CPython suppresses, and refusing it is the
+    # answer; a constant it cannot read is left where it was.  A zero divisor is
+    # CPython's own run-time error and not a value, so it leaves the return
+    # undecided rather than inventing one.
+    if isinstance(node, F.BinaryOp) and node.op in ("/", "%"):
+        a = fold_literal_expr(node.left)
+        b = fold_literal_expr(node.right)
+        if isinstance(a, int) and not isinstance(a, bool) \
+                and isinstance(b, int) and not isinstance(b, bool):
+            try:
+                quotient = (a / b) if node.op == "/" else (a % b)
+            except (ZeroDivisionError, OverflowError, ValueError):
+                return None
+            return quotient != 0
     value = fold_literal_expr(node)
     if value is None:
-        return None
-    return bool(value)
+        value = fold_module_select_expr(node)
+    if value is None:
+        value = fold_module_int_expr(node)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value != ""
+    # The shapes the int/str folders decline, and they are declined for a reason
+    # that is about a WORD rather than about the truthiness this gate asks: a
+    # branch that is a FLOAT, a CONDITION that is a float or a string (the
+    # module-level folder is deliberately int-only there, because a `char *` is
+    # non-null for the empty string on the machine), or an operand that is a
+    # CONTAINER.  Each is decided here by recursing on the operand whose
+    # truthiness decides the result, so no operator table is restated — the
+    # recursion is the same reader, one level down.
+    if isinstance(node, F.UnaryOp) and node.op == "not":
+        inner = _literal_return_truthiness(node.operand)
+        return None if inner is None else (not inner)
+    if isinstance(node, F.BinaryOp) and node.op in ("and", "or"):
+        left = _literal_return_truthiness(node.left)
+        if left is None:
+            return None
+        # CPython's short circuit: `a and b` is `a` when `a` is falsy and `b`
+        # when `a` is truthy; `a or b` is the mirror.  The left operand decides
+        # the answer outright in one of the two cases and is the reason the
+        # right operand is only asked for when it is the one that is returned.
+        if node.op == "or":
+            return True if left else _literal_return_truthiness(node.right)
+        return _literal_return_truthiness(node.right) if left else False
+    if isinstance(node, F.TernaryExpr):
+        cond = _literal_return_truthiness(node.condition)
+        if cond is None:
+            return None
+        return _literal_return_truthiness(node.then_val if cond else node.else_val)
+    # A container display is truthy exactly when it is non-empty, whatever its
+    # elements are, so its ARITY is the whole question — and a starred element
+    # (`[*a]`) or a `**` spread (`{**a}`) makes the arity unknowable.
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        elements = list(getattr(node, "elements", None) or ())
+        if any(isinstance(e, F.UnaryOp) and e.op == "*" for e in elements):
+            return None
+        return len(elements) > 0
+    if isinstance(node, F.DictExpr):
+        pairs = list(getattr(node, "pairs", None) or ())
+        if any(isinstance(k, F.UnaryOp) and k.op == "**" for k, _v in pairs):
+            return None
+        return len(pairs) > 0
+    # `a < b < c` is `a < b and b < c`, and it is its own node rather than two
+    # `BinaryOp`s, so it needs the VALUE reader above.  An operand that is not a
+    # constant, an operator the table does not know, or Python's own `TypeError`
+    # (a `None` operand) all decline rather than guess.
+    if isinstance(node, F.CompareChain):
+        for at, op in enumerate(node.ops):
+            left = _constant_scalar(node.operands[at])
+            right = _constant_scalar(node.operands[at + 1])
+            if left is _UNKNOWN_CONSTANT or right is _UNKNOWN_CONSTANT:
+                return None
+            compare = _FOLD_COMPARE.get(op)
+            if compare is None:
+                return None
+            try:
+                if not compare(left, right):
+                    return False
+            except TypeError:
+                return None
+        return True
+    return None
 
 
 def context_exit_returns_truthy(method) -> bool:
@@ -54104,29 +54278,35 @@ def context_exit_returns_truthy(method) -> bool:
     lower.  **The word reader is deliberately not reused for the float**:
     `fold_literal_expr` has no float arm, and `fold_module_value`'s truncation
     (`int(0.5)` is 0) would answer the truthiness the wrong way, which is why
-    `_literal_return_truthiness` reads a float's own value.  So a
-    COMPUTED return is not counted here and stays
-    as it was: that is the remaining limit, it is cross-FIELD flow (`nullcontext`
-    returns `self.exit_result`, and whether that is true depends on a constructor
-    argument this function cannot see), and it is the same limit
-    `_expr_is_fd` states for a descriptor in a field.  A narrower gate that
-    refused every computed return would refuse `formal/hostmods/contextlib.mojo`'s
-    own `nullcontext`, whose three CPython pairs live in
-    `test_formal_core_hostmods.py`'s `ctx` group — refusing a host module the
-    corpus depends on to catch a case the corpus does not write is the wrong
-    trade, and this says so instead of hiding it.
+    `_literal_return_truthiness` reads a float's own value.  **A return need
+    not be a single literal to be decided**: a COMPARISON, `and`/`or`/`not`, a
+    bitwise op, a select or `len(<string literal>)` over constants all fold, so
+    `return 1 < 2` / `return 1 and 2` / `return 1 | 2` / `return len("abc")` are
+    refused with the literal ones (measured on both architectures; before the
+    composition these built and dropped the suppression, the same wrong answer).
+    **What stays uncounted is a return that depends on a RUN-TIME value** — the
+    remaining limit is cross-FIELD flow (`nullcontext` returns
+    `self.exit_result`, and whether that is true depends on a constructor
+    argument this function cannot see), and it is the same limit `_expr_is_fd`
+    states for a descriptor in a field.  A narrower gate that refused every
+    return that is not a single literal would refuse
+    `formal/hostmods/contextlib.mojo`'s own `nullcontext`, whose three CPython
+    pairs live in `test_formal_core_hostmods.py`'s `ctx` group — refusing a host
+    module the corpus depends on to catch a case the corpus does not write is
+    the wrong trade, and this says so instead of hiding it.
     """
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if not isinstance(node, F.ReturnStmt):
             continue
         # `_literal_return_truthiness` is the ONE reader of "what would CPython
         # read this return as", so the test is the value's TRUTHINESS rather
-        # than its type or its word: `fold_literal_expr` answers an int for a
-        # number or a `bool` and a STRING for a string literal, `0.5` is a float
-        # literal it does not fold, and every one of those is decided there.
-        # Python `None` means "not decided" — a bare `return` and a computed
-        # expression both — and is falsy here, the refusal-to-decide direction
-        # this gate is deliberately one-sided in.
+        # than its type or its word: it composes the build's three constant
+        # folders and answers an int, a `bool` or a STRING for every shape they
+        # can decide — a literal, arithmetic, a comparison, `and`/`or`/`not`, a
+        # select, a bitwise op or `len(<string literal>)` — and a float from its
+        # own value.  Python `None` means "not decided" — a bare `return` and a
+        # return that depends on a run-time value both — and is falsy here, the
+        # refusal-to-decide direction this gate is deliberately one-sided in.
         if _literal_return_truthiness(getattr(node, "value", None)):
             return True
     return False
