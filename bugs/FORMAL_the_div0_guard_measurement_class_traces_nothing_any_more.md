@@ -202,6 +202,12 @@ moved into the startup stub below `func_offset`, so it is subtracted by ADDRESS
 rather than published as a trap — pinned by `test_formal_call_proof_gen.py`'s
 `TestCompilerTrapIsNotAProgramCall`), so on master there is nothing to subtract,
 and (b) subtracting it is measured NOT to reach
+is new, and what blocks the fix this doc wants, is that (a) at the time it was
+written arm64's `compiler_traps` list was EMPTY because the emitter recording
+had been dropped by a merge (`8df5b273`; the emitter half has since landed
+again, and the stack guard's `getrlimit` read has moved to the startup stub,
+below `func_offset`, where it is subtracted by address), so on that tree there
+was nothing to subtract, and (b) subtracting it is measured NOT to reach
 the div0 residual: with the recording restored and the traps filtered out of
 `_unfollowable_calls`, `q(a,b)` moves to a THIRD refusal (`recursion contract: the
 call in block 2 has to be below the source condition's negation`), not to the

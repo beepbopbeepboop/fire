@@ -11743,21 +11743,10 @@ def generate_arm64_proof(prog, code, info) -> str:
 
     decode_lemmas = _gen_decode_lemmas(func_name, code, base_addr)
     # **The step lemmas cover the EXECUTABLE region only, not the string data.**
-    # `__TEXT` carries every function body and THEN every interned string
-    # (`compile`'s string-emission loop), and `_step_result_plan`/`_gen_step_
-    # lemmas` walk every 4-byte word of `code`.  A string byte pattern that
-    # decodes as an instruction the step table knows is therefore planned a step
-    # lemma for a word no execution reaches — and the step-OK lemma's `hne` for
-    # that branch is FALSE, so the whole proof fails to typecheck.  Measured:
-    # `model.stack_trap_message` contains the word `909189220` (`TBZ w4, #…`),
-    # which every guarded image carries, so EVERY arm64 proof was red on it.
-    # `info["str_addrs"]` is the published string table, so the first string's
-    # address is the end of the code.  The run tests still read the whole
-    # `code` (`{name}_code` is unchanged), so nothing else moves.
-    _str_addrs = list((info.get("str_addrs") or {}).values())
-    code_end = (min(_str_addrs) - base_addr) if _str_addrs else len(code)
-    code_end = max(0, min(code_end, len(code)))
-    step_code = code[:code_end]
+    # `_exec_code_limit` is that boundary and its docstring carries the
+    # measurement; it is shared with the frame and dylib emitters so the three
+    # cannot disagree about where the code ends.
+    step_code = code[:_exec_code_limit(code)]
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
     step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
@@ -12889,8 +12878,9 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
     is false, or admitting it, are both worse than emitting the part that IS
     true, which is the part this backend is actually about:
 
-      * the per-instruction decode and step lemmas, which cover the WHOLE image
-        including the methods' `LDR`/`STR` and are unconditional;
+      * the per-instruction decode and step lemmas, which cover the image's
+        executable region — every function body, including the methods'
+        `LDR`/`STR` — and are unconditional;
       * one frame contract per method, quantified over the receiver word, which
         is the by-reference receiver proved end to end;
       * one concrete `native_decide` run test per method, entered at the
@@ -12927,7 +12917,7 @@ set_option linter.unusedVariables false
    address is not a source-level value and the entry function's result is not
    stated here.  What is proved is the receiver -- one contract per method,
    quantified over the receiver word -- plus the per-instruction step lemmas
-   for the whole image and a concrete run test per method. -/
+   for the image's executable region and a concrete run test per method. -/
 
 /- Code memory: maps absolute addresses to instruction bytes
    (a RET sentinel is appended after the emitted code). -/
@@ -13767,6 +13757,12 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
     base = info["base_addr"]
     test_input = info.get("test_input", 10)
     specs = specs or {}
+    # The step lemmas read the EXECUTABLE region only: a dylib whose export
+    # prints a literal interns the string, and a data word that decodes as an
+    # instruction would otherwise get a step lemma whose corollary is false
+    # (measured: `dylib_sr_190`, the TBZ word of `model.stack_trap_message`).
+    # `dylib_code` below is the whole thing, which is what the run tests read.
+    step_code = code[:_exec_code_limit(code)]
     export_defs = []
     proofs = []
     for index, export in enumerate(exports):
