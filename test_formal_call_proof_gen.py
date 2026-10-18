@@ -1446,6 +1446,35 @@ the text; it does not find out whether any word can arrive there.  So:
             "arm and dropped in the other is the duplicate-decoder defect this "
             "replaces")
 
+    def test_no_arm_of_the_generic_rhs_builder_raises(self):
+        """Every index the work-step table names builds a right-hand side.
+
+        `_step_rhs_generic` is the word-relative twin of `_step_rhs`, and it is
+        the one the universal-theorem closer calls (`"s.pc" in (_step_rhs_generic(
+        idx) or "")`), so an arm that raises takes the whole proof generation
+        down with a `NameError` rather than with a type error Lean would name.
+
+        It had one. The `B.cond` arm interpolated `{w & 0xf}` — a PYTHON
+        expression, where every other arm interpolates the Lean word `w` — so
+        `_step_rhs_generic(51)` raised `NameError: name 'w' is not defined`. The
+        arm is unreachable today because `51` is not in `_WORK_STEP_BY_IDX`, which
+        is why no row saw it and why the bug is filed rather than fixed
+        (`bugs/MERGE_step_rhs_generic_b_cond_interpolates_a_python_w.md`); this
+        is the sweep that would see the next one, and it covers the whole table
+        rather than the arm.
+
+        A future arm that raises is a `NameError` here, which is the cheapest
+        possible signal and the one a proof run would have taken 45 s to give.
+        """
+        import formal.arm64_proof_gen as G
+        bad = []
+        for idx in sorted(G._WORK_STEP_BY_IDX):
+            try:
+                G._step_rhs_generic(idx)
+            except Exception as e:            # noqa: BLE001 — the point
+                bad.append((idx, f"{type(e).__name__}: {e}"))
+        self.assertEqual(bad, [], f"arms that raise: {bad}")
+
     def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
         """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
 
