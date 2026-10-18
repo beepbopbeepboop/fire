@@ -314,3 +314,31 @@ blocker is the one the 2026-10-09 Status names: twelve `@admitted` contracts
 shaped `UInt64 → UInt64`, whose reshape is an integrator's Lean run and no light
 worker's. **This section is the cross-module half of option 1's groundwork, not
 option 1.**
+
+## Status 2026-10-13, merged (`work/formal411-docs`): the SAME fix, measured
+build-and-run, on one implementation
+
+`work/formal411-docs` built this fix independently and its two
+`test_formal_run.py` `CROSS_MODULE_CASES` rows land with this merge:
+`cross_module_returned_one_field_struct_reads_through_its_field` and
+`cross_module_dotted_returned_one_field_struct_reads_through_its_field`, which
+run the `struct CP` / `def make(n: Int) -> CP` pair above through a REAL image on
+both backends and compare the answer with CPython (`77` and `99`). The branch's
+own mechanism — a build-pass `_imported_function_defs` table plus a
+`_callee_declaration` helper — is NOT what the merged tree carries: the
+2026-10-13 (`work/formal398-docs`) section above is, and it is kept because it
+reads the declarations from `formal/imports.py::imported_function_defs` /
+`imported_module_function_defs`, which follow a package RE-EXPORT and are
+threaded through `_prepare_functions` rather than rebuilt per call site. The
+branch's one fact that the kept implementation did not have is folded into it: a
+`MODULE.member` chain is claimed only when no struct of THIS image declares
+`member`, because a local `m` that shadows an imported module's name makes
+`m.f()` a method call the lift owns.
+
+**What this does NOT do is the same in both readings, and it is the doc's actual
+symptom:** `run` still returns the STATUS WORD, so `r.returncode` is still a
+field access on an integer. Closing it is still option 1 (give `run` a
+`-> CompletedProcess` struct return), and its remaining blocker is the one the
+2026-10-09 Status names: twelve `@admitted` contracts shaped `UInt64 → UInt64`,
+whose reshape is an integrator's Lean run and no light worker's.
+

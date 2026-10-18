@@ -4879,6 +4879,48 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A ONE-FIELD STRUCT RETURNED BY AN IMPORTED FUNCTION, and the identity the
+    # same-image fix already applied to a callee in THIS module.
+    # `_call_returns_one_word_struct` read a local function's `-> T` out of
+    # `functions_by_name` and claimed nothing across the boundary, so `r.v` was
+    # refused with "… nothing … establishes [what r holds]" on both
+    # architectures even though `CP` is one field and its value IS `r`. The
+    # declaration is now read from the imported module's own source
+    # (`_imported_function_defs`), for both spellings a call has: the bare name
+    # `from byref_xmod import make` binds, and the `byref_xmod.make(...)` chain
+    # `import byref_xmod` binds. `both: True` because the identity is a shared
+    # build-pass decision and a boundary is exactly where a divergence would be
+    # invisible — the two sides are separate compilations. Each reads the field
+    # TWICE in one expression (`v*10 + v`), so a backend that read the wrong
+    # word answers a different number rather than merely failing.
+    ("cross_module_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "from byref_xmod import make\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = make(7)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 77, None),
+    ("cross_module_dotted_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "import byref_xmod\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = byref_xmod.make(9)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 99, None),
     # A ONE-FIELD MUTATOR across the boundary, and the third of the three
     # measured shapes that used to drop the receiver write-back: the old
     # statement-shaped rewrite was built from `one_field_mutating_methods`, a
@@ -7016,6 +7058,41 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+
+    # ── TWO INSTANTIATIONS OF ONE TEMPLATE, EACH SETTLED BY ITS RECEIVER ─────
+    #
+    # The same ambiguous-name resolution as the row above, for the case the
+    # binding tables used to MISS entirely: a ZERO-FIELD struct.  `Pair[T,
+    # *values]` carries a `comptime` and no runtime field at all, so
+    # `struct_is_framed` is False of it and `struct_is_one_field` is False of it
+    # — it was in NEITHER `one_word` nor `bound` — and the two mangled
+    # instantiations `Pair_…_1` and `Pair_…_5_6` BOTH declare `size`, so
+    # `_method_owners` popped `size` as ambiguous and `_rewrite_method_calls`
+    # declined both calls.  Refused identically on both backends ("p.size() is a
+    # method call on a value …"), on the FIRST receiver, while one instantiation
+    # in one function also answered 1.
+    #
+    # The fix is `_bound_receiver_structs`'s `unit_structs`: a local bound from a
+    # zero-field struct's constructor is recorded like any other construction
+    # binding, so the bare-receiver arm of `_rewrite_one_word_field_method_calls`
+    # can read which instantiation `p` holds and lift `p.size()` to
+    # `Pair_…_1_size(p)` and `q.size()` to `Pair_…_5_6_size(q)`.  `len=1 2` is
+    # CPython's answer (`p`'s values are `(1,)`, `q`'s are `(5, 6)`); a fix that
+    # lifted both to ONE instantiation would answer `1 1` or `2 2`, which is why
+    # the row reads BOTH receivers rather than one.  On both backends because
+    # the walk is shared and its two emitters must not come apart on one source.
+    ("both_arch_two_variadic_instantiations_settle_each_receiver",
+     "struct Pair[T: AnyType, *values: T]:\n"
+     "    comptime length = len(Self.values)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair[Int, 1]()\n"
+     "    var q = Pair[Int, 5, 6]()\n"
+     "    printf(\"len=%d %d\", p.size(), q.size())\n"
+     "    return 0\n", 0, "len=1 2"),
 
     # ── AN ENUM-TYPED PARAMETER, AND `.value` OFF IT ─────────────────────────
     #

@@ -11508,6 +11508,16 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
     `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`
     records.
 
+    **A `MODULE.member` chain is claimed only when no struct of this image
+    declares `member`** (`work/formal411-docs`): `_import_aliases` excludes a
+    name this file DEFINES at top level, but not a LOCAL VARIABLE that happens
+    to share a module's name, and `m.f()` for a local `m` is a METHOD call the
+    lift owns — resolving it to an imported module's free function `f` would
+    record a binding the program does not have.  When `member` is declared by
+    any struct the answer is therefore None (the binding keeps its refusal),
+    which is the direction that cannot produce a wrong number: the method lift,
+    which runs after this table is built, still gets its own chance at the
+    call.
     Three refusals, and each is the direction that cannot produce a wrong
     number:
 
@@ -11534,6 +11544,14 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
         # test is the discriminator.
         mod = (module_functions or {}).get(value.func.obj.name)
         if mod:
+            if any(m.name == value.func.member
+                   for st in (structs_by_name or {}).values()
+                   for m in M.struct_methods(st)):
+                # A LOCAL `m` that shadows an imported module's name makes
+                # `m.f()` a METHOD call the lift owns, and resolving it to the
+                # module's free function would record a binding the program
+                # does not have (`work/formal411-docs`).
+                return None
             callee = mod.get(value.func.member)
     if callee is None:
         return None
@@ -11877,7 +11895,8 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
 
 
 def _bound_receiver_structs(fn, framed, functions=(), owner=None,
-                           one_field=None, own_scope: bool = False) -> dict:
+                           one_field=None, own_scope: bool = False,
+                           unit_structs: dict = None) -> dict:
     """`{name: struct}` for a local whose construction bindings all AGREE.
 
     **The same evidence `_one_word_field_map` reads, without the one-word
@@ -11890,6 +11909,28 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     question this table answers: `x = A()` on one path and `x = B()` on another
     is one name with two layouts, and lifting `x.m()` to either one of them is a
     wrong answer chosen by ordering.
+
+    **`unit_structs` adds the structs with NO fields.** They are the one part of
+    the partition `framed`/`wide`/`one_field` that is in none of the three
+    (`struct_fits_one_word` is True of a marker and `struct_is_one_field` is
+    False of it, so `_one_word_field_map` does not hold it and `struct_is_framed`
+    is False of it), and a name bound from such a struct's constructor was
+    therefore in NO binding table at all. What that cost: a method call on such
+    a name whose method name two structs declare — which is exactly what two
+    INSTANTIATIONS of one generic template are — reached
+    `_rewrite_one_word_field_method_calls`'s bare-receiver arm with no evidence
+    of which struct the receiver held, and was refused as "a method call on a
+    value". See `test_formal_run.py`'s
+    `both_arch_two_variadic_instantiations_settle_each_receiver`.
+
+    `unit_structs` is merged into `framed` for the `_constructor_bindings` walk
+    rather than consulted as a second table, because the agreement test has to
+    see BOTH kinds at once: `x = A()` (framed) on one path and `x = Z()`
+    (a marker) on another is one name with two layouts, and two independent
+    tables would each keep its own candidate and lift to one of them by
+    ordering. The owner's own entry below still reads `framed` and only `framed`
+    — `owner_framed` is a question about the receiver's REPRESENTATION, and a
+    marker is not framed however it is bound.
 
     `_constructor_bindings` is the implementation rather than a second walk of
     the same bindings, and it is called with the module's `framed` table so the
@@ -11940,7 +11981,8 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     """
     out = {name: cands[0]
            for name, cands in _constructor_bindings(
-               fn, framed, functions, own_scope=own_scope).items()
+               fn, framed if not unit_structs else {**framed, **unit_structs},
+               functions, own_scope=own_scope).items()
            if len(cands) == 1}
     # The owner's OWN entry in the same table, not a fresh `struct_is_framed`
     # ask: `owner` comes from `method_owners`, which is built from the `structs`
@@ -18686,6 +18728,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # struct) pairs changing their answer inside one call, `struct_is_one_field`
     # one of the four it covered.
     one_field = M.one_field_struct_names(structs_by_name.values())
+    # …and the module's ZERO-FIELD structs, the one part of the same partition
+    # that is in NONE of `framed`, `wide` and `one_field`.  `struct_fits_one_word`
+    # is True of a marker and `struct_is_one_field` is False of it, so
+    # `_one_word_field_map` does not hold it; `struct_is_framed` is False of it,
+    # so `_bound_receiver_structs` did not either.  A method call on a local bound
+    # from such a struct's constructor was therefore lifted by NAME alone, and a
+    # name two structs declare — which two INSTANTIATIONS of one generic template
+    # are — was refused.  Read OFF the partition rather than by asking
+    # `struct_field_count` once per struct: the three tables above are the whole
+    # partition, so "in none of them" is the answer and costs three dict lookups.
+    unit_structs = {name: st for name, st in structs_by_name.items()
+                    if name not in framed and name not in wide
+                    and name not in one_field}
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
@@ -18984,7 +19039,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # is the ambiguity `_bound_receiver_structs` already drops rather than
         # picks, and the alias is one more binding rather than a better one.
         _bound = _bound_receiver_structs(fn, framed, _image_function_names, st,
-                                         one_field)
+                                         one_field, unit_structs=unit_structs)
         for _aname, _ast in with_alias_structs.items():
             if _aname in _bound or _aname in one_word:
                 continue
