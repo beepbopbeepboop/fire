@@ -5,7 +5,21 @@
 `_gen_universal_e2e_cfg` pair that consumes it. **NOT** the flag lemmas
 (`lib/ProofLib.lean::arm64_flag_*_s` are correct and are what the rewrite
 actually uses), and **NOT** the codegen: the emitted image is right on both
-architectures and agrees with CPython. **Status: PARTIALLY FIXED 2026-10-05. THE FALSE STATEMENT IS GONE — the
+architectures and agrees with CPython. **Status (2026-10-13, `work/formal405-docs`): STEP 1 IS LANDED.**
+`lib/ProofLib.lean` now carries `arm64_slt_iff_lt` — the sign-flip equivalence
+`(a ^^^ 2^63) < (b ^^^ 2^63) ↔ a < b` for `a, b < 2^63`, proved by `bv_decide`
+and pinned by
+`test_formal_call_proof_gen.py::TestTheSignedOrderLemmaIsInTheLibrary`
+(the statement, and Lean elaborating a use of it) — so the reusable half of
+§"The next step" step 1 is done. **What is left is unchanged**: the OTHER
+library piece (a SIGNED variant of `while_lt_exit_contract_bottom` whose
+hypothesis and fuel are stated in the flipped order — the generator's own
+comment at `_gen_range_loop` names it), then step 2 (the generator half) and
+step 3 (`hbound`). The refusal itself is unchanged and `sum_range` is still a
+refusal rather than a proof, so nothing below this line moves. Everything after
+it is the 2026-10-05 measurement.
+
+**Status: PARTIALLY FIXED 2026-10-05. THE FALSE STATEMENT IS GONE — the
 generator now DECLINES the contract instead of emitting it — and the library
 half (`arm64_slt_iff_lt`, plus the signed variant of `while_lt_exit_contract`)
 is still not landed, so `sum_range` is a refusal rather than a proof. §"What
@@ -178,7 +192,15 @@ still not landable without it; the refusal above makes step 2 SAFE to land
 which is the one thing that changed about this list.
 
 1. **Add `arm64_slt_iff_lt` to `lib/ProofLib.lean`** — the reusable piece, and
-   the reason this is not a patch:
+   the reason this is not a patch. **LANDED 2026-10-13 (`work/formal405-docs`)**:
+   the theorem is in the library and elaborates, pinned by
+   `TestTheSignedOrderLemmaIsInTheLibrary`. The proof is
+   `constructor <;> intro h <;> bv_decide`, not the `simp only
+   [arm64_lt_iff_flip]` sketched below — that lemma was never in the library
+   (`grep -c arm64_lt_iff_flip lib/ProofLib.lean` was 0), so the sketch was a
+   second missing fact rather than a proof of this one. **This is one of the
+   TWO library pieces**: the signed `while_lt_exit_contract_bottom` variant
+   (the generator's comment at `_gen_range_loop`) is still not landed.
 
    ```lean
    /-- The sign flip is an involution, so below the sign bit it is the

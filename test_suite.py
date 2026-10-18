@@ -1252,14 +1252,16 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # 'mojo' is not defined`; with that fixed, these six run and pass, and a
     # marker on a passing test is reported as a FAILURE.
     #
-    # `formal-os-backing` is an ADDITION rather than a drop: it was registered
-    # with no marker and red 30 of 58 (its own doc), and is now `expect=`-
-    # marked. The branch marked 6 of 70 on 2026-10-07; on the merged tree the
-    # 32-bit pointer-subscript half of that 6 is fixed (the subscript emitters
-    # read at the element's width and signedness on both backends), so the
-    # count is 2 of 70 — `stat_null`'s dev width, both backends. Its harness
-    # had to start printing a `PASS=n FAIL=m` shape for the count to be
-    # checkable at all.
+    # `formal-os-backing` is a NINTH drop and the one this census's own rule
+    # caught last: it carried `expect='2 of 70: stat_null dev width …'` from
+    # the 2026-10-08 state, and both halves of that red were then closed on
+    # master — the 32-bit pointer-subscript class by the width-and-signedness
+    # subscript emitters, and `stat_null`'s `dev` by an oracle that compares
+    # the 32-bit device number both sides agree on (CPython's sign-extended
+    # `0xffffffffa8fb1a80` is above 2**63, which this backend's signed 64-bit
+    # integer cannot print). The job is 72/72, and an `expect=` on a passing
+    # test is reported as a FAILURE ("marked expect=… but it PASSES"), which
+    # is what removed it. Its three bug docs went with it.
     #
     # `bootstrap-stage2-dumps` no longer states a count: its `40 of 46` marker
     # was removed on master (2026-10-03/04, the stage2 dumps stopped dying the
@@ -1272,19 +1274,29 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      'coro-future-await': 17,
                      'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
-                     # `formal-os-backing` (2) is the addition from the 2026-
-                     # 10-07 re-measurement, narrowed on the merged tree (above).
-                     # `formal-x86-parity` (1) was a SEVENTH drop, restored on
-                     # 2026-10-16: 4ceb7603 removed its marker and made its one
-                     # row `Float64` doubles instead of the integers whose bits
-                     # happen to be a double's, but a later bulk merge reverted
-                     # the TEST half of that fix while the doc deletion (the
-                     # other half) survived, so the row went red on both
-                     # backends again and the marker came back with it — a
-                     # half-applied fix, which is the same class of damage as
-                     # the dropped definitions in
-                     # `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`.
-                     'formal-os-backing': 2,
+# NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
+                     # is in this census any more, and that is the union of the two
+                     # sides of the 2026-10-17 merge, each of which dropped one of
+                     # them for its own reason:
+                     #   * `formal-os-backing` was an ADDITION from the 2026-10-07
+                     #     re-measurement; it became the NINTH drop when both halves
+                     #     of its 2-of-70 red closed (see the prose above).
+                     #   * `formal-x86-parity` (1) was the 2026-10-06 registration,
+                     #     then a SEVENTH drop and then briefly RESTORED on
+                     #     2026-10-16 — 4ceb7603 removed its marker and made its one
+                     #     row `Float64` doubles instead of the integers whose bits
+                     #     happen to be a double's, but a later bulk merge reverted
+                     #     the TEST half of that fix while the doc deletion (the
+                     #     other half) survived, so the row went red on both
+                     #     backends again and the marker came back with it, a
+                     #     half-applied fix of the same class as the dropped
+                     #     definitions in
+                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
+                     #     — and then master's `5e45d0b5` restored the test half for
+                     #     real, so the marker is gone a second time and the count
+                     #     with it.  The registry is the authority for both: a
+                     #     census entry for a job that no longer carries an
+                     #     `expect=` fails this very check.
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '

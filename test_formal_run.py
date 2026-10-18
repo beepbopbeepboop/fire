@@ -15422,6 +15422,18 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 # diverging by architecture is the same defect with a different subject.
 #
 # (name, mojo_source, want_exit, stderr_needles)
+#
+#: The FULL text `model.list_append_overflow_message` returns for the two rows
+#: below, as a needle. The message is NOT ASCII (an em dash and an ellipsis:
+#: 774 characters are 778 bytes) and `_emit_stop_diagnostic` used to tell
+#: `write(2)` the CHARACTER count, which wrote every run-time stop four bytes
+#: short — this one ended at "...the overflow follows the appe". The
+#: two-architecture byte-for-byte comparison cannot see that (both machines
+#: truncated the same), and every needle the rows carried was early in the
+#: text, so the model's own sentence is what pins the ending.
+_APPEND_OVERFLOW_TEXT = __import__(
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
+
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
     # One site, three executions, and the capacity is ONE — which is the whole
@@ -15435,6 +15447,17 @@ STDERR_CASES = [
     # overflow" would leave a reader unable to tell this from a frame-budget
     # refusal (`frame_blob_refusal`), which has a different and differently
     # fixable remedy.
+    #
+    # **AND THE WHOLE SENTENCE IS A NEEDLE, which is the half that was missing
+    # and is why a real defect lived here.** The three needles above are all
+    # early in the text; the message is NOT ASCII — it carries an em dash and an
+    # ellipsis, so its 774 characters are 778 BYTES — and both emitters told
+    # `write(2)` the CHARACTER count, so every run-time stop was written four
+    # bytes short and this one ended mid-word at "...the overflow follows the
+    # appe". The byte-for-byte two-architecture comparison below could not see
+    # it (both machines truncated identically) and no needle reached the end.
+    # `_APPEND_OVERFLOW_TEXT` is the whole message from the model, so the
+    # truncation is a FAILURE and not a sentence nobody read to the end.
     ("list_append_overflow_is_loud",
      "def main(n):\n"
      "    xs = []\n"
@@ -15444,7 +15467,8 @@ STDERR_CASES = [
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
+     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
+         _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
     # the capacity each one sees is its own", and that repair does not work: the
@@ -15474,7 +15498,8 @@ STDERR_CASES = [
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
      1, ["SITES outside any loop", "for … in range(n)",
-         "Moving the appends into a function of their own does NOT help"]),
+         "Moving the appends into a function of their own does NOT help",
+         _APPEND_OVERFLOW_TEXT]),
     # `d[k] = v` for a key the blob does NOT hold, which is CPython's INSERT and
     # used to be a key scan that missed and stopped the program having printed
     # nothing. The reservation is `formal/model.py`'s `dict_store_capacity` —
@@ -18224,11 +18249,17 @@ COMPREHENSION_ELEMENT_CASES = [
     #
     # A nested comprehension whose produced values are words is accepted too
     # (`a_nested_comprehension_whose_result_is_words_is_per_iteration`), by the
-    # same copy over the shared predicate. The rows after the nested acceptance
-    # are the shapes whose per-iteration materialisation is still refused — a
-    # nested comprehension whose own result holds containers, a list of lists,
-    # and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_
-    # blob_base.md`) a slice or a constructor call, whose runtime blob base is
+    # same copy over the shared predicate. A SLICE is accepted on the same
+    # reasoning one node further out — a slice copies element words out of its
+    # base, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site — and its own rows
+    # (`…_that_is_a_slice_of_a_name_…`, `…_of_a_literal_…`, `…_of_a_list_of_
+    # lists_…`, `a_slice_element_is_a_distinct_object_per_iteration`) sit beside
+    # the nested ones. The rows after them are the shapes whose per-iteration
+    # materialisation is still refused — a nested comprehension whose own result
+    # holds containers, a list of lists, a slice whose base carries a scratch
+    # address, and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_
+    # runtime_blob_base.md`) a constructor call, whose runtime blob base is
     # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
     # so a refusal about anything else fails the case.
     #
@@ -18273,6 +18304,61 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      0, "63"),
+    # A SLICE element is materialised per iteration on the same reasoning one
+    # node further out: a slice copies element words out of its BASE into a blob
+    # of its own, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site. `a[0:y]` under a
+    # NAME is the measured shape, and the length read is the one a content read
+    # cannot fake: an aliased element would carry the LAST iteration's slice, so
+    # three of these would read `3 3 3`.
+    ("a_comprehension_element_that_is_a_slice_of_a_name_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", len(r[0]), len(r[1]), len(r[2]))\n"
+     "    return 0\n",
+     0, "1 2 3"),
+    # The same slice read through MUTATION, which is the other half of "distinct
+    # objects": writing element 0 must not be visible through element 1. CPython
+    # gives `99 10 10`; an aliased result would give `99 99 99`.
+    ("a_slice_element_is_a_distinct_object_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    r[0][0] = 99\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "99 10 10"),
+    # A slice of a base that PERSISTS and holds containers — `b[0:2]` where `b`
+    # is a name — is sound for the same reason the literal arms accept `[a, b]`:
+    # the copied words are addresses of the persistent inner lists, which is what
+    # CPython's own slice shares, not addresses of a blob built per iteration.
+    ("a_slice_of_a_list_of_lists_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var b = [[1, 2], [3, 4], [5, 6]]\n"
+     "    var r = [b[0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][0][0], r[1][1][1], r[2][0][1])\n"
+     "    return 0\n",
+     0, "1 4 2"),
+    # A slice whose base is a display of scalars: the base IS built here, but a
+    # `[1, 2, 3]` display contributes only words, so the copy carries no scratch
+    # address and the element is materialised.
+    ("a_comprehension_element_that_is_a_slice_of_a_literal_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[1, 2, 3][0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][0], r[2][1])\n"
+     "    return 0\n",
+     0, "2 1 2"),
+    # …and the boundary a slice does NOT cross: a base built here that ITSELF
+    # holds a container carries the address of one scratch blob into every
+    # iteration's copy, so `[[1, 2]][0:1]` stays refused. This is the row that
+    # keeps the slice arm from being "accept every slice".
+    ("a_slice_whose_base_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[1, 2]][0:1] for y in [1, 2, 3]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:the element `[[1, 2]][0:1]` opens a container", None),
     # …and the boundary the nested acceptance does NOT cross: an inner
     # comprehension whose OWN result holds containers carries those containers
     # as addresses, so copying it per iteration would share one scratch blob —

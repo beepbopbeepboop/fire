@@ -2,12 +2,13 @@
 
 **Area:** FORMAL, `formal/arm64_proof_gen.py`'s ADD/SUB-immediate decodes.
 **Status: OPEN, MEASURED, and the fix is written and verified (patch at the
-end) but NOT landed — the symptom is `bunny-proofgen`'s claim
-(`FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`), so this is filed
-rather than edited.**
+end) but NOT landed — the symptom it shares with the rest of the oct-7
+`test_formal_call_proof_gen.py` reds is `maxRecDepth` on an `sp`-arithmetic step,
+which `f7bd05ea` closed for its own half; this half is a different mechanism, so
+this doc is filed rather than edited under that one.**
 
-This is a **distinct root cause** from the one that doc names, not a duplicate
-of it: that doc says the reds come from the non-reducible `arm64_ext_imm12 w`
+This is a **distinct root cause** from the one that half names, not a duplicate
+of it: that half says the reds come from the non-reducible `arm64_ext_imm12 w`
 term in `work_step_add_imm64`'s STATEMENT (`lib/ProofLib.lean`), which makes the
 elaborator exceed `maxRecDepth`.  This one is in the GENERATOR, and no change to
 the library lemma touches it.

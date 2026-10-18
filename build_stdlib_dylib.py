@@ -21,6 +21,7 @@ import argparse
 import tempfile
 import subprocess
 import fcntl
+import contextlib
 from concurrent.futures import ProcessPoolExecutor
 
 import cas
@@ -169,6 +170,25 @@ _PROBE_SRC = 'int mojo_probe(void) { return 0; }\n'
 _driver_probe: dict = {}
 
 
+@contextlib.contextmanager
+def _staging_dir(prefix: str):
+    """A `tempfile.mkdtemp` directory removed on the way out, success or raise.
+
+    `ignore_errors=True` is deliberate: the failure worth raising is the
+    caller's, and a cleanup error must not mask it. The three sites that stage
+    objects into a directory — `_driver_targets` (a driver probe), `build` (the
+    stdlib objects and the linked dylib) and `runtime_dylib` (the runtime
+    objects) — each used to spell this shape out, and `build`'s copy was
+    missing, which leaked a `mojostdlib_*` directory. One reader of the shape
+    is what keeps the next staging site from being the one that forgets.
+    `formal/build.py::_publish_signed_image` is the same shape."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _driver_targets(driver: str, arch: str) -> tuple:
     """(works, why) — can `driver` emit an object FOR `arch`? Measured, not assumed."""
     key = (driver, arch)
@@ -176,12 +196,11 @@ def _driver_targets(driver: str, arch: str) -> tuple:
         return _driver_probe[key]
     result = (False, 'not probed')
     try:
-        wd = tempfile.mkdtemp(prefix='mojo_archprobe_')
         # The probe directory holds a one-line C file and its object; the object
         # is read and then nothing needs the directory, so it is removed here or
         # it leaks one dir per probed (driver, arch) — the same class of leak
         # `runtime_dylib` had, in the same file.
-        try:
+        with _staging_dir('mojo_archprobe_') as wd:
             src = os.path.join(wd, 'probe.c')
             out = os.path.join(wd, 'probe.o')
             with open(src, 'w') as f:
@@ -198,8 +217,6 @@ def _driver_targets(driver: str, arch: str) -> tuple:
             else:
                 detail = (proc.stderr or proc.stdout or '').strip().splitlines()
                 result = (False, detail[-1] if detail else f'exit {proc.returncode}')
-        finally:
-            shutil.rmtree(wd, ignore_errors=True)
     except Exception as e:
         result = (False, str(e))
     _driver_probe[key] = result
@@ -940,8 +957,14 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     arch = normalize_arch(arch)
     objflags = _OBJ_FLAGS + arch_flags(arch) + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    workdir = tempfile.mkdtemp(prefix='mojostdlib_')
-    try:
+    # Every object, the generated reflection C and its object, and the staged
+    # dylib live under this work directory, and `os.replace` moves only the
+    # finished dylib out — so nothing removes it unless `_staging_dir` does.
+    # Measured at ~324 kB for a ONE-module cold build (a full stdlib build is
+    # 664 modules plus the runtime and the reflection table, so tens to hundreds
+    # of MB), created unconditionally even on a cache hit, and leaked per cold
+    # CAS before this.
+    with _staging_dir('mojostdlib_') as workdir:
         objs = []
 
         # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
@@ -1264,8 +1287,6 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             with open(out, 'rb') as f:
                 cas.publish(link_key, '.dylib', f.read())
             return out
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None,
@@ -1394,25 +1415,23 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
     os.makedirs(os.path.dirname(out), exist_ok=True)
     # Everything below happens inside a staging DIRECTORY that is removed on the
     # way out, whether the build succeeded or raised. Only the finished dylib
-    # leaves (`os.replace(staged, out)`), and without this `finally` the eight
+    # leaves (`os.replace(staged, out)`), and without `_staging_dir` the eight
     # runtime objects, the reflection table's generated C and its object, and
     # the linked dylib itself sit in `$TMPDIR` for the life of the machine —
     # ~520 kB per COLD build, which per-test CAS homes make routine. The
     # `ignore_errors=True` is deliberate: the failure that matters is the
     # build's, and a stale directory is worth less than a cleanup error masking
     # it. `formal/build.py::_publish_signed_image` is the same shape.
-    wd = tempfile.mkdtemp(prefix='mojo_rt_')
     # The work directory holds the runtime objects, the generated reflection C
     # and its object, and the staged dylib — and `os.replace` below moves only
     # the dylib out, so nothing else removes `wd` unless this does. It is per
     # COLD CAS (a cache hit returned above), and this tree has many callers with
     # a fresh `GMOJO_HOME` per test, so the leak measured ~500 kB per cold build
-    # (34 leaked dirs, ~17 MB, in twelve minutes of one corpus run). The
-    # `finally` is the model `formal/build.py::_publish_signed_image` uses:
+    # (34 leaked dirs, ~17 MB, in twelve minutes of one corpus run).
+    # `_staging_dir` is the model `formal/build.py::_publish_signed_image` uses:
     # stage, publish, and remove the staging DIRECTORY so a killed build leaves
-    # no debris for a later glob to mistake for a library. `ignore_errors=True`
-    # because the failure worth raising is the build's, not the cleanup's.
-    try:
+    # no debris for a later glob to mistake for a library.
+    with _staging_dir('mojo_rt_') as wd:
         objs = []
         for src, lang, unit_flags in units:
             stem = os.path.splitext(os.path.basename(src))[0]
@@ -1457,8 +1476,6 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         _arch_or_die(staged, arch, 'linked runtime dylib')
         os.replace(staged, out)
         return out
-    finally:
-        shutil.rmtree(wd, ignore_errors=True)
 
 
 # The headers that declare the runtime's public C surface, in the order they

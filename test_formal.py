@@ -248,8 +248,8 @@ EXPECTED_FAILURES = {
     #   * `count` is still a hard red but at a NEW site.  The proof now reaches
     #     `count_proof.lean:4305:58: error: maximum recursion depth has been
     #     reached`, the same `arm64_ext_imm12`/`work_step_add_imm64` kernel
-    #     reduction `mod_by_var` hits
-    #     (`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`).  It
+    #     reduction `mod_by_var` hits — `f7bd05ea`'s `first | simp <;> done |
+    #     rfl` at a block start, in place of the bare `rfl`.  It
     #     also admits ONE `sorry`, at the x30 CFG leaf this comment describes,
     #     which the corrected frame address now lets Lean reach instead of
     #     stopping at the `rfl` below.

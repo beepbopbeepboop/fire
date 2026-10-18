@@ -5716,6 +5716,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
         self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
         self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
+        # The interned blob is UTF-8 + NUL, so this is the BYTE count and not
+        # `len(text)`; see `model.diagnostic_length` for the truncation the
+        # character count caused on a non-ASCII message.
         self._emit_mov_imm(Reg.RDX, M.diagnostic_length(text))   # length
         self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
         self._emit_extern_call("write")
@@ -7044,8 +7047,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # The SHAPE's leaves, for the same reason the arm64 site asks for
             # them: a star leaf keeps its `*`, so a starred for-target is
             # refused HERE, by this identifier check, with the same sentence
-            # arm64 gives it — the option (1) refusal of
-            # `FORMAL a starred for target is broken on both backends`.
+            # arm64 gives it — the option (1) refusal, pinned by
+            # `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target`
+            # and its two sibling rows.
             leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
@@ -11296,7 +11300,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # language failure this backend exists to prevent.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and not M.string_operand_is_string(
+                and not M.is_non_pointer_string(
                     self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:

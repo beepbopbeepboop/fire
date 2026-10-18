@@ -219,6 +219,32 @@ class TestExemptions(unittest.TestCase):
                          "they are a fixed gap that kept its exemption: %s"
                          % stale)
 
+    def test_the_x86_64_backend_has_no_backlog_entry(self):
+        """x86-64 carries the same ratchet, and this is what closed it.
+
+        The x86-64 half of the census used to have a `BACKLOG` entry for every
+        form the model could not step. Each one was closed at its own root: the
+        nine SSE2 scalar binary64 forms, the three-operand `imul`, the byte-wise
+        `and`/`or`, and the runnable rows the pool did not draw. The last one,
+        `encode_call_r64`, was never a gap in this backend at all — `FF /2` with
+        mod=11 calls a REGISTER's contents, which the fuzz harness can install no
+        target for — so it is a `HARNESS_LIMITS` entry and x86-64 has no `BACKLOG`
+        row left. Both halves are asserted here, because the reclassification
+        and the emptying are the same claim seen from two sides.
+        """
+        x86_forms = {r.encoder for r in _ROWS["x86_64"]}
+        backlog = sorted(name for name in C.BACKLOG if name in x86_forms)
+        self.assertEqual(
+            [], backlog,
+            "these `BACKLOG` entries name an x86-64 form, so the x86-64 half of "
+            "the census is carrying a gap again — either it is a real one that "
+            "needs a doc, or it is a property of the harness and belongs in "
+            "`HARNESS_LIMITS`: %s" % backlog)
+        self.assertIn(
+            "encode_call_r64", C.HARNESS_LIMITS,
+            "`encode_call_r64` is not in `HARNESS_LIMITS`, so the fuzz column "
+            "it cannot have is unexplained on x86-64 again")
+
     def test_the_arm64_backend_has_no_unexplained_gap_at_all(self):
         """arm64 is the backend this census was built for, so it is held to the
         whole property with no slack: every one of its exemptions is a named

@@ -3847,9 +3847,10 @@ dylib_exports: list = None, globals_base: int = None,
         leaves keep the star, and refuses the target at the identifier check
         with the one shared sentence the x86-64 site gives it. The rest-blob
         machinery this method used to own (`_emit_for_unpack_star_rest`) was
-        deleted with that refusal — the option (1) resolution of
-        `FORMAL a starred for target is broken on both backends` —
-        rather than left as dead code that reads as support."""
+        deleted with that refusal — the option (1) resolution, pinned by
+        `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target` and its
+        two sibling rows — rather than left as dead code that reads as
+        support."""
         if isinstance(tree, str):
             self._store_var(tree, 0)
             return
@@ -7671,6 +7672,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         byte for byte so the class is a red row rather than a shorter sentence.
         """
         label = self._intern_string(text)
+        # X2 is the interned blob's BYTE length, not `len(text)`; the text is
+        # UTF-8 and several of the stop messages are not ASCII, which is the
+        # truncation `model.diagnostic_length` documents.
         self.asm.emit_adrp_add(1, label)                   # X1 = text
         self.asm.emit(encode_movz_xd_imm(0, 2))            # X0 = fd = stderr
         self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))
@@ -10733,7 +10737,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # payload type, rather than the pointer model's.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and not M.string_operand_is_string(
+                and not M.is_non_pointer_string(
                     self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:

@@ -3312,18 +3312,18 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     # Re-measured 2026-10-12 on the merged tree: 68 of 70. The 2026-10-07
-     # 6-of-70 (three cases x two backends) has narrowed to ONE case: the
-     # 32-bit pointer-subscript class (`pointer_subscript_i32`,
-     # `pointer_subscript_augmented`) is fixed on master — the subscript
-     # emitters now read and store at the element's width AND signedness on
-     # both backends, so those rows pass; what is left is `stat_null`'s
-     # `dev` field, on both backends, where the 4-byte signed `st_dev` is
-     # zero-extended (2835028608) instead of sign-extended
-     # (18446744072249612928 on this host, 0xffffffffa8fb1a80).
-     expect='2 of 70: stat_null dev width on both backends — a 4-byte signed '
-            'st_dev zero-extended instead of sign-extended — '
-            'bugs/FORMAL_os_backing_pointer_and_stat_widths.md',
+     # 72 of 72, and the `expect=` this carried is gone with its bug doc. The
+     # 2026-10-07 six reds (three cases x two backends) are all closed on
+     # master: the 32-bit pointer-subscript class (`pointer_subscript_i32`,
+     # `pointer_subscript_augmented`) is fixed because the subscript emitters
+     # now read and store at the element's width AND signedness on both
+     # backends; `stat_null`'s `dev` difference is the 32-bit `dev_t` the two
+     # sides render differently when its high bit is set — the image
+     # zero-extends the four bytes, CPython sign-extends them into an unsigned
+     # long above 2**63, a value this backend's signed 64-bit integer cannot
+     # print — so the oracle compares the 32-bit device number both sides
+     # agree on. A live `expect=` on a passing job is an anti-rot FAILURE
+     # (CLAUDE.md, "Known-failing tests"), which is what dropping it fixes.
      desc='the syscalls under the os host module, through real images')
 
 # ── the ten the batch merge left unregistered ──────────────────────────────
@@ -3766,11 +3766,17 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # zero-second proof, every timing names the date it was taken, and at least one
 # carries a real measured time so the 2x gate is not inert). That last one is the
 # check that keeps a hand-edited baseline from being a green light.
+#
 # `deps=['preflight', 'prooflib']`: one assertion,
-# `test_library_state_agrees_with_the_question_it_asks`, requires all six
-# `lib/*.olean` to be present (it is what says a cache report is not reporting
-# about a missing library), so the job must not start before the shared library
-# build when a parallel `proofs` bucket runs it beside `formal-proof-census`.
+# `test_library_state_agrees_with_the_question_it_asks`, asks the same
+# library-state question the census above asks — it requires every
+# `formal/lean.py::LIBRARY_MODULES` key (all six of them) to have a
+# `lib/*.olean`, which is what says a cache report is not reporting about a
+# missing library — so the job must not start before the shared library build
+# when a parallel `proofs` bucket runs it beside `formal-proof-census`. It went
+# unnoticed because a warm tree already has the library: this job's own work
+# stays Lean-free and the dep only orders it behind the one build every proof
+# job shares.
 # `timeout` raised 3600 -> 7200 on 2026-10-05, and the arithmetic is the
 # reason: `formal/examples` grew from 52 programs to 93, and the census is `-j 1`
 # by design (it gates on whole-tree CPU seconds, which is a per-example cost, so

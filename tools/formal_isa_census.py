@@ -559,12 +559,13 @@ HARNESS_LIMITS = {
                        "harness cannot install, so a case leaves the "
                        "generated stub — the same reason as arm64's "
                        "`encode_br_xn`",
-    "encode_call_r64": "`callq *%r` jumps to the CONTENTS of a register, which "
-                       "is outside the harness's one `MAP_FIXED` region and "
-                       "cannot be installed as a case value — the same reason "
-                       "as `encode_jmp_rm64` and arm64's `encode_br_xn`; the "
-                       "decoder, model arm, `samples()` row and `as` check are "
-                       "all `yes`",
+    "encode_call_r64": "`FF /2` with mod=11 calls a REGISTER's contents. The "
+                       "harness can install no target there, and a random "
+                       "64-bit value is outside its one `MAP_FIXED` region, so "
+                       "a case leaves the generated stub — the same reason as "
+                       "`encode_jmp_rm64` and arm64's `encode_br_xn`. `x86_step` "
+                       "has an arm (`x86_step_call_r64`) and `as` checks the "
+                       "encoding; only the fuzz column cannot run it",
 }
 
 #: `encoder -> (bug doc, what the gap is)`. Every doc named here must exist:
@@ -618,6 +619,13 @@ BACKLOG = {
     # here on purpose because the tool was "another claim's write set"; the
     # anti-rot half of `test_formal_isa_census.py` is what a stale entry costs, so
     # it is removed now rather than reported once more.
+    # `encode_call_r64` was here until 2026-10-13: its one missing column was
+    # FUZZ, and the reason was never a gap in this backend — `FF /2` with
+    # mod=11 calls a register's contents, which the harness can install no
+    # target for, the same permanent property as `encode_jmp_rm64` and arm64's
+    # `encode_br_xn`. So it moved to `HARNESS_LIMITS` and this dict now has no
+    # x86-64 entry at all; `test_formal_isa_census.py`'s
+    # `test_the_x86_64_backend_has_no_backlog_entry` is the pin.
     # `encode_and_r8_r8` / `encode_or_r8_r8` were here until 2026-10-07: the
     # byte-wise `and`/`or` the floating compare needs, whose gap was a REX prefix
     # the tree's own encoder omitted for SPL/BPL/SIL/DIL. `_byte_rex_required`
