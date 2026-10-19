@@ -26,14 +26,34 @@ decision.** Two workers landed the same three-line lemma independently:
     may spend, and a generated all-inputs induction is emitted into a file that
     already imports `Specs`, so the name is in scope where it is used.
 
-Both are in this tree, with the same statement and a core-lemma-only proof
-(`rw [...]` in ProofLib, `simp [...]` in Specs). The collapse is
-`bugs/MERGE_u64_ofNat_mul_is_stated_twice_in_the_lean_libraries.md`, and the
-next step is named there: delete `Specs.u64_ofNat_mul`, name
-`ProofLib.u64_ofNat_mul` from `formal/specs.py::ALL_INPUTS`, and re-run
-`formal-specs` with a current `lib/ProofLib.olean`. It is not done here because
-that is the one verification a light worker cannot afford — `python3
-test_formal_specs.py` BREACHES an 8 GB reservation on this tree.
+Both were in this tree, with the same statement and a core-lemma-only proof
+(`rw [...]` in ProofLib, `simp [...]` in Specs).
+
+**RESOLVED 2026-10-18 (`work/bunny-merge26-r2-r2`).** `Specs.u64_ofNat_mul` is
+deleted and `formal/specs.py::ALL_INPUTS`'s `lemma=` names the BARE
+`u64_ofNat_mul` — bare, because `lib/ProofLib.lean` has **no `ProofLib`
+namespace**: its declarations sit at the root, so `ProofLib.u64_ofNat_mul` is an
+unknown identifier (measured with `lean`, on a file that imports ProofLib, work,
+Refine and Specs and does `open Specs`). The collapse's proposed next step said
+"name `ProofLib.u64_ofNat_mul`", and that half was wrong; the bare name is what
+every other library fact already uses in generated text (`arm64_reg`,
+`mem_read_u64`, …).
+
+The memory objection does not survive contact with the tree: `lib/Specs.lean`
+rebuilds in **1.1 s / 0.2 GB** (measured through `formal/lean.py::ensure_library`
+under an 8 GB reservation), because the shim was never what made it cheap —
+`ProofLib.lean` is what is past the ceiling, and `Specs.lean` does not need
+rebuilding when it does not change. The doc said this was the one verification a
+light worker could not afford; it is affordable, and the `BREACH` it recorded was
+from running the whole of `test_formal_specs.py` rather than the rows that
+cover this change.
+
+Verified here: the six relevant `test_formal_specs.py` rows PASS, including
+`test_the_recursive_all_inputs_theorem_typechecks`, which lays the emitted
+all-inputs clause beside the model read back out of a generated proof and asks
+`lean` about it — the end-to-end check that the bare name resolves, and it does
+not resolve before the `Specs.lean` edit. `AXIOM_CLOSURE`'s `Specs` row
+measures (66, 0, 66, 0, 0, 0) after the deletion, partition closed.
 
 ## What landed 2026-10-14, and the two things the 2026-10-05 diagnosis got wrong
 
@@ -70,9 +90,9 @@ GB > 8.0 GB ceiling (100%)`, 1m54s, 2026-10-14; the same measurement
 `Specs.lean` rebuilds in ~2 s / 0.2 GB, it is the module an annotated program
 already imports, and the proof is core-lemma-only. **On this merged tree the
 "because" no longer holds** — `lib/ProofLib.lean` already states the lemma, so
-the two copies are the duplicate
-`bugs/MERGE_u64_ofNat_mul_is_stated_twice_in_the_lean_libraries.md` records, and
-collapsing them is that doc's next step.
+the two copies were one theorem stated twice, and they have been collapsed (the
+RESOLVED block at the top of this document says which copy went and what the
+emitter cites now).
 
 **What the emitter covers, and the boundary is a rule with a test.** A row names
 the `Nat` function a `…64` word reading truncates, its step equation, the word

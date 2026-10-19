@@ -383,7 +383,13 @@ def test_the_all_inputs_emitter_is_registered_and_shape_checked(tmpdir, shared):
     check("hfits : Specs.factorial w.toNat < 2 ^ 64" in sec,
           "the factorial all-inputs theorem has no no-wrap hypothesis, so it "
           "claims the equation outside the region where it is true")
-    check("Specs.u64_ofNat_mul" in sec,
+    # BARE `u64_ofNat_mul`, not `Specs.u64_ofNat_mul`: `lib/Specs.lean` used to
+    # restate the theorem so the name would be in scope without rebuilding
+    # ProofLib's `.olean`, which is past a bounded change's memory ceiling.  It
+    # resolves without the shim, and it is bare because `lib/ProofLib.lean` has
+    # no `ProofLib` namespace -- its declarations sit at the root, the same
+    # spelling `arm64_reg` and `mem_read_u64` already use in generated text.
+    check("u64_ofNat_mul" in sec and "Specs.u64_ofNat_mul" not in sec,
           "the factorial induction does not cite the multiplication fact its "
           "step needs, so it would not elaborate")
     # A registered spec on the WRONG model shape refuses rather than emitting a

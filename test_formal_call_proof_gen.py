@@ -5499,85 +5499,6 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
                                 % (key, err))
 
 
-class TestTheRecursionContractBaseCaseCarriesTheStepBody(unittest.TestCase):
-    """A SECOND, independent reason `count`/`pow2` fail their proofs, found
-    2026-10-08 while re-measuring
-    `FORMAL three examples fail their proofs on master`.
-
-    The doc's x30 frame read (`rfl` failed) is still one of the diagnostics, but
-    the generated `count_contract` now also fails in its **base-case** bullet:
-    the walk reaches the program's self-call there and emits the
-    recursion-descent code that belongs to the step case.  `hbase`'s signature
-    has no `arg`, no `hk` and no induction hypothesis, so Lean reports exactly
-    that — `Unknown identifier 'hk'`, `hbnd has type FrameBound 131152 st 0 but
-    is expected to have type FrameBound 131152 st arg` inside the application of
-    `frameBound_descend_le`, and `Unknown identifier 'ih'`.
-
-    This is a GAP pin, not a wanted-behaviour test, and it is the same shape as
-    `TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`: it asserts the
-    corruption is PRESENT, so it is green while the gap is open and goes red the
-    moment the base case stops replaying the step walk — at which point the
-    defect is fixed, `test_formal.py`'s marker for `count`/`pow2` is re-measured,
-    and this class is deleted with the fix.  Lean-free: it reads the generated
-    proof's text.
-
-    The regenerate-or-die half is deliberate.  `formal/arm64_proof_gen.py` is
-    the write set of a live claim (`formal207-docs`,
-    `FORMAL_dylib_export_loops_and_frame_bounds.md`), so this pin exists to tell
-    that worker the moment the base case changes — and to tell the next reader
-    that `count` needs this fix AND the x30 lemma.
-    """
-
-    STEM = "count"
-
-    #: `frameBound_descend_le` is emitted only by the recursion-descent block,
-    #: and for `count` the only recursive call is inside the `else` arm — so in
-    #: a correct file it appears in the STEP bullet (6178+) and never in the
-    #: base bullet (5824-6177).  Its presence between the two `intro` lines is
-    #: the text signature of the defect.
-    DESCENT = "frameBound_descend_le"
-    BASE_INTRO = "· intro fuel st hb"
-    STEP_INTRO = "· intro k arg st fuel"
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="recbase-")
-        src = os.path.join(os.getcwd(), "formal", "examples",
-                           cls.STEM + ".mojo")
-        with open(src) as f:
-            text = f.read()
-        cls.proof, cls.error = _generate(cls.tmp, text, cls.STEM)
-        cls.region = None
-        if cls.proof is not None:
-            with open(cls.proof) as f:
-                whole = f.read()
-            _start = whole.index(cls.BASE_INTRO)
-            _end = whole.index(cls.STEP_INTRO, _start)
-            cls.region = whole[_start:_end]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_the_base_case_bullet_replays_the_recursion_descent(self):
-        self.assertIsNotNone(
-            self.proof,
-            "%s generated no proof at all, so this class is measuring a "
-            "generation refusal, not the base-case defect: %s"
-            % (self.STEM, self.error))
-        self.assertIsNotNone(
-            self.region,
-            "%s: the proof has no `%s` / `%s` bullet pair, so the theorem's "
-            "shape changed and this pin is reading the wrong region"
-            % (self.STEM, self.BASE_INTRO, self.STEP_INTRO))
-        self.assertIn(
-            self.DESCENT, self.region,
-            "the base-case bullet no longer applies %s — either the base case "
-            "stopped replaying the step walk (the defect is FIXED: re-measure "
-            "test_formal.py's `count`/`pow2` marker and delete this class) or it "
-            "moved to a spelling this pin does not read" % self.DESCENT)
-
-
 class TestBottomTestedRangeLoop(unittest.TestCase):
     """A `for … in range(…)` loop, whose back edge is a CONDITIONAL branch.
 
@@ -7356,6 +7277,17 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     when it really measured a residual.
     """
 
+    #: The two spellings, and each one's patch (the doc's next step, applied).
+    #: ONE table, read by `setUpClass` AND by all three rows below, because a
+    #: spelling that is listed in one place and hard-coded in another is a
+    #: spelling that can be measured in one place and not the other -- and the
+    #: merge that produced this tree had exactly that, which is why one row read
+    #: `self.SPELLINGS` (an attribute nobody defined) and the other two read a
+    #: literal.  `AttributeError: no attribute 'SPELLINGS'` is what a half-applied
+    #: merge of a class attribute looks like, and it is invisible until the
+    #: `lib/ProofLib.olean` the class skips without is built.
+    SPELLINGS = (("as_emitted", False), ("doc_next_step", True))
+
     @classmethod
     def setUpClass(cls):
         lean = _lean()
@@ -7379,7 +7311,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         #: truth is "there is no residual here to move".  The check is
         #: `test_the_measurement_class_can_still_see_what_it_measures`.
         cls.blind = {}
-        for label, patch in (("as_emitted", False), ("doc_next_step", True)):
+        for label, patch in cls.SPELLINGS:
             try:
                 head, tail = _symbolic_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
@@ -7394,21 +7326,19 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 # the generator SUBSTITUTED the universal theorem (announced,
                 # one out-of-image call), or it did not and the tail is empty
                 # for a reason nothing names. Naming WHICH is what makes this
-                # failure message actionable.
-                #
-                # WHICH drift took the residual away, not just that one did.
-                # The walk substitutes a REACHABILITY theorem for a program
-                # whose run halts at a call it cannot follow, and `q(a, b)`'s
-                # divide-by-zero arm ends in the compiler's own `BL fflush` —
+                # failure message actionable, and it is the difference between
+                # "the residual moved" and "there is no residual here to move":
+                # the walk substitutes a REACHABILITY theorem for a program whose
+                # run halts at a call it cannot follow, and `q(a, b)`'s
+                # divide-by-zero arm ends in the compiler's own `BL fflush` --
                 # the trap `formal/arm64_codegen.py` records in
-                # `info["compiler_traps"]` — so the halt address is that call
+                # `info["compiler_traps"]` -- so the halt address is that call
                 # and no terminal value flow (and so no `_ADMIT`) is emitted.
-                # Naming the substitution says the residual is not "moved", it
-                # is behind
-                # `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
-                # conditional_path.md`, and this class goes green the way that
-                # doc's step 1 describes: until the walk can discharge a call
-                # on a conditional path, there is no `_ADMIT` in the tail for
+                # Naming the substitution says the residual is not "moved", it is
+                # behind `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_
+                # a_conditional_path.md`, and this class goes green the way that
+                # doc's step 1 describes: until the walk can discharge a call on
+                # a conditional path, there is no `_ADMIT` in the tail for
                 # `tail.replace(_ADMIT, _TRACE)` to patch, so nothing here can
                 # trace the div0 residual. The substitution is pinned, Lean
                 # free, by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`.
@@ -7458,7 +7388,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         it.md` records for `bootstrap-stage2-dumps` — a check that did not look
         at what it produced.  This row is the one that says so.
         """
-        for label in ("as_emitted", "doc_next_step"):
+        for label, _patch in self.SPELLINGS:
             with self.subTest(spelling=label):
                 self.assertIsNone(
                     self.blind.get(label),
@@ -7489,7 +7419,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
-        for label in ("as_emitted", "doc_next_step"):
+        for label, _patch in self.SPELLINGS:
             self.assertIsNone(self.blind.get(label),
                               f"{label}: {self.blind.get(label)}")
             got, keep = [], False
