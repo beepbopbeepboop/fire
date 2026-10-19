@@ -7853,12 +7853,13 @@ POINTER_KIND = "ptr"
 #
 # The refusal below is the safe direction for the DIRECT spelling: a call that
 # passes a foreign-bytes value into a parameter the callee measures as TEXT.
-# What it does NOT cover, and what a future session must, is the TRANSITIVE and
-# RETURNED spellings — `f(s)` calling `g(s)`, and `y = ident(x)` then `len(y)`
-# — both of which need the foreign kind to propagate through parameters and
-# returns, which is a whole-image fixed point rather than a call-site test.
-# Measured wrong on both architectures, so this is a real remainder and not a
-# theoretical one.
+# The TRANSITIVE spelling (`f(s)` calling `g(s)`) is covered by the least fixed
+# point `text_measured_parameters` computes over forwarding calls, and the
+# RETURNED spelling (`y = ident(x)` then `len(y)`) by
+# `returned_parameter_position` carrying the foreign kind through the call
+# result in `ValueKinds`. All three were measured wrong on both architectures
+# before their fix, so each is pinned by a row in `test_formal_os_backing.py`
+# rather than left to the message.
 _CODEPOINT_MEASURED_METHODS = ("find",)
 
 
@@ -7901,7 +7902,115 @@ def codepoint_measured_parameters(fn) -> frozenset:
     return frozenset(measured)
 
 
-def foreign_bytes_into_text_parameter_refusal(fn_name, callee, args, kind_of):
+def text_measured_parameters(functions) -> dict:
+    """`{function name: parameter names measured as CODE POINTS}`, transitively.
+
+    `codepoint_measured_parameters` is the DIRECT evidence: a `len(p)` or
+    `p.find(...)` in the function's own body. A parameter that is FORWARDED to
+    such a parameter of another function is the same question one call out —
+    `def f(s: String) -> int: return g(s)` with `def g(s): return len(s)` — and
+    the value's provenance does not change because the source took a hop.
+
+    The answer is a LEAST FIXED POINT over the image's call graph, because that
+    is what "every call that reaches a text measurement" means: direct evidence
+    seeds the set, a bare parameter passed to a member of the set joins it, and
+    a cycle (two functions forwarding to each other) converges rather than
+    recursing. Only a BARE NAME is followed, which is the same evidence
+    `parameter_kinds_by_call_site` reads for the same kind of question: an
+    expression with a shape of its own (`f(g(x))`, `f(x + "a")`) is not this
+    parameter reaching that call, and claiming it is would refuse programs
+    whose argument the analysis never named.
+
+    The result is an OVER-APPROXIMATION and it is deliberately in the safe
+    direction: a call passing KERNEL BYTES into a parameter that is measured at
+    any depth is refused (`foreign_bytes_into_text_parameter_refusal`), and the
+    alternative is the wrong answer this reader exists to stop — a `strlen`
+    inside the callee presented as CPython's `len(str)`, measured on both
+    architectures as 6 for `héllo` where CPython answers 5.
+
+    A function defined twice is the UNION of its definitions' evidence, which
+    is the same direction: an overload the build cannot tell apart must not
+    make the other one's measurement disappear.
+    """
+    by_name: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    measured: set = set()          # (function name, parameter name)
+    edges: set = set()             # ((caller, p), (callee, q))
+    for name, defs in by_name.items():
+        for fn in defs:
+            measured.update((name, p) for p in codepoint_measured_parameters(fn))
+            params = set(_positional_parameter_names([fn]))
+            for node in iter_nodes(getattr(fn, "body", None) or [],
+                                   skip=(("FunctionDef", "body"),)):
+                if not isinstance(node, F.CallExpr):
+                    continue
+                callee = call_callee_name(node.func)
+                if callee is None or callee not in by_name:
+                    continue
+                cnames = _positional_parameter_names(by_name[callee])
+                for pname, arg in zip(cnames, list(node.args or ())):
+                    if isinstance(arg, F.IdentExpr) and arg.name in params:
+                        edges.add(((name, arg.name), (callee, pname)))
+    changed = True
+    while changed:
+        changed = False
+        for caller, callee in edges:
+            if callee in measured and caller not in measured:
+                measured.add(caller)
+                changed = True
+    rows: dict = {}
+    for name, pname in measured:
+        rows.setdefault(name, set()).add(pname)
+    return {name: frozenset(params) for name, params in rows.items()}
+
+
+def returned_parameter_position(fn) -> int | None:
+    """The positional index of the parameter `fn` hands straight back, or None.
+
+    The RETURNED spelling of the foreign-bytes gap is `def ident(s): return s`
+    called on a kernel string: the call's answer is the very bytes that went in,
+    and a `len` of the result answered 6 for `héllo` where CPython answers 5 on
+    both architectures. `ValueKinds` classifies the call from the callee's
+    DECLARED return type (`String`), which is the honest type and says nothing
+    about provenance, so the caller's binding was a plain string.
+
+    The question this reader answers is the one piece of evidence that settles
+    it: does the callee return one of its arguments unchanged? Only the
+    spelling whose answer is FORCED counts — every value-returning exit is a
+    bare parameter NAME and they all name the same one. A second return of
+    something else, a bare `return`, or a return of an expression is a
+    different function, and this returns None rather than guessing, because a
+    caller that marked such a call foreign would refuse a program whose bytes
+    the source plainly replaced.
+
+    The index is into the CALL's positional arguments, so a receiver is already
+    excluded by `_positional_parameter_names` and the two tables cannot
+    disagree about which argument lands on which parameter.
+    """
+    names = _positional_parameter_names([fn])
+    if not names:
+        return None
+    found = set()
+    returns = [node for node in iter_nodes(getattr(fn, "body", None) or [],
+                                          skip=(("FunctionDef", "body"),))
+               if isinstance(node, F.ReturnStmt)]
+    if not returns:
+        return None
+    for node in returns:
+        value = getattr(node, "value", None)
+        if not isinstance(value, F.IdentExpr) or value.name not in names:
+            return None
+        found.add(value.name)
+    if len(found) != 1:
+        return None
+    return names.index(next(iter(found)))
+
+
+def foreign_bytes_into_text_parameter_refusal(fn_name, callee, args, kind_of,
+                                              measured=None):
     """Why a call passing KERNEL BYTES into a text-measured parameter is refused.
 
     `callee` is the callee's AST, `args` the call's positional arguments and
@@ -7909,8 +8018,16 @@ def foreign_bytes_into_text_parameter_refusal(fn_name, callee, args, kind_of):
     `len` lowering asks (is the operand's kind foreign?) one node earlier — at
     the call — because inside the callee the kind is gone. Returns None when the
     callee is not measured or no foreign argument reaches a measured parameter.
+
+    `measured` is the TRANSITIVE set of the callee's parameters, from
+    `text_measured_parameters` over the whole image. It defaults to the DIRECT
+    reader, which is what a caller with no function table in hand can answer;
+    both emitters pass the transitive one, because `f(s)` calling `g(s)` is the
+    same wrong answer one call out and a one-level walk is exactly the shape
+    that let the direct spelling look "done" until the next hop was measured.
     """
-    measured = codepoint_measured_parameters(callee)
+    if measured is None:
+        measured = codepoint_measured_parameters(callee)
     if not measured:
         return None
     names = _positional_parameter_names([callee])
@@ -7932,9 +8049,7 @@ def foreign_bytes_into_text_parameter_refusal(fn_name, callee, args, kind_of):
                 f"`os.str_len({spelled(arg)})`; a CHARACTER count of a kernel "
                 f"string is not answerable on this path. The kind rides on the "
                 f"expression that READ the kernel bytes, not on the word, so "
-                f"this refusal is the DIRECT spelling only — a foreign value "
-                f"reaching the same `len` through a further call, or returned "
-                f"from one, is a separate and larger gap.")
+                f"this call is refused on the argument's PROVENANCE.")
     return None
 
 
@@ -24041,7 +24156,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 685 entry
+# a list that rots, and the shape answers the same question for all 684 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24211,7 +24326,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 685 entry points for that reason looks
+    scalar — and a rule that refuses all 684 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -26902,7 +27017,7 @@ class ValueKinds:
                  param_kind=None, declared_is_dict=None,
                  callee_returns_value=None, float_names=(), bool_names=(),
                  callee_is_bool=None, deref_kind=None,
-                 pointer_pointee_kind=None):
+                 pointer_pointee_kind=None, callee_returned_parameter=None):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
@@ -26961,6 +27076,14 @@ class ValueKinds:
         # module, which only the emitter's table holds. `None` (this class's
         # "cannot say") rather than False for a callee nothing can answer for.
         self._callee_is_bool = callee_is_bool or (lambda name: None)
+        # …and the hook that lets a call hand a FOREIGN-BYTES argument straight
+        # back: the positional index of a parameter the callee returns
+        # unchanged (`model.returned_parameter_position`), or None. It is the
+        # RETURNED spelling of `FOREIGN_BYTES_KIND`'s gap — the kind rides on
+        # the expression and is lost at a call, and this is the one call whose
+        # result is forced to be the argument's provenance.
+        self._callee_returned_parameter = callee_returned_parameter or (
+            lambda name: None)
         self._dict_names_vocab = frozenset(dict_names)
         self.locals: dict = {}
         self._conflicts: set = set()
@@ -28652,6 +28775,25 @@ class ValueKinds:
                 return LIST_PREFIX
             if callee is None:
                 return None
+            # A call that hands one of its arguments straight back keeps that
+            # argument's PROVENANCE, which is a fact a declared `-> String`
+            # cannot carry: `def ident(s: String) -> String: return s` called
+            # on a kernel string is still a kernel string, and `len(y)` on the
+            # result must be the same refusal the direct spelling gets rather
+            # than a `strlen` answering in bytes. Measured wrong on both
+            # architectures before this arm: `[héllo] chars=6`, exit 0.
+            #
+            # A spread before the position would shift which argument lands
+            # there, so such a call is not answered here — the same refusal to
+            # guess the kind tables make everywhere else.
+            back = self._callee_returned_parameter(callee)
+            if back is not None:
+                args = list(e.args or ())
+                spread = any(isinstance(a, F.UnaryOp) and a.op in ("*", "**")
+                             for a in args[:back + 1])
+                if not spread and back < len(args) \
+                        and is_foreign_bytes_kind(self.kind_of(args[back])):
+                    return FOREIGN_BYTES_KIND
             # A lowered string method, asked first: `m = s.strip()` binds `m`,
             # and if `m` came back as a word then the NEXT method call on it
             # would be refused for want of a kind and a correct program would
@@ -29179,6 +29321,42 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
                     continue
                 claims.setdefault((callee, pname), set()).add(
                     _parameter_argument_shape(arg, rets))
+    # A parameter's OWN DEFAULT is a claim on its kind, on exactly the footing a
+    # call site's argument is. `def f(x="plain")` states what `x` holds as
+    # plainly as `def f(x: String)` does, and its one call site `f()` says
+    # NOTHING about it (the call-site walk above finds no argument to read), so
+    # without this the parameter fell through to "a word is an integer" and the
+    # emitter materialized a `char *` into a slot the callee was told held a
+    # number. Measured on both architectures: `def f(x="plain"): return x;
+    # print(f())` printed a pointer where CPython prints `plain`, and
+    # `if x == "plain"` was refused with "compares a NUMBER with a string".
+    #
+    # The unanimity rule then does the rest, which is why this is a CLAIM rather
+    # than a decision: a default that disagrees with a call site contributes a
+    # second shape and the parameter claims nothing, exactly as two disagreeing
+    # call sites do. Only a positional parameter's default is evidence — a
+    # keyword-only parameter cannot be bound by a positional call site, and
+    # `_positional_parameter_names` is the reader that says which names those
+    # are, so the two tables cannot disagree about binding order.
+    for callee, defs in by_name.items():
+        names = _positional_parameter_names(defs)
+        if not names:
+            continue
+        for fn in defs:
+            for pname, expr in (getattr(fn, "param_defaults", None)
+                                or {}).items():
+                if pname not in names:
+                    continue
+                shape = _parameter_argument_shape(expr, rets)
+                # A default the shape reader cannot classify (`None`, a name,
+                # an arithmetic expression) states NOTHING about the kind and
+                # must not join the set: a `None` in the unanimity set is a
+                # VETO, and `def f(x=None)` called once as `f("plain")` is a
+                # program CPython runs whose string kind the call site already
+                # establishes. Only a default that says what it holds (`"plain"`,
+                # `7`, a container literal, a `-> String` call) is a claim.
+                if shape is not None:
+                    claims.setdefault((callee, pname), set()).add(shape)
     # `(caller, name) -> {annotation | None}` — the DECLARATION of a name, for the
     # node question "what does this name hold in the functions called `caller`".
     # A name two definitions of `caller` disagree about (a parameter in one and a
@@ -51288,6 +51466,74 @@ def module_slot_for(name: str, local_names):
     if name in local_names:
         return None
     return module_slot(name)
+
+
+def module_global_method_refusal(obj, method: str, local_names,
+                                 fn_name=None) -> str | None:
+    """Why `NAME.method(...)` on a module-level name cannot be lowered, or None.
+
+    The call lowering decides `recv.m(...)` is a METHOD call rather than a
+    dotted EXTERN call in `_is_value_receiver`, which answers for a local, a
+    string literal, a frame slot and a call result. A module global is none of
+    those: its value is in the image's `__DATA` and its name is not one of the
+    function's own register/spill homes, so the receiver test answered False
+    and the chain fell through to `_callee_symbol`. That flattened `H.append`
+    to a dotted name, the extern path emitted a call to a symbol no library
+    defines, and the build failed four stages later with the LINK AUDIT's
+    sentence — "the image would bind `H.append` and nothing provides it" —
+    which is a true statement about the link line and a false one about the
+    program.
+
+    Measured, both architectures, on the program below: `G = G + 1` through
+    `global G`, `NUMS[1] = 99` and `len(NUMS)` all build and answer, and
+    `H.append(v)` is refused as the dangling symbol. CPython answers `p=4 q=4`.
+
+        G = 0
+        H = [1, 2, 3]
+
+        def push(v):
+            global H
+            H.append(v)
+            return len(H)
+
+    This is the REFUSAL half of the choice: the construct has no lowering (a
+    module-level list whose blob is static data would need an in-place append
+    through the slot, a capability change with its own re-sweep), and a
+    sentence naming the construct is worth more than one naming the linker. It
+    is asked at the same point in both emitters, from this one reader, so the
+    two architectures cannot describe one call differently.
+
+    A LOCAL is not this: `local_names` is the same scoping decision
+    `module_slot_for` makes, so `self.m(...)`, a parameter and a name bound in
+    the function all answer None here and keep their own paths.
+    """
+    name = getattr(obj, "name", None)
+    if not isinstance(obj, F.IdentExpr) or not name:
+        return None
+    if name in set(local_names or ()):
+        return None
+    if module_slot_for(name, local_names) is None:
+        return None
+    who = f"{fn_name}: " if fn_name else ""
+    kind = global_slot_kind(name)
+    if kind == STR_KIND:
+        what = "a module-level STRING"
+    elif isinstance(kind, str) and kind.startswith(LIST_PREFIX):
+        what = "a module-level CONTAINER"
+    else:
+        what = "a module-level name"
+    return (f"{who}{name!r} is {what} of this module, so its value lives in "
+            f"the image's `__DATA` and not in this function's frame. A METHOD "
+            f"call on a module global is not lowered on this path: "
+            f"`{name}.{method}(...)` has no receiver in a frame and no symbol "
+            f"in any library, so the call would be emitted against a symbol "
+            f"spelled `{name}.{method}`. What DOES lower on a module global is "
+            f"a plain read/write of a word, and for a container a subscript "
+            f"(`{name}[i]`, `{name}[i] = v`) and `len({name})`. Give the "
+            f"module an accessor (`def {name}_{method}(...): global {name}; "
+            f"{name}.{method}(...)`) and call that: the body of an accessor "
+            f"reaches the slot the ordinary way, and the call reaches code, "
+            f"which is what a caller can bind")
 
 
 def _module_container_entry_literals(stmts, functions, candidates: dict) -> dict:

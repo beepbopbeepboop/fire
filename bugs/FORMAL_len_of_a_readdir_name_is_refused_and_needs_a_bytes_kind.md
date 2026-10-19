@@ -14,10 +14,12 @@ buffer rather than of a character, which has since been fixed by the same
 (see "What landed" below). **The element half landed** — see "What landed"
 below; **the `len` half is what this document is about.**
 
-**Status 2026-10-14 (`formal415-docs`): the `len` half has a SECOND hole, and it
-is a silent wrong answer on both architectures — the KIND does not cross a call
-boundary. The DIRECT spelling is fixed; the TRANSITIVE and RETURNED spellings are
-filed.**
+**Status 2026-10-14 (`formal415-docs`): the `len` half had a SECOND hole, and it
+was a silent wrong answer on both architectures — the KIND does not cross a call
+boundary. The DIRECT spelling was fixed first; the TRANSITIVE and RETURNED
+spellings are now refused too (`formal/model.py::text_measured_parameters` and
+`returned_parameter_position`, pinned by two more rows in
+`test_formal_os_backing.py`).**
 
 The kind is attached to the EXPRESSION that read the kernel's bytes (a `listdir`
 element, a loop target, a `getcwd()` call) and not to the word, so a call drops
@@ -33,16 +35,18 @@ printf("[%s] chars=%d@@", x, nchars(x))   # héllo -> 6; CPython says 5
 
 `len(x)` at the loop target is refused (the seeds above); `len(x)` one call out
 answered in BYTES, because `parameter_kinds_by_call_site` asks about an
-UNANNOTATED parameter and `String` is an annotation. **The direct spelling is now
-refused by name** — `formal/model.py::foreign_bytes_into_text_parameter_refusal`,
-asked from both emitters' `_emit_call`, pinned by three rows in
+UNANNOTATED parameter and `String` is an annotation. **All three spellings are
+now refused by name** — the DIRECT call by
+`formal/model.py::foreign_bytes_into_text_parameter_refusal`, the TRANSITIVE one
+by the fixed point `text_measured_parameters` computes over forwarding calls,
+and the RETURNED one (`y = ident(x)` then `len(y)`) by
+`returned_parameter_position` carrying the FOREIGN kind through `ValueKinds` —
+asked from both emitters' `_emit_call` and pinned by five rows in
 `test_formal_os_backing.py` (`..._into_a_len_parameter_is_refused`,
-`..._into_a_find_parameter_is_refused`, and the printing control). **The
-transitive (`f` calling `g`) and returned (`y = ident(x)` then `len(y)`) spellings
-are still wrong and are
-`bugs/FORMAL_a_kernel_string_through_a_call_boundary_still_answers_in_bytes.md`**,
-which carries the measurements and the fixed-point next step. The character count
-this document is about is unchanged: still not answerable, still refused.
+`..._into_a_find_parameter_is_refused`,
+`..._through_a_forwarding_call_is_refused`,
+`..._returned_from_a_call_is_refused`, and the printing control). The character
+count this document is about is unchanged: still not answerable, still refused.
 
 ## What I ran
 

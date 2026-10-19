@@ -650,8 +650,8 @@ def main(n):
 # call-site parameter table (`parameter_kinds_by_call_site`) asks about an
 # UNANNOTATED parameter only — so the annotated spelling had no reader. The fix
 # refuses the DIRECT spelling by name; the TRANSITIVE (`f` calling `g`) and
-# RETURNED (`y = ident(x)` then `len(y)`) spellings are a larger gap and are
-# named in the message rather than pinned here.
+# RETURNED (`y = ident(x)` then `len(y)`) spellings are the same fact one hop
+# out and are pinned by the two rows below.
 CASES.append(Case(
     "a_kernel_name_into_a_len_parameter_is_refused",
     '''\
@@ -692,6 +692,62 @@ def main(n):
     return 0
 ''',
     refusal="whose bytes are the KERNEL's, into its parameter",
+))
+
+# …and the same value one call FURTHER OUT. `f` does not measure anything; it
+# hands its parameter to `g`, which does. The kind rides on the expression that
+# read the kernel's bytes, so both the callee's `len` and this call's argument
+# are equally blind to it — and the fixed point `model.text_measured_parameters`
+# computes is what carries the measurement back to `f`'s parameter. Measured on
+# both architectures before it: `chars=6` for `héllo`, exit 0.
+CASES.append(Case(
+    "a_kernel_name_through_a_forwarding_call_is_refused",
+    '''\
+from os import listdir, listdir_free
+
+
+def outer(s: String) -> int:
+    return chars(s)
+
+
+def chars(s: String) -> int:
+    return len(s)
+
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    for x in names:
+        printf("%d@@", outer(x))
+    listdir_free(names)
+    return 0
+''',
+    refusal="whose bytes are the KERNEL's, into its parameter",
+))
+
+# …and the RETURNED spelling: `ident` hands its parameter straight back, and the
+# caller binds the result before measuring it. A declared `-> String` says the
+# honest TYPE and nothing about provenance, so the reader that settles it is
+# "every exit is a bare parameter name" (`model.returned_parameter_position`),
+# and `ValueKinds` carries the FOREIGN kind through the call.
+CASES.append(Case(
+    "a_kernel_name_returned_from_a_call_is_refused",
+    '''\
+from os import listdir, listdir_free
+
+
+def ident(s: String) -> String:
+    return s
+
+
+def main(n):
+    names = listdir("@@UTF8@@")
+    for x in names:
+        var y = ident(x)
+        printf("%d@@", len(y))
+    listdir_free(names)
+    return 0
+''',
+    refusal="len(y) is len() of bytes the KERNEL supplied",
 ))
 
 # THE CONTROL, and it is what keeps the rule narrow: a kernel string passed to a
