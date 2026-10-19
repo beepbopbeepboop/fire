@@ -7166,47 +7166,65 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                       "is that sentence, not merely the theorem's name (a name "
                       "can appear in a comment that does not withdraw it)")
 
-    def test_a_literal_divisor_does_not_restore_the_classs_subject(self):
-        """The doc's step-2 option 2 is REFUTED by measurement, not argued.
+    def test_a_literal_divisor_RESTORES_the_classs_subject(self):
+        """The doc's step-2 option 2 is no longer refuted: MEASURED, not argued.
 
-        `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
-        offers two ways to make the class measure again, and its option 2 is
-        "change the fixture to a literal divisor, where the model can step the
-        divide".  Measured, that does NOT work: the arm64 code generator emits
-        the divide-by-zero arm — and its `_emit_exit` `fflush`, the one
-        out-of-image `BL` — for a CONSTANT non-zero divisor too, so the universal
-        theorem is substituted exactly as for the symbolic case and the class
-        still has no residual to trace.  Both options are therefore refuted, and
-        the class's subject stays unreachable until the walk can discharge a
-        call on a conditional path (the arm64 walk gap).  Pinned so option 2 is
-        not re-proposed as the cheap fix.
+        This row was the other way round until 2026-10-18 and said so: it pinned
+        `fflush` in a `a // 4` image's extern calls and no
+        `q_compiles_correctly_universal` in its proof, on the measurement that a
+        CONSTANT non-zero divisor still emitted the divide-by-zero arm and its
+        exit flush.  That measurement no longer holds, and the reason is not a
+        change in the flush — it is that the ARM IS NOT EMITTED AT ALL.  With the
+        literal divisor, arm64 builds an image whose only extern call is the
+        startup stub's `getrlimit` (below `func_offset`, subtracted by address),
+        `compiler_traps` is EMPTY, and the generated proof carries BOTH
+        `q_compiles_correctly_universal` and the walk terminal's `_ADMIT` — so
+        the class's own mechanism would fire and it would have a residual to
+        dissect.  Measured side by side, generation only, no Lean:
+
+            a // 4   extern_calls ['getrlimit']            traps []        → universal + _ADMIT
+            a // b   extern_calls ['getrlimit','fflush']   traps [0x…04]  → q_reaches_call_at_0x…04
+
+        `formal/model.py::division_needs_zero_guard` is what decides it, and a
+        non-zero literal divisor is decidable at build time, so the arm is
+        correctly absent.  This row is pinned rather than merely re-measured
+        because the doc's option list depends on it: option 2 is no longer a
+        refutation, and the one next step left is the FIXTURE SWITCH, which
+        changes what the class measures and needs a Lean run to confirm.
         """
         import formal.build as fb
         src = os.path.join(self.tmp, "litdiv.mojo")
         with open(src, "w") as f:
             f.write("def q(a):\n    return a // 4\n")
         out = os.path.join(self.tmp, "litdiv.aout")
+        raw = fb.compile_formal(src, arch="arm64", output=out, prove=False,
+                                check=False)
+        inner = raw["info"]
+        syms = [c.get("sym") for c in (inner.get("extern_calls") or ())]
+        self.assertNotIn(
+            "fflush", syms,
+            "a `// 4` image emits the divide-by-zero arm's exit flush again, so "
+            "there is an out-of-image call on the universal path and the doc's "
+            "option 2 is refuted once more — re-measure both cases before "
+            "believing either")
+        self.assertEqual(
+            [hex(a) for a in (inner.get("compiler_traps") or ())], [],
+            "a `// 4` image records a compiler trap, so the divide-by-zero arm "
+            "is still being emitted for a divisor that cannot trap")
         info = fb.compile_formal(src, arch="arm64", output=out, prove=True,
                                  check=False)
         text = open(info["proof_path"]).read()
-        inner = info["info"]
-        self.assertIn("fflush",
-                      [c.get("sym") for c in (inner.get("extern_calls") or ())],
-                      "a `// 4` image carries no `fflush` any more: the div0 "
-                      "arm's exit flush is gone, so the doc's option 2 "
-                      "(a literal divisor) may restore the class's subject "
-                      "after all — re-measure and update it")
-        self.assertNotIn("theorem q_compiles_correctly_universal", text,
-                         "a `// 4` fixture now emits the UNIVERSAL theorem, so "
-                         "the doc's option 2 (a literal divisor) DOES restore "
-                         "the class's subject; update "
-                         "bugs/FORMAL_the_div0_guard_measurement_class_traces_"
-                         "nothing_any_more.md rather than leaving option 2 "
-                         "called refuted")
-        self.assertIn("_reaches_call_at_", text,
-                      "a `// 4` fixture emitted neither the universal theorem "
-                      "nor the announced substitution; re-measure the doc's "
-                      "two options before trusting either")
+        self.assertIn("theorem q_compiles_correctly_universal", text,
+                      "a `// 4` fixture no longer emits the UNIVERSAL theorem, "
+                      "so the doc's option 2 does NOT restore the class's "
+                      "subject after all — re-measure and say so in the doc "
+                      "rather than leaving option 2 called working")
+        self.assertIn(
+            _ADMIT, text,
+            "a `// 4` fixture emits the universal theorem but not the walk "
+            "terminal's admission, so the class's mechanism still would not "
+            "fire and it still traces nothing — the theorem alone is not the "
+            "class's subject")
 
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
