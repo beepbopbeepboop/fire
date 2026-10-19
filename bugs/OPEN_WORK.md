@@ -227,8 +227,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_parameter_default_string_reaches_the_callee_as_a_word.md` | **unclaimed** | an UNANNOTATED parameter whose only value comes from its default is typed from the CALL SITES and they never mention it, so a string default is a number |
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | **unclaimed** | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_a_subscript_of_a_word_whose_kind_is_an_integer_segfaults.md` | **unclaimed** | a subscript whose BASE is itself a subscript of a known integer list SIGSEGVs, where the same subscript of a named integer is refused |
-| `FORMAL_a_tuple_for_target_leaf_is_classified_as_the_element_container.md` | **unclaimed** | `printf("%d", a)` is refused as "a is a CONTAINER" for `for a, b in [(1, 2)]` |
-| `FORMAL_a_tuple_for_targets_element_is_the_iterables_kind.md` | **unclaimed** | a name bound by a multi-name `for` target is classified as the ITERABLE's kind, so a scalar element is refused as a CONTAINER |
 | `FORMAL_int_of_an_out_of_range_double_saturates_the_other_way_on_each_backend.md` | **unclaimed** | `Int(<a double too large for Int64>)` saturates in OPPOSITE directions on the two backends, and CPython raises |
 | `FORMAL_known_limits.md` | **unclaimed** | the sweep residue, audited — which refusals are true |
 | `FORMAL_printf_s_of_a_container_walks_the_blob_header.md` | **unclaimed** | `printf("%s", <a container>)` prints the blob's COUNT byte, where CPython prints the container |
