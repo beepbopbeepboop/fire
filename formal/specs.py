@@ -337,21 +337,29 @@ class AllInputs:
 
     `kind` is the model shape the induction is written for — ``"identity"`` for
     a `UInt64 → UInt64` model that is `n`, ``"recursive"`` for a `Nat → UInt64`
-    structural recursion whose step is `(ofNat (k+1)) <op> <go> k`.  `nat` is
-    the `Nat` function the word reading truncates, `succ` its step equation and
-    `lemma` the word-product fact the step rewrites through.
+    structural recursion whose step is `(ofNat (k+1)) <op> <go> k`, and
+    ``"closed"`` for a straight-line model whose body is one closed word
+    expression.  `nat` is the `Nat` function the word reading truncates, `succ`
+    its step equation and `lemma` the word-product fact the step rewrites
+    through.  A `"closed"` row also carries the model BODY it is written for
+    (`body`, compared exactly) and the tactic block that closes it (`proof`);
+    the two are one row because the proof is only a proof of that body.
     """
 
-    __slots__ = ("word", "nat", "kind", "op", "succ", "lemma")
+    __slots__ = ("word", "nat", "kind", "op", "succ", "lemma", "body",
+                 "proof")
 
     def __init__(self, word: str, nat: str, kind: str, op: str = "",
-                 succ: str = "", lemma: str = ""):
+                 succ: str = "", lemma: str = "", body: str = "",
+                 proof: str = ""):
         self.word = word
         self.nat = nat
         self.kind = kind
         self.op = op
         self.succ = succ
         self.lemma = lemma
+        self.body = body
+        self.proof = proof
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return f"AllInputs({self.word!r}, {self.nat!r}, {self.kind!r})"
@@ -383,6 +391,49 @@ ALL_INPUTS = {
     "Specs.factorial64": AllInputs(
         word="Specs.factorial64", nat="Specs.factorial", kind="recursive",
         op="*", succ="Specs.factorial_succ", lemma="u64_ofNat_mul"),
+    # ── the STRAIGHT-LINE shapes ────────────────────────────────────────────
+    #
+    # A straight-line program's model is one closed word expression, so the
+    # all-inputs theorem is not an induction at all: unfold both sides and the
+    # goal is a word identity.  Each row is the model body it was written for
+    # (compared exactly, like the recursive shape) and the tactic block that
+    # closes THAT body, because the two are one claim.
+    #
+    # They are not interchangeable with a `bv_decide` and that is measured:
+    # `bv_decide` on `w * w + w = w * (w + 1)` times out (the SAT solver does
+    # not have associativity/commutativity for free), while two rewrites
+    # `simplify` leaves in the goal close it.  So the proof is per row and a
+    # row that cannot be written is a spec with no all-inputs theorem rather
+    # than a guessed one.
+    "Specs.consecutiveProduct64": AllInputs(
+        word="Specs.consecutiveProduct64", nat="Specs.consecutiveProduct",
+        kind="closed", body="((n * n) + n)",
+        proof=("simp [mojo, {go}, {word}, {nat}]\n"
+               "rw [UInt64.mul_add, UInt64.mul_one]")),
+    "Specs.succSquare64": AllInputs(
+        word="Specs.succSquare64", nat="Specs.succSquare", kind="closed",
+        body="((n + (UInt64.ofNat 1)) * (n + (UInt64.ofNat 1)))",
+        proof="simp [mojo, {go}, {word}, {nat}]"),
+    "Specs.doubleSuccOne64": AllInputs(
+        word="Specs.doubleSuccOne64", nat="Specs.doubleSuccOne",
+        kind="closed",
+        body="((n * (UInt64.ofNat 2)) + (UInt64.ofNat 1))",
+        proof=("simp [mojo, {go}, {word}, {nat}]\n"
+               "rw [UInt64.mul_comm w 2]")),
+    "Specs.maskedMix64": AllInputs(
+        word="Specs.maskedMix64", nat="Specs.maskedMix", kind="closed",
+        body=("(((n &&& (UInt64.ofNat 255)) + (n ||| (UInt64.ofNat 240))) + "
+              "(n ^^^ (UInt64.ofNat 85)))"),
+        proof="simp [mojo, {go}, {word}, {nat}]"),
+    "Specs.isNonzero64": AllInputs(
+        word="Specs.isNonzero64", nat="Specs.isNonzero", kind="closed",
+        body=("(if (n ≠ (UInt64.ofNat 0)) then (UInt64.ofNat 1) else "
+              "(UInt64.ofNat 0))"),
+        proof=("by_cases h : w.toNat = 0\n"
+               "· have hw : w = 0 := UInt64.toNat_inj.mp (by simpa using h)\n"
+               "  simp [mojo, {go}, {word}, {nat}, hw]\n"
+               "· have hw : w ≠ 0 := fun e => h (by simpa [e])\n"
+               "  simp [mojo, {go}, {word}, {nat}, hw, h]")),
 }
 
 
@@ -423,6 +474,24 @@ def _recursive_shape(go_defs: str, go: str, op: str) -> bool:
         go_defs or "", re.M))
 
 
+def _closed_shape(go_defs: str, go: str, body: str) -> bool:
+    """Is `<go>` a `UInt64 → UInt64` model whose body is EXACTLY `body`?
+
+    The straight-line twin of `_recursive_shape`, with the same rule: the
+    emitted tactic block is written for one expression, so a row that accepted
+    "looks straight-line" would emit a theorem about a different function and
+    Lean would reject the whole proof file.  The comparison is on the def's
+    single body line, so a model that is not one closed expression (an `if`,
+    an application, a second line) does not match unless the row says so.
+    """
+    if not body:
+        return False
+    return bool(re.search(
+        r"^def %s \(n : UInt64\) : UInt64 :=\n  %s$"
+        % (re.escape(go), re.escape(body)),
+        go_defs or "", re.M))
+
+
 def all_inputs_section(func_name: str, ref: Refines, go_defs: str) -> str:
     """The Lean text of the all-inputs refinement, or "" when it cannot be made.
 
@@ -459,6 +528,16 @@ def all_inputs_section(func_name: str, ref: Refines, go_defs: str) -> str:
             + f"    mojo w = {row.word} w := by\n"
             + f"  show {go} w = {row.word} w\n"
             + f"  simp [{go}, {row.word}]\n")
+    if row.kind == "closed":
+        if not _closed_shape(go_defs, go, row.body):
+            return ""
+        proof = "\n".join("  " + line for line in row.proof.format(
+            go=go, word=row.word, nat=row.nat).splitlines())
+        return (
+            head
+            + f"theorem main_refines_all_inputs (w : UInt64) :\n"
+            + f"    mojo w = {row.word} w := by\n"
+            + proof + "\n")
     if row.kind == "recursive":
         if not _recursive_shape(go_defs, go, row.op):
             return ""

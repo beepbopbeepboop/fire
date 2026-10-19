@@ -409,6 +409,82 @@ def test_the_all_inputs_emitter_is_registered_and_shape_checked(tmpdir, shared):
     check(SPECS.all_inputs_section(
               "fact", SPECS.Refines("Specs.factorial64", 20), "") == "",
           "the emitter wrote an all-inputs theorem with no model to read")
+    # …and a STRAIGHT-LINE row is exact about the body, not about the shape
+    # class: the same identity model cannot stand in for a product, and the
+    # body comparison is what stops a theorem for one expression being emitted
+    # above another.
+    check(SPECS.all_inputs_section(
+              "localmul", SPECS.Refines("Specs.consecutiveProduct64", 64),
+              identity_model) == "",
+          "a straight-line row emitted its theorem over an identity-shaped "
+          "model; the proof rewrites that row's own body and cannot elaborate")
+    localmul_model = (
+        "def localmul_go (n : UInt64) : UInt64 :=\n  ((n * n) + n)\n"
+        "def mojo (n : UInt64) : UInt64 :=\n  localmul_go n\n")
+    check("main_refines_all_inputs" in SPECS.all_inputs_section(
+              "localmul", SPECS.Refines("Specs.consecutiveProduct64", 64),
+              localmul_model),
+          "the straight-line row did not emit its theorem over the model body "
+          "it is written for")
+
+
+def test_the_straight_line_all_inputs_theorems_typecheck(tmpdir, shared):
+    """The five straight-line rows are real Lean over the real models.
+
+    `consecutiveProduct64`, `succSquare64`, `doubleSuccOne64`, `maskedMix64`
+    and `isNonzero64` each name a model body and a tactic block written for
+    that body.  The row's proof is the half that can be wrong quietly — a
+    rewrite that no longer matches, or an `isNonzero` case split whose
+    `UInt64.toNat = 0` bridge is missing — so each clause is laid beside the
+    model the generated file actually emitted, with the same imports, and Lean
+    is asked about that.  Asking about the whole proof file would report its
+    end-to-end section instead, exactly as the recursive row's docstring says.
+    """
+    import formal.build as fb
+    from formal.lean import find_lean, ensure_library, run_lean
+
+    lean = find_lean(HERE)
+    if not lean:
+        print("    SKIP: no lean found (the clauses are not elaborated)")
+        return
+    cases = {
+        "localmul": ("Specs.consecutiveProduct64", 64),
+        "pair": ("Specs.succSquare64", 64),
+        "chain": ("Specs.doubleSuccOne64", 64),
+        "bitops": ("Specs.maskedMix64", 256),
+        "nonzero": ("Specs.isNonzero64", 64),
+    }
+    ensure_library(lean, LIB)
+    for example, (spec, rng) in cases.items():
+        src = os.path.join(EXAMPLES, example + ".mojo")
+        built = fb.compile_formal(
+            src, arch="arm64",
+            output=os.path.join(tmpdir, example + "_clause.aout"),
+            prove=True, check=False)
+        proof_path = built["proof_path"]
+        check(os.path.isfile(proof_path),
+              f"{example} wrote no proof: {built}")
+        with open(proof_path, encoding="utf-8") as f:
+            text = f.read()
+        go = re.search(r"def %s_go \(n : UInt64\) : UInt64 :=\n  .*\n"
+                       % re.escape(example), text)
+        mojo = re.search(r"def mojo \(n : UInt64\) : UInt64 :=\n  .*\n", text)
+        check(go and mojo,
+              f"{example}'s proof does not carry the `_go` model and `mojo` "
+              f"this test lays the clause beside")
+        clause = SPECS.all_inputs_section(
+            example, SPECS.Refines(spec, rng), go.group(0) + "\n" + mojo.group(0))
+        check(clause, f"{example} emitted no all-inputs clause for the "
+                      f"model it just read")
+        isolated = os.path.join(tmpdir, f"refines_{example}_clause.lean")
+        with open(isolated, "w", encoding="utf-8") as f:
+            f.write("import ProofLib\nimport work\nimport Refine\nimport Specs\n\n"
+                    + go.group(0) + "\n" + mojo.group(0) + "\n" + clause)
+        result = run_lean(lean, [isolated],
+                          env={**os.environ, "LEAN_PATH": LIB})
+        check(result.returncode == 0,
+              f"{example}'s all-inputs clause did not elaborate: "
+              f"{(result.stdout or '')[-600:]}{(result.stderr or '')[-600:]}")
 
 
 def test_the_recursive_all_inputs_theorem_typechecks(tmpdir, shared):
@@ -566,6 +642,8 @@ TESTS = [
      test_the_all_inputs_emitter_is_registered_and_shape_checked),
     ("the recursive all-inputs theorem typechecks",
      test_the_recursive_all_inputs_theorem_typechecks),
+    ("the straight-line all-inputs theorems typecheck",
+     test_the_straight_line_all_inputs_theorems_typecheck),
     ("a wrong specification is rejected",
      test_a_wrong_specification_is_rejected),
     ("an unannotated program is unchanged",
