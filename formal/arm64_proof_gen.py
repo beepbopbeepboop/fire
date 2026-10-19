@@ -457,74 +457,57 @@ def _has_while(stmts) -> bool:
     return False
 
 
+#: Node types that start a NESTED SCOPE.  A call inside one is not a call of
+#: the enclosing function: a nested `def`'s body runs when IT is called, and a
+#: lambda's body when the lambda object is called.  Every walker below stops at
+#: one, so the answer is "calls this function's own body can make".
+_NESTED_SCOPES = (F.FunctionDef, F.LambdaExpr, F.StructDef, F.TraitDef)
+
+
+def _calls_in(fn):
+    """Every `CallExpr` in `fn`'s own body, in source order.
+
+    ONE walk, because three questions asked of a call used to be three
+    hand-written traversals with different coverage and they duly disagreed on
+    the same body: `_is_recursive` returned on the first `Call` without
+    descending into its arguments, so `g(f(n-1))` was invisible and the model
+    was emitted as a plain `def` that calls itself (Lean: "fail to show
+    termination"); `_callees_of` had the same omission, so `scale(shift(n))`
+    reached no `_go` for `shift`; `_count_self_calls` had the recursion and
+    counted the call the other two could not see.  A question answered by a
+    traversal that does not see a node is not a question about the source.
+
+    The descent is over the AST's dataclass fields, so a call nested in a
+    SUBSCRIPT, a comprehension, a ternary or an `if` condition is a call like
+    any other — the old walker knew four expression forms and five statement
+    forms, and every form it did not know was a place a self-call could hide.
+    """
+    def walk(node):
+        if isinstance(node, _NESTED_SCOPES):
+            return
+        if isinstance(node, Call):
+            yield node
+        fields = getattr(type(node), "__dataclass_fields__", None)
+        if fields is None:
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    yield from walk(item)
+            return
+        for name in fields:
+            yield from walk(getattr(node, name))
+
+    yield from walk(fn.body)
+
+
 def _is_recursive(fn) -> bool:
     """Whether the function body contains a self-call."""
-    def in_expr(e):
-        if isinstance(e, Call):
-            return _call_name(e) == fn.name
-        if isinstance(e, BinOp):
-            return in_expr(e.left) or in_expr(e.right)
-        if isinstance(e, Unary):
-            return in_expr(e.operand)
-        return False
-
-    def in_stmt(st):
-        if isinstance(st, Return):
-            return in_expr(st.value)
-        if isinstance(st, IfStmt):
-            _c0, _tb0, _eb0 = _if_expand(st)
-            return in_expr(_c0) or any(in_stmt(s) for s in _tb0) \
-                or any(in_stmt(s) for s in _eb0)
-        if isinstance(st, ExprStmt):
-            return in_expr(st.value)
-        if isinstance(st, Assign):
-            return in_expr(st.value)
-        if isinstance(st, WhileStmt):
-            return in_expr(st.condition) or any(in_stmt(s) for s in st.body)
-        return False
-
-    return any(in_stmt(st) for st in fn.body)
+    return any(_call_name(c) == fn.name for c in _calls_in(fn))
 
 
 def _count_self_calls(fn) -> int:
     """Number of self-calls in the function body (1 = linear recursion,
     >= 2 = tree recursion, whose step measure grows super-linearly)."""
-    cnt = [0]
-
-    def in_expr(e):
-        if isinstance(e, Call):
-            if _call_name(e) == fn.name:
-                cnt[0] += 1
-            for a in e.args:
-                in_expr(a)
-        elif isinstance(e, BinOp):
-            in_expr(e.left)
-            in_expr(e.right)
-        elif isinstance(e, Unary):
-            in_expr(e.operand)
-
-    def in_stmt(st):
-        if isinstance(st, Return):
-            in_expr(st.value)
-        elif isinstance(st, IfStmt):
-            _c0, _tb0, _eb0 = _if_expand(st)
-            in_expr(_c0)
-            for s in _tb0:
-                in_stmt(s)
-            for s in _eb0:
-                in_stmt(s)
-        elif isinstance(st, ExprStmt):
-            in_expr(st.value)
-        elif isinstance(st, Assign):
-            in_expr(st.value)
-        elif isinstance(st, WhileStmt):
-            in_expr(st.condition)
-            for s in st.body:
-                in_stmt(s)
-
-    for st in fn.body:
-        in_stmt(st)
-    return cnt[0]
+    return sum(1 for c in _calls_in(fn) if _call_name(c) == fn.name)
 
 
 def _norm_uint(s: str) -> str:
@@ -1424,7 +1407,15 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             f"render; answering 0 would be a statement about the source "
             f"rather than a model of it")
     if isinstance(e, Call):
-        return _call_go(e, param, env, scope, _expr_go)
+        # The argument renderer must carry the SAME tables this call was
+        # resolved with: `_call_go` renders every argument through `render`, so
+        # passing `_expr_go` bare gives a nested call `scope=None` and it is
+        # refused as "a function this generator emits no `_go` for" even though
+        # the `_go` exists — `scale(shift(n))` refused on `shift`.  The typed
+        # arm below has always wrapped this way; this is the same wrap.
+        return _call_go(e, param, env, scope,
+                        lambda a, p, en: _expr_go(a, p, en, vtypes,
+                                                  call_types, scope))
     if isinstance(e, F.TernaryExpr):
         # A conditional expression is a VALUE here, not control flow, and it is
         # the same function `_stmts_go`'s `IfStmt` arm builds for an `if` — the
@@ -2737,49 +2728,13 @@ def _scope_of(tc: dict):
 def _callees_of(fn) -> list:
     """The names `fn` calls, in program order, self-calls included.
 
-    Walks the same statement forms `_is_recursive` walks, so a call the
-    recursion detector can see is a call the call-graph walk can see too.
+    `_calls_in` is the ONE walk the recursion and self-call questions use too,
+    so a call this graph can see is a call `_is_recursive` can see — and in
+    particular a callee nested in another call's ARGUMENT (`scale(shift(n))`)
+    is reachable, or `_go_defs_for` emits no `_go` for it and the model refuses
+    a program whose callee it could have stated.
     """
-    out = []
-
-    def in_expr(e):
-        if isinstance(e, Call):
-            out.append(_call_name(e))
-        if isinstance(e, BinOp):
-            in_expr(e.left)
-            in_expr(e.right)
-        elif isinstance(e, Unary):
-            in_expr(e.operand)
-
-    def in_stmt(st):
-        if isinstance(st, Return):
-            in_expr(st.value)
-        elif isinstance(st, IfStmt):
-            _c0, _tb0, _eb0 = _if_expand(st)
-            in_expr(_c0)
-            for s in _tb0:
-                in_stmt(s)
-            for s in _eb0:
-                in_stmt(s)
-        elif isinstance(st, ExprStmt):
-            in_expr(st.value)
-        elif isinstance(st, Assign):
-            in_expr(st.value)
-        elif isinstance(st, AugAssign):
-            in_expr(st.value)
-        elif isinstance(st, WhileStmt):
-            in_expr(st.condition)
-            for s in st.body:
-                in_stmt(s)
-        elif isinstance(st, ForStmt):
-            for a in _range_args_of(st):
-                in_expr(a)
-            for s in st.body:
-                in_stmt(s)
-
-    for st in fn.body:
-        in_stmt(st)
-    return out
+    return [_call_name(c) for c in _calls_in(fn)]
 
 
 def _go_defs_for(prog, fn, tc: dict) -> list:

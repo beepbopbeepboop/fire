@@ -116,7 +116,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | `formal413-docs` | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | `formal415-docs` | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md` | **unclaimed** | FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen |
-| `FORMAL_a_self_call_nested_in_a_call_argument_is_invisible_to_is_recursive.md` | **unclaimed** | `_is_recursive` does not recurse into a call's ARGUMENTS, so a self-call written `g(f(n-1))` is invisible and the model is emitted as a plain `def` that calls itself |
 | `FORMAL_absval_proof_does_not_check.md` | **unclaimed** | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_arm64_frame_contract_sp_trackers_scale_an_immediate_by_8.md` | **unclaimed** | The frame-contract sp trackers scale an ADD/SUB immediate by 8 AND drop its `sh` bit |
 | `FORMAL_arm64_proof_gen_sp_tracking_drops_the_imm_shift.md` | **unclaimed** | The arm64 proof generator's `sp`/frame trackers drop the `ADD`/`SUB` immediate's `sh` field — a SECOND cause of the `call_proofgen` reds |

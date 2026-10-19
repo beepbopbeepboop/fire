@@ -431,6 +431,37 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertLess(defs.index("def c_go"), defs.index("def b_go"),
                         "a callee must be defined before its caller names it")
 
+    def test_a_self_call_in_another_calls_argument_is_recursive(self):
+        """`g(f(n-1))` is a self-call wherever it appears.
+
+        The three call questions used to be three hand-written walks with
+        different coverage: `_is_recursive` returned on the first `Call`
+        without descending into its arguments, so this body was invisible and
+        the model was emitted as a plain `def f_go` that calls itself — Lean
+        rejects that with "fail to show termination"; `_callees_of` had the
+        same omission.  `_calls_in` is now the one walk all three use, so the
+        answer cannot depend on which question was asked.
+        """
+        import formal.arm64_proof_gen as G
+        src = ("def g(x):\n"
+               "    return x\n"
+               "def f(n):\n"
+               "    if n == 0:\n"
+               "        return 0\n"
+               "    return g(f(n - 1))\n")
+        f = next(fn for fn in _functions(src) if fn.name == "f")
+        self.assertTrue(G._is_recursive(f),
+                        "a self-call nested in a call's argument is a self-call")
+        self.assertEqual(G._count_self_calls(f), 1)
+        self.assertEqual(G._callees_of(f), ["g", "f"],
+                         "the call graph must see the callee AND the self-call "
+                         "written inside its argument")
+        defs = _models(src, "f")
+        self.assertIn("partial def f_go", defs,
+                      "a recursive model emitted as `def` names itself and "
+                      "Lean refuses its termination proof")
+        self.assertIn("(g_go (f_go (n - (UInt64.ofNat 1))))", defs)
+
     def test_unmodelled_value_forms_are_refused_not_zeroed(self):
         """`p.x` and `a[i]` have no value in a `UInt64 -> UInt64` model."""
         import formal.arm64_proof_gen as G
