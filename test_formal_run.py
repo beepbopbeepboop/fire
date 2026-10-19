@@ -1181,6 +1181,19 @@ CASES = [
     # no-home clause and NOT "'Box' is read at line N before anything in this
     # function stores it", which is what a value read would say and is not what
     # this is.
+# `Box.length` read through the struct's OWN NAME -- which USED to be refused
+    # here ("'Box' has no home: the module-level symbol table is empty for this
+    # unit") and now BUILDS and answers `3`, the `comptime length = 3` the
+    # struct declares.  The refusal was a compile-time inability to find a home
+    # for the name, and what answers it now does not fabricate a value: `3` is
+    # what CPython's own evaluation of the same declaration gives, and the
+    # sibling row that reads the SAME constant as `Self.length` inside a method
+    # is what says the two spellings agree.
+    #
+    # A refusal row only said the construct was refused, which is a fact about
+    # the compiler; this one says what the program COMPUTES, which is a fact
+    # about the language.  `--no-prove` because the proof layer is a different
+    # subject and has its own rows.
     ("comptime_class_attribute_of_a_generic_struct_read_through_its_name",
      "struct Box[T: AnyType]:\n"
      "    comptime length = 3\n"
@@ -1194,8 +1207,7 @@ CASES = [
      "def main(n) -> Int:\n"
      "    printf(\"%d\", show())\n"
      "    return 0\n",
-     "refuse:'Box' has no home: the module-level symbol table is empty for this "
-     "unit", None),
+     0, "3"),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
@@ -18538,12 +18550,29 @@ COMPREHENSION_ELEMENT_CASES = [
     # here, but the rule is the base's own container, and it is the same rule the
     # literal case asks one node type in — so this stays refused, and the refusal
     # names the source's own spelling (`[1, 2][0:1]`) rather than `SliceExpr`.
-    ("a_slice_element_whose_base_builds_a_container_is_refused",
+# A comprehension ELEMENT that is itself a container CONSTRUCTION --
+    # `[1, 2][0:1]` -- which USED to be refused here ("the element `[1, 2][0:1]`
+    # opens a container") and now BUILDS, RUNS, and is per-iteration: a write
+    # through one element leaves the other alone, which is the read a `len`
+    # check could not have told (both are 1).  Measured against CPython's own
+    # answer for the same expression, which is `9 1` because a list
+    # comprehension produces a DISTINCT list per iteration.
+    #
+    # The row is stronger than the refusal it replaces, not weaker: a refusal
+    # row only said the construct was refused, which is a fact about the
+    # compiler; this one says what the program COMPUTES, which is a fact about
+    # the language, and a compiler that kept the refusal would fail here instead
+    # of passing.  `--no-prove` is the other half of that: the construct still
+    # refuses PROOF generation, by name ("a Comprehension has no value in the
+    # semantic model"), so a `prove=True` build would be measuring the proof
+    # layer, not the image.
+    ("a_slice_element_that_builds_a_container_is_per_iteration",
      "def main() -> Int:\n"
      "    var r = [[1, 2][0:1] for y in [1, 2]]\n"
+     "    r[0][0] = 9\n"
      "    printf(\"%d %d\", r[0][0], r[1][0])\n"
      "    return 0\n",
-     "refuse:the element `[1, 2][0:1]` opens a container", None),
+     0, "9 1"),
     # An EMPTY/SIZED container CONSTRUCTION as the element, which is flat by
     # construction: `bytearray(3)` reserves a `[3][0][0][0]` blob and the copy
     # lands it per iteration, so the two elements are DISTINCT containers. The
