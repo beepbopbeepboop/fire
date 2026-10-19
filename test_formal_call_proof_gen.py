@@ -8317,56 +8317,100 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
 
 
 class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
-    """`floordiv` and `udivmod` are refused at GENERATION time, and the reason
-    is the call walk rather than anything about division.
+    """`floordiv` and `udivmod` no longer stop at GENERATION, and what replaced
+    the stop is pinned rather than assumed.
 
     These two were the only red `formal/examples` stems that
     `test_formal.py::EXPECTED_FAILURES` did not name, so a whole-corpus run
     reported them as FAILURES with no document anywhere saying why — and the
     natural next reading, "the floor correction has no proving case", is wrong:
     measured through `compile_formal(prove=True, check=False)` the generator
-    RAISES, so no `<stem>_proof.lean` is ever written and there is no Lean
+    RAISED, so no `<stem>_proof.lean` was ever written and there was no Lean
     residual goal to read at all.
 
-    The refusal is the universal theorem's call walk refusing to follow TWO call
-    sites of ONE callee — `//` and `%` each lower to a call to the same
-    divide-and-correct helper — with a single halt address. That is item 2 of
-    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`,
-    and it is why `test_formal.py`'s entry for these two says so.
+    The refusal was the universal theorem's call walk refusing to follow TWO
+    call sites of ONE callee — `//` and `%` each lower to a call to the same
+    divide-and-correct helper — with a single halt address.  That is item 2 of
+    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`.
 
-    Pinned in both directions because both failure modes are real and neither is
-    the interesting one: a generator that STOPPED raising would leave a proof
-    file whose residual goal nobody has read (the state this class was written
-    against), and a generator that raised for a DIFFERENT reason would leave the
-    marker in `test_formal.py` describing a defect that is gone.
+    **Measured 2026-10-18: that refusal no longer fires.**  Both stems now reach
+    a `*_compiles_correctly_universal` carrying the walk terminal, so the row
+    that pinned "no proof file exists" is replaced by one that pins WHAT the
+    file contains — a universal theorem and its walk terminal, and NOT a
+    `q_reaches_call_at_…` substitution, which would mean the universal path
+    still halts at an out-of-image call.  What that does not settle is whether
+    the emitted theorem TYPECHECKS: both files still admit `sorry`, and that is
+    the whole-corpus Lean run `test_formal.py`'s markers own, so those rows stay
+    with their reason corrected rather than deleted.
     """
 
     STEMS = ("floordiv", "udivmod")
 
-    def test_both_are_refused_before_a_proof_file_exists(self):
+    def test_both_now_reach_the_universal_theorem(self):
+        """They are NOT refused at GENERATION any more, and that is pinned.
+
+        Measured 2026-10-18 on this tree, generation only, no Lean:
+
+            formal/examples/floordiv.mojo  ->  floordiv_compiles_correctly_universal
+            formal/examples/udivmod.mojo   ->  udivmod_compiles_correctly_universal
+
+        with `all_goals (first | done | sorry)` — the walk terminal the
+        div0/floor-correction classes dissect — present in both.  The refusal
+        this class was written against ("the universal theorem's call walk
+        cannot follow two call sites of ONE callee, because `//` and `%` each
+        lower to a call to the same helper and ONE halt address cannot discharge
+        them") no longer fires for either stem, so a generator that STOPPED
+        raising is exactly the state to catch: what it writes is unreviewed
+        until something reads it.
+
+        Both directions are still real and neither is the interesting one.  The
+        interesting failure is a proof file nobody has read, so this row
+        asserts the file EXISTS and carries the theorem plus the walk terminal
+        (a `_reaches_call_at_…` substitution would mean the universal path still
+        halts at an out-of-image call, which is the state this class existed to
+        distinguish from "no proof at all").  A refusal for a DIFFERENT reason is
+        the other one: it would leave `test_formal.py`'s marker describing a
+        defect that is gone.
+
+        **What this does NOT establish.** "Generates" is not "proves": both
+        files still admit `sorry`, and whether the emitted theorem TYPECHECKS is
+        what `test_formal.py`'s `EXPECTED_FAILURES` rows cover, which is a
+        whole-corpus Lean run and not a light worker's.  So the marker stays,
+        with its reason corrected to what is now true.
+        """
         import formal.build as fb
         for stem in self.STEMS:
-            tmp = tempfile.mkdtemp(prefix=f"a2-divrefuse-{stem}-")
+            tmp = tempfile.mkdtemp(prefix=f"a2-divreach-{stem}-")
             try:
                 src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
-                with self.assertRaises(fb.FormalBuildError) as caught:
-                    fb.compile_formal(src, arch="arm64",
-                                      output=os.path.join(tmp, f"{stem}.aout"),
-                                      prove=True, check=False)
-                text = str(caught.exception)
-                self.assertIn("universal theorem", text)
-                self.assertIn("halt address", text)
-                self.assertIn("calls this walk cannot follow", text)
-                # …and the decisive half: NO proof file, so there is nothing for
-                # Lean to have rejected and nothing for a residual-goal
-                # measurement to be about.
-                written = [f for f in os.listdir(tmp) if f.endswith("_proof.lean")]
-                self.assertEqual([], written,
-                                 f"{stem} wrote a proof file, so whatever it "
-                                 f"contains is unreviewed")
+                try:
+                    info = fb.compile_formal(src, arch="arm64",
+                                             output=os.path.join(
+                                                 tmp, f"{stem}.aout"),
+                                             prove=True, check=False)
+                except fb.FormalBuildError as e:
+                    self.fail(
+                        f"{stem} refuses at GENERATION again ({e}); the "
+                        f"two-call-site walk refusal came back, or it now "
+                        f"refuses for a different reason and `test_formal.py`'s "
+                        f"marker is naming the wrong subject")
+                text = open(info["proof_path"]).read()
+                self.assertIn(f"theorem {stem}_compiles_correctly_universal",
+                              text,
+                              f"{stem} wrote a proof file with no universal "
+                              f"theorem in it: that is not a proof of anything, "
+                              f"and it is how a silent substitution would look")
+                self.assertNotIn("_reaches_call_at_", text,
+                                 f"{stem}'s universal path still halts at an "
+                                 f"out-of-image call, so the file carries a "
+                                 f"reachability statement instead — read THAT "
+                                 f"before treating it as a value theorem")
+                self.assertIn(
+                    _ADMIT, text,
+                    f"{stem}'s proof carries no walk terminal, so the residual "
+                    f"measurement classes have nothing to dissect in it")
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
-
     def test_the_image_itself_is_fine_without_the_proof(self):
         # The refusal is at PROOF GENERATION, so `--no-prove` builds both
         # architectures and both spellings run and answer. If this stopped being

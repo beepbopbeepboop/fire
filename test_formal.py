@@ -390,14 +390,19 @@ EXPECTED_FAILURES = {
                     "call SITES on one path -- more than the walk can follow, "
                     "and the model refuses the inner callee first",
 
-    # (5) A division helper is an OPAQUE call, which is the same walk refusal
-    # seen from the other side and is the family `udivmod` and `floordiv` are
+    # (5) A division helper is an OPAQUE call, which was the same walk refusal
+    # seen from the other side and was the family `udivmod` and `floordiv` were
     # already in (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_
-    # seven_are_declared.md` §#10, #11).
-    "augassign_floordiv": "`//=` and `%=` call the division helper, which is an "
-                          "opaque call site, and two of them on one path is "
-                          "more than the CFG walk's single halt address can "
-                          "discharge -- the same refusal as `udivmod`",
+    # seven_are_declared.md` §#10, #11).  CORRECTED 2026-10-18: that refusal no
+    # longer fires for any of the three — measured, generation only, all three
+    # now reach a `*_compiles_correctly_universal` carrying the walk terminal,
+    # and all three still admit `sorry`, which is the Lean half these rows
+    # cover.
+    "augassign_floordiv": "`//=` and `%=` call the division helper; the "
+                          "generator now reaches the universal theorem and "
+                          "writes a proof file carrying it, but that file "
+                          "admits `sorry` — same as `floordiv` and `udivmod`, "
+                          "whose two-call-site refusal stopped firing",
 
     # (6) Two single gates, each its own sentence.
     "printf_int": "`printf` with TWO arguments has no faithful AST: "
@@ -486,17 +491,29 @@ EXPECTED_FAILURES = {
     # into_the_same_image.md`'s next step, the largest single family in that
     # census.  The image itself is fine: `--no-prove` builds and both spellings
     # run, so nothing here is a codegen or a value-model fact.
-    "floordiv": "the arm64 proof GENERATOR refuses before a proof exists: the "
-                "universal theorem's call walk cannot follow two call sites of "
-                "one callee, because `//` and `%` each lower to a call to the "
-                "same helper and ONE halt address cannot discharge them, so no "
-                "proof file is written and there is no Lean residual. See "
+    #
+    # CORRECTED 2026-10-18: these two no longer stop at GENERATION.  The
+    # two-call-site refusal ("ONE halt address cannot discharge them") no longer
+    # fires, and both stems now reach a `*_compiles_correctly_universal` carrying
+    # the walk terminal -- measured through `compile_formal(prove=True,
+    # check=False)`, generation only, and pinned by
+    # `test_formal_call_proof_gen.py::TestTheDivisionExamplesHaveNoProofToCheck::
+    # test_both_now_reach_the_universal_theorem`.  What these rows now cover is
+    # the half that measurement cannot settle from a light worker: both emitted
+    # files still admit `sorry`, so whether the theorem TYPECHECKS is the
+    # whole-corpus Lean run, and that is what the marker is for.
+    "floordiv": "the arm64 proof GENERATOR reaches the universal theorem again: "
+                "the two call sites of the divide-and-correct helper no longer "
+                "stop the walk, so a proof file IS written and it carries "
+                "`floordiv_compiles_correctly_universal` with the walk terminal "
+                "-- but it still admits `sorry`, and whether that theorem "
+                "typechecks is the Lean half this row covers. See "
                 "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
                 "into_the_same_image.md",
-    "udivmod": "the same GENERATION-time refusal as `floordiv`, for `/` and "
-               "`%`: two call sites of one callee and ONE halt address. The "
-               "image builds and runs with --no-prove, so this is not a "
-               "division fact. See "
+    "udivmod": "the same as `floordiv`, for `/` and `%`: the generator reaches "
+               "the universal theorem and writes a proof file, and the file "
+               "admits `sorry`. The image builds and runs with --no-prove, so "
+               "this is not a division fact. See "
                "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
                "into_the_same_image.md",
 
