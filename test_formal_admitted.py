@@ -1445,7 +1445,20 @@ AXIOM_CLOSURE = {
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
-    "Specs": (66, 0, 66, 0, 0, 0),
+    # Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge:
+    # `lib/Specs.lean` gained ONE askable name, `u64_ofNat_mul`, the
+    # multiplication analogue of ProofLib's `u64_ofNat_add`/`u64_ofNat_sub` that
+    # a generated all-inputs induction needs. It is MEASURED `clean`, not
+    # assumed: `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`,
+    # `UInt64.toNat_ofNat'` and `Nat.mul_mod`, so it reaches no axiom. So
+    # `asked` and `clean` rise together and `reaches` stays 0 -- the same shape
+    # the row has moved in three times, and the shape that says the ARRIVAL is
+    # specification theorems and not new trusted evaluation. Partition closes
+    # (67 = 0 + 67 + 0 + 0). Its place is Specs and not ProofLib because
+    # ProofLib's `.olean` is past the memory ceiling a bounded change may spend;
+    # the duplication of the name across the two modules is filed as
+    # `bugs/MERGE_u64_ofNat_mul_is_stated_twice_in_the_lean_libraries.md`.
+    "Specs": (67, 0, 67, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
     # the same way on the same run.  Fourteen askable declarations, of which TEN
     # are kernel-checked and ONE reaches a decide axiom; the three
