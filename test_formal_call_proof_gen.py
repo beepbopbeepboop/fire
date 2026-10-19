@@ -4190,9 +4190,13 @@ class TestStringValueInTheModel(unittest.TestCase):
                 addr, f"{key}: the format string is not in the intern table, "
                       f"so the model has no value for it")
             with self.subTest(arch=arch):
+                # `MojoExpr.call` carries its arguments AS A LIST; it carried
+                # one `MojoExpr` until 2026-10-05, which made a call of any
+                # arity but one unstatable.  The pin was the old splat
+                # spelling, which the inductive no longer has.
                 self.assertIn(
-                    f'MojoExpr.call "printf" (MojoExpr.int '
-                    f'(UInt64.ofNat {addr}))',
+                    f'MojoExpr.call "printf" [MojoExpr.int '
+                    f'(UInt64.ofNat {addr})]',
                     text,
                     f"{key}: the AST bridge does not carry the format "
                     f"strings interned address {addr}, so the AST and the "
@@ -6197,12 +6201,16 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The ten that still generate, grouped as the doc grouped them, so a
+    #: The ELEVEN that still generate, grouped as the doc grouped them, so a
     #: reader can see which family each is in. `wdiff` was family 4's other
-    #: member and moved to `REFUSED` on 2026-10-08 (see the class docstring).
+    #: member and joined `REFUSED` on 2026-10-08, when the stack-floor guard put
+    #: a `getrlimit` call in every arm64 prologue; it came back out on
+    #: 2026-10-18 because that row landed by a MERGE AFTER the fix which closed
+    #: it (the `REFUSED_OWNER` note says which commit and which order).
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
-                "both", "either")                               # family 3
+                "both", "either",                               # family 3
+                "wdiff")                                       # family 4
 
     #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
     #: is HERE rather than deleted because the refusal is the FIX and not a
@@ -6214,13 +6222,8 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
     #: generating proof that says something false.
     #:
-    #: `wdiff` was family 4 and PASSED when this census was written; it refuses
-    #: again on this tree because `bfeec991`'s stack-floor guard put a
-    #: `getrlimit` call in every arm64 prologue, and the guard's low address is
-    #: the run terminal, so the loop contract has no block to match. That is
-    #: `FORMAL the stack guards getrlimit is counted as a program call`'s
-    #: regression, and the row is recorded rather than fixed here because the
-    #: repair is a `formal/arm64_codegen.py` change owned by that doc.
+    #: `wdiff` was a second row here until 2026-10-18, and `REFUSED_OWNER` below
+    #: says exactly what happened to it.
     #:
     #: The needles are the three facts a reader needs to act, and the first two
     #: are what tell this refusal apart from "the loop shape is unrecognised"
@@ -6232,24 +6235,15 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                        "while_lt_exit_contract_bottom"],
                       "its loop test is signed and the contract is stated in "
                       "the unsigned order, so the obligation would be false"),
-        "wdiff": (["unsupported edge to",
-                   "loop back-edge / continuation; no loop contract matches"],
-                  "the stack-floor guard's `getrlimit` in the prologue is "
-                  "counted as a program call, so it becomes the theorem's halt "
-                  "boundary and the loop contract is never reached; the address "
-                  "in the message is a build detail, so the needles name the "
-                  "shape rather than the address"),
     }
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
-    #: doc is named for the DEFECT rather than for the example. BOTH rows are
-    #: here, and neither doc contains its stem: `sum_range`'s is
+    #: doc is named for the DEFECT rather than for the example. The row is here,
+    #: and the doc contains no stem: `sum_range`'s is
     #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` and `wdiff`'s is
-    #: `FORMAL the stack guards getrlimit is counted as a program call` — each
-    #: a name that says what is wrong, which is why
-    #: `test_the_owners_of_the_refusals_still_exist` cannot find either by
-    #: prefix and has to be told.
+    #: flag.md` — a name that says what is wrong, which is why
+    #: `test_the_owners_of_the_refusals_still_exist` cannot find it by prefix
+    #: and has to be told.
     #:
     #: The point of naming them is the same as the check's own: a refusal is a
     #: STOP, not a fix, and the doc is what a reader has to find to learn that.
@@ -6258,11 +6252,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: here — which is the opposite of true, because each doc records the part
     #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
     #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
+    #:
+    #: `wdiff` WAS the second row, pinned as refusing with a bug doc of its own —
+    #: the one whose title said the stack guard's `getrlimit` was counted as a
+    #: program call — as its owner, and BOTH are gone. `806e72cb` moved the
+    #: RLIMIT_STACK read out of every arm64 prologue into the startup stub
+    #: (`_emit_stack_floor_init`, below `func_offset`) and restored the arm64
+    #: trap flush, so the guard's `getrlimit` is no longer a call the proof walk
+    #: or `_program_extern_calls` sees; that doc was deleted with the fix
+    #: (c7902a43), whose own message records this class as green.  The row came
+    #: back by a MERGE: it was written on 2026-10-08 (`1cb403ec`), which is NOT
+    #: an ancestor of the fix, so the two halves of one story landed in the
+    #: wrong order.
+    #: `test_the_owners_of_the_refusals_still_exist` is what found it — it
+    #: failed with "`wdiff` is pinned as refusing with no bug doc naming it",
+    #: which is the shape a row takes when the fix beats it to master.
     REFUSED_OWNER = {
         "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
                      "against_a_signed_flag.md",
-        "wdiff": "FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_"
-                 "call.md",
     }
 
     @classmethod
@@ -6333,15 +6340,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **`REFUSED` has TWO rows** — `sum_range` joined it on 2026-10-05, when
-        its loop contract was declined for stating an unsigned order against a
-        signed flag, and `wdiff` joined it when the stack-floor guard put a
-        `getrlimit` in every arm64 prologue — so this check does real work for
-        both. It was vacuous while the table was empty, and an empty table and a
-        table whose rows all point at deleted docs look identical from the
-        outside: that is the difference between "nobody refuses" and "the records
-        of the refusals were thrown away". The census is asserted explicitly for
-        the same reason.
+        **`REFUSED` HAD TWO rows, and this check is what removed one.**  `sum_range`
+        joined it on 2026-10-05, when its loop contract was declined for stating
+        an unsigned order against a signed flag; `wdiff` joined it after that,
+        when the stack-floor guard put a `getrlimit` in every arm64 prologue.
+        `806e72cb` fixed the second — the RLIMIT_STACK read moved into the
+        startup stub and the trap flush came back — and the bug doc was deleted
+        with the fix, but the ROW landed afterwards by a merge (`1cb403ec`,
+        2026-10-08, is not an ancestor of the fix).  So this assertion failed
+        with "`wdiff` is pinned as refusing with no bug doc naming it", which is
+        the most useful thing a check of this kind can do: it is the shape a row
+        takes when the fix beats it to master, and it is not the same failure as
+        a row that has no owner yet.
+
+        It was vacuous while the table was empty, and an empty table and a table
+        whose rows all point at deleted docs look identical from the outside:
+        that is the difference between "nobody refuses" and "the records of the
+        refusals were thrown away". The census is asserted explicitly for the
+        same reason.
         """
         # The number is the census this class claims; a silent change to either
         # list is how a refusal goes unrecorded, and the OWNER check below is
