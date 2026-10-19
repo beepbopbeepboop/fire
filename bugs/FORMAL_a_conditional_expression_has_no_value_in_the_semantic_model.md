@@ -101,9 +101,12 @@ selector (`32 << 12` is the 128 KiB frame scratch), so it named an address the
 composed state cannot contain. **FIXED** in this branch — `_addsub_imm` in
 `formal/arm64_proof_gen.py` is now the one reader of that immediate and all four
 byte-level `sp` trackers use it; the three fixtures typecheck and
-`TestTheAddSubImmediateShiftBit` pins the decode without Lean. The whole of it is
-`bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md` §0b,
-because the `hcond` obligation is that doc's subject. What §0 above landed is
+`TestTheAddSubImmediateShiftBit` pins the decode without Lean. The `hcond`
+obligation is a separate doc, since deleted by `a9080ffa` because its own subject
+landed 2026-10-09: a conditional branch's flag lemma has to be `try rw`-ed
+BEFORE the `simp only` that unfolds `arm64_subs_flags` /
+`arm64_matches_condition`, because that unfold is irreversible. What §0 above
+landed is
 unaffected: the CSEL/`_ternary_go` model half is still the residue this doc is
 about, and the machine half is still
 `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`.

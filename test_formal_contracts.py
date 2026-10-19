@@ -716,8 +716,10 @@ def test_the_ladders_simp_set_carries_the_UInt64_order_bridge(tmpdir=None):
     attribute, because the attribute is the one thing a future reader would
     not think to check when they changed the set: `simp_all [ … ]` is written
     out in the theorem, so a set that lost a name is a proof that quietly stops
-    closing.  `bugs/FORMAL_contract_ladder_reach.md` is where the measurement
-    behind each name is.
+    closing.  The ladder-reach measurement behind each name is in the history:
+    `f801d013` (the bug doc it closed is deleted, and its two load-bearing
+    notes -- the `-T 0` trap and the false `sKey_lt_iff` -- were kept in
+    `formal/lean.py` and `formal/contracts.py`).
     """
     from formal import contracts as CT
     for name in CT._ORDER_BRIDGE:
@@ -1228,7 +1230,11 @@ def test_lean_closes_a_true_contract_and_refuses_a_false_one(tmpdir):
     # turns it into a Nat equality the simplifier cannot discharge without that
     # missing lemma.  `test_UNKNOWN_is_reachable_and_is_not_a_pass` holds the
     # same line at the `classify` level; the reason it is still unreached,
-    # measured, is in `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # measured, was the ladder-reach bug doc's §6 -- the xor CANCELLATION the
+    # three order bridges cannot state -- and `f801d013` is what answered it
+    # (`work_u64_sign_zero_of_le` in `_SIGN_BRIDGE`).  That doc is deleted, with
+    # its two load-bearing notes kept in `formal/lean.py` and
+    # `formal/contracts.py`; this comment is what it said.
     cases = [("mini2.mojo", "mini2", True),
              ("bounds_index.mojo", "at_offset", True),
              ("clamped.mojo", "clamped", True),

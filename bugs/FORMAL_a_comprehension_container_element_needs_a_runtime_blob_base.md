@@ -90,8 +90,11 @@ because no row asks this predicate to refuse anything.
 **Pinned by five rows in `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`**:
 `a_slice_element_of_a_name_is_per_iteration`,
 `a_slice_element_over_a_list_of_lists_is_per_iteration`,
-`a_slice_element_whose_base_builds_a_container_is_refused` (the `[1, 2][0:1]`
-needle, which pins the new spelling as well as the refusal),
+`a_slice_element_that_builds_a_container_is_per_iteration` (the `[1, 2][0:1]`
+row — it was named `…_whose_base_builds_a_container_is_refused` and pinned a
+REFUSAL; measured 2026-10-18 it builds, runs, and is per-iteration, so it now
+pins the answer `9 1` instead, which is a stronger row: a refusal only said the
+compiler declined),
 `a_container_construction_element_is_per_iteration` — which WRITES through
 `r[0][0]` and reads `r[1][0]`, the read a shared blob would answer `9` to and a
 copy answers `0` to — and `an_empty_list_construction_element_is_per_iteration`.

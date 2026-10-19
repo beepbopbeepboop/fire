@@ -361,12 +361,28 @@ class AllInputs:
 #: annotation writes.  A row exists only where the induction has been written
 #: and checked; every other `@refines(…)` spec gets the finite-range theorem and
 #: no more.  See `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+#:
+#: `lemma=` is the BARE `u64_ofNat_mul`, and used to be `Specs.u64_ofNat_mul`:
+#: `lib/Specs.lean` restated the theorem so the name would be in scope without
+#: rebuilding `ProofLib`'s `.olean`, which is past a bounded change's memory
+#: ceiling.  That was a merge artefact -- `lib/ProofLib.lean` already stated it
+#: beside `u64_ofNat_add`/`u64_ofNat_sub` -- and it cost two proofs to keep true
+#: and a second row in `AXIOM_CLOSURE` for one theorem.
+#:
+#: **It is bare and not `ProofLib.u64_ofNat_mul` because `lib/ProofLib.lean` has
+#: no `ProofLib` namespace**: its declarations sit at the root, so the prefix is
+#: an unknown identifier (measured with `lean` on a file that imports all four
+#: modules and `open Specs`).  That is the same spelling `arm64_reg`,
+#: `mem_read_u64` and every other library fact already uses in generated text.
+#: A generated proof does `import ProofLib` and `import Specs` with `open Specs`,
+#: so the bare name resolves to ProofLib's, and with the Specs copy gone there is
+#: nothing for `open Specs` to shadow it with.
 ALL_INPUTS = {
     "Specs.id64": AllInputs(word="Specs.id64", nat="Specs.idNat",
                             kind="identity"),
     "Specs.factorial64": AllInputs(
         word="Specs.factorial64", nat="Specs.factorial", kind="recursive",
-        op="*", succ="Specs.factorial_succ", lemma="Specs.u64_ofNat_mul"),
+        op="*", succ="Specs.factorial_succ", lemma="u64_ofNat_mul"),
 }
 
 

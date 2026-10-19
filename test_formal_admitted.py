@@ -1445,20 +1445,35 @@ AXIOM_CLOSURE = {
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
-    # Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge:
-    # `lib/Specs.lean` gained ONE askable name, `u64_ofNat_mul`, the
-    # multiplication analogue of ProofLib's `u64_ofNat_add`/`u64_ofNat_sub` that
-    # a generated all-inputs induction needs. It is MEASURED `clean`, not
-    # assumed: `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`,
-    # `UInt64.toNat_ofNat'` and `Nat.mul_mod`, so it reaches no axiom. So
-    # `asked` and `clean` rise together and `reaches` stays 0 -- the same shape
-    # the row has moved in three times, and the shape that says the ARRIVAL is
-    # specification theorems and not new trusted evaluation. Partition closes
-    # (67 = 0 + 67 + 0 + 0). Its place is Specs and not ProofLib because
-    # ProofLib's `.olean` is past the memory ceiling a bounded change may spend;
-    # the duplication of the name across the two modules is filed as
-    # `bugs/MERGE_u64_ofNat_mul_is_stated_twice_in_the_lean_libraries.md`.
-    "Specs": (67, 0, 67, 0, 0, 0),
+    # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
+    # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
+    # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
+    # `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`, `UInt64.toNat_ofNat'`
+    # and `Nat.mul_mod`, so it reaches no axiom), so `asked` and `clean` rose
+    # together and `reaches` stayed 0: the same shape this row has moved in three
+    # times, and the shape that says the ARRIVAL is specification theorems and
+    # not new trusted evaluation.  Partition closed at 67 = 0 + 67 + 0 + 0.
+    #
+    # That copy was then DELETED, so the row is back where it was.  It restated
+    # `lib/ProofLib.lean`'s theorem of the same name -- stated beside
+    # `u64_ofNat_add`/`u64_ofNat_sub`, which is where it belongs -- and it
+    # existed only so the generated all-inputs induction would have the name in
+    # scope without rebuilding ProofLib's `.olean`.  Measured, that objection
+    # does not survive contact with the tree: `lib/Specs.lean` rebuilds in 1.1 s
+    # / 0.2 GB, and the emitted clause now cites the BARE `u64_ofNat_mul` (there
+    # is no `ProofLib` namespace), which
+    # `test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks`
+    # elaborates with Lean.  So the NUMBER is unchanged either way; what changed
+    # is that ONE theorem is counted once instead of twice.
+    #
+    # Re-measured after the deletion, generation only:
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` answers
+    # 66 of 66, 0 reaching a decide axiom, 66 clean, 0 text_only /
+    # closure_only / ofReduceBool -- partition closes (66 = 0 + 66 + 0 + 0).  The
+    # other seven rows are NOT re-measured here; this row is the only one that
+    # moved, and it moved because a declaration LEFT the module, not because a
+    # proof stopped being kernel-checked.
+    "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
     # the same way on the same run.  Fourteen askable declarations, of which TEN
     # are kernel-checked and ONE reaches a decide axiom; the three

@@ -1181,6 +1181,19 @@ CASES = [
     # no-home clause and NOT "'Box' is read at line N before anything in this
     # function stores it", which is what a value read would say and is not what
     # this is.
+# `Box.length` read through the struct's OWN NAME -- which USED to be refused
+    # here ("'Box' has no home: the module-level symbol table is empty for this
+    # unit") and now BUILDS and answers `3`, the `comptime length = 3` the
+    # struct declares.  The refusal was a compile-time inability to find a home
+    # for the name, and what answers it now does not fabricate a value: `3` is
+    # what CPython's own evaluation of the same declaration gives, and the
+    # sibling row that reads the SAME constant as `Self.length` inside a method
+    # is what says the two spellings agree.
+    #
+    # A refusal row only said the construct was refused, which is a fact about
+    # the compiler; this one says what the program COMPUTES, which is a fact
+    # about the language.  `--no-prove` because the proof layer is a different
+    # subject and has its own rows.
     ("comptime_class_attribute_of_a_generic_struct_read_through_its_name",
      "struct Box[T: AnyType]:\n"
      "    comptime length = 3\n"
@@ -1194,8 +1207,7 @@ CASES = [
      "def main(n) -> Int:\n"
      "    printf(\"%d\", show())\n"
      "    return 0\n",
-     "refuse:'Box' has no home: the module-level symbol table is empty for this "
-     "unit", None),
+     0, "3"),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
@@ -14321,6 +14333,34 @@ PRINTF_TEXT_CASES = [
     #
     #     printf("v=%d\n", [1, 2, 3])   arm64 1809329920   x86-64 1870638832
     #
+    # THE EVIDENCE, and where it moved.  Every needle below names the CONVERSION
+    # and the OPERAND, because that is what makes the rows discriminating: the
+    # dict rows would pass against a needle that only said "is a container", and
+    # the `%s` row would pass against one that only said "reads `xs`".
+    #
+    # **What these needles used to name, and why they do not any more.**  Two
+    # branches implemented "refuse a CONTAINER handed to a printf conversion" in
+    # parallel: `9bae9cec` (2026-10-08) wrote rows against a message that echoed
+    # the operand's kind (`reads `xs` as a NUMBER, and `xs` is `list:int``), and
+    # `8a720a1e` (2026-10-08) wrote rows against `is a container (kind
+    # `list:int`)`.  Neither is an ancestor of the other.  The implementation
+    # that is in `formal/model.py` is `e67c27c4`'s (2026-10-07,
+    # `printf_container_conversion_refusal`), whose message has NEVER named the
+    # kind -- it says "is a CONTAINER — its one word is the address of its
+    # blob".  So the twelve red rows were pinned against a message this tree has
+    # never produced, which is the union-of-both-sides question with only one
+    # side's IMPLEMENTATION surviving: the message is the better of the two and
+    # re-pinning the rows to it is a correction, not a weakening.
+    #
+    # **What that costs, stated plainly.**  The comment below used to say "the
+    # needle names the conversion, the operand and its kind, so a reword that
+    # stops naming the kind fails here" -- and that row was RIGHT, against a
+    # message that does not exist on this tree.  The kind-driven evidence is
+    # still there, but it is no longer in the message: it is
+    # `printf_container_conversion_refusal`'s own `is_list_kind(kind_of(args[j]))`,
+    # and what the table still proves end to end is that a `bytearray` (kind
+    # `list:byte`) and a `Dict` get the SAME answer as a `List`, which is what a
+    # check reading a constructor NAME would not give.
     # two DIFFERENT heap addresses for one program, where CPython raises
     # `TypeError: %d format: a real number is required, not list`.  The evidence
     # is the operand's own `list:`-prefixed kind (`is_list_kind`), so one row
@@ -14331,13 +14371,13 @@ PRINTF_TEXT_CASES = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%d\\n\", xs)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     ("printf_d_of_a_dict_container_is_refused",
      "def main(n):\n"
      "    var d = {\"a\": 1}\n"
      "    printf(\"v=%d\\n\", d)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `d` as a number, and `d` is a CONTAINER", None),
     # A byte blob is the row that separates the KIND from the constructor: its
     # kind is `list:byte` (`model.byte_blob_kind`), not `list:int`, and a test
     # that only read a `ListExpr` would let this one print an address.
@@ -14347,7 +14387,7 @@ PRINTF_TEXT_CASES = [
      "    b.append(65)\n"
      "    printf(\"v=%x\\n\", b)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:byte`)", None),
+     "refuse:reads `b` as a number, and `b` is a CONTAINER", None),
     # A CONTAINER PARAMETER, and it is a different evidence path from the three
     # above: the name is bound by the CALL SITE rather than by a statement in
     # this function, and `ValueKinds.kind_of` still answers `list:int` for it —
@@ -14360,7 +14400,7 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    show([1, 2, 3])\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # THE GUARDS, and they are the reason this is a row about the CONVERSION
     # rather than about the container: an element and a count are numbers and
     # must keep printing — a refusal that also stopped these would be an
@@ -18510,12 +18550,29 @@ COMPREHENSION_ELEMENT_CASES = [
     # here, but the rule is the base's own container, and it is the same rule the
     # literal case asks one node type in — so this stays refused, and the refusal
     # names the source's own spelling (`[1, 2][0:1]`) rather than `SliceExpr`.
-    ("a_slice_element_whose_base_builds_a_container_is_refused",
+# A comprehension ELEMENT that is itself a container CONSTRUCTION --
+    # `[1, 2][0:1]` -- which USED to be refused here ("the element `[1, 2][0:1]`
+    # opens a container") and now BUILDS, RUNS, and is per-iteration: a write
+    # through one element leaves the other alone, which is the read a `len`
+    # check could not have told (both are 1).  Measured against CPython's own
+    # answer for the same expression, which is `9 1` because a list
+    # comprehension produces a DISTINCT list per iteration.
+    #
+    # The row is stronger than the refusal it replaces, not weaker: a refusal
+    # row only said the construct was refused, which is a fact about the
+    # compiler; this one says what the program COMPUTES, which is a fact about
+    # the language, and a compiler that kept the refusal would fail here instead
+    # of passing.  `--no-prove` is the other half of that: the construct still
+    # refuses PROOF generation, by name ("a Comprehension has no value in the
+    # semantic model"), so a `prove=True` build would be measuring the proof
+    # layer, not the image.
+    ("a_slice_element_that_builds_a_container_is_per_iteration",
      "def main() -> Int:\n"
      "    var r = [[1, 2][0:1] for y in [1, 2]]\n"
+     "    r[0][0] = 9\n"
      "    printf(\"%d %d\", r[0][0], r[1][0])\n"
      "    return 0\n",
-     "refuse:the element `[1, 2][0:1]` opens a container", None),
+     0, "9 1"),
     # An EMPTY/SIZED container CONSTRUCTION as the element, which is flat by
     # construction: `bytearray(3)` reserves a `[3][0][0][0]` blob and the copy
     # lands it per iteration, so the two elements are DISTINCT containers. The
@@ -20095,7 +20152,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%d\", xs)\n"
      "    return 0\n",
-     "refuse:reads `xs` as a NUMBER, and `xs` is `list:int`", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # The `%s` arm, which is the one that DEREFERENCES: the blob's count bytes
     # are not text, so this printed `[]` (the walk stopped at whichever zero byte
     # the heap block starts with) rather than faulting. Same kind test, different
@@ -20105,7 +20162,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%s\", xs)\n"
      "    return 0\n",
-     "refuse:reads `xs` as text, and `xs` is `list:int`", None),
+     "refuse:reads `xs` as text, and `xs` is a CONTAINER", None),
     # The KIND and not the constructor's name, which is the doc's second
     # decision: `printf("%d", d)` for a `Dict` is the same shape and the same
     # answer, and the needle names the operand (`d`) rather than a list.
@@ -20114,7 +20171,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var d = {1: 10, 2: 20}\n"
      "    printf(\"v=%d\", d)\n"
      "    return 0\n",
-     "refuse:reads `d` as a NUMBER", None),
+     "refuse:reads `d` as a number, and `d` is a CONTAINER", None),
     # A list PARAMETER, through an annotation rather than a local, so the
     # evidence is the DECLARATION and not a body statement: the kind is the bare
     # `list` an annotation gives, and the row pins that the test is the kind
@@ -20125,7 +20182,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    return 0\n"
      "def main() -> Int:\n"
      "    return show([1, 2, 3])\n",
-     "refuse:reads `xs` as a NUMBER, and `xs` is `list` — a CONTAINER", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # ── THE CONTROLS, and both are the over-refusal direction ───────────────
     #
     # The element and the length are what a reader means to print, and both

@@ -1,5 +1,64 @@
 # FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more
 
+**Status 2026-10-18 (`work/bunny-merge26-r2-r2`): step 2's option 2 is NO
+LONGER REFUTED — measured, generation only, no Lean, the two fixtures side by
+side:**
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 -c "
+import formal.build as fb, re
+for name, body in (('lit', 'def q(a):\n    return a // 4\n'),
+                   ('sym', 'def q(a, b):\n    return a // b\n')):
+    open('.tmp/%s.mojo' % name, 'w').write(body)
+    r = fb.compile_formal('.tmp/%s.mojo' % name, arch='arm64',
+                          output='.tmp/%s.aout' % name, prove=False,
+                          check=False)['info']
+    print(name, [c['sym'] for c in (r.get('extern_calls') or ())],
+          [hex(a) for a in (r.get('compiler_traps') or ())])
+    p = fb.compile_formal('.tmp/%s.mojo' % name, arch='arm64',
+                          output='.tmp/%s.aout' % name, prove=True,
+                          check=False)['proof_path']
+    t = open(p).read()
+    print('   ', re.findall(r'^theorem (q_.*(?:universal|reaches_call_at_\w+))', t, re.M),
+          '_ADMIT', 'all_goals (first | done | sorry)' in t)"
+lit ['getrlimit'] []
+    ['q_compiles_correctly_universal'] True
+sym ['getrlimit', 'fflush'] ['0x100000504']
+    ['q_reaches_call_at_0x100000504'] False
+```
+
+**The mechanism is not the flush — the div0 ARM IS NOT EMITTED AT ALL for a
+non-zero literal divisor**, because `formal/model.py::division_needs_zero_guard`
+decides it at build time and `4` is decidable. So the `a // 4` image has no
+out-of-image call at all (the startup stub's `getrlimit` is below `func_offset`
+and is subtracted by address), `compiler_traps` is empty, and the generated
+proof carries BOTH `q_compiles_correctly_universal` AND the walk terminal's
+`all_goals (first | done | sorry)`.
+
+**So the class's mechanism WOULD FIRE on a literal-divisor fixture and it would
+have a residual to dissect** — which is exactly what "the class traces nothing"
+denies. The 2026-10-13 Status block below measured option 2 the other way
+(`fflush` present, substitution fired); that measurement no longer reproduces,
+and the pin that recorded it
+(`test_a_literal_divisor_does_not_restore_the_classs_subject`) was asserting a
+thing that has stopped being true, so it is replaced by
+`test_a_literal_divisor_RESTORES_the_classs_subject`, which pins the
+`universal` + `_ADMIT` half — the half that IS the class's subject — rather than
+the `fflush` that used to cause it.
+
+**What this changes and what it does not.** The class is still blind **for the
+symbolic divisor**, and this doc's next step is unchanged in that respect. But
+option 2 is no longer a refutation, so the two-option decision in "The exact next
+step" is a ONE-option decision, and what remains is the FIXTURE SWITCH: measure
+`TestTheZeroDivisorGuardAgainstLean` on `def q(a): return a // 4`. That is not
+landed here, and it honestly cannot be from a light worker: the class's Lean
+rows need a built `lib/ProofLib.olean` (9.8 GB, over an 8 GB reservation), and
+the switch "changes what the class measures", which is what the doc has said
+since it was filed. **Option 1 is NOT re-measured here** — this block asserts
+only what it ran, and the 2026-10-12 measurement that option 1 reaches the
+recursion-contract refusal rather than the `⊢ 1 =` goal stands as the last word
+on it.
+
 **Status 2026-10-12 (`work/formal282-docs`): the SYMPTOM has moved once
 further, the two claims the 2026-10-07/`formal115-docs` block below rests on are
 both FALSE on this tree, and the class's own step-1 check now names the real
@@ -114,6 +173,11 @@ unreachable on this tree rather than merely unpicked.**
   recursion contract, §"Re-measured 2026-10-07" item 3). **Both options are now
   refuted**, and the second is pinned by
   `test_a_literal_divisor_does_not_restore_the_classs_subject`.
+  *(SUPERSEDED 2026-10-18 — the "STILL emits" claim here is FALSE on this tree:
+  `division_needs_zero_guard` is decidable for a literal, so the arm is not
+  emitted at all and option 2 WORKS.  The Status block at the top of this
+  document is the measurement; the pin is now
+  `test_a_literal_divisor_RESTORES_the_classs_subject`.)*
 
 **So the class cannot measure the div0 residual until the arm64 walk can
 discharge a call on a conditional path — `bugs/FORMAL_arm64_the_walk_cannot_
@@ -440,7 +504,12 @@ Two independent drifts, and a fix needs both:
      the divide and the residual is a different (and provable-or-not) goal.
      Cheaper, and it measures something real, but it stops measuring the
      symbolic-divisor case this class was written for — which is why it is the
-     second option and not the first.
+     second option and not the first. **MEASURED WORKING 2026-10-18**: the
+     Status block at the top of this document shows a `a // 4` image with no
+     out-of-image call at all and a proof carrying both
+     `q_compiles_correctly_universal` and `_ADMIT`, so this is the ONE option
+     left, and the step it names is the FIXTURE SWITCH — needs a built
+     `lib/ProofLib.olean`, so it is not a light worker's.
 
 **Not done in the branch that found it:** that branch's claim is the arm64
 extern-call and subscript diagnostics, and re-scoping a doc-truth measurement

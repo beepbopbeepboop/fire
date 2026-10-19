@@ -4033,13 +4033,18 @@ _RN = "(((w >>> 5) &&& 0x1f).toNat)"
 _RM = "(((w >>> 16) &&& 0x1f).toNat)"
 _RT2 = "(((w >>> 10) &&& 0x1f).toNat)"
 _I12 = "(((w >>> 10) &&& 0xfff).toNat)"
-#: The `ADD`/`SUB`/`CMP` `#imm12` value WITH its `sh` field: the model's
-#: `arm64_ext_imm12 w`, spelled out so the generated right-hand side does not
-#: carry the helper into downstream value-flow `simp only` lists. The
-#: step-result lemma is closed by `exact`-ing the library lemma, whose statement
-#: uses the helper, so the two only have to be `defeq` — which unfolding makes
-#: them.
-_EXT12 = f"({_I12} <<< ((((w >>> 22) &&& 0x3).toNat) * 12))"
+# NOTE: the `#imm12` value WITH its `sh` field used to be spelled out HERE, as
+# `_EXT12 = f"({_I12} <<< ((((w >>> 22) &&& 0x3).toNat) * 12))"`, on the
+# reasoning that a generated right-hand side should not carry
+# `arm64_ext_imm12` into downstream value-flow `simp only` lists.  The arms
+# then stopped using it and name the helper directly (`6a`, `a8015f3c`), which
+# is the spelling the library's `work_step_*` lemmas are closed by and the one
+# `test_the_imm12_shift_is_read_through_one_helper` pins -- so the constant was
+# left DEAD by that merge, still carrying a SECOND spelling of the shift
+# (`&&& 0x3`, where the library reads bit 22 alone because bit 23 is a fixed 0
+# in all three classes).  A dead second reader of one field is exactly what
+# `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md` is about;
+# it is deleted rather than reconciled, and the model is the one reader.
 _I16 = "(((w >>> 5) &&& 0xffff).toNat)"
 _HW = "(((w >>> 21) &&& 0x3).toNat)"
 _I7 = "(((w >>> 15) &&& 0x7f).toNat)"
@@ -4053,8 +4058,29 @@ _OFF19 = (f"(if ({_IMM19} &&& 0x40000) ≠ 0 then (UInt64.ofNat ({_IMM19}).toNat
 _IMM21 = ("(((((w >>> 5) &&& (0x7ffff : UInt32)) * (4 : UInt32)"
           " + ((w >>> 29) &&& (0x3 : UInt32))) : UInt32).toNat)")
 _ADDR7 = f"(if {_I7} ≥ 64 then {_BASE} - UInt64.ofNat ((128 - {_I7}) * 8) else {_BASE} + UInt64.ofNat ({_I7} * 8))"
+#: The `CBZ`/`CBNZ` (idx 30) condition argument.  Those two encodings carry the
+#: condition in bits 15:12 but only as its INVERSE -- bit 12 set means "branch
+#: while the Z flag is ZERO" (cond 1) and clear means "while it is one" (cond 0)
+#: -- so the word's 4 bits are `cond ± 1` depending on bit 0 of the field, which
+#: is what this reads.  `B.cond` (idx 51) has no such inversion: it passes the
+#: field through, which is `_COND4` below.
 _COND = (f"(if ((w >>> 12) &&& 0xf) &&& 0x1 = 0 then (((w >>> 12) &&& 0xf) + 1).toNat "
          f"else (((w >>> 12) &&& 0xf) - 1).toNat)")
+#: The `B.cond` (idx 51) condition argument: bits 3:0 of the word, read exactly
+#: as `_RD` reads bits 4:0 -- `(w &&& mask).toNat`, because `w` is the `UInt32`
+#: the generated `work_step_*` statement binds and `arm64_matches_condition`
+#: takes a `Nat`.  This is the spelling `_step_rhs` produces for the same
+#: encoding by evaluating `w & 0xf` in PYTHON and printing the number; the two
+#: right-hand sides are the same term once `w` is the concrete word.
+#:
+#: It was `{w & 0xf}` inside the arm itself -- a PYTHON expression in a module
+#: where `w` is not a name -- so `_step_rhs_generic(51)` raised `NameError`
+#: instead of emitting Lean.  The arm was unreachable only because `51` is not
+#: yet a key of `_WORK_STEP_BY_IDX`, which is precisely why no proof run ever
+#: saw it; `test_formal_call_proof_gen.py::TestRegister31` now holds a STATIC
+#: guard (every global this function reads must exist at module level) so the
+#: class is caught even while the arm is dormant.
+_COND4 = "((w &&& 0xf).toNat)"
 
 
 def _step_rhs_generic(idx: int):
@@ -4104,7 +4130,7 @@ def _step_rhs_generic(idx: int):
         return (f"some {{ s with x30 := UInt64.ofNat (s.pc + 4), "
                 f"pc := (UInt64.ofNat s.pc + {_OFF26} * 4).toNat }}")
     if idx == 51:  # B.cond -- flags-only, exactly as in _step_rhs
-        return (f"(if arm64_matches_condition {w & 0xf} s.nzcv = true then "
+        return (f"(if arm64_matches_condition {_COND4} s.nzcv = true then "
                 f"({{ s with pc := (UInt64.ofNat s.pc + {_OFF19} * 4).toNat }} : Arm64State) "
                 f"else ({{ s with pc := s.pc + 4 }} : Arm64State))")
     if idx in (16, 17):
