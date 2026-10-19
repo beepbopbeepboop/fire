@@ -10093,7 +10093,7 @@ def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | N
     )
 
 
-def scalar_container_base_evidence(expr, kind) -> str | None:
+def scalar_container_base_evidence(expr, kind, vkinds=None) -> str | None:
     """Why `expr` is provably a SCALAR and not a container, or None.
 
     **The one reader of "this base cannot be a container", and therefore the one
@@ -10158,6 +10158,35 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
     `INT_KIND` reached any other way is also None, because that is the default.
     A `StringLiteral` is not a scalar here: a string's subscript IS a byte
     load, and both emitters take that path above the container one.
+
+    **A SUBSCRIPT OF A LIST WHOSE ELEMENTS ARE NUMBERS is the fourth arm, and it
+    is the one the emitters cannot answer from `kind` alone.** `v = [1]`;
+    `v[0][0]` asks the container walk for an element of `v[0]`, whose kind is
+    `int` — but that kind is `subscript_element_kind(own_shape_kind("v"))`,
+    i.e. it comes from the LITERAL's element kinds, and a list can be appended
+    to after the literal. So this arm is guarded by two claims and neither is
+    `kind`:
+
+      * the BASE name's OWN SHAPE is a list whose element kind is a number
+        (`ValueKinds.own_shape_kind`, which returns None for a conflict, an
+        unannotated parameter, a call result and a loop target — so none of
+        those is refused by this arm); and
+      * that name is not a receiver of `append` anywhere in this function
+        (`ValueKinds.appended_names`), because `v = [1]; v.append([2]); v[1][0]`
+        is CORRECT on both architectures and the literal's element kind has
+        stopped describing the list by then.
+
+    Why it is needed at all, measured on both architectures: the inner subscript
+    already produces a word, and asking THAT word for an element reads eight
+    bytes at offset 0 (the word itself) as a COUNT and then dereferences the
+    scalar plus 8 — SIGSEGV, exit 139, with a green build. The named-base
+    refusal for the same mistake already exists and describes the fault
+    exactly; it simply never asked this base shape.
+
+    `vkinds` is optional because the early `formal/build.py` pass has already
+    resolved its base to a struct FIELD and asks the question without a
+    function's kind maps. None keeps this arm inert, which is the conservative
+    direction: the emitters pass their own `ValueKinds`.
     """
     field = isinstance(expr, F.MemberExpr)
     if kind == TYPE_KIND:
@@ -10180,6 +10209,16 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         return ("a number — the literal carries no count at offset 0 and no "
                 "memory behind it, so there is nothing for the container walk "
                 "to read")
+    if (isinstance(expr, F.SubscriptExpr)
+            and isinstance(expr.obj, F.IdentExpr) and vkinds is not None):
+        name = expr.obj.name
+        shape = vkinds.own_shape_kind(name)
+        elem = subscript_element_kind(shape) if shape is not None else None
+        if is_number_kind(elem) and name not in vkinds.appended_names():
+            return (f"a subscript of `{name}`, whose every binding in this "
+                    f"function is a list literal of numbers — so the element "
+                    f"is ONE word, with no count at offset 0 and no memory "
+                    f"behind it for the container walk to read")
     return None
 
 
@@ -26965,6 +27004,13 @@ class ValueKinds:
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
+        # `xs.append(...)` receivers, scanned once from the function's own
+        # body.  A list literal's element kind describes the list only until
+        # something appends to it, so the subscript-evidence arm in
+        # `scalar_container_base_evidence` has to ask this before it treats
+        # `own_shape_kind` as a claim.  Lazy rather than eager: most functions
+        # never ask, and the scan is the whole statement tree.
+        self._appended_names = None
         # The DICT-NESS axis, parallel to `locals`: `{name: True|False}` for the
         # names this function's own statements bound to a dict (or to something
         # that is not one), and `return_is_dict` below for the function's RETURN
@@ -28370,6 +28416,34 @@ class ValueKinds:
         """
         return {name: node for name, node in self._dict_inits.items()
                 if node is not None}
+
+    def appended_names(self) -> frozenset:
+        """The names `xs.append(...)` is called on anywhere in this function.
+
+        The append-capacity scan in each backend has its own richer map
+        (`_scan_list_caps`, keyed by literal and by name), but this question is
+        narrower and belongs to the KIND model: a list literal's element kind
+        is evidence about the list only while nothing grows it, because
+        `v = [1]; v.append([2])` has a `list:int` shape and an element that is
+        itself a list. The subscript-evidence arm in
+        `scalar_container_base_evidence` is the caller.
+
+        Nested `def`/`lambda` bodies are not descended into, via
+        `walk_stmt_trips` — their `append` is their own scope's, not this
+        function's, and counting it would decline the evidence for a name it
+        never grew.
+        """
+        if self._appended_names is None:
+            out = set()
+            for node, _trips in walk_stmt_trips(
+                    getattr(self._fn, "body", None) or [], lambda _s: 1):
+                if (isinstance(node, F.CallExpr)
+                        and isinstance(node.func, F.MemberExpr)
+                        and node.func.member == "append"
+                        and isinstance(node.func.obj, F.IdentExpr)):
+                    out.add(node.func.obj.name)
+            self._appended_names = frozenset(out)
+        return self._appended_names
 
     def own_shape_kind(self, name: str):
         """What a statement of THIS function bound `name` to, on the EVIDENCE
