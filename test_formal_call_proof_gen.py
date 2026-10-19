@@ -738,19 +738,49 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertEqual(lib.count("let imm12 := arm64_ext_imm12 insn"), 5,
                          "an `ADD`/`SUB`/`CMP` `#imm12` arm does not read "
                          "`arm64_ext_imm12`, so it drops the `lsl #12`")
-        self.assertIn("(((insn >>> 22) &&& 0x3).toNat * 12)", lib,
+        # The `sh` field is bit 22, and what is pinned here is that the helper
+        # READS IT AND SCALES BY 12 -- not which mask it uses to do it.  The
+        # pin used to be the literal `((insn >>> 22) &&& 0x3)`, which came
+        # from a SECOND copy of this definition that `6d43d4e8` removed in a
+        # dedupe; the surviving definition masks bit 22 alone, which is right:
+        # bits 28:23 are `100010` for `ADD` (immediate), `110100` for `SUB`
+        # (immediate) and `110100` for `CMP` (immediate), so bit 23 is a FIXED
+        # 0 in all three classes and `&&& 0x3` and `&&& 0x1` cannot differ on a
+        # word that reaches the helper.  The generator's arms name the helper
+        # (pinned by `test_the_imm12_shift_is_read_through_one_helper`), so no
+        # generated text has to agree with the mask at all -- and the dead
+        # `_EXT12` constant that did carry `&&& 0x3` is deleted with this.
+        m = re.search(r"def arm64_ext_imm12 \(insn : UInt32\) : Nat :=\n(.+)",
+                      lib)
+        self.assertIsNotNone(m, "`arm64_ext_imm12`'s definition is gone")
+        body = m.group(1)
+        self.assertIn("(insn >>> 10)", body,
+                      "`arm64_ext_imm12` does not read the `imm12` field")
+        self.assertIn("(insn >>> 22)", body,
                       "`arm64_ext_imm12` does not read the `sh` field")
+        self.assertIn("12", body,
+                      "`arm64_ext_imm12` reads `sh` but does not scale by 12, "
+                      "so `lsl #12` would be a shift by 1 rather than by 12")
         # The generator's own right-hand sides, word by word. `adds x11, x1,
         # x15` is `0xab0f002b` and `cmn x1, x15` is `0xab0f003f`.
+        #
+        # The flags go INSIDE and `arm64_set_reg` OUTSIDE, which is the order
+        # `lib/ProofLib.lean`'s `0xab000000` arm and `work_step_adds_reg` state
+        # it in (`a8015f3c`), so the two right-hand sides are `defeq` and the
+        # step-result `exact` closes.  The other order — set `Rd` on `s`, then
+        # attach the flags — is the same state update, so it is not a soundness
+        # question; it is a question of which text `exact` is given, and only one
+        # of the two is what the lemma's conclusion says.  The pin used to be
+        # the other one and had been stale since that commit.
         self.assertEqual(
             G._step_rhs(0xab0f002b, 66),
-            "some { (arm64_set_reg 11 s (arm64_reg 1 s + arm64_reg 15 s)) "
-            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "some (arm64_set_reg 11 { s with nzcv := arm64_adds_flags "
+            "(arm64_reg 1 s) (arm64_reg 15 s) } (arm64_reg 1 s + arm64_reg 15 s))",
             "the ADDS row does not write `Rd`")
         self.assertEqual(
             G._step_rhs(0xab0f003f, 66),
-            "some { (arm64_set_reg 31 s (arm64_reg 1 s + arm64_reg 15 s)) "
-            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "some (arm64_set_reg 31 { s with nzcv := arm64_adds_flags "
+            "(arm64_reg 1 s) (arm64_reg 15 s) } (arm64_reg 1 s + arm64_reg 15 s))",
             "the CMN row must write `Rd = 31` — `arm64_set_reg 31` is the "
             "identity, which is what makes the flags-only spelling the same "
             "statement, and writing it unconditionally is what the library "
@@ -1447,7 +1477,7 @@ the text; it does not find out whether any word can arrive there.  So:
             "replaces")
 
     def test_no_arm_of_the_generic_rhs_builder_raises(self):
-        """Every index the work-step table names builds a right-hand side.
+        """EVERY index the decoder can produce builds a right-hand side.
 
         `_step_rhs_generic` is the word-relative twin of `_step_rhs`, and it is
         the one the universal-theorem closer calls (`"s.pc" in (_step_rhs_generic(
@@ -1457,23 +1487,61 @@ the text; it does not find out whether any word can arrive there.  So:
         It had one. The `B.cond` arm interpolated `{w & 0xf}` — a PYTHON
         expression, where every other arm interpolates the Lean word `w` — so
         `_step_rhs_generic(51)` raised `NameError: name 'w' is not defined`. The
-        arm is unreachable today because `51` is not in `_WORK_STEP_BY_IDX`, which
-        is why no row saw it and why the bug is filed rather than fixed
-        (`bugs/MERGE_step_rhs_generic_b_cond_interpolates_a_python_w.md`); this
-        is the sweep that would see the next one, and it covers the whole table
-        rather than the arm.
+        arm was unreachable only because `51` is not in `_WORK_STEP_BY_IDX`
+        (47 rows), which is why no row saw it: sweeping the TABLE cannot see an
+        arm the table does not name. So the sweep domain here is the DECODER's
+        domain, `range(len(_STEP_CONDS))` — every index `_step_branch_index` can
+        return — not the table's keys. Today that is 69 indices against the
+        table's 47, and the 22 extra ones are exactly the arms nothing calls.
 
         A future arm that raises is a `NameError` here, which is the cheapest
         possible signal and the one a proof run would have taken 45 s to give.
         """
         import formal.arm64_proof_gen as G
         bad = []
-        for idx in sorted(G._WORK_STEP_BY_IDX):
+        for idx in range(len(G._STEP_CONDS)):
             try:
                 G._step_rhs_generic(idx)
             except Exception as e:            # noqa: BLE001 — the point
                 bad.append((idx, f"{type(e).__name__}: {e}"))
         self.assertEqual(bad, [], f"arms that raise: {bad}")
+
+    def test_the_generic_rhs_builder_reads_no_name_that_does_not_exist(self):
+        """`_step_rhs_generic` interpolates only names this module defines.
+
+        The `B.cond` bug was a class, not an arm: an f-string in a function
+        where the interpolated expression was PYTHON rather than Lean. The
+        runtime sweep above is the consequence, but it can only report the arm
+        that RAISES when it is called, and the arm that raised was unreachable.
+        The cause is visible without calling anything: `w` is not a global of
+        this module, so a reference to it in an f-string is a `NameError` by
+        construction. `symtable` reads exactly that fact out of the source —
+        every global the function reads but never assigns — so the whole class
+        is caught statically, including while the arm is still dormant.
+
+        The `B.cond` arm had `{w & 0xf}` in it -- a PYTHON expression, where
+        every other arm interpolates the Lean word `w` -- and `symtable` was
+        the way that bug was FOUND (`_step_rhs_generic w`, a free global the
+        module never binds).  So this is that reproduction turned into a guard
+        that runs on every change.  Its bug doc is deleted with the fix.
+        """
+        import builtins
+        import symtable
+        with open(PROOF_GEN) as fh:
+            src = fh.read()
+        top = symtable.symtable(src, PROOF_GEN, "exec")
+        fn = next((c for c in top.get_children()
+                   if c.get_name() == "_step_rhs_generic"), None)
+        self.assertIsNotNone(fn, "`_step_rhs_generic` is gone from the source")
+        defined = set(top.get_identifiers()) | set(dir(builtins))
+        free = sorted({s.get_name() for s in fn.get_symbols()
+                       if s.is_global() and not s.is_assigned()})
+        missing = [n for n in free if n not in defined]
+        self.assertEqual(
+            missing, [],
+            f"`_step_rhs_generic` reads {missing}, which this module does not "
+            "define; an f-string naming one raises NameError at the arm that "
+            "does so — which is how the B.cond arm failed")
 
     def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
         """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
@@ -1573,9 +1641,20 @@ _FLOOR_COMMON = [
      "some (arm64_set_reg 5 s (arm64_reg 5 s &&& arm64_reg 6 s))"),
 ]
 
+# The two `SUB (shifted register)` tails carry their `imm6` as a `<<< 0` even
+# though the assembler was asked for an unshifted subtract.  That is the
+# generator reading the shift field on every `add`/`sub` (shifted register)
+# word rather than only on a shifted one -- the fix in
+# `test_the_shifted_register_imm6_field_is_read_on_both_sides`, without which
+# every `add Xd, Xn, Xm, lsl #3` stepped a state the machine never reached.
+# It is `x <<< 0`, which is `x`, so the term is the one the row meant; the
+# library's `work_step_sub_reg` states it as `arm64_shifted_reg insn s rm`,
+# which reduces to exactly this text on the concrete word, which is what makes
+# the step-result `exact` close.
 _FLOOR_DIV_TAIL = [
     ("sub x0, x2, x5",
-     "some (arm64_set_reg 0 s (arm64_reg 2 s - arm64_reg 5 s))"),
+     "some (arm64_set_reg 0 s (arm64_reg 2 s "
+     "- (arm64_reg 5 s <<< UInt64.ofNat 0)))"),
 ]
 
 # The remainder multiplies the FLOOR-CORRECTED QUOTIENT, which is why it costs
@@ -1583,7 +1662,8 @@ _FLOOR_DIV_TAIL = [
 # `a - b * fdiv64 a b`, which is what `lib/ProofLib.lean`'s `frem64` says.
 _FLOOR_MOD_TAIL = [
     ("sub x6, x2, x5",
-     "some (arm64_set_reg 6 s (arm64_reg 2 s - arm64_reg 5 s))"),
+     "some (arm64_set_reg 6 s (arm64_reg 2 s "
+     "- (arm64_reg 5 s <<< UInt64.ofNat 0)))"),
     ("msub x0, x1, x6, x0",
      "some (arm64_set_reg 0 s (arm64_reg 0 s "
      "- (arm64_reg 1 s * arm64_reg 6 s)))"),
