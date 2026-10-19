@@ -18744,7 +18744,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # partition, so "in none of them" is the answer and costs three dict lookups.
     unit_structs = {name: st for name, st in structs_by_name.items()
                     if name not in framed and name not in wide
-                    and name not in one_field}
+                    and not M.one_field_answer(st, one_field)}
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
