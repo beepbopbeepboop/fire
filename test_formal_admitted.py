@@ -1445,22 +1445,34 @@ AXIOM_CLOSURE = {
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
-    # Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge,
-    # which brought in `lib/Specs.lean`'s copy of `u64_ofNat_mul` -- and back to
-    # 66 in the SAME DAY, because that copy was a merge artefact: it restated
-    # `lib/ProofLib.lean`'s theorem of the same name, which is stated beside
-    # `u64_ofNat_add`/`u64_ofNat_sub`, and the shim existed only so the name
-    # would be in scope without rebuilding ProofLib's `.olean`.  The shim is
-    # deleted and the generated all-inputs induction cites the bare
-    # `u64_ofNat_mul` again, which is what `lib/ProofLib.lean` has no namespace
-    # prefix for.  The NUMBER is unchanged either way; what changed is that one
-    # theorem is counted once instead of twice.  Measured, generation only:
-    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` after
-    # the `lib/Specs.lean` edit answers 66 of 66, 0 reaching a decide axiom,
-    # 66 clean, 0 text_only / closure_only / ofReduceBool -- partition closes
-    # (66 = 0 + 66 + 0 + 0).  The other seven rows are NOT re-measured here;
-    # this row is the only one that moved, and it moved because a declaration
-    # left the module, not because a proof stopped being kernel-checked.
+    # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
+    # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
+    # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
+    # `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`, `UInt64.toNat_ofNat'`
+    # and `Nat.mul_mod`, so it reaches no axiom), so `asked` and `clean` rose
+    # together and `reaches` stayed 0: the same shape this row has moved in three
+    # times, and the shape that says the ARRIVAL is specification theorems and
+    # not new trusted evaluation.  Partition closed at 67 = 0 + 67 + 0 + 0.
+    #
+    # That copy was then DELETED, so the row is back where it was.  It restated
+    # `lib/ProofLib.lean`'s theorem of the same name -- stated beside
+    # `u64_ofNat_add`/`u64_ofNat_sub`, which is where it belongs -- and it
+    # existed only so the generated all-inputs induction would have the name in
+    # scope without rebuilding ProofLib's `.olean`.  Measured, that objection
+    # does not survive contact with the tree: `lib/Specs.lean` rebuilds in 1.1 s
+    # / 0.2 GB, and the emitted clause now cites the BARE `u64_ofNat_mul` (there
+    # is no `ProofLib` namespace), which
+    # `test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks`
+    # elaborates with Lean.  So the NUMBER is unchanged either way; what changed
+    # is that ONE theorem is counted once instead of twice.
+    #
+    # Re-measured after the deletion, generation only:
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` answers
+    # 66 of 66, 0 reaching a decide axiom, 66 clean, 0 text_only /
+    # closure_only / ofReduceBool -- partition closes (66 = 0 + 66 + 0 + 0).  The
+    # other seven rows are NOT re-measured here; this row is the only one that
+    # moved, and it moved because a declaration LEFT the module, not because a
+    # proof stopped being kernel-checked.
     "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
     # the same way on the same run.  Fourteen askable declarations, of which TEN
