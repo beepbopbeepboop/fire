@@ -146,7 +146,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_optional_needs_a_niche.md` | `formal410-docs` | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | `formal410-docs` | what a pointer IS on the formal path, and why the 54-file group was never about that |
 | `FORMAL_string_value_model.md` | `formal411-docs` | what a string IS on the formal path, and the two things that want to be one |
-| `FORMAL_a_typed_bracket_parameter_is_parsed_as_a_struct_field.md` | **unclaimed** | a one-field instantiation with a VALUE argument SEGFAULTS when a free function takes it |
 | `FORMAL_dialect_operations_with_no_lowering.md` | **unclaimed** | what is left of `__mlir_op` once the refusal stopped being false |
 | `FORMAL_no_public_api_reason_lost_the_backend_rule_clause.md` | **unclaimed** | `no_public_api_reason`'s constants-only sentence lost the "backend RULE" clause its own test pins |
 | `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |

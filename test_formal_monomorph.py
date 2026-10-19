@@ -2654,6 +2654,109 @@ def test_a_bare_literal_value_parameter_instantiates(tmpdir):
               f"value the bracket supplied")
 
 
+# The typed-bracket parameter is a compile-time parameter, not storage: a
+# template whose head declares `origin: Int` used to measure one field WIDER
+# than its own one-field instantiation, so a free function taking the
+# instantiation was compiled as a FRAME receiver while the caller passed the
+# field by value.  The program built and then SEGFAULTED on both architectures.
+# These two programs are that case in its two admitted spellings — a comptime
+# VALUE argument and a display — and both read the one field through the call
+# boundary, which is the read that faults when the contract is wrong.
+TYPED_BRACKET_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+def untag_int(t: Tagged[Int, 7]) -> Int:
+    return t.v
+"""
+
+TYPED_BRACKET_PROG = """\
+from taglib import Tagged, untag_int
+
+def main():
+    var t = Tagged[Int, 7]()
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.v = 0
+        self.origin = origin
+
+def untag_int(t):
+    return t.v
+
+def main():
+    t = Tagged(7)
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_DISPLAY_LIB = """\
+struct Tagged[T, keys: List[T]]:
+    var v: T
+
+def untag_int(t: Tagged[Int, [1, 2]]) -> Int:
+    return t.v
+"""
+
+TYPED_BRACKET_DISPLAY_PROG = """\
+from taglib import Tagged, untag_int
+
+def main():
+    var t = Tagged[Int, [1, 2]]()
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_DISPLAY_CPYTHON = """\
+class Tagged:
+    def __init__(self, keys):
+        self.v = 0
+        self.keys = keys
+
+def untag_int(t):
+    return t.v
+
+def main():
+    t = Tagged([1, 2])
+    t.v = 5
+    print(untag_int(t))
+"""
+
+
+def test_a_typed_bracket_parameter_is_not_instance_storage(tmpdir):
+    """A one-field instantiation crosses a free function's boundary by VALUE.
+
+    The head `[T, origin: Int]` declares a compile-time parameter; the parser
+    keeps the annotated one in `StructDef.fields` for the interpreter's member
+    read, but `formal/model.py::struct_field_names` must not count it as
+    storage.  Counting it made the TEMPLATE `Tagged` two fields wide while
+    `Tagged[Int, 7]` is one, so the callee compiled `t.v` as a frame slot and
+    the caller — a one-field receiver, whose value IS its field — passed the
+    word itself: SIGSEGV, exit 139, on both architectures.  The answer 5 is
+    whatever `t.v` was set to, and the build is the assertion; CPython's twin
+    is the same call with the head's parameter written as an argument.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_typedbr", TYPED_BRACKET_LIB,
+                            TYPED_BRACKET_PROG, TYPED_BRACKET_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, 7]` read through a "
+              f"free function taking the instantiation")
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_typedbrdisp",
+                            TYPED_BRACKET_DISPLAY_LIB, TYPED_BRACKET_DISPLAY_PROG,
+                            TYPED_BRACKET_DISPLAY_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, [1, 2]]` read through "
+              f"a free function taking the instantiation")
+
+
 def test_a_bare_literal_is_only_a_value_when_the_declaration_says_so(tmpdir):
     """The declaration decides: `Pair[2]` and `widen[3]` are still not demands.
 
