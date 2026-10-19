@@ -293,6 +293,34 @@ BUILTIN_PROGRAMS = {
             print(b"ab"[0])
             print(b"ab" == b"ab")
     """),
+    # A `List`/`Dict`/`Set` field or local with no initializer is an empty
+    # container of the declared kind — the compiled path's answer and real
+    # Mojo's — not None: the interpreter used to leave it None, so
+    # `q.xs.append(1)` raised `'NoneType' object has no attribute 'append'`
+    # where the language and the compiled path accept it. The `String` field
+    # prints None on BOTH engines (a shared, deliberately separate gap),
+    # which is what makes the container rows here the whole test. The
+    # mutation of a defaulted container field is deliberately NOT here: the
+    # compiled path SIGSEGVs on `q.xs.append(1)` after printing the right
+    # default (filed separately — a struct-field container default is not
+    # retained for mutation), so including it would pin a codegen crash
+    # this interpreter fix is not responsible for.
+    "container_field_default_is_empty": textwrap.dedent("""\
+        struct Box:
+            var s: String
+            var xs: List[Int]
+            var d: Dict[String, Int]
+            var st: Set[Int]
+
+        def main():
+            var q = Box()
+            print(q.s)
+            print(q.xs)
+            print(q.d)
+            print(q.st)
+            var ys: List[Int]
+            print(ys)
+    """),
     # A method call is the only `return` EXPRESSION KIND whose type the
     # enclosing function's inference had no case for: `_quick_type`'s
     # method-call branch is gated on the RECEIVER's type naming a registered
