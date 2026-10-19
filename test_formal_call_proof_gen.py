@@ -6667,8 +6667,10 @@ class TestCfgLeafCensus(unittest.TestCase):
     census it feeds; the Lean half -- "which leaf does the corpus actually
     admit at" -- is `no_admission_fallback` plus a Lean run, which is what
     `test_formal.py`'s census reports and what
-    `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`
-    records.
+    `bugs/FORMAL_arm64_known_proof_gaps.md`'s census records.  The CBZ-leaf
+    doc that used to be cited here is deleted: its subject left when the guard
+    became a load-and-compare, and the admissions that remained were the `sh`
+    bit dropped by every `sp` tracker, fixed by 37ae3718.
     """
 
     def test_the_registry_is_exactly_the_pinned_fifteen(self):
@@ -6786,7 +6788,9 @@ class TestCfgLeafCensus(unittest.TestCase):
         which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
         place that says memory is zero, and the universal theorem's `st` is a
         free state. So this test pins the REDUCTION and not a pass, and the doc
-        that says so is `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`.
+        that says so is `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` \u2014 the
+        `st.mem`-free finding outlived the CBZ doc that used to carry it, and
+        37ae3718 is the commit that retired that doc.
         """
         import formal.arm64_proof_gen as G
         corpus = os.path.join(HERE, "formal", "examples")

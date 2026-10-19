@@ -62,7 +62,9 @@ the reason this document exists instead of a patch.
     absent: `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_
     against_a_signed_flag.md` and `bugs/FORMAL_a_loop_that_is_neither_a_decrement_
     nor_a_range_loop_has_no_contract.md` are two shapes of the same gap, and
-    `bugs/FORMAL_contract_ladder_reach.md` is about the ladder's reach. A fold's
+    the ladder's reach was a third shape of the same gap, and `f801d013` closed
+    it (its doc is deleted; the measurement is still the one a reader wants, so
+    it is named here). A fold's
     accumulator is loop-carried state, which is the hardest of the three;
   * the same on BOTH backends, since a proof that exists for one architecture and
     not the other is a census row that reports a construct as covered on one and
