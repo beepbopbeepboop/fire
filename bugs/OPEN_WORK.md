@@ -275,7 +275,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_register_read_out_of_a_shift_has_no_projection_fact.md` | **unclaimed** | a REGISTER READ out of `x86_shift_post` has no projection fact, so every program with a shift leaves the closing read admitted |
 | `FORMAL_x86_64_end_to_end_proof.md` | **unclaimed** | a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both |
 | `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` | **unclaimed** | the x86-64 end-to-end chain cannot close past about a hundred steps, so the first program with a stack argument is unprovable |
 

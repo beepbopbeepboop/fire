@@ -3340,6 +3340,49 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertIn("x86_set_reg_narrow", applied)
         self.assertIn("x86_set_flag4", applied)
 
+    def test_every_wrapper_projection_the_read_names_is_a_library_theorem(self):
+        """A name in the closing read's `simp only` set must be a theorem.
+
+        `x86_shift_post` is a wrapper whose `if k = 0` cannot reduce while the
+        count is symbolic, so `.rip`, `.rsp` and `.rbp` projections out of it
+        stop unless the library states them.  `_WRAPPER_PROJECTIONS` is that set
+        and `_unfold` puts it in every closing read; a name there that is not a
+        theorem is an elaboration error in every generated file with a shift on
+        its path, which is the same failure `_MEM_LEMMAS`' own check exists for.
+
+        The rsp/rbp side conditions are asserted too, and they are the
+        load-bearing half: `shl rsp, 1` is a legal encoding, so the
+        unconditional statement is FALSE.  A rename or a dropped hypothesis
+        would leave a fact that looks present and is not provable.
+        """
+        import formal.x86_64_endtoend_test as E
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "lib", "X86.lean")) as f:
+            src = f.read()
+        for name in E._WRAPPER_PROJECTIONS:
+            self.assertIn("theorem %s " % name, src,
+                          "%s is in the closing read's simp set and is not a "
+                          "theorem in lib/X86.lean" % name)
+        for name, excluded in (("x86_shift_post_rsp", "4"),
+                               ("x86_shift_post_rbp", "5")):
+            i = src.find("theorem %s " % name)
+            self.assertGreaterEqual(i, 0, name)
+            statement = src[i:src.find(":=", i)]
+            self.assertIn("(h : i ≠ %s)" % excluded, statement,
+                          "%s must exclude register %s: that register is a "
+                          "legal destination for a shift, and without the "
+                          "hypothesis the fact is false" % (name, excluded))
+
+    def test_the_closing_read_names_every_wrapper_projection(self):
+        """`_unfold` is what the closing read actually runs, not the table."""
+        import formal.x86_64_endtoend_test as E
+        got = E._unfold(("hs1", "hs2"))
+        for name in E._WRAPPER_PROJECTIONS:
+            self.assertIn(name, got,
+                          "%s is in `_WRAPPER_PROJECTIONS` but not in the "
+                          "`simp only` set `_unfold` builds, so the fact the "
+                          "table names is never available to the read" % name)
+
     def test_every_rex_byte_a_path_uses_has_a_named_decoding(self):
         """`simp only` does not use the default simp set, so the sixteen `[simp]`
         REX decodings in `lib/X86.lean` have to be NAMED — and a REX byte the

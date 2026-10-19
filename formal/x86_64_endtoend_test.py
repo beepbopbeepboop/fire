@@ -3326,15 +3326,24 @@ _WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
 
 #: Projections through a wrapper whose own `if` CANNOT REDUCE.  Every other
 #: entry above is a fact about a projection that follows from the wrapper's
-#: result; this one is about a wrapper the simplifier cannot get inside, because
+#: result; these are about a wrapper the simplifier cannot get inside, because
 #: its condition is a symbolic byte: `x86_shift_post s i digit a k` is
 #: `if k = 0 then … else …` and `k` is `(code (m + 3)).toNat &&& 63`, so
 #: `(x86_shift_post …).rip` unfolds to a projection through an `ite` and stops.
 #: `_MEM_LEMMAS` does not help there — `x86_shift_post_mem` says the memory is
 #: the state's own, which is a statement about the RESULT and not a way to
-#: reduce the projection — and without this the emitter's closing `hrip` is
+#: reduce the projection — and without `rip` the emitter's closing `hrip` is
 #: admitted for every program with a shift on its path.
-_RIP_LEMMAS = ("x86_shift_post_rip",)
+#:
+#: **`rsp` and `rbp` are the other two fields the closing read and every frame
+#: address project**, and they are here for the same reason: the read's address
+#: is `s_k.rsp.toNat`, so a shift anywhere on the chain stops the projection.
+#: Their hypotheses are load-bearing — `shl rsp, 1` is legal, so an
+#: unconditional `rsp` statement is FALSE — and the index the simplifier is
+#: asked about is the decoded ModRM `rm` plus `REX.B`, a small literal whose
+#: `x86_rex_*` decodings are in the same `simp only` set.
+_WRAPPER_PROJECTIONS = ("x86_shift_post_rip", "x86_shift_post_rsp",
+                        "x86_shift_post_rbp")
 
 
 def _rex_byte_lemmas(shapes):
@@ -3374,7 +3383,8 @@ def _unfold(hs_path, rex=()):
     without unfolding the `match`, and the projection walks on down.
     """
     return ", ".join(("i0, X86State.init",) + tuple(hs_path)
-                     + _MEM_LEMMAS + _WRAPPER_DEFS + _RIP_LEMMAS + tuple(rex))
+                     + _MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS
+                     + tuple(rex))
 
 
 #: **How many successor equations the closing read may UNFOLD, and why it is a
