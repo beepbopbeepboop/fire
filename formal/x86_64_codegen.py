@@ -751,6 +751,16 @@ class X86_64Codegen:
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
+        # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
+        # parameters each function measures as TEXT, transitively through calls
+        # that forward a bare parameter (`model.text_measured_parameters`).
+        # None means "not computed"; the same one-table-per-compile shape as
+        # `_returnless`.
+        self._text_measured = None
+        # Lazily filled by `_callee_returned_parameter`: `{name: index or None}`
+        # for the call whose result is its own argument handed back. Computed
+        # once per callee, because it walks the callee's body.
+        self._returned_parameter: dict = {}
         # Filled by `compile()`: a callable NAME -> the label a call to it
         # lands on, and the per-definition labels it points at, which are not
         # published in `info["labels"]`. arm64's `_entry_labels` is the same
@@ -4534,14 +4544,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `model.foreign_bytes_into_text_parameter_refusal` is the whole of the
         rule, and the input it needs is the callee's BODY rather than its
         declaration — a `String` parameter is the honest type, so only what the
-        body does with it says whether a byte count would be a wrong answer. A
-        no-op for a callee this image does not declare.
+        body does with it says whether a byte count would be a wrong answer.
+        The parameters it is measured at are the TRANSITIVE set
+        (`model.text_measured_parameters`), so `def f(s): return g(s)` is the
+        same call one hop out. A no-op for a callee this image does not declare.
         """
         callee = self._functions.get(name)
         if callee is None:
             return
+        if self._text_measured is None:
+            self._text_measured = M.text_measured_parameters(
+                self._functions.values())
         reason = M.foreign_bytes_into_text_parameter_refusal(
-            name, callee, list(e.args or ()), self._expr_str_kind)
+            name, callee, list(e.args or ()), self._expr_str_kind,
+            measured=self._text_measured.get(name))
         if reason is not None:
             raise CodegenError(reason)
 
@@ -10323,6 +10339,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
                 fn, e, self._structs, self._functions),
@@ -10810,6 +10827,26 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returned_parameter(self, name):
+        """The positional index of a parameter `name` hands straight back.
+
+        `model.returned_parameter_position` is the whole reader — every exit is
+        a bare parameter name and they all name the same one — and this is the
+        cache, because it walks the callee's body and every call site asks the
+        same question about the same declaration. The answer is what lets
+        `ValueKinds` carry a FOREIGN-BYTES argument through
+        `def ident(s: String): return s`, which a declared `-> String` cannot
+        say and whose loss was a wrong number on both architectures.
+
+        `None` for a callee this image does not declare, which leaves the call
+        result classified exactly as it was.
+        """
+        if name not in self._returned_parameter:
+            fn = self._functions.get(name)
+            self._returned_parameter[name] = (
+                None if fn is None else M.returned_parameter_position(fn))
+        return self._returned_parameter[name]
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -11471,6 +11508,19 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
             return
+        # …and a METHOD call on a MODULE GLOBAL is neither: the name is not a
+        # local, so `_is_value_receiver` answers False, and nothing on the link
+        # line provides `H.append`, so the extern path would emit a call against
+        # a dotted symbol and the build would die four stages later with the
+        # LINK AUDIT's sentence about a symbol. The model's shared reader owns
+        # the words so the two architectures cannot describe one call
+        # differently; arm64's copy carries the same measurement.
+        if isinstance(e.func, F.MemberExpr):
+            reason = M.module_global_method_refusal(
+                e.func.obj, e.func.member, self._fn_local_names,
+                getattr(self._cur_fn, "name", None))
+            if reason:
+                raise CodegenError(reason)
         # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
         # decision and its reasons are `model.dotted_struct_construction`, read
         # from the same three tables arm64 reads, and placed immediately after

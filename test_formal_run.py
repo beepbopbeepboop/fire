@@ -6455,6 +6455,51 @@ ASSIGNED_TYPE_CASES = [
      "    var xs = [a + b + c for a, (b, c) in [(1, (2, 3)), (10, (20, 30))]]\n"
      "    printf(\"n=%d s=%d\\n\", len(xs), xs[0] + xs[1])\n"
      "    return 0\n", 0, "n=2 s=66"),
+    # A parameter's OWN DEFAULT is a claim on its kind. Before this, the only
+    # evidence was the CALL SITES, and `f()` passes no argument at all, so an
+    # unannotated `x` fell through to "a word is an integer" and the emitter
+    # put a `char *` into a slot the callee was told held a number. Measured on
+    # both backends: the row below printed a pointer and the comparison row was
+    # refused with "compares a NUMBER with a string", where CPython answers
+    # `plain` and `1`. The INTEGER control is here so a fix that turned every
+    # default into a string would fail rather than pass.
+    ("both_arch_a_string_parameter_default_is_the_string",
+     "def f(x=\"plain\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[plain]"),
+    ("both_arch_a_string_parameter_default_compares_as_text",
+     "def f(x=\"plain\"):\n"
+     "    if x == \"plain\":\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f())\n"
+     "    return 0\n", 0, "1"),
+    ("both_arch_an_integer_parameter_default_stays_the_number",
+     "def f(x=7):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f())\n"
+     "    return 0\n", 0, "7"),
+    # THE CONTROL for the unanimity rule: a `None` default says NOTHING about
+    # what the parameter holds, so it must not enter the claim set as a veto.
+    # Without this row, `def f(x=None)` called `f("plain")` stopped being a
+    # string comparison and was refused with "compares a NUMBER with a string"
+    # — a regression the call site's own evidence had already answered.
+    ("both_arch_a_none_default_does_not_retract_the_call_sites_string",
+     "def f(x=None):\n"
+     "    if x == \"plain\":\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f(\"plain\"))\n"
+     "    return 0\n", 0, "1"),
 ]
 
 # Positive cases built and RUN on BOTH backends, which is what

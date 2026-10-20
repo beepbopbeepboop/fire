@@ -93,7 +93,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | `formal412-docs` | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | `formal407-docs` | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | `formal415-docs` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
-| `FORMAL_a_method_call_on_a_module_level_container_reaches_the_link_audit.md` | **unclaimed** | `H.append(v)` on a module global is refused as a DANGLING SYMBOL, not by name |
 | `FORMAL_arm64_exit_flush_is_not_published_as_a_compiler_trap.md` | **unclaimed** | FORMAL/arm64: `_emit_exit`'s `BL fflush` is not published as a compiler trap, so it reads as a program call |
 | `FORMAL_arm64_step_lemmas_are_generated_for_the_images_diagnostic_string.md` | **unclaimed** | `_gen_step_lemmas` walks the whole code buffer, so `bfeec991`'s embedded stack-trap message gets false `sr`/`step_ok` lemmas and `bitops` no longer proves |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
@@ -223,8 +222,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md` | **unclaimed** | The parser DISCARDS a `comptime` FUNCTION-TYPE alias, and silently erases a `comptime` call whose bracket mixes a keyword with a later positional |
 | `FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md` | **unclaimed** | A callee that is an EXPRESSION inside a `try` is the whole of what is left of the unplaceable tier |
 | `FORMAL_a_float_has_no_print_spelling.md` | **unclaimed** | `print(<a float>)` is refused: CPython's spelling is the shortest decimal that round-trips, and no libc conversion is that |
-| `FORMAL_a_kernel_string_through_a_call_boundary_still_answers_in_bytes.md` | **unclaimed** | the foreign-bytes KIND rides on the reading EXPRESSION, so a call drops it and `len` answers in bytes |
-| `FORMAL_a_parameter_default_string_reaches_the_callee_as_a_word.md` | **unclaimed** | an UNANNOTATED parameter whose only value comes from its default is typed from the CALL SITES and they never mention it, so a string default is a number |
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | **unclaimed** | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_a_subscript_of_a_word_whose_kind_is_an_integer_segfaults.md` | **unclaimed** | a subscript whose BASE is itself a subscript of a known integer list SIGSEGVs, where the same subscript of a named integer is refused |
 | `FORMAL_a_tuple_for_target_leaf_is_classified_as_the_element_container.md` | **unclaimed** | `printf("%d", a)` is refused as "a is a CONTAINER" for `for a, b in [(1, 2)]` |
