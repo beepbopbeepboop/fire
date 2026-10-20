@@ -1493,6 +1493,16 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
                 continue
             if (sd.name, m.name) in self._generator_method_api:
                 continue
+            if (m.name == '__new__'
+                    and sd.name in getattr(self, '_bytes_subclass_structs', ())):
+                # A builtin-`bytes` subclass's `__new__` is handled inline at
+                # the construction site (payload synthesis; see
+                # _lower_struct_constructor), so the function-body loop emits
+                # no C symbol for it: no prototype, and no `_mojo_getattr_<S>`
+                # arm to take its address — the arm dangles and the link fails
+                # (measured: `Undefined symbols: _Extra___new__` in
+                # gimple_bytes_subclass_shape, and in the selfhost binary).
+                continue
             overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
             mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
             ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
