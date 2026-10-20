@@ -2782,7 +2782,18 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # the length is read once and the slots after the star are counted
             # from its END (`a, *mid, z` over "abcd" -> `mid == ['b', 'c']`).
             # `starred_slot_index` is the model for the arithmetic.
-            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
+            # GIMPLE strict calls take SIMPLE operands: an inline cast in a call
+            # argument (`mojo_strlen ((char *) k)`) is a hard error
+            # ("expected expression before '(' token" / "invalid argument to
+            # gimple call") in `__GIMPLE`-tagged functions — the ones WITHOUT
+            # setjmp (see emit_funcs/emit_loops `_sig_kw`) — while the same line
+            # parses fine in setjmp-tagged ones. The starless-dict loops this
+            # check guards landed in three such functions in the selfhost
+            # closure (solvers/coro/myinterpreter) and the whole build failed to
+            # compile. Hoist the cast to its own CONVERSION statement; behavior
+            # is unchanged in both tag classes.
+            _key_cstr = gen._new_val('char *', f"(char *) {key_tmp}")
+            _klen = gen._new_val('int64_t', f"mojo_strlen ({_key_cstr})")
             _n = gen._new_val('int64_t', f"{_n_after}LL")
             # CPython raises ValueError when a starred target's non-starred
             # slots outnumber the item's elements ("not enough values to unpack
@@ -2868,7 +2879,18 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # never executes this — `mojo_is_registered_list` routes it to
             # the list arm — so real code that iterates a list of pairs is
             # not newly refused by a check written here.
-            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
+            # GIMPLE strict calls take SIMPLE operands: an inline cast in a call
+            # argument (`mojo_strlen ((char *) k)`) is a hard error
+            # ("expected expression before '(' token" / "invalid argument to
+            # gimple call") in `__GIMPLE`-tagged functions — the ones WITHOUT
+            # setjmp (see emit_funcs/emit_loops `_sig_kw`) — while the same line
+            # parses fine in setjmp-tagged ones. The starless-dict loops this
+            # check guards landed in three such functions in the selfhost
+            # closure (solvers/coro/myinterpreter) and the whole build failed to
+            # compile. Hoist the cast to its own CONVERSION statement; behavior
+            # is unchanged in both tag classes.
+            _key_cstr = gen._new_val('char *', f"(char *) {key_tmp}")
+            _klen = gen._new_val('int64_t', f"mojo_strlen ({_key_cstr})")
             _nslots = gen._new_val('int64_t', f"{len(var_names)}LL")
             _long = gen._new_val('_Bool', f"{_as_str(_klen)} > {_as_str(_nslots)}")
             _bb = gen._new_bb(); _bo = gen._new_bb()
