@@ -797,6 +797,37 @@ BUILTIN_PROGRAMS = {
             print(o.y)
             print(hasattr(o, "nope"), hasattr(o, "y"))
     """),
+    # A method referenced as a VALUE through a receiver the codegen ERASES to
+    # int64_t (an unannotated parameter — `c` in `H.__init__(self, c)`). There
+    # is no static type at that read, so `c.add` lowers to the runtime getattr
+    # dispatch, which lands on the object's own type tag and, until the
+    # `_mojo_getattr_<Struct>` method arm existed, answered a fields-only
+    # lookup and raised `AttributeError: add` — the stored `cb` never became a
+    # callable. The typed spelling (`c: C`) worked throughout, which is what
+    # made this a gap in the dynamic dispatch rather than in the bound-method
+    # value itself; the arm answers with the same `mojo_bound_method_new` value
+    # that spelling builds.
+    "bound_method_value_on_an_untyped_receiver": textwrap.dedent("""\
+        class C:
+            def __init__(self):
+                self.k = 9
+            def add(self, a, b):
+                return self.k + a + b
+
+        class H:
+            def __init__(self, c):          # c is unannotated: erased to int64_t
+                self.cb = c.add
+            def go(self):
+                return self.cb(1, 2)
+
+        def main():
+            m = C()
+            print(H(m).go())                # 12, through the value stored in a field
+            e = m                           # the same read, kept in a local
+            f = e.add
+            print(f(10, 20))                # 39
+            print(e.add(1, 2))              # 12, a direct call on the erased receiver
+    """),
     # An EMPTY container literal asserts no element type, and one place
     # believed otherwise: `_lower_list_literal` /
     # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
@@ -1529,6 +1560,12 @@ CPYTHON_COMPARABLE = {
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "dict_items_reads_each_slot_kind",
     "getattr_default_on_a_miss",
+    # An erased receiver is a PARAMETER with no annotation (a local keeps the
+    # type its initializer gave it, which is why `method_call_result` above
+    # never came near this); the only witness that the word the getattr
+    # dispatch hands back is a callable and not a raw int is CPython's own run
+    # of the same text.
+    "bound_method_value_on_an_untyped_receiver",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
     # The interpreter yielded characters where the compiled path yielded ints;

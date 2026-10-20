@@ -1454,6 +1454,104 @@ def _emit_reflection_fwd_decls(self, parts):
     return elem_repr_fwd_decls
 
 
+def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
+    """One prototype per struct method's mangled C symbol, and the record of
+    which METHOD names its generated `_mojo_getattr_<Struct>` may answer as a
+    bound-method value (`self._getattr_method_arms`).
+
+    Emitted BEFORE `_emit_reflection_dispatch` (which it did not used to be —
+    this block lived just below the function-body emission, i.e. after the
+    reflection definitions that now reference these symbols) for exactly one
+    reason: C has no two-pass declarations, and a `_mojo_getattr_<Struct>` arm
+    takes the ADDRESS of a method symbol, which needs the prototype in front of
+    it. Same rule, same consequence as `_emit_reflection_fwd_decls`'s own
+    docstring: a declaration emitted after its use is an implicit one.
+
+    The arm table is built HERE, beside the prototypes, rather than derived a
+    second time from the same `struct_defs`, so an arm can only ever name a
+    symbol this block declared (and Phase 2a defined): one walk, one symbol per
+    method name, no second lookup to drift.
+
+    A generator method is skipped — as it is for the prototype — because it has
+    no ordinary C symbol at all (its callable surface is the `<base>_start/
+    _resume/_value/_destroy` coroutine API; see `_lower_bound_method_value`'s
+    refusal, which is the same decision from the value side).
+    """
+    self._getattr_method_arms: dict = {}
+    for sd in struct_defs:
+        if not isinstance(sd, StructDef):
+            continue
+        _moids = self._struct_method_overload_ids(sd)
+        # Index loop, NOT `{id(m): oid for m, oid in zip(...)}`: neither
+        # `zip()` nor a dict comprehension over it lowers in the self-hosted
+        # backend, and `id()` is unreliable there — walk `sd.methods` by
+        # position so `_moids` (same length) stays aligned.
+        _z8_meths = sd.methods
+        for _z8k in range(len(_z8_meths)):
+            m = _z8_meths[_z8k]
+            if (sd.name, m.name) in self._supported_generator_methods:
+                continue
+            if (sd.name, m.name) in self._generator_method_api:
+                continue
+            overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
+            mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
+            ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
+                   or self.func_return_types.get(f"{sd.name}_{m.name}")
+                   or self._resolve_type(m.return_type))
+            method_full_name = f"{sd.name}_{m.name}"
+            per_overload_params = self.func_param_types.get(mangled_name)
+            if per_overload_params is not None:
+                param_ctypes = per_overload_params
+            elif gimple_ctypes._params_have_vararg(m.params):
+                param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
+                self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
+            else:
+                param_ctypes = []
+                for i, (pname, ptype) in enumerate(m.params):
+                    if pname.startswith('**'):
+                        continue  # skip **kwargs
+                    if pname == 'self':
+                        ct = f"{sd.name} *"
+                    elif ptype is None and hasattr(self, '_inferred_param_types'):
+                        if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
+                            ct = self._inferred_param_types[method_full_name][pname]
+                        else:
+                            ct = 'int64_t'
+                    else:
+                        ct = self._resolve_type(ptype)
+                    param_ctypes.append(ct)
+            ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
+            parts.append(f"{ret} {mangled_name} ({ptypes});")
+            # Record the method arm for `_mojo_getattr_{sd.name}`. FIRST
+            # occurrence of a source name wins: an overloaded method is two
+            # (or more) symbols and one `attr` string, and this is the same
+            # symbol whose prototype is directly above. `_lower_bound_method_
+            # value`'s own overload rule falls back to the UNSUFFIXED symbol
+            # when a name is overloaded, which no overload defines (measured:
+            # `f = c.m` with two `def m` overloads links `Undefined symbols:
+            # _C_m`) — the arm deliberately does not follow it there, because a
+            # bound method to the first overload is a value and a link error is
+            # not.
+            _arms_sn = _as_str(sd.name)
+            if _arms_sn not in self._getattr_method_arms:
+                self._getattr_method_arms[_arms_sn] = {}
+            _arms_mn = _as_str(m.name)
+            if _arms_mn not in self._getattr_method_arms[_arms_sn]:
+                self._getattr_method_arms[_arms_sn][_arms_mn] = _as_str(mangled_name)
+
+        _emitted_base: set[str] = set()
+        _z9_meths = sd.methods
+        for _z9k in range(len(_z9_meths)):
+            m = _z9_meths[_z9k]
+            if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
+                base_cname = self._struct_method_csym(sd.name, m.name, '')
+                if base_cname not in _emitted_base:
+                    base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
+                                or self._resolve_type(m.return_type))
+                    parts.append(f"{base_ret} {base_cname} (...);")
+                    _emitted_base.add(base_cname)
+
+
 def _emit_reflection_dispatch(self, parts):
     """Emit the generic reflection dispatch (getattr/setattr/repr/
     dataclasses.fields/asdict). Extracted from gen_module_impl so its
@@ -1505,6 +1603,34 @@ def _emit_reflection_dispatch(self, parts):
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
+        # A METHOD name is answered with the SAME value a typed receiver's
+        # `c.add` already builds — `mojo_bound_method_new(<the method's own
+        # mangled C symbol>, obj)`, the `MojoBoundMethod *`
+        # `_lower_bound_method_value` emits. A receiver the codegen ERASED to
+        # int64_t (an unannotated parameter, here `c` in
+        # `H.__init__(self, c): self.cb = c.add`) has no static type at all,
+        # so `_lower_MemberExpr` cannot see that `add` names a method and
+        # `c.add` lowers to the runtime getattr dispatch, which lands HERE on
+        # the object's own type tag; the fields-only answer then fell through
+        # to `mojo_obj_getattr`, which raises `AttributeError: add` and the
+        # stored `cb` is never a callable. Fields stay FIRST (a field and a
+        # method may share a name, and the field wins, as in every other
+        # getattr) and a miss keeps falling through to `mojo_obj_getattr`
+        # unchanged, so this adds answers and takes none away.
+        #
+        # The CALL side needs nothing new for this: a call through the stored
+        # word is `mojo_fnptr_call_N`, which already dispatches on
+        # `mojo_is_bound_method` — the same runtime registry
+        # `mojo_maybe_bound_call_N` consults for a tainted local — so the
+        # bound value reaches `mojo_bound_method_call_N`, which re-supplies
+        # the bound receiver as the method's implicit first argument.
+        _mm_arms = self._getattr_method_arms.get(_as_str(sn))
+        if _mm_arms:
+            for _mm_attr in _mm_arms:
+                get_lines.append(
+                    f'  if (strcmp(attr, "{_as_str(_mm_attr)}") == 0) '
+                    f'return (int64_t)(intptr_t)mojo_bound_method_new ('
+                    f'(void *){_as_str(_mm_arms[_mm_attr])}, (void *)obj);')
         # Inlined `_fieldnames_append_lines` (was a separate function
         # taking `name_lits: list`, called once, at the single call site
         # below) — self-hosted codegen has no mechanism that carries a
@@ -13702,6 +13828,16 @@ def gen_module_impl(self, stmts):
         )
         parts.append('')
 
+    # The StructDefs whose METHODS get a C prototype, and — the same walk —
+    # `_getattr_method_arms`, the per-struct method table the reflection
+    # dispatch's `_mojo_getattr_<Struct>` reads. Computed and emitted HERE,
+    # ahead of both the reflection definitions (which call the arms' symbols)
+    # and the function bodies.
+    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+    if not self.do_imports:
+        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
+    _emit_struct_method_prototypes(self, parts, struct_defs)
+
     if self.emit_struct_defs:
         _emit_reflection_dispatch(self, parts)
 
@@ -14108,61 +14244,12 @@ def gen_module_impl(self, stmts):
         parts.append(f"{ret} {_c_fn_name} ({ptypes});")
         parts.append('#endif')
 
-    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
-    if not self.do_imports:
-        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
-    for sd in struct_defs:
-        _moids = self._struct_method_overload_ids(sd)
-        # Index loop, NOT `{id(m): oid for m, oid in zip(...)}`: neither
-        # `zip()` nor a dict comprehension over it lowers in the self-hosted
-        # backend, and `id()` is unreliable there — walk `sd.methods` by
-        # position so `_moids` (same length) stays aligned.
-        _z8_meths = sd.methods
-        for _z8k in range(len(_z8_meths)):
-            m = _z8_meths[_z8k]
-            if (sd.name, m.name) in self._supported_generator_methods:
-                continue
-            overload_suffix = _moids[_z8k] if _z8k < len(_moids) else ''
-            mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
-            ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
-                   or self.func_return_types.get(f"{sd.name}_{m.name}")
-                   or self._resolve_type(m.return_type))
-            method_full_name = f"{sd.name}_{m.name}"
-            per_overload_params = self.func_param_types.get(mangled_name)
-            if per_overload_params is not None:
-                param_ctypes = per_overload_params
-            elif gimple_ctypes._params_have_vararg(m.params):
-                param_ctypes = self._signature_ctypes(m.params, m, sd.name, sentinel='MojoList *')
-                self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, sd.name)
-            else:
-                param_ctypes = []
-                for i, (pname, ptype) in enumerate(m.params):
-                    if pname.startswith('**'):
-                        continue  # skip **kwargs
-                    if pname == 'self':
-                        ct = f"{sd.name} *"
-                    elif ptype is None and hasattr(self, '_inferred_param_types'):
-                        if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
-                            ct = self._inferred_param_types[method_full_name][pname]
-                        else:
-                            ct = 'int64_t'
-                    else:
-                        ct = self._resolve_type(ptype)
-                    param_ctypes.append(ct)
-            ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
-            parts.append(f"{ret} {mangled_name} ({ptypes});")
-
-        _emitted_base: set[str] = set()
-        _z9_meths = sd.methods
-        for _z9k in range(len(_z9_meths)):
-            m = _z9_meths[_z9k]
-            if (_moids[_z9k] if _z9k < len(_moids) else ''):  # has an overload suffix
-                base_cname = self._struct_method_csym(sd.name, m.name, '')
-                if base_cname not in _emitted_base:
-                    base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
-                                or self._resolve_type(m.return_type))
-                    parts.append(f"{base_ret} {base_cname} (...);")
-                    _emitted_base.add(base_cname)
+    # `struct_defs` (and the method prototypes + `_getattr_method_arms` table
+    # that walk produces) moved UP, to just before `_emit_reflection_dispatch`:
+    # a `_mojo_getattr_<Struct>` method arm takes the address of one of these
+    # symbols, so the prototype has to be emitted first — see
+    # `_emit_struct_method_prototypes`'s own docstring. Same list, same loop,
+    # same emissions, one place earlier in `parts`.
 
     if func_defs or struct_defs:
         parts.append('')
