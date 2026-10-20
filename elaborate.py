@@ -967,11 +967,24 @@ class Elaborator:
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
-    def elaborate_generic_struct(self, module_src: str, struct_name: str, type_args):
+    def elaborate_generic_struct(self, module_src: str, struct_name: str,
+                                 type_args, nested=None):
         """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
         the struct + its methods for the type args (CAS-cached), and report the
         concrete name, field layout, method signatures, and object so the codegen
-        can materialize the type, construct it, and call its methods."""
+        can materialize the type, construct it, and call its methods.
+
+        `nested` handles a type argument that is itself a generic-struct mention
+        (e.g. `_PeekableIterator[_ListIter[True, Int, ImmOrigin, True]]`): a list
+        of `(mention, module_src, struct_name, type_args)`, where `mention` is
+        the exact string the caller passed as that nested argument in
+        `type_args` and the other three locate the struct's definition. Each
+        nested struct is bound-checked and monomorphized here, and its definition
+        is spliced into the wrapper's translation unit, so a by-value nested
+        field keeps its real layout — the isolated TU resolves the mangled name
+        against the definition in the same TU instead of erasing the mention to
+        int64_t (see monomorphize.instantiate's splice note for the failure this
+        fixes: the wrapper's own `next(self._inner)` refusal)."""
         tmpl = extract_struct_source(module_src, struct_name)
         if tmpl is None:
             return None
@@ -981,7 +994,24 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        nested_defs, renames = [], []
+        for mention, n_src, n_name, n_args in (nested or []):
+            if mention not in type_args:
+                return None
+            n_tmpl = extract_struct_source(n_src, n_name)
+            if n_tmpl is None:
+                return None
+            n_targs = bind_type_args(n_tmpl, n_args)
+            if n_targs is None:
+                return None
+            check_bounds(n_src, n_tmpl, n_targs)
+            n_mangled, n_concrete = mm.monomorphize_source(n_tmpl, n_targs)
+            nested_defs.append(n_concrete)
+            renames.append((mention, n_mangled))
+
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
+                                                     nested_defs=nested_defs,
+                                                     renames=renames)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers

@@ -501,6 +501,18 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     t = gen._call_expr(ret_type, mangled, all_pairs)
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]
+    # The per-slot twin of the block above. A struct method that RETURNS a
+    # heterogeneous tuple (`_ListIter.bounds` -> `(iter_len, {iter_len})` —
+    # int slot + MojoSet* slot) records its per-slot ctypes at the return
+    # (emit_stmts.py's `_return_slot_types[current_func_name]`), but this
+    # method-call path re-keyed only the JOINED elem (`_return_elem_types`),
+    # whose join is a single pointer type: the caller's `a, b = m()` unpack
+    # then read slot 0 with the joined `MojoSet *` — `a + n` became pointer
+    # arithmetic over an incomplete type, a hard gcc error (an ICE under
+    # -fgimple). `_lower_named_call`'s own identical block covers bare-name
+    # calls; this is the method-call half of the same gap.
+    if mangled in gen._return_slot_types:
+        gen._tuple_slot_types[t] = gen._return_slot_types[mangled]
     return ret_type, t
 
 
@@ -5301,6 +5313,17 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # where real Python returns an absolute one.
         return 'char *', gen._call_expr('char *', 'int64_t_realpath',
                                         [('char *', cstr_ov)])
+    if method == '__fspath__' and not arg_vals:
+        # String.__fspath__ (stdlib string.mojo) returns the receiver
+        # UNCHANGED — in this codegen's model a String IS its char* buffer,
+        # so the call is the identity: no stub, no runtime hop. This is the
+        # os.fspath-shaped call site the stdlib `getsize`/`stat` family
+        # spells (`stat(path.__fspath__())` in std/os/path/path.mojo), and
+        # the generic 'int' 0-stub below made it a dangling `stat(0)` — the
+        # wrong value where the real answer is the path itself. (Non-String
+        # receivers — Path objects — never reach this char*-receiver
+        # handler, so this cannot mask a real fspath on them.)
+        return 'char *', cstr_ov
     if method in ('encode', 'decode', 'format', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
@@ -6408,4 +6431,16 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         gen._elem_types[t] = gen._return_elem_types[mangled]
         if ret_type in ('int', 'int64_t'):
             gen._actual_types[t] = 'MojoList *'
+    # The per-slot twin of the block above. A struct method that RETURNS a
+    # heterogeneous tuple (`_ListIter.bounds` -> `(iter_len, {iter_len})` —
+    # an int slot + a MojoSet* slot) records its per-slot ctypes at the
+    # return (emit_stmts.py's `_return_slot_types[current_func_name]`), but
+    # this struct-method-call path re-keyed only the JOINED elem, whose join
+    # is a single pointer type: the caller's `a, b = m()` unpack then read
+    # slot 0 with the joined `MojoSet *`, and `a + n` became pointer
+    # arithmetic over an incomplete type — a hard gcc error (an ICE under
+    # -fgimple, tree.cc:5208). `_lower_named_call`'s own block covers
+    # bare-name calls; this is the struct-method half of the same gap.
+    if mangled in gen._return_slot_types:
+        gen._tuple_slot_types[t] = gen._return_slot_types[mangled]
     return ret_type, t

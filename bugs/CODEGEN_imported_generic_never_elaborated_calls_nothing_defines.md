@@ -943,3 +943,58 @@ the C type cannot express.
 
 Acceptance for the whole family is unchanged and unmet: the census must reach
 **0 sites** and the declared `EXPECTED_FAILURES` must empty.
+
+### Landed 2026-10-20: `getsize`'s first defect is closed (measured), and the
+field-resolution fix it exposed changed 4 files — all verified, none a regression
+
+**Defect 1 of the `getsize` family is fixed.** `__fspath__()` on a String
+receiver was stubbed to 0 in the monomorphized `getsize_String` TU — the call
+was `stat(0)`. stdlib's `String.__fspath__` returns the receiver unchanged,
+and in this codegen's model a String IS its char* buffer, so
+`emit_methods._lower_str_method` now lowers `__fspath__` on a char* receiver
+as the identity (the `readlink`-family precedent: an honest passthrough, not
+the generic 0-stub). Measured in the monomorphized TU's generated C:
+
+    before:  _t2 = 0;  /* TODO: char*.__fspath__ */
+             _t3 = stat (_t2);
+    after:   _t2 = stat (path);
+
+The main-pipeline caller of the same shape (`open(file_path, ...)` in
+`test/os/test_stat.mojo`) moved with it: `mojo_open (file_path, mode)` where
+it was `mojo_open ((char *)0, mode)`. `test_getsize` REMAINS in
+`EXPECTED_FAILURES` — the TU still fails gcc -c, and the reason string now
+names the two defects that remain (below). This is not a syntax-only green:
+both defects are value-level and would still be wrong at runtime.
+
+**The two defects that remain, precisely:**
+
+1. **Bare `stat` — a cross-stdlib call the isolated TU cannot see.** The
+   monomorphized `getsize_String` body spells `stat(path)` bare; `stat` is
+   the generic `stat[PathLike: stdPathLike]` (std/os/fstat.mojo:179), and the
+   isolated TU carries no import knowledge — so gcc sees `implicit
+   declaration of function 'stat'`. Needs transitive elaboration of the
+   callee (PathLike=String, inferred from the arg), a call rewrite to the
+   mangled `stat_8_PathLike_6_String` symbol, and the callee's object on the
+   link line. Same imported-generic family as the R1 doc's call site.
+2. **The result model.** `stat(...)`'s return is boxed `int64_t`, re-
+   interpreted `void *`, and `.st_size` is a dynamic
+   `_mojo_dispatch_getattr`. The real signature is `int stat(const char *,
+   struct stat *)` — an OUT-param filling a caller-owned struct — so a
+   prototype pinning does not fix it (it would add an argument-count error,
+   and the value would still come from the return register, not the out-
+   struct). Needs `stat_result` materialized with its real layout so `.st_
+   size` is a direct field read.
+
+**The field-resolution fix (landed for the R1 doc's nested splice) changed 4
+files' generated C — all four verified by a full-tree A/B (every file's C
+hashed, baseline vs current; exactly 4 differ, zero status transitions):**
+
+| file | change | verdict |
+|---|---|---|
+| `test/os/test_stat.mojo` | the `__fspath__` identity above | intended, measured |
+| `std/ffi/__init__.mojo` | `OwnedDLHandle._handle: _DLHandle` (a struct VALUE — source: `var _handle: _DLHandle`) resolves `_DLHandle *` per the universal struct-as-pointer convention instead of `int64_t`; locals follow; `_DLHandle`'s `mojo_close` is called with the pointer | improvement — the baseline int64_t view was the erasure this family removes; both versions compile |
+| `std/random/_rng.mojo` | `_RandomState._generator: _PhiloxWrapper` resolves `_PhiloxWrapper *`; the Box-Muller path's `log(u1)` dtype inference corrected `Int64` -> `Float64` (source: `u1 = self._generator.next_float64()` — a float; the baseline's `log_5_dtype_5_Int64` instantiation was the wrong one) | improvement, source-verified |
+| `std/runtime/_asyncrt.mojo` | `TaskGroup`/`_AsyncContext` typedef positions move within the preamble; `TaskGroup.chain: _Chain` (a struct value) resolves `_Chain *` | improvement / position-only; compiles |
+
+The A/B also established codegen determinism for these files (two
+consecutive runs byte-identical), so the 4 are the complete change set.

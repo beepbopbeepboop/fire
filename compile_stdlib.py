@@ -102,7 +102,19 @@ _NEXT_ON_STRUCT = (
     "is `gcc -fgimple -fsyntax-only`, which cannot see that, and nothing "
     "else links the `test/` tree. `next(<struct>)` DOES lower whenever the "
     "receiver's type IS resololvable, and `Self.<type-param>` substitution "
-    "inside a monomorphized generic struct is fixed; see "
+    "inside a monomorphized generic struct is fixed. UPDATE 2026-10-20: the "
+    "materialization half of the remaining gap is closed — a NESTED generic-"
+    "struct type argument (`_PeekableIterator[_ListIter[...]]`) now "
+    "monomorphizes: `monomorphize.instantiate(nested_defs=, renames=)` "
+    "splices the nested struct's own monomorphized definition into the "
+    "isolated TU and renames the mention to its mangled name, so the by-"
+    "value field keeps its real layout and the wrapper's own `next(self._"
+    "inner)` lowers (measured: the TU builds with the nested `__next__`/"
+    "`__iter__`/`bounds` + the wrapper's methods; before, the isolated TU "
+    "typed the field `int64_t` and codegen refused). What remains is the "
+    "CALL itself: overload selection (pass-mode + conformance), dependent-"
+    "return resolution, and the call-site construction of the container's "
+    "iterator; see "
     "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
 
 EXPECTED_FAILURES = {
@@ -303,16 +315,28 @@ EXPECTED_FAILURES = {
     # of emitting the above. That is the same situation as the 21 entries
     # above, which is why the summary line reads 22 expected / 0 unexpected.
     'test/os/path/test_getsize.mojo': (
-        "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. Three "
-        "defects in the emitted body: `__fspath__()` is stubbed to 0, `stat` is "
-        "called unprototyped, and its result is modelled as a struct POINTER "
-        "with `.st_size` fetched by dynamic getattr on it — the real signature "
-        "is `int stat(const char *, struct stat *)`, an out-param filling a "
+        "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. "
+        "UPDATE 2026-10-20: the first of the three defects is closed — "
+        "`__fspath__()` on a String receiver is now lowered as the identity "
+        "(stdlib's `String.__fspath__` returns self, and this codegen's "
+        "String IS its char* buffer): the monomorphized TU's call is "
+        "`stat(path)`, passing the real path, where it was `stat(0)` from "
+        "the 0-stub (measured before/after in the generated C). TWO defects "
+        "remain, both value-level, and the TU still fails gcc -c on the "
+        "first: (1) bare `stat` — a CROSS-STDLIB call to the generic "
+        "`stat[PathLike: stdPathLike]` (std/os/fstat.mojo) that the isolated "
+        "monomorphized TU has no prototype for (`implicit declaration of "
+        "function 'stat'`); it needs transitive elaboration of the callee "
+        "with PathLike=String and a call rewrite to the mangled symbol + "
+        "linked object; (2) the result is modelled as int64_t, reinterpreted "
+        "as `void *`, with `.st_size` fetched by dynamic "
+        "`_mojo_dispatch_getattr` — the real signature is "
+        "`int stat(const char *, struct stat *)`, an out-param filling a "
         "caller-owned struct, so a prototype alone would not fix it. Not "
         "fixable by `#include <sys/stat.h>` either: every TU includes "
-        "fire_runtime.h and std/os/_macos.mojo:137 declares `stat` itself via "
-        "`external_call[\"stat\", Int32]`. Reachable only once the codegen "
-        "models the out-param. See "
+        "fire_runtime.h and std/os/_macos.mojo:137 declares `stat` itself "
+        "via `external_call[\"stat\", Int32]`. Reachable only once the "
+        "codegen models the out-param. See "
         "bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md"),
 }
 

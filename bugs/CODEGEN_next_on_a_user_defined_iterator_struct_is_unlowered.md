@@ -67,6 +67,88 @@ below had a test when it was written:
 None of that makes the 19 files build. They fail at the type-inference gap,
 which is upstream of all of it.
 
+### Landed 2026-10-20: the nested-struct materialization blocker is closed,
+measured — the remaining work is the call itself
+
+The one blocker that stood between the fixed receiver half and the family's
+own materialization was the NESTED generic-struct type argument:
+`_PeekableIterator[InnerIterator]` instantiated for
+`_ListIter[True, Int, ImmOrigin, True]` refused in the isolated
+monomorphized TU — the nested mention has no registration there, so the
+by-value field `var _inner: Self.InnerIterator` erased to `int64_t` and the
+wrapper's own `next(self._inner)` hit the dead-end refusal (measured before:
+`RuntimeError: next(...) on next(MemberExpr) (receiver typed int64_t) has no
+lowering`, emit_calls.py:1772). It is fixed and measured:
+
+- `monomorphize.instantiate(nested_defs=, renames=)` splices the nested
+  struct's own monomorphized definition (fields + methods, already renamed
+  to its mangled name) AHEAD of the template in the isolated TU, and rewrites
+  each nested mention in the template (and the nested defs) to the mangled
+  name — longest-mention-first so `A[B[C]]` matches whole. Both fold into the
+  CAS key under a distinct `mojo-inst-v2-nested` domain, so a nested
+  instantiation can never collide with the plain one and no plain
+  instantiation's key moves.
+- `elaborate.elaborate_generic_struct(nested=)` bound-checks and
+  monomorphizes each nested struct and passes the splice through.
+- `module_gen`'s field-annotation pass resolves a bare annotation that is a
+  REGISTERED struct name under a non-capitalized spelling (mangled private
+  instantiations, `_ListIter_1_T_3_Int_...`) to the pointer spelling — the
+  capitalized-only test skipped them and the field sat at `int64_t`.
+- `monomorphize_source` no longer lets a type parameter spelled like a
+  receiver convention rewrite the receiver marker: `_ListIter[mut: Bool, ...]`
+  substituted the `mut` of `def __next__(mut self)` into `True self`, giving
+  the method an EXTRA parameter — gcc then rejected the caller's one-argument
+  `next(<struct>)` call ("too few arguments... expected 2, have 1"). The
+  `<param> self` position is excluded, and the guard is folded into the CAS
+  key so any pre-fix cache entry for such a template (only `_ListIter` in
+  stdlib) is rerouted to a fresh build.
+- `emit_methods._lower_struct_method_call` re-keys `_return_slot_types` onto
+  the call result (the twin of the existing `_return_elem_types` re-key;
+  `_lower_named_call` already had it for bare-name calls). Without it, a
+  struct method returning a HETEROGENEOUS tuple — `_ListIter.bounds` ->
+  `(iter_len, {iter_len})` — unpacked at the caller with the JOINED elem
+  type, so `var lower, upper = self._inner.bounds()` read slot 0 as `MojoSet
+  *` and `lower + peek_len` became pointer arithmetic over an incomplete
+  type: a hard gcc error, an ICE under -fgimple (tree.cc:5208) — the same
+  failure the return-side recording at emit_stmts.py documents.
+
+Measured after: `elaborate_generic_struct(iter_src, '_PeekableIterator',
+['_ListIter[True, Int, ImmOrigin, True]'], nested=[...])` BUILDS — CAS .o,
+13 symbols (the nested `__iter__`/`__next__`/`bounds` plus the wrapper's
+`__init__`/`__iter__` x2/`__next__`/`bounds`/`peek`), and the generated C
+typedef is `{ __mojo_type_id; _ListIter_... * _inner; int64_t _next; ... }`
+— the pointer spelling per this codegen's universal struct-as-pointer
+convention. The standalone `_ListIter` materialization regressed in the
+GOOD direction: `__next__`'s parameters are now `[]` (receiver only), was
+`['int64_t']` (the corrupted extra parameter).
+
+The sweep is UNCHANGED at 592 / 18 / 0: the materialization is the
+infrastructure; the 17 files still fail at the CALL, which is the next
+piece, in order:
+
+1. **Overload selection** — the two `peekable` overloads are distinguished
+   by PASS MODE (param `ref` vs `var`/moved) with conformance (declared
+   trait list) as the gate; `List` declares BOTH `Iterable` and
+   `IterableOwned`, so conformance alone cannot disambiguate. Site:
+   `elaborate_overload_call`'s exact-string match (elaborate.py:1010).
+2. **Dependent return** — evaluate `type_of(arg).IteratorType[origin_of(
+   arg)]` against the concrete arg type: `List`'s `comptime IteratorType`
+   is the AST of `_ListIter[downcast[Self.T, Copyable], iterable_origin,
+   True]`; `downcast`/origin terms are C-erased; the resulting mention then
+   goes through `elaborate_generic_struct(..., nested=[...])` — which now
+   works (above).
+3. **Call-site construction** — the specialized body `return
+   {iter(iterable)}` lowers to a bare identity in isolation; the call site
+   must emit the container's own iter construction (list.mojo:710:
+   `_ListIter(0, self.unsafe_ptr(), self._len)`), then the wrapper's
+   `__init__(out self, var inner)`, and return `P *` — after which
+   `next(it)` / `it.peek()` / `it.bounds()` resolve through the existing
+   struct-protocol branch.
+4. **Registration layout** — the caller-side report still says
+   `('_inner', 'int64_t')` (`_struct_layout_anns` analyzes the un-renamed
+   outer source); the outer compile's P registration needs the mangled-name
+   mapping when the call site wires up.
+
 ### OPEN, and smaller: 19 files, down from 22
 
 Three genuinely went green — `test/iter/test_empty.mojo`,

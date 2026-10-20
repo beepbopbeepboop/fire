@@ -5586,6 +5586,24 @@ def gen_module_impl(self, stmts):
                                     else:
                                         continue
                                     break
+                        # A bare annotation that is a registered struct name
+                        # under a NON-capitalized spelling — a mangled generic-
+                        # struct instantiation of a private base (`_ListIter_1_
+                        # T_3_Int_...`): the capitalized test above never fires
+                        # for a `_`-leading name, so the field stayed at
+                        # `_mojo_type`'s int64_t erasure — one word where the
+                        # layout is three, and every method the owning struct
+                        # calls on it (`next(self._inner)`) fell into the next-
+                        # on-unresolvable-receiver refusal. Exact lookup in
+                        # struct_field_types, so no false positive; pointer
+                        # spelling per this codegen's universal struct-as-
+                        # pointer convention (the same convention the
+                        # capitalized branch and `_resolve_type` apply).
+                        if (ft == 'int64_t' and _fann_s
+                                and '[' not in _fann_s and '.' not in _fann_s
+                                and '*' not in _fann_s
+                                and _fann_s in self.struct_field_types):
+                            ft = f"{_fann_s} *"
                         _arr_m = (_FIXED_ARRAY_ANN_RE.match(_as_str(field.type_ann).strip())
                                   if field.type_ann else None)
                         if _arr_m:
