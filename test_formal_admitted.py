@@ -1386,7 +1386,11 @@ AXIOM_CLOSURE = {
     # partition still closes (151 = 2 + 148 + 0 + 1).
     # Re-pinned by the bulk merge of the formal-worker branches: two more clean
     # theorems (153 = 2 + 150 + 0 + 1).
-    "X86": (153, 2, 150, 0, 1, 0),
+    # Re-pinned 2026-10-20 after landing work/formal637-docs: its three
+    # shift-successor projections (`x86_shift_post_rbp`, `_rsp`, `_rip`) are
+    # `simp` facts that reach no decide axiom, so `asked` and `clean` both move
+    # by three (156 = 2 + 153 + 0 + 1).
+    "X86": (156, 2, 153, 0, 1, 0),
     # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
     # closed the contract ladder's last two unreached contracts and put the fact
     # it needed in this module rather than in `ProofLib.lean` -- deliberately,
