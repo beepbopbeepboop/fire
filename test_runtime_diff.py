@@ -297,6 +297,33 @@ BUILTIN_PROGRAMS = {
             print(b"ab" == b"ab")
             print(list(b"cd"))
     """),
+    # len(s) on a non-ASCII string: Python counts CODE POINTS, and the
+    # compiled path's `char *` strings are UTF-8 buffers — its `len` was
+    # `strlen`, the BYTE count — so len("é") answered 2 where the
+    # interpreter (a Python str) and CPython say 1, and a 4-byte emoji
+    # answered 4. The engine-vs-engine diff sees this one; CPython is the
+    # adjudicator the escape spellings need, because the rows are the
+    # doc's probe — \uXXXX, \UXXXXXXXX, \N{…} and the character itself,
+    # all decoding to the same one code point (the escape DECODING of all
+    # four is a separate, earlier fix; this pins what len reports once the
+    # text is real). len(b"…") stays bytes by CPython's own rule, so the
+    # bytes row is a guard against the counter leaking onto the wrong type.
+    # The escapes are DOUBLE-BACKSLASHED on purpose: this file is Python,
+    # so a single \u00e9 here would decode at import and the written case
+    # would carry the decoded character — which is fine for the str rows
+    # but a SyntaxError in CPython the moment it lands in a b"…" literal
+    # (bytes can only contain ASCII). Written with the escapes raw, every
+    # engine decodes them (the interpreter's \u/\U/\N{…} decoder and
+    # CPython's own).
+    "len_of_a_non_ascii_string_counts_code_points": textwrap.dedent("""\
+        def main():
+            print(len("\\u00e9"))
+            print(len("\\U0001F600"))
+            print(len("\\N{LATIN SMALL LETTER E WITH ACUTE}"))
+            print(len("é"))
+            print(len("abc"))
+            print(len(b"\\xff\\xfe"))
+    """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real
     # Mojo's — not None: the interpreter used to leave it None, so
@@ -1565,6 +1592,10 @@ CPYTHON_COMPARABLE = {
     # The interpreter yielded characters where the compiled path yielded ints;
     # only CPython can say which is right, and it says ints.
     "bytes_iterates_as_ints",
+    # len() over non-ASCII text: the compiled path answered the UTF-8 BYTE
+    # count where both the other engines count code points; CPython is the
+    # adjudicator for the escape spellings (\u / \U / \N{…}).
+    "len_of_a_non_ascii_string_counts_code_points",
 }
 
 

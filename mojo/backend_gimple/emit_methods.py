@@ -5062,7 +5062,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     else:
         cstr_ov = ov
     if method == '__len__':
-        return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
+        # Code-point count, not strlen: the same UTF-8 model as the len()
+        # builtin (mojo_str_codepoint_len) — CPython's "é".__len__() is 1.
+        return 'int64_t', gen._new_val('int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
     if method == 'hex':
         # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
         # This compiler had a `mojo_hex` for it (an INTEGER formatter, used

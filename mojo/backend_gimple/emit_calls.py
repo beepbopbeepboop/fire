@@ -2679,7 +2679,12 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', itc.remaining(gen, _cur)
     at, av = gen.lower_expr(node.args[0])
     _LEN_FNS = {
-        'MojoStr *':  f'mojo_str_len ({av})',
+        # A wrapped string's OWN len is bytes (the concat/char_at family
+        # reads it as bytes), but len() counts CODE POINTS — so the builtin
+        # walks the same UTF-8 buffer through the code-point counter on
+        # s->data (mojo_str_codepoint_len's doc comment is the model
+        # argument; the FORMAL_string_value_model doc owns the rest).
+        'MojoStr *':  f'mojo_str_codepoint_len ({av}->data)',
         'MojoBytes *': f'mojo_bytes_len ({av})',
         'MojoMemoryView *': f'mojo_memoryview_len ({av})',
         'MojoList *': f'mojo_list_len ({av})',
@@ -2704,6 +2709,11 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # fell all the way to the final "unsupported type" fallback,
         # so len(any_string) always silently returned 0. Found via
         # len(c_code) on a real compiled program's C output.
+        # mojo_str_codepoint_len, not mojo_strlen: Python's len counts
+        # CODE POINTS, and this is a UTF-8 buffer — strlen answered 2
+        # for "é" and 4 for a 4-byte emoji where CPython says 1
+        # (the doc that measured all four spellings is gone with this
+        # fix; the code-point counter's doc comment is the argument).
         # A FRESH string temp (`len(mk(i))`, `len(s[1:3])`, `len("a" + b)`)
         # is a malloc block nothing else can name, and the length is all this
         # call reads — so it is freed here, the same bargain the container
@@ -2711,7 +2721,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # emitted first: freeing before it is a use-after-free, which is what
         # the first version of this did). `_owned_free_runtime_fn` answers ''
         # for a `char *`, which is why the branch it now takes is spelled out.
-        _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        _len_t = gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)
         return 'int64_t', _len_t
@@ -2757,7 +2767,9 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         actual = gen._actual_types.get(av)
         if actual == 'char *':
             cp = gen._new_val('char *', f'(char *){av}')
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', cp)])
+            # Code-point count, not strlen — the erased handle's string is
+            # the same UTF-8 buffer as the static char * arm above.
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', cp)])
         if actual == 'MojoDict *':
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_dict_len ({dp})')

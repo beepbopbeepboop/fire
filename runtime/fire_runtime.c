@@ -4552,6 +4552,26 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
     return count;
 }
 
+/* len(s) on a UTF-8 char * — Python's len counts CODE POINTS, and a char *
+ * here is a UTF-8 buffer, so strlen's byte count answers 2 for "é" and 4
+ * for a 4-byte emoji where CPython (and the interpreter, and the formal
+ * backends' len-from-decoded-text) say 1. Same non-continuation test
+ * (10xxxxxx) mojo_utf8_codepoint_index uses for the regex offsets, run over
+ * the whole buffer: exactly one lead byte per code point, so an ASCII string
+ * is unchanged and the answer is the code-point count. This is the len-only
+ * half of the string-model question on purpose: s[i]/find/slicing/printf
+ * width still read a char * as bytes, and choosing code points everywhere is
+ * the larger model change argued in FORMAL_string_value_model — so this is
+ * the ONE place len() is right rather than a generic "length" to reach for
+ * in the byte-indexed paths. MojoStr is wrapped, but its data is the same
+ * UTF-8 buffer (mojo_str_new builds it from one), so its len goes through
+ * here on s->data instead of on s->len, which the concat/char_at family
+ * still read as bytes. */
+int64_t mojo_str_codepoint_len(char *s) {
+    if (!s) return 0;
+    return mojo_utf8_codepoint_index(s, (int64_t)strlen(s));
+}
+
 /* platform.system()/platform.machine(): resolved via preprocessor macros at
  * the C compiler's own build time (not Python's `platform` module — this
  * runtime is itself compiled by whatever gcc builds the self-hosted binary,
