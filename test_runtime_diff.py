@@ -603,6 +603,33 @@ BUILTIN_PROGRAMS = {
             for *only3, in d:
                 print(only3)
     """),
+    # A STARBLESS pair target over a DICT — the shape next to the starred one
+    # above, which that change did not touch. The dict's item is the KEY and a
+    # key is a `str`, so `for k, v in d` unpacks the key STRING: CPython
+    # refuses any key that is not exactly the target's arity
+    # (`ValueError: too many values to unpack (expected 2)`), and so does the
+    # interpreter (`_check_exact_arity`, measured). The compiled path was the
+    # one engine that never checked: it bound the whole key to the first name
+    # and the literal 0 to every other, so this program printed `3 abc 0` and
+    # exited 0 where the other two raise — measured on master, pre-fix.
+    #
+    # `len("abc")` and the list-of-pairs loop print BEFORE the raise, so the
+    # comparison has non-empty stdout to compare (a case that only raised
+    # would pass on two empty streams plus matching exit codes, which is a
+    # weaker check) and so the working shape the old lowering was RIGHT about
+    # — `for pk, pv in [("ab", 7)]`, a list of pairs, where slot 1 really does
+    # have a value — is asserted still to work. Three characters is the count
+    # that catches a `<`-only guard: a short-key check passes a 3-over-2 key
+    # silently and is still wrong, and `!=` catches the 1-character case too.
+    "for_target_starless_pair_over_a_dict_key": textwrap.dedent("""\
+        def main():
+            d = {"abc": 1}
+            print(len("abc"))
+            for pk, pv in [("ab", 7)]:
+                print(pk, pv)
+            for k, v in d:
+                print(len(k), k, v)
+    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -1552,6 +1579,13 @@ CPYTHON_COMPARABLE = {
     # without CPython in the comparison the case could have stayed a green
     # non-check.
     "for_target_starred_rest_over_a_dict",
+    # …and the STARLESS shape beside it, for the same third-opinion reason
+    # turned the other way: the two engines could be made to agree here by
+    # binding the whole key in the INTERPRETER too, which is what the compiled
+    # path did before the fix. That would leave this file green on a lowering
+    # CPython refuses outright, so the only witness that raising is the right
+    # answer (and not merely agreement) is CPython's own run.
+    "for_target_starless_pair_over_a_dict_key",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_target_does_not_shadow_a_module_constant",
