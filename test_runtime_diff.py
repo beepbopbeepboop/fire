@@ -661,6 +661,33 @@ BUILTIN_PROGRAMS = {
             for *only3, in d:
                 print(only3)
     """),
+    # A STARBLESS pair target over a DICT — the shape next to the starred one
+    # above, which that change did not touch. The dict's item is the KEY and a
+    # key is a `str`, so `for k, v in d` unpacks the key STRING: CPython
+    # refuses any key that is not exactly the target's arity
+    # (`ValueError: too many values to unpack (expected 2)`), and so does the
+    # interpreter (`_check_exact_arity`, measured). The compiled path was the
+    # one engine that never checked: it bound the whole key to the first name
+    # and the literal 0 to every other, so this program printed `3 abc 0` and
+    # exited 0 where the other two raise — measured on master, pre-fix.
+    #
+    # `len("abc")` and the list-of-pairs loop print BEFORE the raise, so the
+    # comparison has non-empty stdout to compare (a case that only raised
+    # would pass on two empty streams plus matching exit codes, which is a
+    # weaker check) and so the working shape the old lowering was RIGHT about
+    # — `for pk, pv in [("ab", 7)]`, a list of pairs, where slot 1 really does
+    # have a value — is asserted still to work. Three characters is the count
+    # that catches a `<`-only guard: a short-key check passes a 3-over-2 key
+    # silently and is still wrong, and `!=` catches the 1-character case too.
+    "for_target_starless_pair_over_a_dict_key": textwrap.dedent("""\
+        def main():
+            d = {"abc": 1}
+            print(len("abc"))
+            for pk, pv in [("ab", 7)]:
+                print(pk, pv)
+            for k, v in d:
+                print(len(k), k, v)
+    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -854,6 +881,37 @@ BUILTIN_PROGRAMS = {
             print(getattr(o, "y", "dflt"))
             print(o.y)
             print(hasattr(o, "nope"), hasattr(o, "y"))
+    """),
+    # A method referenced as a VALUE through a receiver the codegen ERASES to
+    # int64_t (an unannotated parameter — `c` in `H.__init__(self, c)`). There
+    # is no static type at that read, so `c.add` lowers to the runtime getattr
+    # dispatch, which lands on the object's own type tag and, until the
+    # `_mojo_getattr_<Struct>` method arm existed, answered a fields-only
+    # lookup and raised `AttributeError: add` — the stored `cb` never became a
+    # callable. The typed spelling (`c: C`) worked throughout, which is what
+    # made this a gap in the dynamic dispatch rather than in the bound-method
+    # value itself; the arm answers with the same `mojo_bound_method_new` value
+    # that spelling builds.
+    "bound_method_value_on_an_untyped_receiver": textwrap.dedent("""\
+        class C:
+            def __init__(self):
+                self.k = 9
+            def add(self, a, b):
+                return self.k + a + b
+
+        class H:
+            def __init__(self, c):          # c is unannotated: erased to int64_t
+                self.cb = c.add
+            def go(self):
+                return self.cb(1, 2)
+
+        def main():
+            m = C()
+            print(H(m).go())                # 12, through the value stored in a field
+            e = m                           # the same read, kept in a local
+            f = e.add
+            print(f(10, 20))                # 39
+            print(e.add(1, 2))              # 12, a direct call on the erased receiver
     """),
     # An EMPTY container literal asserts no element type, and one place
     # believed otherwise: `_lower_list_literal` /
@@ -1579,6 +1637,13 @@ CPYTHON_COMPARABLE = {
     # without CPython in the comparison the case could have stayed a green
     # non-check.
     "for_target_starred_rest_over_a_dict",
+    # …and the STARLESS shape beside it, for the same third-opinion reason
+    # turned the other way: the two engines could be made to agree here by
+    # binding the whole key in the INTERPRETER too, which is what the compiled
+    # path did before the fix. That would leave this file green on a lowering
+    # CPython refuses outright, so the only witness that raising is the right
+    # answer (and not merely agreement) is CPython's own run.
+    "for_target_starless_pair_over_a_dict_key",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_target_does_not_shadow_a_module_constant",
@@ -1587,6 +1652,12 @@ CPYTHON_COMPARABLE = {
     "dict_repr_zero_value_is_not_the_none_sentinel",
     "dict_items_reads_each_slot_kind",
     "getattr_default_on_a_miss",
+    # An erased receiver is a PARAMETER with no annotation (a local keeps the
+    # type its initializer gave it, which is why `method_call_result` above
+    # never came near this); the only witness that the word the getattr
+    # dispatch hands back is a callable and not a raw int is CPython's own run
+    # of the same text.
+    "bound_method_value_on_an_untyped_receiver",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
     # The interpreter yielded characters where the compiled path yielded ints;
