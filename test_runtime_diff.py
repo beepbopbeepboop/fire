@@ -282,16 +282,20 @@ BUILTIN_PROGRAMS = {
     # where CPython (and the compiled path) yield `97`/`98`. An engine-vs-engine
     # diff could not see it — the compiled half is right and the interpreter
     # wrong, so the two disagreed only once this was fixed, which is why the
-    # third opinion is required. `list(b"cd")` is deliberately NOT here: the
-    # compiled path reads the `MojoBytes` struct as a list of its slots, which
-    # is a separate codegen gap filed as
-    # `bugs/CODEGEN_list_of_bytes_reads_the_struct_slots.md`.
+    # third opinion is required. `list(b"cd")` was deliberately out of this
+    # case for a while: the COMPILED path read the `MojoBytes` struct as a
+    # list of its own slots — five ascending pointer-sized words, exit 0 —
+    # where CPython says `2 / [99, 100]`. That codegen gap is closed by the
+    # `MojoBytes *` arm of `_materialize_as_list`, so the line below pins it
+    # here: it answers the struct's fields before the fix and the bytes'
+    # ints after.
     "bytes_iterates_as_ints": textwrap.dedent("""\
         def main():
             for x in b"ab":
                 print(x)
             print(b"ab"[0])
             print(b"ab" == b"ab")
+            print(list(b"cd"))
     """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real

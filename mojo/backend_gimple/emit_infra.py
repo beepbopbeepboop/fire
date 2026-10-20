@@ -3422,6 +3422,52 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         return _sl
     if src_type == 'MojoGenerator *':
         return _generator_to_list(gen, value)
+    if src_type == 'MojoBytes *':
+        # A bytes operand iterates its BYTES as ints 0-255 (CPython), so its
+        # materialized view is a fresh MojoList of int slots, one per byte,
+        # read with the same element source `for x in b:` uses
+        # (emit_loops._gen_for_bytes: a mojo_bytes_len/mojo_bytes_get index
+        # loop). Before this arm, a statically-typed bytes value fell into
+        # the generic pointer branch below: boxed to int64, all three
+        # registry probes missed (a MojoBytes * is registered in none of
+        # them), and `mojo_iter_boxed_list` classified the live allocation
+        # as a STRING — mojo_boxed_is_str accepts any unregistered heap
+        # pointer — and read the struct's own fields as a char string:
+        # read the struct's own fields as a char string: `list(b"cd")`
+        # answered five ascending pointer-sized words and exited 0 — the gap
+        # CODEGEN_list_of_bytes_reads_the_struct_slots documented (that doc
+        # is gone, closed by this change). `tuple(x)` reaches this arm too
+        # (it builds an ordinary list and marks it a tuple afterwards), so it
+        # is fixed by the same branch.
+        res = gen._new_temp('MojoList *')
+        gen._emit(f"  {res} = mojo_list_new ();")
+        len_t = gen._new_val('int64_t', f"mojo_bytes_len ({value})")
+        idx = gen._new_temp('int64_t')
+        gen._emit(f"  {idx} = (int64_t)0;")
+        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_cond)
+        cond = gen._new_val('_Bool', f"{idx} < {len_t}")
+        gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
+        gen._emit_label(bb_body)
+        byte = gen._new_val('int64_t', f"mojo_bytes_get ({value}, {idx})")
+        gen._void_call('mojo_list_append_int',
+                       [('MojoList *', res), ('int64_t', byte)])
+        # The increment is written INSIDE the body on purpose (same reason
+        # as the enumerate lowering in emit_calls): `_new_val` emits the
+        # declaration at the current point, so calling it before the loop
+        # would compute `idx + 1` once, re-assign that same value every
+        # iteration, and the loop would never terminate.
+        one = gen._new_val('int64_t', '(int64_t)1')
+        nidx = gen._new_val('int64_t', f'{idx} + {one}')
+        gen._emit(f"  {idx} = {nidx};")
+        gen._emit(f"  goto {bb_cond};")
+        gen._emit_label(bb_after)
+        # Bytes elements are always ints — record it so a consumer that
+        # asks (enumerate's pair slot, set.update, star-unpack, ...) reads
+        # the slots with the int accessor.
+        gen._elem_types[res] = 'int64_t'
+        return res
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
         _td = _tagged_dyn_read(gen, value, 'list')
         if _td is not None:
