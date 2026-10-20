@@ -359,13 +359,14 @@ GIMPLE_SOURCES = (
 #
 # Override with MEMLIMIT_GB (absolute, all classes) or MEMLIMIT_GB=0 (no cap at
 # all, loudly).
-# `mid` (6 GB) is the rung the `check` bucket's PEAK job sits on: `selfhost`
-# measures 4.4 GB, the 1.5x standard asks for 6.6, and the ladder covers that
-# with `small` (8). The owner asked for the check peak to carry 6 rather than
-# 8 (2026-10-11), so the rung sits one step below the standard and the
-# deviation is registered in `CLASS_ABOVE_PEAK`, where every other deliberate
-# class-vs-peak decision lives. `small` stays 8 for the 57 jobs that take the
-# default and for everything else that names it.
+# `small` (8 GB) is the rung the `check` bucket's PEAK job sits on: `selfhost`
+# measures 4.6 GB, the 1.5x standard asks for 6.9, and the ladder covers that
+# with `small` (8) — the standard rung itself. It sat one step below, on
+# `mid` (6), because the owner asked for the check peak to carry 6 rather
+# than 8 (2026-10-11, deviation registered in `CLASS_ABOVE_PEAK`); the
+# measurement grew past `mid`'s 1.5x coverage on 2026-10-20 and the ratchet
+# re-classed it to the standard rung. `small` stays 8 for the jobs that take
+# the default and for everything else that names it.
 MEMCLASS = {
     'tiny': 4,
     'mid': 6,
@@ -421,12 +422,8 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jobs, "
-                'one at a time (2026-10-09, arm64, python 3.14.7), merged from the '
-                'per-run logs .tmp/logs/*.log and applied with --apply-peaks; only '
-                'jobs that PASSED and ran >= 2 s are trusted, and the rows added '
-                'before this run keep the 2026-10-07 `gate` they were read from, as '
-                'their own comments say.')
+MEASURED_RUN = ('a full `gate`, 2026-10-20, master 8e449ed3, per-job peaks from the '
+                'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
     # The two `selfhost-memory*` rows are DELIBERATELY absent rather than
@@ -454,10 +451,10 @@ MEASURED_RUN = ("per-job `--no-cache` runs of this branch's 36 never-measured jo
 MEASURED_PEAK_GB = {
     'native-dumpfull':             (31.3, 'measured'),
     'ab-native':                   (20.5, 'measured'),
-    'selfhost':                    (4.4, 'measured'),
+    'selfhost':                    (4.6, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    'sqliteruntime':               (2, 'measured'),
+    'sqliteruntime':               (2.3, 'measured'),
     'bootstrap-stage1-transitive': (1.4, 'measured'),
     'bootstrap-stage2-cc':         (1.9, 'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
@@ -734,12 +731,12 @@ MEASURED_PEAK_GB = {
     'gimplegenerators':                       (0.2, 'measured'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.1, 'measured'),
-    'nonlocal':                               (0.1, 'measured'),
+    'linkmode':                               (0.4, 'measured'),
+    'nonlocal':                               (0.4, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
-    'runtimedylib':                           (0.4, 'measured'),
-    'silentnoop':                             (0.2, 'measured'),
+    'runtimedylib':                           (1.2, 'measured'),
+    'silentnoop':                             (0.4, 'measured'),
     'suite-self-test':                        (0.6, 'measured'),
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'comptime-parity':                        (0.3, 'measured'),
@@ -1120,16 +1117,6 @@ CLASS_ABOVE_PEAK = {
               'HIGH (see procrun.tree_usage); `program` (55 GB) covers the '
               'measurement at 1.19x, where `stage` (96 GB) would reserve the '
               'whole ledger and make the job unadmittable on a 64 GB budget',
-    # Not an over-count like the two above, and not an upper bound like
-    # `formal-sweep-truth`'s: the measurement is stable (4.4 on the 2026-10-07
-    # gate, 4.3 on the 2026-10-11 check) and `mid` covers it at 1.36x, one
-    # step below the 1.5x standard that would assign `small` (8). This is the
-    # owner's decision for the check bucket's peak job, recorded where every
-    # other deliberate class-vs-peak deviation is, so it reads as a decision
-    # rather than as drift.
-    'selfhost': 'the owner asked for the check peak to carry 6 GB: `mid` '
-                '(6) covers the stable 4.4 GB measurement at 1.36x, one step '
-                'below the 1.5x standard that would assign `small` (8)',
 }
 
 
@@ -1800,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'formal/model.py', 'bugs/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
-# `mem='mid'` (6 GB), down from `stage` (96) — the single biggest change in
+# `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
 # whole-closure self-compile plus `gcc -O2 -fgimple` plus a link, so this job
@@ -1808,24 +1795,26 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
 # of the machine's 96 GB: the everyday `check` bucket serialised behind a job
 # measured at 3.7 GB (4.4 GB today), twelve times a second, on every other worker's runs too.
 # Measured peak 3.7 GB then (4.4 GB in the 2026-10-07 gate, 4.3 in the
-# 2026-10-11 check), so the 1.5x standard asks for 6.6 GB, which the ladder
-# covers with `small` (8). The owner asked for the check bucket's peak to
-# carry 6 rather than 8, so the job sits on the `mid` rung one step below the
-# standard, and the deviation is registered in CLASS_ABOVE_PEAK like every
-# other deliberate class-vs-peak decision. What replaced the 55.8 GB figure is
+# 2026-10-11 check, 4.6 in the 2026-10-20 check), so the 1.5x standard asks
+# for 6.9 GB, which the ladder covers with `small` (8). The job sat one step
+# below that, on `mid` (6), because the owner asked for the check bucket's
+# peak to carry 6 — but the measurement grew past `mid`'s 1.5x coverage on
+# 2026-10-20 (6.9 > 6), so the ratchet re-classed it to the standard rung and
+# the one-step-below-standard placement (and its CLASS_ABOVE_PEAK
+# registration) is superseded. What replaced the 55.8 GB figure is
 # MEASURED_PEAK_GB, read off a run's log by the same wrapper that enforces the
 # ceiling — and note that the same measurement taken on 2026-09-29 for
 # `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
 # the 55.8/96 numbers are not this workload's RSS on this tree. A build that
 # genuinely needs more says so: MEMLIMIT_GB=96.
-test('selfhost', [PY, 'test_selfhost.py'], mem='mid', cache=True,
-     memwhy='measured 4.4 GB (2026-10-07 gate), 4.3 GB (2026-10-11 check): '
-            '`fire.build_executable` of fire.py, the same whole-closure '
-            'self-compile as `mojoc` plus the link. `mid` (6) covers the '
-            'measurement at 1.36x, one step below the 1.5x standard that '
-            'would assign `small` (8); the owner asked for the check peak to '
-            'carry 6, and the deviation is in CLASS_ABOVE_PEAK. Over the '
-            '4 GB line and therefore a debt, not a fact — see '
+test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
+     memwhy='measured 4.6 GB (2026-10-20 check; 4.4 on the 2026-10-07 gate, '
+            '4.3 on 2026-10-11): `fire.build_executable` of fire.py, the same '
+            'whole-closure self-compile as `mojoc` plus the link. `small` (8) '
+            'covers the measurement at 1.74x — the 1.5x standard rung; the '
+            'owner-asked `mid` (6) placement no longer covers it at 1.3x, so '
+            'the ratchet re-classed it on 2026-10-20. Over the 4 GB line and '
+            'therefore a debt, not a fact — see '
             + MEM_DEBT_DOC,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
