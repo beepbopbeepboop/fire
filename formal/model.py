@@ -32534,6 +32534,32 @@ def struct_fields(struct_def) -> list:
     return list(getattr(struct_def, "fields", None) or [])
 
 
+def struct_bracket_param_names(struct_def) -> frozenset:
+    """The names the struct's BRACKET declares, which are never storage.
+
+    `struct Tagged[T, origin: Int]` declares two compile-time parameters: `T`
+    is a TYPE and `origin` is a value supplied at the application
+    (`Tagged[Int, 7]`).  Neither has a slot in an instance — the value is
+    substituted into the template's body when the instantiation is built, which
+    is why `formal/monomorph.py::instantiate` drops the whole head.
+
+    `fire_compiler._parse_struct_params_as_fields` nevertheless puts the
+    ANNOTATED ones in `StructDef.fields` (the interpreter's member read is
+    written against that shape), so a reader that answers "what is this
+    struct's storage" has to subtract exactly these names and nothing else.
+    `struct_field_names` is that reader, and the report is the one-field
+    instantiation whose segment faulted when a free function took it:
+    the unapplied TEMPLATE measured one field wider than its one-field
+    instantiation, so a free function taking `Tagged[Int, 7]` was compiled as
+    a FRAME receiver while the caller passed the field by value, and the
+    program segfaulted on both architectures.
+
+    Empty for a struct with no bracket, and for every struct parsed before this
+    list existed (`getattr` default), which is the direction that leaves an
+    existing answer where it was."""
+    return frozenset(getattr(struct_def, "bracket_params", None) or ())
+
+
 def struct_field_name(field) -> object:
     """The name this one `StructDef` field introduces, or None if it has none.
 
@@ -34619,7 +34645,13 @@ def _split_declaration(struct_def):
     reached = set()
     for _method, names, _fields in per_method:
         reached |= names
-    fields, constants, seen = [], [], set()
+    # BRACKET PARAMETERS are compile-time, not storage: see
+    # `struct_bracket_param_names`.  Priming `seen` with them keeps the declared
+    # loop and the receiver-touch loop below from turning one into a field, and
+    # it is the same set `_pre_rule_field_names` subtracts, so a struct with and
+    # without the write census agrees about its width.
+    params = struct_bracket_param_names(struct_def)
+    fields, constants, seen = [], [], set(params)
     for field in struct_fields(struct_def):
         slots = _slots_names(field.value) \
             if isinstance(field, F.AssignStmt) \
@@ -34763,10 +34795,10 @@ def struct_bound_names(struct_def) -> frozenset:
     function here rather than `struct_field_names` at each call site: the two
     tables are not the same set. A class-level `NAME = value` and a
     `comptime NAME = …` are class CONSTANTS (`_split_declaration`), a declared
-    or assigned `var` is a FIELD, and a bracket parameter is a field too
-    (`_parse_struct_params_as_fields`) — so a shadow of a builtin can be spelled
-    in any of the three ways and a reader that asked only one of the tables
-    would read it as the builtin and fold over it.
+    or assigned `var` is a FIELD, and a bracket parameter is bound in the
+    class scope as well — it is not STORAGE (`struct_bracket_param_names`) but
+    it still shadows a builtin for a fold, so it is added here explicitly
+    rather than through `struct_field_names`.
 
     Measured: `struct Box: var len: Int = 2` plus `comptime width =
     len([1, 2, 3])` puts `len` in the CONSTANT table and `width` in neither the
@@ -34775,6 +34807,7 @@ def struct_bound_names(struct_def) -> frozenset:
     had bound. That is the fabricated word this reader exists to refuse.
     """
     names = set(struct_field_names(struct_def) or ())
+    names.update(struct_bracket_param_names(struct_def))
     names.update(name for name, _default in struct_class_constants(struct_def))
     return frozenset(names)
 
@@ -34973,7 +35006,14 @@ def comptime_binding_reads_a_field(struct_def, value) -> list:
     read of some OTHER class — is not reported as this struct's parameter."""
     if value is None or struct_def is None:
         return []
+    # The BRACKET PARAMETERS are not storage (`struct_bracket_param_names`), and
+    # they are exactly what this reader is for, so they are added back to the
+    # body's field names rather than being read out of `struct_field_names`
+    # (which stopped counting them when the temple's width had to match its
+    # instantiation's).  A parameter read and a field read are reported the same
+    # way here, as they were before the two sets were distinguished.
     fields = set(struct_field_names(struct_def) or ())
+    fields.update(struct_bracket_param_names(struct_def))
     if not fields:
         return []
     bases = set(struct_receivers(struct_def) or ()) | {"Self", "cls", "this"}
@@ -35507,6 +35547,7 @@ own function rather than inlined so the two derivations cannot drift apart
             seen.add(name)
             names.append(name)
 
+    params = struct_bracket_param_names(struct_def)
     for field in struct_fields(struct_def):
         declared = _slots_names(field.value) \
             if isinstance(field, F.AssignStmt) \
@@ -35516,6 +35557,13 @@ own function rather than inlined so the two derivations cannot drift apart
                 add(name)
         else:
             add(struct_field_name(field))
+    # A BRACKET PARAMETER is not storage (see `struct_bracket_param_names`),
+    # so it must not enter the set even when a method spells it through the
+    # receiver — which is what the next loop would otherwise do.  `seen` is
+    # primed with them rather than filtering afterwards, so the method walk
+    # cannot re-add one under a different field node.
+    for _param in params:
+        seen.add(_param)
     receivers = struct_receivers(struct_def)
     # `struct_method_receiver_reads` and not the bare walker, for the same reason
     # `_split_declaration`'s per-method loop uses it: a name this struct declares
