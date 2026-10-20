@@ -440,6 +440,22 @@ CASES = [
      "    print(\"v:\", R[0][1], R[1][0])\n"
      "    return 0\n",
      "v: 2 3\n"),
+    # …and the OTHER side of the same shape, which is what keeps the subscript
+    # refusal from being an arm keyed on the literal's element kind alone:
+    # `v` starts as `[1]` and `append` puts a `[2]` in it, so `v[1][0]` is a
+    # subscript of a LIST and must answer 2.  `own_shape_kind("v")` still says
+    # `list:int` — the literal said so and the append never retracted it — so a
+    # refusal that read only the kind would refuse this correct program.  The
+    # append scan (`ValueKinds.appended_names`) is the second half of the
+    # question, and this row is why it is not optional.
+    ("a_subscript_of_a_list_that_was_appended_to_is_a_number",
+     "def main(n):\n"
+     "    var v = [1]\n"
+     "    v.append([2])\n"
+     "    var s = v[1][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "2"),
     # The MODULE-GLOBAL spelling of the same literal, which is a DIFFERENT
     # reader (`formal/model.py::global_slot_kind` →
     # `container_literal_elem_kind`) and refused identically before the change.
@@ -2162,6 +2178,21 @@ REFUSALS = [
      "    var a = 5\n"
      "    a[0] = 1\n"
      "    printf(\"a=%d\", a)\n"
+     "    return 0\n",
+     "asks for a container element"),
+    # …and the same fault with the base written as a SUBSCRIPT, which is the one
+    # base shape the scalar evidence did not ask about: `v = [1]` gives `v[0]`
+    # the kind `int` (from the literal's element kind), and the element address
+    # is then that word plus 8.  Measured on both architectures from a GREEN
+    # build: SIGSEGV, exit 139, nothing on stderr.  The needle is the named-base
+    # sentence's own clause, so this cannot pass by refusing something else; the
+    # append-corrected row beside it in `CASES` is what stops the fix from being
+    # an arm that reads the literal's kind without asking whether the list grew.
+    ("an_element_of_a_subscript_of_a_list_of_integers_is_refused",
+     "def main(n):\n"
+     "    var v = [1]\n"
+     "    var s = v[0][0]\n"
+     "    printf(\"%d\", s)\n"
      "    return 0\n",
      "asks for a container element"),
     # `%s` OF AN INTEGER, and the same argument for putting it here: the

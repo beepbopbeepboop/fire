@@ -4,6 +4,26 @@
 `lib/ProofLib.lean`, and the `main_refines_spec` theorem an `@refines(…)`
 annotation emits.
 
+**Status: PARTIALLY FIXED 2026-10-19 (`work/formal637-docs`). FIVE more rows
+are registered, so SEVEN of the eleven annotated examples now carry an
+all-inputs theorem rather than the finite range: `Specs.consecutiveProduct64`,
+`Specs.succSquare64`, `Specs.doubleSuccOne64`, `Specs.maskedMix64` and
+`Specs.isNonzero64`, beside the existing `Specs.id64` and
+`Specs.factorial64`.  They are a new `"closed"` row kind — a straight-line
+model is one closed word expression, so the theorem is not an induction: the
+row states the model body it was written for (compared exactly, like the
+recursive shape) and the tactic block that closes THAT body.  All five clauses
+are checked end to end by `test_formal_specs.py`'s
+`the_straight_line_all_inputs_theorems_typecheck`, which reads each model back
+out of the generated proof and asks Lean about the clause in isolation.  §"The
+straight-line rows, 2026-10-19" has the measurements.  The remaining three are
+`Specs.abs64` (true for all inputs, but the proof needs signed `asInt`
+reasoning that is not a two-line tactic) and `Specs.stepConst64` /
+`Specs.shiftMix64`, whose all-inputs statements are FALSE outside the finite
+range for a reason that is the specification's own domain (below), so they need
+a stated hypothesis rather than a row.  Everything below this paragraph is the
+2026-10-14 record and is unchanged.**
+
 **Status: PARTIALLY FIXED 2026-10-14 (`work/formal418-docs`). The all-inputs
 claim is now EMITTED for the specifications whose model shape has a row, the
 missing `UInt64` multiplication lemma is landed and proved, and the boundary is
@@ -128,6 +148,59 @@ checked in isolation), so this is a queue of small pieces rather than a project
 — which is the one thing the 2026-10-05 Status, framing the whole thing as
 un-landable, obscured.
 
+
+## The straight-line rows, 2026-10-19
+
+**Five more specifications now claim the whole word.** `ALL_INPUTS` grew a
+`"closed"` kind: a straight-line program's model is ONE closed `UInt64`
+expression, so its all-inputs theorem is not an induction — unfold both sides
+and the goal is a word identity. A row carries the model BODY it was written
+for and the tactic block that closes that body, because the two are one claim;
+`_closed_shape` compares the body exactly (the same refusal rule
+`_recursive_shape` follows) and the emitter returns "" rather than a theorem
+above a model it does not recognise.
+
+| spec | model body | what closes it |
+|---|---|---|
+| `Specs.consecutiveProduct64` | `((n * n) + n)` | `simp [...]`, then `rw [UInt64.mul_add, UInt64.mul_one]` |
+| `Specs.succSquare64` | `((n + 1) * (n + 1))` | `simp [...]` |
+| `Specs.doubleSuccOne64` | `((n * 2) + 1)` | `simp [...]`, then `rw [UInt64.mul_comm w 2]` |
+| `Specs.maskedMix64` | `(((n &&& 255) + (n ||| 240)) + (n ^^^ 85))` | `simp [...]` |
+| `Specs.isNonzero64` | `(if n ≠ 0 then 1 else 0)` | split on `w.toNat = 0`, bridge with `UInt64.toNat_inj`, `simp [...]` |
+
+**`bv_decide` is not the tool, and that is measured rather than assumed.**
+`w * w + w = w * (w + 1)` is a bitvector identity, but `bv_decide` times out on
+it (the SAT solver does not get associativity/commutativity for free, and the
+`acNf` option is not on by default); the two rewrites above close it in one
+step. So the proof is per row rather than one generic tactic, which is what the
+`proof` field is.
+
+**What each clause is checked against.** `test_formal_specs.py`'s
+`the_straight_line_all_inputs_theorems_typecheck` builds each annotated example
+(`check=False`), reads the `_go` and `mojo` definitions back out of the
+generated proof, lays the emitted clause beside those exact definitions with
+the same imports, and runs Lean on that file. That is the same narrow shape the
+recursive row's test uses, and for the same reason: the enclosing proof file's
+end-to-end section is red for unrelated reasons on some examples, so asking
+about the whole file would report that instead of this layer. The whole file
+reports `PASS=12 FAIL=0`, and the five clauses elaborate with `rc=0`.
+
+**The three that are still not rows, and the two different reasons:**
+
+* `Specs.abs64` is TRUE for every word, but its proof is not a two-line tactic:
+  the model branches on the SIGNED order (`n ^^^ 2^63 > 0 ^^^ 2^63`, which is
+  `n > 0` signed) while the specification reads `asInt w` and `absInt`. The
+  goal after `simp` still carries both the sign-bit split and the
+  `wordLimit`/`toNat` conversion, so it is a real proof, not a missing row.
+* `Specs.stepConst64` and `Specs.shiftMix64` are FALSE outside the finite
+  range, and this is a property of the SPECIFICATION's domain rather than of
+  the program. `bigconst` branches on the SIGNED comparison `n <= 0`, so a word
+  whose top bit is set returns 0, while `stepConst w.toNat` returns
+  `100000 + w.toNat` (a huge natural). `shiftlr` computes an ARITHMETIC right
+  shift (`asr64`), while `Nat.shiftRight` is LOGICAL, so the two disagree for
+  every negative word. An all-inputs row for either would be a false theorem;
+  what they need is a stated no-wrap/no-negative hypothesis (the shape the
+  recursive row already has in `hfits`), not a `closed` row.
 
 ## What is landed, in one paragraph
 

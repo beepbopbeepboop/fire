@@ -5924,7 +5924,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         business, and this one would not answer it.
         """
         kind = self._expr_str_kind(obj)
-        evidence = M.scalar_container_base_evidence(obj, kind)
+        evidence = M.scalar_container_base_evidence(
+            obj, kind, getattr(self, "_vkinds", None))
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(

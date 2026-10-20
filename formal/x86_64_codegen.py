@@ -6187,7 +6187,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         disagree about which bases qualify.
         """
         kind = self._expr_str_kind(obj)
-        evidence = M.scalar_container_base_evidence(obj, kind)
+        evidence = M.scalar_container_base_evidence(
+            obj, kind, getattr(self, "_vkinds", None))
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
