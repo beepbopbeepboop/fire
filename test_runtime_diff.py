@@ -300,11 +300,12 @@ BUILTIN_PROGRAMS = {
     # where the language and the compiled path accept it. The `String` field
     # prints None on BOTH engines (a shared, deliberately separate gap),
     # which is what makes the container rows here the whole test. The
-    # mutation of a defaulted container field is deliberately NOT here: the
-    # compiled path SIGSEGVs on `q.xs.append(1)` after printing the right
-    # default (filed separately — a struct-field container default is not
-    # retained for mutation), so including it would pin a codegen crash
-    # this interpreter fix is not responsible for.
+    # MUTATION of a defaulted container field was deliberately kept out of
+    # this case: the compiled path once printed the right default and then
+    # SIGSEGVd on `q.xs.append(1)` (a no-initializer container field stayed
+    # NULL — not a valid owned container — so the first mutation crashed).
+    # That codegen half is fixed, and the mutating shape is pinned by its
+    # own case right below, `defaulted_container_field_mutates`.
     "container_field_default_is_empty": textwrap.dedent("""\
         struct Box:
             var s: String
@@ -320,6 +321,32 @@ BUILTIN_PROGRAMS = {
             print(q.st)
             var ys: List[Int]
             print(ys)
+    """),
+    # The mutation half of the case above. A `List`/`Dict`/`Set` field with
+    # no initializer is an empty container of the declared kind, and the
+    # compiled path used to hold a NULL where the container should be:
+    # `print(q.xs)` answered `[]` (a NULL field reprs as an empty container)
+    # and the FIRST mutation — `q.xs.append(1)`, `q.d["a"] = 2`,
+    # `q.st.add(3)` — SIGSEGVd, because the field was not retained for
+    # mutation the way an explicit `= []` field's value is. The fix seeds
+    # every instance from a per-class empty container in the struct's
+    # allocator, exactly like the explicit empty-literal initializer, so the
+    # three mutations below land on a live container on the compiled path
+    # and both engines print the same mutated contents.
+    "defaulted_container_field_mutates": textwrap.dedent("""\
+        struct Box:
+            var xs: List[Int]
+            var d: Dict[String, Int]
+            var st: Set[Int]
+
+        def main():
+            var q = Box()
+            q.xs.append(1)
+            q.d["a"] = 2
+            q.st.add(3)
+            print(q.xs)
+            print(q.d)
+            print(q.st)
     """),
     # A method call is the only `return` EXPRESSION KIND whose type the
     # enclosing function's inference had no case for: `_quick_type`'s

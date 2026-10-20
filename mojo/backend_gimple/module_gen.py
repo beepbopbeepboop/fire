@@ -2135,12 +2135,27 @@ def _class_field_decl(field):
     bare AssignStmt. A `var FIELD = struct.Struct('<HH')` therefore got a
     struct FIELD with the right ctype and NO initializer anywhere, leaving
     it NULL: the first `self.FIELD.size` was a live segfault, not a wrong
-    value. Both spellings now reach both passes. Returns None for a bare
-    `var x` with no value, which neither pass can initialize."""
+    value. Both spellings now reach both passes.
+
+    A no-INITIALIZER container field (`var xs: List[Int]`, a VarDecl whose
+    value is None and whose annotation resolves to one of the three owned
+    container kinds) returns `(name, None)`: its default is a fresh empty
+    container of the declared kind — the value the compiled path has always
+    printed (a NULL field reprs as `[]`/`{}`/`set()`) — but the NULL itself
+    was not a valid owned container, so the first mutation through the
+    field (`q.xs.append(1)`) segfaulted. Both passes now see it, with the
+    value None because there is no literal: the KIND is the annotation's,
+    and each caller resolves it with `_mojo_type` (the same function the
+    field-typing pass uses, so their answers agree by construction). Every
+    OTHER no-value field returns None, as before."""
     if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr):
         return field.target.name, field.value
     if isinstance(field, VarDecl) and field.name and field.value is not None:
         return field.name, field.value
+    if isinstance(field, VarDecl) and field.name and field.value is None:
+        _ft = _mojo_type(getattr(field, 'type_ann', None))
+        if _ft in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            return field.name, None
     return None
 
 
@@ -5246,6 +5261,21 @@ def gen_module_impl(self, stmts):
                         continue
                     aname = field.name
                     v = field.value
+                elif (isinstance(field, VarDecl) and field.name
+                        and field.value is None and _class_field_decl(field) is not None):
+                    # A no-initializer CONTAINER field (`var xs: List[Int]`):
+                    # its default is an empty container of the declared kind,
+                    # so register it exactly like an explicit `= []` field —
+                    # one per-class global the allocator seeds into every
+                    # instance — instead of letting it stay NULL (a NULL
+                    # field PRINTS as an empty container but SEGFAULTS on
+                    # the first mutation, `q.xs.append(1)`). `_class_field_
+                    # decl` is the one definition of this shape: it returns
+                    # (name, None) precisely for the no-init container kinds
+                    # and None for every other no-value field, so a no-init
+                    # SCALAR field keeps its old (no class attribute) path.
+                    aname = field.name
+                    v = None
                 else:
                     continue
                 mangled = f"_classattr_{s.name}__{aname}"
@@ -5290,6 +5320,16 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
+                    elif v is None:
+                        # A no-initializer container field: there is no
+                        # literal to read the kind from, so the ANNOTATION
+                        # is the ground truth. `_mojo_type` is the same
+                        # function the field-typing pass resolves the field
+                        # with (the `_p->f = _classattr_...` per-instance
+                        # init below is gated on the two agreeing), so the
+                        # container global and the struct field it seeds can
+                        # never mismatch by construction.
+                        ctype = _mojo_type(_as_str(getattr(field, 'type_ann', None)))
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
@@ -13386,6 +13426,16 @@ def gen_module_impl(self, stmts):
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]
                         ctype = _class_attr_ctype(v)
+                        if ctype is None and v is None:
+                            # A no-initializer container field (`var xs:
+                            # List[Int]`): no literal to read the kind from,
+                            # so the annotation is the ground truth,
+                            # resolved with `_mojo_type` exactly as the
+                            # registration pass and the field-typing pass
+                            # resolve it. The population branches below emit
+                            # exactly their empty-literal line for it (no
+                            # elements to add), which is the whole default.
+                            ctype = _mojo_type(_as_str(getattr(field, 'type_ann', None)))
                         # `_X = frozenset({...})` / `set([...])` / `list((...))`:
                         # the container-constructor call wraps the literal whose
                         # elements we enumerate. Unwrap a single collection-literal
