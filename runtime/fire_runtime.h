@@ -756,6 +756,14 @@ int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
+/* The box's OWN word for every kind that has one — a str/bytes/list box gives
+ * back its pointer, a None box the NULL word that IS None in this value model,
+ * an int/bool box its integer — and the box itself, unchanged, for a float
+ * (which has no int64_t spelling) or for anything that is not a box. What a
+ * possibly-boxed slot read becomes when it is BOUND to a name: a local that
+ * kept the box answered `is None` false for a None slot and handed every
+ * consumer the box's address instead of the value. */
+int64_t     mojo_box_word(int64_t v);
 char       *mojo_repr_boxed(int64_t v);
 /* `id(x)`, as the integer CPython says it is: an interned box holding the
  * word, so every classifier here reads the token as an integer rather than as

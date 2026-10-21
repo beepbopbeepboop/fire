@@ -1084,6 +1084,16 @@ int64_t mojo_box_int(int64_t v)
     return (int64_t)mojo_box_double(v);
 }
 
+/* See the header: unwrap every box that has a word of its own, keep a float
+ * box (and every non-box) as it is. */
+int64_t mojo_box_word(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return v;
+    MojoBox *bx = (MojoBox *)(intptr_t)v;
+    if (bx->kind == 'd') return v;
+    return bx->bits;
+}
+
 /* The repr of a possibly-boxed int64_t. A box is described by its OWN kind
  * byte (see MojoBox): 'd' the double it holds, 'p' a str, 's' bytes, 'l' a
  * nested container, 'n' None, anything else the plain integer. Not a box ->

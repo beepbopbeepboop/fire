@@ -4102,6 +4102,13 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is / is not → pointer identity
     if op in ('is', 'is not'):
         c_op = '==' if op == 'is' else '!='
+        # Identity is on the slot's WORD, not on the box a heterogeneous slot
+        # read may hand back (see `mojo_box_word`): `t[1] is None` for a None
+        # slot compared a heap cell's address with NULL.
+        if lt == 'int64_t' and lv in getattr(gen, '_boxed_vals', ()):
+            lv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', lv)])
+        if rt == 'int64_t' and rv in getattr(gen, '_boxed_vals', ()):
+            rv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', rv)])
         t = gen._new_temp('_Bool')
         if '*' in lt or '*' in rt:
             p1 = gen._new_temp('int64_t')

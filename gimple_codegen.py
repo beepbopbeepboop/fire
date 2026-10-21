@@ -3238,6 +3238,7 @@ class GimpleGen:
         'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_box_double':           ('double',    ['int64_t']),
         'mojo_box_int':              ('int64_t',   ['int64_t']),
+        'mojo_box_word':             ('int64_t',   ['int64_t']),
         'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)

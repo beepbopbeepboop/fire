@@ -1068,6 +1068,23 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A slot read that may be a BOX (`mojo_list_get_boxed`: `v = t[1]` off
+        # a tuple whose kinds are only known at run time) is unwrapped when it
+        # is bound to a name. The temp is tracked in `_boxed_vals`; the local
+        # is not, so a local that kept the box answered `v is None` false for
+        # a None slot (the box is a non-NULL heap cell) and handed every later
+        # consumer the box's address. The compiled compiler did exactly that
+        # in `_mojo_classattr_init`'s `v = _cfd[1]` (`_class_field_decl`'s
+        # `(name, None)`), dropping every no-initializer container class
+        # attribute the reference emits. `mojo_box_word` keeps a float box (no
+        # int64_t spelling) and returns every other kind's own word, so the
+        # local is a word of unknown kind -- which is what `_dyn_word_locals`
+        # records, so its `str()`/`==` ask the runtime.
+        if vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
+            _bw = gen._new_temp('int64_t')
+            gen._emit(f'  {_bw} = mojo_box_word ({v});')
+            v = _bw
+            gen._dyn_word_vals.add(v)
         # A word of unknown kind bound to a local makes the LOCAL one too
         # (`leaf = getattr(node, fname)`): its later `str()` / `==` have to ask
         # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
