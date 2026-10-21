@@ -779,6 +779,19 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
         return _wt, wv
     cont_t, cont_v = gen.lower_expr(node.args[0])
     cont_t = gen._get_actual_type(cont_t, cont_v)
+    _cont_arg = node.args[0]
+    if rec['kind'] == 'set':
+        # A set container is a list container via the runtime's insertion-
+        # order materialization (`mojo_set_to_list` — the same order the
+        # runtime set for-loop iterator walks, see emit_loops' set branch):
+        # the converted list replaces the container expression for the inner
+        # construction below. The wrapped list is the TU's documented
+        # in-TU-iterator leak class (the owned inner never frees it).
+        if cont_t != 'MojoSet *':
+            return None
+        _set_list = gen._call_expr('MojoList *', 'mojo_set_to_list',
+                                   [('MojoSet *', cont_v)])
+        _cont_arg = gimple_ctypes.IdentExpr(name=_set_list)
     if rec['kind'] == 'factory':
         inner_v, inner_t = cont_v, cont_t
     else:
@@ -800,7 +813,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                 return None
             _zero = gimple_ctypes.IntLiteral(value=0)
             _it, inner_v = gen._lower_struct_constructor(
-                rec['inner_mangled'], [node.args[0], _zero])
+                rec['inner_mangled'], [_cont_arg, _zero])
         else:
             # Borrowed iterator: `List.__iter__(ref self)` returns
             # `_ListIter(0, self.unsafe_ptr(), self._len)`; `unsafe_ptr()` is
@@ -1142,7 +1155,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # type. A miss (no record — the call site was refused, e.g. a parameter
     # container) falls through to those arms unchanged.
     if isinstance(node.func, gimple_ctypes.IdentExpr):
-        _fk = iter_factory.factory_call_key(node.func.name, node)
+        _fc_name = node.func.name
+    elif (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)):
+        # The explicit type-arg spelling (measured 2026-10-21 (further):
+        # `take_while[less_than_5](nums)` — a FUNCTION passed as a type
+        # argument). Same record; the key folds the type arg into the
+        # signature (factory_call_key), so a miss here is exactly the
+        # pre-subpath fall-through.
+        _fc_name = node.func.obj.name
+    else:
+        _fc_name = None
+    if _fc_name is not None:
+        _fk = iter_factory.factory_call_key(_fc_name, node)
         _frec = getattr(gen, '_intu_factory_records', {}).get(_fk)
         if _frec is not None:
             _fr = _lower_factory_call(gen, node, _frec)
@@ -1568,7 +1593,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return 'MojoDict *', t
         if base in ('Set', 'FrozenSet'):
             t = gen._new_val('MojoSet *', 'mojo_set_new ()')
-            for a in node.args: gen.lower_expr(a)
+            for a in node.args:
+                at, av = gen.lower_expr(a)
+                # Add the element to the set (measured 2026-10-21 (further):
+                # `Set[Int](1, 2, 3)` in test/collections/test_set — the
+                # pre-fix loop evaluated the arguments and DROPPED them,
+                # silently constructing an empty set).
+                if at in ('int', 'int64_t', '_Bool'):
+                    gen._emit(f'  mojo_set_add_int ({t}, {av});')
+                elif at == 'char *':
+                    gen._emit(f'  mojo_set_add_str ({t}, {av});')
+                elif at == 'MojoBytes *':
+                    gen._emit(f'  mojo_set_add_bytes ({t}, {av});')
+                # Any other element type has no runtime add in this
+                # runtime: the argument stays evaluated but unadded (the
+                # pre-fix behavior), not a guess at a nonexistent call.
             return 'MojoSet *', t
         if base == 'Optional':
             if node.args:
@@ -1584,6 +1623,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return _lower_immpointer_ctor(gen, node)
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             return _lower_pointer_ctor(gen, node)
+    # Bare `Set(<set value>)` copy constructor (measured 2026-10-21
+    # (further): `Set(Set[Int](1, 2, 3))` in test/collections/test_set —
+    # the pre-fix shape emitted a bare extern `Set` that nothing defines,
+    # an undefined symbol at link): the single argument is a set value, the
+    # result is its copy — the runtime's mojo_set_copy. Any other argument
+    # type falls through to the ordinary call path (the pre-fix behavior).
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name == 'Set' and len(node.args) == 1
+            and len(node.kwargs or []) == 0):
+        at, av = gen.lower_expr(node.args[0])
+        if at == 'MojoSet *':
+            t = gen._new_val('MojoSet *', f'mojo_set_copy ({av})')
+            gen._note_fresh_result(t)
+            return 'MojoSet *', t
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
         # Calling the RESULT of a call expression directly —
         # `factory()(5)`, `make_adder2(100)(2)`, `pick(1)(x)` — where the

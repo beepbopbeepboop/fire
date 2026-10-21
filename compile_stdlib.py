@@ -352,20 +352,47 @@ EXPECTED_FAILURES = {
         "dependent return resolved through the receiver's static type — the "
         "same machinery applied to a MemberExpr callee. See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/collections/test_set.mojo': (
-        "2026-10-21 measured: `test_iter` — `var it = enumerate(my_set)` where "
-        "`my_set` is the set LITERAL `{4, 5, 6}` (this codegen's set literals "
-        "are `MojoList *`; measured `next(it)` receiver `MojoList *`, in "
-        "function `test_iter`): the factory seed's container gate "
-        "(iter_factory.resolve_container) accepts a statically resolvable "
-        "local List / range / nested factory — a set literal is none of "
-        "those, so the call seeds no record, `it` keeps its container-derived "
-        "type, and `next(it)` hits the hard refusal (not a stub). The for-"
-        "loop half of the same function (`for e in Set[Int]():` / `for e in "
-        "{1, 2, 3}:`) already lowers; only the enumerate(set-literal) factory "
-        "shape is missing. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/iter/test_chain.mojo': (
+     # 2026-10-21 (further) — REMOVED from this dict: test/collections/
+     # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
+     # (enumerate(my_set) over the set LITERAL `{4, 5, 6}`: resolve_container
+     # refused the set-literal container, `next(it)` hit the hard refusal in
+     # `test_iter`) is closed, so C-gen completes (11086 lines, 35 tests)
+     # and gcc -c passes. This is a FLOOR-GREEN, not a value-green — the
+     # full-file ladder stays RED on five independent measured gaps, each
+     # measured in the 20-31 test scratch (11 PASS / 9 FAIL), and the full
+     # file does not LINK (check_write_to + conforms_to undefined):
+     #   (A) check_write_to — cross-module test_utils import + Some[Writable]
+     #       trait-protocol dispatch, unavailable to the single-module link
+     #       (link fails on it, as on (C));
+     #   (B) write_repr_to / write_to — protocol methods lower to the
+     #       constant 0 (in-TU weak stub);
+     #   (C) conforms_to — the comptime builtin is emitted DECLARATION-ONLY
+     #       (no definition; undefined at link — needs static trait
+     #       resolution of Set's conditional conformances, a feature);
+     #   (D) the Set element methods _lower_set_method does not handle —
+     #       .remove/.pop (no-op, and no raise on missing/empty),
+     #       .insert/.deinit_with/.clear_with (closure-argument methods),
+     #       iterator .bounds() — while .add/.discard/.copy/.clear/.update
+     #       DO lower (ladder-verified in the 11-test scratch, PASS 11/11);
+     #   (E) the empty {} literal convention is an empty DICT (mojo_dict_new)
+     #       — `set == {}` takes the erased mojo_value_eq path (kind mismatch
+     #       -> 0), and `set > {}` / `set < {}` hit the container-ordering
+     #       refusal, which raises a TypeError the codegen then exits on
+     #       (rc=1, kills the whole ladder run — those 2 tests are excluded
+     #       from continue-mode maps);
+     #   (F) cross-module hash(<set>) is not content-derived (measured:
+     #       equal content, different words).
+     # Ladder evidence: the reduced-file scratch (11 tests: construction/
+     # move/copy/len/in/equal/bool/iter/add/comprehension/iter_owned) is
+     # LADDER PASS 11/11 with real values, incl. test_iter's full
+     # next()/tuple-subscript/`it.__next__()`-exhaustion flow — the
+     # enumerate(set) path proven end to end. The set-constructor fix
+     # (Set[T](x, y, ...) previously evaluated its args and DROPPED them —
+     # silent empty set; bare Set(<MojoSet *>) now mojo_set_copy) is a
+     # genuine improvement kept in the codegen. Full measurement record:
+     # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
+     # "2026-10-21 (further)".
+     'test/iter/test_chain.mojo': (
         "2026-10-21 measured: `test_chain_ref` — `chain(l1, l2)`: the factory "
         "is VARIADIC (`*iterables: *Ts`) and returns the iterator through an "
         "`out` PARAMETER (`out res: _ChainedIterator[...]`), not through the "
@@ -377,14 +404,31 @@ EXPECTED_FAILURES = {
         "`test_chain_ref`. See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/iter/test_map.mojo': (
-        "2026-10-21 measured: `test_map` — `map[add_one](l)`: the wrapper's "
-        "type argument is a FUNCTION VALUE (`_MapIterator[function]`, `function: "
-        "def(var Element) thin -> ResultType` — a thin-function type parameter). "
-        "This codegen has no value representation for a thin function, so the "
-        "instantiation cannot be formed and `it` erases to `int64_t` (measured "
-        "receiver, hard refusal, in function `test_map`). Landing map needs the "
-        "function-value type argument first — the same gap take_while/"
-        "drop_while carry (`predicate: def(Element) thin -> Bool`). See "
+        "2026-10-21 (further) measured — the Part 2 blocker (thin-FUNCTION "
+        "value type argument) is CLOSED: map now seeds its positional "
+        "`_MapIterator[function]` return — parse_return's positional arm "
+        "(the bare identifier is the FUNCTION VALUE the call passes as its "
+        "explicit type arg, gated so it must resolve to an actual def in "
+        "scope — a bare type arg can never bind the function slot), the "
+        "wrapper header's parameters classified by annotation (`Iterator` "
+        "-> inner, `def(...)` -> function, other -> derived, where derived "
+        "binds from the function value's OWN return annotation — `def "
+        "add_one(x: Int) -> Int` supplies OutputType=Int, `def to_str` "
+        "supplies String), and `map` joins the no-import builtin factory "
+        "table (test_map calls it without an import line, like enumerate/"
+        "iter). The reduced-file scratch ladder (2 tests: test_map + "
+        "test_map_owned) is LADDER PASS 2/2 with real values — Int output "
+        "(next(m) = 2, 3, 4), String output (next(m2) = \"1\", \"2\", "
+        "\"3\"), exhaustion raising StopIteration via `m.__next__()` in "
+        "both. The ONE remaining test (test_map_function_can_take_owned_"
+        "value) is blocked by an independent cross-module gap: CopyCounter "
+        "from test_utils (`CopyCounter[NoneType](None)` + `.copy_count`) — "
+        "the single-module ladder link cannot supply test_utils (the same "
+        "family as test_set's check_write_to); its container argument "
+        "(`var list = [CopyCounter[NoneType](None)]`) is also refused by "
+        "the seed's container gate (measured note: `map(...): container "
+        "argument is not a statically resolvable local List / range / "
+        "nested factory`). See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/iter/test_zip.mojo': (
         "2026-10-21 measured: `test_zip2` — `zip(l, l2)`: VARIADIC multi-"
@@ -408,6 +452,16 @@ EXPECTED_FAILURES = {
     #   test/itertools/test_drop.mojo    14/14 PASS (incl. the function-
     #                                     level `from std.itertools import
     #                                     take` composition test)
+    #   test/itertools/test_take_while.mojo  14/14 PASS (the thin-FUNCTION
+    #                                     `predicate` type argument: the
+    #                                     seed binds the wrapper's function
+    #                                     type parameter from the call's
+    #                                     explicit type arg — kwarg form
+    #                                     `predicate=predicate`; module-
+    #                                     level AND nested non-capturing
+    #                                     predicate defs both verified)
+    #   test/itertools/test_drop_while.mojo  14/14 PASS (incl. the nested
+    #                                     `is_zero` predicate)
     # The lift: elab_intu no longer refuses List-container factories —
     # the in-TU iterator protocol materializes in RUNTIME-MojoList terms
     # (mojo_list_len/mojo_list_get_* over a `MojoList *` `_list` field),
@@ -419,31 +473,42 @@ EXPECTED_FAILURES = {
     # protocol copies, comptime-assert no-op, function-level import
     # factory homes): bugs/CODEGEN_next_on_a_user_defined_iterator_
     # struct_is_unlowered.md, "2026-10-20 (further)".
+    # The Part 3 lift (2026-10-21 (further)) for the two take_while/
+    # drop_while files: the thin-FUNCTION type argument — iter_factory's
+    # kwarg-form parse_return arm reads `Wrapper[kw=..., predicate=predicate]`,
+    # elab_intu._seed_one_factory classifies the wrapper header's
+    # parameters by annotation (Iterator -> inner, def -> function) and
+    # binds the function parameter from the call's explicit type arg
+    # (nested non-capturing defs to their lifted C name, closure_lifted_
+    # name; capturing closures refused; module-level bare names via
+    # _func_csym), and the spliced `Self.predicate(elem)` body
+    # monomorphizes (the Self.<param> unit pass) to a direct call of the
+    # lifted function. The same classification, extended with the
+    # positional arm + the DERIVED parameter (bound from the function
+    # value's own return annotation), is what lifted map's mechanism —
+    # see test/iter/test_map's entry above for its one remaining blocker.
     'test/itertools/test_cycle.mojo': (
-        "15 of 17 `cycle(...)` call sites now compile, LINK and run with "
-        "real values (Int/String/Bool lists, `List[Int]()`, `range(...)`, "
-        "the copyable/iterator-protocol/for-loop/composition forms — "
-        "ladder PASS 15/15 on a copy of the file without the 2 user-owned "
-        "tests, 2026-10-21). The 2 remaining sites (`cycle(_owned3(1, 2, "
-        "3))` line 283, `cycle(_owned1(42))` line 302) pass USER-DEFINED "
-        "`IterableOwned` structs whose local comptime-parametrized "
-        "materialization is non-mangled (a single `_CopyableOwned "
-        "{__mojo_type_id, int64_t size, MojoList * _data}` layout, "
-        "`Array[Int, Self.size]` lowered to `MojoList *`) and whose local-"
-        "fn return boxes to int64_t — the local-generic-elaboration gap "
-        "(R2 sibling). Measured surface: the boxed `it` local then hits "
-        "next()'s hard refusal — `cannot compile module: next(...) on "
-        "next(IdentExpr) (receiver typed int64_t) has no lowering` — not "
-        "a stub. See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_"
-        "is_unlowered.md, \"2026-10-20 (further)\"."),
-    'test/itertools/test_drop_while.mojo': (
-        "2026-10-21 measured: `test_drop_while_basic` — `drop_while[pred]"
-        "(nums)`: the wrapper's `predicate` type argument is a thin FUNCTION "
-        "value (`_DropWhileIterator[InnerIteratorType=..., predicate=predicate]`, "
-        "`predicate: def(Element) thin -> Bool`) — no function-value "
-        "representation in this codegen, so the instantiation cannot be formed "
-        "and `it` erases to `int64_t` (measured receiver, hard refusal, in "
-        "function `test_drop_while_basic`). See "
+        "2026-10-21 (further) measured — 15 of 17 `cycle(...)` call sites "
+        "compile, LINK and run with real values (Int/String/Bool lists, "
+        "`List[Int]()`, `range(...)`, the copyable/iterator-protocol/for-"
+        "loop/composition forms — ladder PASS 15/15 on a copy of the file "
+        "without the 2 user-owned tests). The 2 remaining sites "
+        "(`cycle(_owned3(1, 2, 3))` line 283 in test_cycle_owned, "
+        "`cycle(_owned1(42))` line 302 in test_cycle_owned_single) are "
+        "refused at the SEED's container gate (measured notes, x2: `cycle"
+        "(...): container argument is not a statically resolvable local "
+        "List / range / nested factory`): the container argument is a "
+        "LOCAL FUNCTION CALL (`_owned3(1, 2, 3)`) whose bracketed return "
+        "type requires local generic elaboration, and its value is a "
+        "USER-DEFINED `IterableOwned` struct (`_CopyableOwned[3]` — module-"
+        "local, comptime-parameterized, in-TU `_CopyableOwnedIter[3]` over "
+        "`Array[Int, 3]`) — neither a List/Set local nor a nested factory, "
+        "so no record can be filed. The boxed `it` local then hits next()'s "
+        "hard refusal — `cannot compile module: next(...) on next(IdentExpr) "
+        "(receiver typed int64_t) has no lowering` — not a stub. Landing "
+        "needs the local-generic-elaboration gap (R2 sibling: a local fn's "
+        "bracketed return boxes to int64_t) and the in-TU user-struct "
+        "iterator (`next-on-a-user-defined-iterator-struct` family). See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/itertools/test_product.mojo': (
         "2026-10-21 measured: `test_product2` — `product(l1, l2)`: the return "
@@ -454,14 +519,6 @@ EXPECTED_FAILURES = {
         "iterable dependent return is not representable in the current record "
         "shape. Measured: `next(it)` hard refusal, receiver `int64_t`, in "
         "function `test_product2`. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/itertools/test_take_while.mojo': (
-        "2026-10-21 measured: `test_take_while_basic` — `take_while[less_than_5]"
-        "(nums)`: same thin-FUNCTION-value type argument as test_map (`"
-        "_TakeWhileIterator[InnerIteratorType=..., predicate=predicate]`, "
-        "`predicate: def(Element) thin -> Bool`) — no function-value "
-        "representation, `it` erases to `int64_t` (measured receiver, hard "
-        "refusal, in function `test_take_while_basic`). See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/python/test_python_object.mojo': (
         "2026-10-21 measured: `test_iter` — `for fruit in list_obj` where "

@@ -88,6 +88,38 @@ _RE_BARE_ITER_BORROWED = re.compile(r'^(\w+)\s*\.\s*IteratorType\s*\[[^\]]*\]$')
 # existed. The emit side (emit_calls._lower_factory_call, kind 'direct')
 # maps positionals, kwargs, then the factory's own parameter defaults.
 _RE_BARE_STRUCT = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)$')
+# The KEYWORD-ARG form (measured 2026-10-21 (further): `def take_while[...]
+# -> _TakeWhileIterator[InnerIteratorType=IterableType.IteratorType[origin],
+# predicate=predicate]` in std/itertools/itertools.mojo): the type-arg block
+# carries `name=expr` pairs instead of the single `X.IteratorType[...]`
+# mention. `kind` comes from which iterator member the INNER kwarg names
+# (`IteratorOwnedType` -> owned, `IteratorType` -> borrowed — check owned
+# first, its string contains the other). The remaining kwargs are the
+# FUNCTION parameters (take_while/drop_while's `predicate`), bound from the
+# call's explicit type arg by elab_intu._seed_one_factory.
+_RE_KW_STRUCT = re.compile(r'^(\w+)\s*\[(.*)\]$')
+
+
+def _top_level_split(s: str) -> list:
+    """The comma parts of a type-arg block, splitting only at bracket/paren/
+    brace depth 0 — a kwarg VALUE may itself carry nested brackets
+    (`...IteratorType[origin]`) and a function annotation parens
+    (`def(...) thin -> Bool`)."""
+    parts, depth, cur = [], 0, []
+    for c in s:
+        if c in '[({':
+            depth += 1
+        elif c in '])}':
+            depth -= 1
+        if c == ',' and depth == 0:
+            parts.append(''.join(cur).strip())
+            cur = []
+        else:
+            cur.append(c)
+    tail = ''.join(cur).strip()
+    if tail:
+        parts.append(tail)
+    return parts
 
 
 def parse_return(ann) -> dict | None:
@@ -111,6 +143,39 @@ def parse_return(ann) -> dict | None:
     m = _RE_BARE_ITER_BORROWED.match(s)
     if m:
         return {'wrapper': None, 'kind': 'borrowed', 'x': m.group(1)}
+    m = _RE_KW_STRUCT.match(s)
+    if m:
+        if '=' in m.group(2):
+            kind, inner_kwarg = None, None
+            for part in _top_level_split(m.group(2)):
+                km = re.match(r'(\w+)\s*=\s*(.*)$', part, re.S)
+                if not km:
+                    continue
+                v = km.group(2)
+                if 'IteratorOwnedType' in v:
+                    kind, inner_kwarg = 'owned', km.group(1)
+                    break
+                if 'IteratorType' in v:
+                    kind, inner_kwarg = 'borrowed', km.group(1)
+                    break
+            if kind is None:
+                return None
+            return {'wrapper': m.group(1), 'kind': kind, 'x': None,
+                    'inner_kwarg': inner_kwarg}
+        # The positional arm (measured 2026-10-21 (further): map's
+        # `_MapIterator[function]` — the single positional is the FUNCTION
+        # VALUE the call passes as its explicit type arg, `map[add_one](l)`;
+        # a positional cannot carry a kind, so `kind` is None and the seed
+        # derives the pass mode from the call argument's own `moved`).
+        # The other single-bare-identifier returns in the measured stdlib
+        # (`_RepeatIterator[ElementType]`, `_Empty[T]`, `_Once[T]`) match this
+        # arm too, but the seed refuses them: their calls pass no bare-
+        # identifier explicit type arg that resolves to a def in scope, so
+        # the call site is left exactly as this arm found it — the same C as
+        # the pre-arm refusal.
+        parts = _top_level_split(m.group(2))
+        if parts and all(re.match(r'^\w+$', p) for p in parts):
+            return {'wrapper': m.group(1), 'kind': None, 'x': None}
     m = _RE_BARE_STRUCT.match(s)
     if m:
         return {'wrapper': m.group(1), 'kind': 'direct', 'x': None}
@@ -397,11 +462,23 @@ def arg_signature(node) -> tuple:
 
 
 def factory_call_key(name: str, node) -> tuple:
-    """The record key for one factory CALL: name + every argument's signature
-    + the kwarg names (values already inside the argument signatures)."""
+    """The record key for one factory CALL: name + the explicit type args +
+    every argument's signature + the kwarg names (values already inside the
+    argument signatures). The type-arg part matters exactly when the factory
+    takes a FUNCTION as a type argument (measured 2026-10-21 (further):
+    `take_while[less_than_5](nums)` — two calls with the same container
+    local but different predicates are DIFFERENT instantiations; a key
+    without the type arg let the second seed's record silently replace the
+    first, and both call sites would have emitted the same wrapper)."""
+    fn = getattr(node, 'func', None)
+    type_args = ()
+    if type(fn).__name__ == 'SubscriptExpr':
+        idx = getattr(fn, 'index', None)
+        if idx is not None:
+            type_args = (arg_signature(idx),)
     args = getattr(node, 'args', None) or ()
     kws = getattr(node, 'kwargs', None) or ()
-    return (name, tuple(arg_signature(a) for a in args),
+    return (name, type_args, tuple(arg_signature(a) for a in args),
             tuple(k[0] for k in kws))
 
 
@@ -434,6 +511,20 @@ def list_literal_elem(elements) -> str | None:
             kinds.add('Bool')
         elif t == 'IdentExpr' and nm in ('True', 'False'):
             kinds.add('Bool')
+        elif t == 'UnaryOp' and getattr(e, 'op', None) in ('-', '+'):
+            # A signed numeric LITERAL (`[5, 3, 1, 0, -1, 2]` parses `-1`
+            # as a UnaryOp, not an IntLiteral): the emitter's `_quick_type`
+            # answers the default int64_t for it, so the list lowers as a
+            # numeric one — mirror that. Any other operand (an identifier,
+            # a call) stays a refusal: the element type is not static here.
+            _op = getattr(e, 'operand', None)
+            _ot = type(_op).__name__
+            if _ot == 'IntLiteral':
+                kinds.add('Int')
+            elif _ot == 'FloatLiteral':
+                kinds.add('Float64')
+            else:
+                return None
         else:
             return None
     if 'String' in kinds:
@@ -486,7 +577,15 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
                 # `var`/owned overload is the one real Mojo can pick here
                 # (a `ref` parameter cannot bind an owned value), so the
                 # inner is the owned one regardless of the argument spelling.
-                return {'kind': 'list', 'tname': m.group(1),
+                # A `Set[T]` local is a SET container (measured 2026-10-21
+                # (further): `var my_set = {4, 5, 6}` — the literal infers
+                # `Set[Int]`): the seed side derives its inner from the
+                # LIST source (the emit side feeds it
+                # `mojo_set_to_list(<set>)` — the runtime's insertion-order
+                # materialization, the same order the runtime set for-loop
+                # iterator walks).
+                return {'kind': 'set' if m.group(1) == 'Set' else 'list',
+                        'tname': m.group(1),
                         'elem': m.group(2), 'moved': True}
             return None          # annotated, but not a single-param container
         v = getattr(d, 'value', None)
@@ -496,6 +595,15 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
             if elem is None:
                 return None
             return {'kind': 'list', 'tname': 'List', 'elem': elem,
+                    'moved': True}
+        if vt == 'SetExpr':
+            # A set LITERAL local (`var my_set = {4, 5, 6}` — no annotation,
+            # the literal IS the type evidence): element from the literal,
+            # same promotion rules as a list literal.
+            elem = list_literal_elem(getattr(v, 'elements', None) or ())
+            if elem is None:
+                return None
+            return {'kind': 'set', 'tname': 'Set', 'elem': elem,
                     'moved': True}
         if vt == 'CallExpr':
             f = getattr(v, 'func', None)
@@ -513,6 +621,17 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
                     return {'kind': 'list', 'tname': 'List', 'elem': idx,
                             'moved': True}
                 return None      # `List[K, V]` / multi-param: unmeasured
+            if fn == 'Set':
+                # `Set[T]()`: the constructor's type parameter is the
+                # element (measured 2026-10-21 (further): `var s = Set[Int]()`
+                # in test/collections/test_set).
+                _idx = getattr(f, 'index', None)
+                idx = getattr(_idx, 'name', None) \
+                    if type(_idx).__name__ == 'IdentExpr' else None
+                if idx in ('Int', 'String', 'Bool'):
+                    return {'kind': 'set', 'tname': 'Set', 'elem': idx,
+                            'moved': True}
+                return None      # `Set[K, V]` / multi-param: unmeasured
             if fn in (factory_names or ()):
                 return {'kind': 'factory', 'name': fn, 'node': v,
                         'moved': moved}
@@ -521,13 +640,15 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
     if t == 'CallExpr':
         f = getattr(node, 'func', None)
         if type(f).__name__ == 'SubscriptExpr':
-            # `List[T]()`: the constructor's own type parameter is the
-            # element. A direct argument is an rvalue — the owned overload.
+            # `List[T]()` / `Set[T]()`: the constructor's own type parameter
+            # is the element. A direct argument is an rvalue — the owned
+            # overload.
             obj = getattr(f, 'obj', None)
-            if type(obj).__name__ == 'IdentExpr' and obj.name == 'List':
+            if type(obj).__name__ == 'IdentExpr' and obj.name in ('List', 'Set'):
                 idx = getattr(getattr(f, 'index', None), 'name', None)
                 if idx in ('Int', 'String', 'Bool'):
-                    return {'kind': 'list', 'tname': 'List', 'elem': idx,
+                    return {'kind': 'set' if obj.name == 'Set' else 'list',
+                            'tname': obj.name, 'elem': idx,
                             'moved': True}
                 return None
             return None
@@ -545,4 +666,12 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
             return None
         return {'kind': 'list', 'tname': 'List', 'elem': elem,
                 'moved': moved}
+    if t == 'SetExpr':
+        # A set literal as a DIRECT factory argument: same promotion rules
+        # as a list literal, owned overload (an rvalue is passed by value).
+        elem = list_literal_elem(getattr(node, 'elements', None) or ())
+        if elem is None:
+            return None
+        return {'kind': 'set', 'tname': 'Set', 'elem': elem,
+                'moved': True}
     return None

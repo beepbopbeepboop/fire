@@ -1139,3 +1139,74 @@ shape — the shape table lives in the R1 doc). This doc's own census
 counts the elaborator's INSTANTIATION declines, and the two lifts act on
 the call-site side — the census numbers are what they were at the end
 of the 2026-10-20 session (not re-run in this one).
+
+## 2026-10-21 (further): declared-red 11 -> 9; this session's A/B removes
+no site of this class; the two remaining members re-measured
+
+### The declared-red reduction (the R1 doc carries the evidence)
+
+The R1 doc's "2026-10-21 (further)" section lifted the thin-FUNCTION type
+argument (`test_take_while` 14/14, `test_drop_while` 14/14 ladder), the set-
+literal container (`test_set` out of the sweep — floor-green; the full-file
+ladder stays red on five INDEPENDENT measured gap families A-F, none of them
+of either doc's class), and the map mechanism (`test_map` 2/2 scratch ladder
+with real values; the file stays red on ONE cross-module test_utils struct).
+Declared red: **11 -> 8** in the sweep (602 PASSED / 8 FAILED, 0 unexpected,
+0 stale, EXIT 0); 9 entries counted including the floor-green `test_set`
+whose ladder-level red is documented in the R1 doc. Interpreter note:
+the session's first measurements ran under PATH 3.15 (homebrew); a probe of
+every changed codegen path proved 3.15 and the mandated /opt/local 3.14.8
+emit byte-identical C (the CAS is keyed on inputs only), so the A/B below
+stands, and all gates (ladders, sweep, warn set, bucket 53/53 rc 0,
+ps-verified) were remeasured under 3.14.8 — see the R1 doc's interpreter-
+verification section.
+
+### This session's full-tree A/B removes NO site of this class
+
+The fresh-process A/B vs 5179db5a (610 files) is 603 identical / E->C 3 /
+E->E 1 / C->E 0 / C->C 3 — and the one C->C file that touches a
+this-session mechanism in a green file (`test/builtin/test_bool.mojo`,
+`map[gt0](l)` in `test_all` / `test_any`) did NOT remove an undefined-extern
+site: the baseline C boxes the `map[gt0](l)` call to `int64_t` (verified in
+the before-C — the R1 doc's false-green guard removed std/iter's 4
+`next_12_IteratorType_5_Int64` calls at 5179db5a, and map's baseline
+lowering is the erased scalar, not a mangled call with 0 definitions).
+Removed-symbol cross-reference on the 3 changed files: **0** undefined-and-
+referenced symbols.
+
+### test_getsize — still blocked (the two 2026-10-20 defects, re-measured
+today, unchanged surface)
+
+Fresh measurement (2026-10-21 (further), fresh process): the monomorphized TU
+`getsize_8_PathLike_6_String` still fails real `gcc -c` — attempt 1 of 3:
+`error: implicit declaration of function 'stat'` at the spliced line 16
+(`return stat(path.__fspath__()).st_size`): the CROSS-STDLIB `stat[PathLike:
+stdPathLike]` (std/os/fstat.mojo) is not transitively elaborated with
+`PathLike=String`, and a prototype alone would not fix the result model
+either (int64 reinterpreted as `void *` with a dynamic `st_size` getattr,
+versus the real `int stat(const char *, struct stat *)` out-param filling a
+caller-owned struct). Same surface as 2026-10-20/21.
+
+### test_cycle — the 2 user-owned sites (remeasured; the refusal moved up
+to the seed, the gap is the same)
+
+Remeasured 2026-10-21 (further): the 2 sites (`cycle(_owned3(1, 2, 3))` /
+`cycle(_owned1(42))`) are now refused at the SEED's container gate (x2
+measured notes: `cycle(...): container argument is not a statically
+resolvable local List / range / nested factory`) — the container is a LOCAL
+FUNCTION CALL returning a USER-DEFINED `IterableOwned` struct
+(`_CopyableOwned[3]`, in-TU `_CopyableOwnedIter[3]` over `Array[Int, 3]`) —
+and the boxed `it` local then hits next()'s hard refusal (receiver `int64_t`,
+in `test_cycle_owned`, unchanged from 5179db5a). The gap is the
+local-generic-elaboration sibling (R1 doc), not an elaborated-callee-
+undefined site: no mangled call with 0 definitions is emitted for these 2
+sites (the call never seeds a record at all). 15/17 sites work with real
+values.
+
+### Where this doc's own census stands
+
+The elaborator-decline census (`tools/elab_fail_census.py`) counts a
+DIFFERENT population (instantiation declines); the 3 E->C lifts and the 3
+C->C deltas above act on the call-site side. The census is not re-run in
+this session (same treatment as the 2026-10-21 section above it); the
+declared-red population it complements is the 9 entries named above.

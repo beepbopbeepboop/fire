@@ -224,7 +224,16 @@ def _check_no_value_shadow(src: str, type_params) -> None:
     fail loudly rather than emit wrong code."""
     for tp in type_params:
         e = re.escape(tp)
-        if re.search(rf'\b(?:var|for)\s+{e}\b', src) or \
+        # The `var`/`for` match must not be a MEMBER ACCESS: the function
+        # type parameter's owned-parameter convention (`def(var
+        # InnerIteratorType.Element) thin -> OutputType` in std/iter's
+        # _MapIterator, measured 2026-10-21 (further)) spells `var
+        # <Type>.Element` in an ANNOTATION — a type position, not a binding —
+        # and the bare-word substitution rewrites it to `var
+        # <inner>.Element`, which is exactly what the substituted annotation
+        # should read. A real statement-level `var T` / `for T` is followed
+        # by `=`, `in`, or end-of-line, never `.`.
+        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
            re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "

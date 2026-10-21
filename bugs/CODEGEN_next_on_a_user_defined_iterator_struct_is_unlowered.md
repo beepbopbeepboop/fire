@@ -1857,3 +1857,250 @@ The census must reach 0 sites and the declared `EXPECTED_FAILURES` must
 empty. The measured remainder is the 11 above; none of them is a stub or a
 silent green — every one fails a real `gcc -c`/codegen with a named, per-
 file reason, which is the state this dict exists to declare.
+
+## 2026-10-21 (further): the thin-FUNCTION type argument lifts
+(take_while/drop_while); the set-literal container lifts; the map mechanism
+lifts; declared-red 9, of which 1 is floor-green
+
+### The thin-function subpath (lifts `test_take_while` and `test_drop_while`,
+14/14 ladder each; the mechanism is what test_map needed)
+
+The Part 2 blocker for the three thin-FUNCTION files was that the wrapper's
+function type parameter (`_TakeWhileIterator`'s
+`predicate: def(InnerIteratorType.Element) thin -> Bool`) had no value
+representation, so the instantiation could not be formed and `it` erased to
+`int64_t`. It now can, with every piece measured:
+
+1. **`iter_factory.parse_return`'s kwarg arm** reads the dependent return
+   `Wrapper[kw=expr, ...]`: `kind` comes from which iterator member the inner
+   kwarg names (`IteratorOwnedType` -> owned, `IteratorType` -> borrowed), the
+   rest are the FUNCTION parameters (take_while/drop_while's `predicate`).
+   A **positional arm** (same session) reads `Wrapper[<bare-ident>]` with
+   `kind=None` — map's shape, below.
+2. **`elab_intu._seed_one_factory`'s parameter classification**
+   (`_wrapper_param_roles`) classifies the wrapper HEADER's parameters by
+   annotation: `Iterator`-prefixed -> the inner (bound from the container
+   argument), `def(...)` -> the function value (bound from the call's EXPLICIT
+   TYPE ARG — `take_while[less_than_5](nums)` passes the function as a type
+   argument; nested non-capturing defs bind to their lifted C name
+   (`closure_lifted_name`), capturing closures are refused, module-level bare
+   names resolve via `_func_csym`), other -> DERIVED (bound from the function
+   value's OWN `-> T` return annotation — map's `OutputType`, below). The
+   positional arm additionally GATES the bare identifier to an actual def in
+   scope (`_find_fn_def`), so a bare type arg (`Foo[T]`) can never bind the
+   function slot — the other single-bare-identifier returns in the measured
+   stdlib (`_RepeatIterator[ElementType]`, `_Empty[T]`, `_Once[T]`) match the
+   arm but are refused downstream (no container argument / no fn arg),
+   leaving their call sites exactly as the pre-arm refusal did.
+3. **`_factory_return_for`'s kind-None fallback**: map's two overloads
+   annotate IDENTICALLY (`_MapIterator[function]` — a positional cannot
+   express a pass mode), so the first kind-None overload answers; the pass
+   mode is the call argument's `moved`, which the record already carries.
+4. **`map` joins `_BUILTIN_FACTORY_HOME`** (test_map calls `map[add_one](l)`
+   with NO import line — a compiler builtin whose measured dependent-return
+   implementation is std/iter's overloads, exactly like enumerate/iter).
+5. **`monomorphize._check_no_value_shadow` member-access exclusion**: the
+   shadow check's `var <T>` regex false-positived on map's function
+   parameter's OWNED convention `def(var InnerIteratorType.Element) thin ->
+   OutputType` (a type position inside a def annotation — take_while's
+   `def(InnerIteratorType.Element)` has no `var`, which is why it never
+   tripped). The match now requires the name NOT be followed by `.`; a real
+   statement-level `var T` / `for T` is followed by `=`, `in`, or EOL.
+6. The spliced `Self.predicate(elem)` / `Self.function(next(self._inner))`
+   body monomorphizes through the existing `Self.<param>` unit pass to a
+   direct call of the lifted function — no new emit-side machinery.
+
+Ladder (fresh process, real `gcc -c` + link + run, value-checking asserts):
+**test_take_while 14/14 PASS** (module-level AND nested predicates;
+`next()`/`.__next__()`/for-loop/exhaustion forms) and **test_drop_while
+14/14 PASS** (incl. the nested `is_zero` predicate). Re-verified 14/14 on the
+final code after every subsequent edit in this session.
+
+### The set-literal container (lifts `test_set` OUT OF THE SWEEP; the
+full-file ladder stays red on five measured independent gaps)
+
+`test_iter`'s measured blocker was `enumerate(my_set)` over the set LITERAL
+`{4, 5, 6}` — `resolve_container` refused a set literal (it accepted
+statically resolvable local List / range / nested factory only), so no
+record seeded, `it` kept its container-derived type, and `next(it)` (measured
+receiver `MojoList *`) hit the hard refusal. Now:
+
+- **`resolve_container` gained the Set arm** (list literal / local / rvalue /
+  owned forms, x5 sites) and the seed builds the set-kind record from the
+  LIST source; the emit side (`_lower_factory_call`, kind 'set') converts the
+  `MojoSet *` through `mojo_set_to_list` — the runtime set's own insertion-
+  order walk (the same order the runtime set for-loop iterator uses) — and the
+  inner rides the ladder-verified List path end to end.
+- **`Set[T](x, y, ...)` constructor arg-append**: the constructor used to
+  EVALUATE its args and drop them — a silent empty set (measured: the
+  baseline `test_any_all` C is `mojo_set_new()` with zero adds for
+  `Set[String]("bleep", "bloop")`, i.e. `any(...)` computed over an EMPTY set
+  where the source asserts true). It now appends via `mojo_set_add_int/str/
+  bytes`; bare `Set(<MojoSet *>)` copies via `mojo_set_copy`. Both are
+  genuine improvements that also land in two GREEN files' C (test_any_all,
+  below).
+- **Signed-literal `list_literal_elem`**: a list literal with a NEGATIVE
+  element failed element inference (the `-` was not parsed), which silently
+  kept `test_dict`'s `for i, key in enumerate(keys)` on the old fallback path
+  (`keys` is a literal of large/negative int64s); the signed arm seeds it —
+  in-TU `_Enumerate` materialization (below).
+- **`factory_call_key` folds the explicit type arg** — `take_while[
+  less_than_5]` / `take_while[always_true]` over the same local are distinct
+  records.
+
+Measured surface: the full file's C gen COMPLETES (11,086 lines, 35 tests;
+baseline: `next(...)` hard refusal in `test_iter`, whole-module crash) — the
+file leaves the sweep (599->602 PASSED) and `EXPECTED_FAILURES`. The full-
+FILE ladder, however, does not link (exactly `check_write_to` + `conforms_to`
+undefined, measured in the link step) and its 20-31 test scratch runs
+11 PASS / 9 FAIL with five INDEPENDENT measured gap families, none of them
+of this doc's `next(<struct>)` class:
+
+- **(A)** `check_write_to` — cross-MODULE test_utils import + `Some[Writable]`
+  trait-protocol dispatch; the single-module ladder link cannot supply
+  test_utils (link fails on it, as on (C)).
+- **(B)** `write_repr_to` / `write_to` — protocol methods lower to the
+  constant 0 (in-TU weak stub).
+- **(C)** `conforms_to` — the comptime builtin is emitted DECLARATION-ONLY
+  (no definition; undefined at link). Landing it needs static trait
+  resolution of Set's conditional conformances — a feature.
+- **(D)** the Set element methods `_lower_set_method` does not handle:
+  `.remove` / `.pop` (no-op, and no raise on missing/empty — measured:
+  `.pop()` returns pointer-garbage 0x100000000 on an empty set), `.insert` /
+  `.deinit_with` / `.clear_with` (closure-argument methods, no-op), iterator
+  `.bounds()` (no-op -> 0) — while `.add` / `.discard` / `.copy` / `.clear` /
+  `.update` DO lower (ladder-verified).
+- **(E)** the empty `{}` literal convention is an empty DICT
+  (`mojo_dict_new`): module-side `set == {}` takes the erased path (`_
+  eq_operand_kind`'s ctype check hits `MojoDict *` before the SetExpr node
+  check) -> `mojo_value_eq(set, dict)` -> 0 (kills test_discard / test_clear);
+  `set > {}` / `set < {}` hits the container-ordering REFUSAL, which raises a
+  CPython-style `TypeError` the codegen's unhandled-exception path then
+  `exit(1)`s on — killing the whole ladder run (test_greaterthan /
+  test_lessthan are excluded from continue-mode maps for this reason).
+- **(F)** cross-module `hash(<set>)` is not content-derived (measured: two
+  sets with equal content hash to different words).
+
+The reduced-file scratch (11 tests: construction/move/copy/len/in/equal/
+bool/iter/add/comprehension/iter_owned) is **LADDER PASS 11/11** with real
+values, including `test_iter`'s full `next()` / tuple-subscript / `it.
+__next__()`-exhaustion flow — the enumerate(set) path proven end to end.
+Stale-binary lesson recorded in the session notes: an earlier continue-mode
+run showed test_discard PASS from a stale binary; remeasured with a fresh
+build (both whole-run and per-test argv) it reproduces the (E) failure with
+byte-identical generated C across trees.
+
+### The map mechanism (the file stays red on ONE cross-module test)
+
+`test_map`'s Part 2 blocker was the same thin-function gap, in its positional
+form: `_MapIterator[function]`, `function: def(var InnerIteratorType.Element)
+thin -> OutputType`, with `OutputType` a SEPARATE derived parameter. With the
+subpath above (items 1-6, positional arm + derived binding from the function
+value's own return annotation: `def add_one(x: Int) -> Int` supplies
+`OutputType=Int`, `def to_str` supplies `String`), the reduced-file scratch
+(2 tests, the CopyCounter test removed) is **LADDER PASS 2/2** with real
+values: `next(m) = 2, 3, 4` (Int output), `next(m2) = "1", "2", "3"` (String
+output through the in-TU `_ListIterOwned` + `mojo_list_get_int` chain,
+verified by disassembly), exhaustion raising StopIteration via `m.__next__()`
+in both; `map[double](l^)` exercises the owned overload (2, 4, 6). The ONE
+remaining test, `test_map_function_can_take_owned_value`, is blocked by an
+INDEPENDENT cross-module gap: `CopyCounter` from test_utils (`CopyCounter[
+NoneType](None)` + `.copy_count`) — the single-module link cannot supply
+test_utils (the (A) family); its container argument (`var list = [CopyCounter
+[NoneType](None)]`) is also refused by the seed's container gate (measured
+note: `map(...): container argument is not a statically resolvable local List
+/ range / nested factory`). A/B state: **E->E with the crash relocated** —
+baseline: `next(...) (receiver typed int64_t) in function test_map`; final:
+`... in function test_map_function_can_take_owned_value`. The mechanism
+works; the file's remaining red is the test_utils struct, not map.
+
+Driver note (this session, both ladders): the char* pointer heuristic's floor
+was 1<<40, which MISSES this machine's 33-bit malloc heap (0x1_0...) —
+test_map's `assert_equal(next(m2), "1")` (a char* pair there) fell into the
+word comparison and failed on pointer identity. The floor is now 1<<32 (the
+equal-values case still passes — the strcmp branch compares a pointer with
+itself); the tested asserts carry no unequal >=1<<32 integer pair, so the
+widened range cannot dereference an integer.
+
+### test_cycle — the 2 remaining sites, remeasured (surface unchanged,
+refusal now at the seed)
+
+The 2 user-owned sites (`cycle(_owned3(1, 2, 3))` line 283 in
+`test_cycle_owned`, `cycle(_owned1(42))` line 302 in `test_cycle_owned_
+single`) are now refused at the SEED's container gate (measured notes, x2:
+`cycle(...): container argument is not a statically resolvable local List /
+range / nested factory`): the container argument is a LOCAL FUNCTION CALL
+whose bracketed return type requires local generic elaboration, and its value
+is a USER-DEFINED `IterableOwned` struct (`_CopyableOwned[3]` — module-local,
+comptime-parameterized, in-TU `_CopyableOwnedIter[3]` over `Array[Int, 3]`).
+The boxed `it` local then hits next()'s hard refusal (receiver typed
+`int64_t`, in `test_cycle_owned` — measured, unchanged from clean master).
+15/17 sites work with real values. The blocker is the local-generic-
+elaboration gap (R2 sibling) + the in-TU user-struct iterator — both
+documented, neither stubbed.
+
+### Full-tree A/B vs clean master 5179db5a (fresh-process, 610 files,
+final code)
+
+**603 identical**; **E->C 3** — `test_take_while` / `test_drop_while` /
+`test_set` (above); **E->E 1** — `test_map` (crash relocated to the
+CopyCounter test, above); **C->E 0**; **C->C 3**, every delta classified:
+
+| file | the delta | classification |
+|---|---|---|
+| `test/builtin/test_bool.mojo` | the `map[gt0](l)` sites in `test_all` / `test_any` materialize the real in-TU `_MapIterator[...Bool...test_all_gt0 / test_any_gt0]` + `_ListIterOwned[Int]` (baseline: the call boxed to `int64_t` — verified in the before-C; NOT an undefined extern, so no site of the sibling doc's class is removed) | call-site improvement; the `all()` / `any()` CONSUMPTION of the wrapper still hits the runtime-dispatch fallback (`mojo_is_registered_dict/set` probe on the wrapper pointer — measured: the `assert_false(all(map[gt0](l2)))` site computes the pointer's truthiness, 4294967297, and fails at runtime — same status as the baseline's int64 garbage; test_bool is floor-green only and is not executed by the bucket). Extending all()/any() to in-TU iterators is recorded as the next narrow feature, deliberately out of this session's scope |
+| `test/collections/test_dict.mojo` | `for i, key in enumerate(keys)` (`keys` = a list literal of large/NEGATIVE int64s) seeds the enumerate record through the signed-literal `list_literal_elem` arm -> in-TU `_Enumerate` + `_ListIterOwned` materialization (baseline: the old fallback loop) | improvement |
+| `test/builtin/test_any_all.mojo` | the `Set[String]("any")` / `Set[String]("bleep", "bloop")` constructor sites now APPEND their args — 12x `mojo_set_add_str` (baseline: `mojo_set_new()` with zero adds — a silently EMPTY set, semantically wrong against the file's own `assert_true(any(...))`) | improvement (the Set-constructor fix, above) |
+
+The removed-symbol cross-reference on the 3 changed files reports **0**
+undefined-and-referenced symbols (the only removed line, test_dict's
+`_known[]` static, is a hunk-position artifact — the array is present in the
+after-C, grown by the 2 new in-TU type tags).
+
+### Where the population stands now (measured sweep, 2026-10-21 (further),
+final code)
+
+Sweep **602 PASSED / 8 FAILED — 8 expected, 0 unexpected, EXIT 0, no stale
+entries** (was 599/11 at 5179db5a). Warn set BYTE-IDENTICAL to the baseline
+15 files / 248. The 8 declared-red entries each carry a per-file measured
+reason; by root-cause shape (updated table):
+
+| shape | files (emitting function, measured receiver) |
+|---|---|
+| method-call dependent return (`s.bytes()` on a local `StringSlice`) | `test_iterators` (`test_bytes_iter_empty`, `int64_t`) |
+| variadic multi-iterable factory + `out res` parameter | `test_chain` (`test_chain_ref`, `int64_t`), `test_zip` (`test_zip2`, `void *`) |
+| two-container dependent return (`_Product2[iterA, iterB]`) | `test_product` (`test_product2`, `int64_t`) |
+| thin-FUNCTION type argument, positional form — mechanism LIFTED, one cross-module test remains | `test_map` (`test_map_function_can_take_owned_value`, `int64_t` — the CopyCounter container gate refusal; the ladder 2/2 above) |
+| `for` over an imported struct (`PythonObject.__iter__ -> _PyIter`; the protocol cursor binds to `MojoList *`) | `test_python_object` (`test_iter`) |
+| user-defined `IterableOwned` locals (R2 sibling, local-generic-elaboration gap) | `test_cycle` (`test_cycle_owned`; 15/17 sites work with real values) |
+| cross-stdlib `stat` + the out-param result model (R2 doc) | `test_getsize` (gcc -c: implicit declaration of `stat`) |
+| (floor-green, ladder-red) set-literal container — 5 independent gaps A-F above | `test_set` (out of the sweep; full-file ladder link fails on `check_write_to` + `conforms_to`) |
+
+### Interpreter verification (mandated 3.14.8; the session's first
+measurements ran under PATH 3.15)
+
+The project's interpreter is /opt/local Python 3.14.8, but this session's
+first measurements ran through `python3` on PATH (homebrew 3.15). The CAS
+key folds in the codegen sources + env + git epoch only — the interpreter
+is invisible to it — so a cache is only sound if both interpreters emit
+identical C. Measured with the uncached generator on 11 representative
+files covering every codegen path this session changed (the three lifted
+mechanisms, the three C->C files, three sanity/remaining-red files, and
+std/iter itself): the generated C is BYTE-IDENTICAL under 3.15 and
+3.14.8 (10/11 hash-equal; test_getsize raises under both, its message
+differing only in a per-run random temp-dir name). Everything was then
+remeasured under 3.14.8: ladders take_while 14/14, drop_while 14/14,
+set-scratch 11/11, map-scratch 2/2; sweep 602/8 (8 expected, 0
+unexpected, EXIT 0) with the warn set again byte-identical 15/248; the
+5179db5a baseline (fresh worktree) 599/11; bucket **53/53 (rc 0,
+ps-verified /opt/local 3.14)** — the invalidated 3.15 bucket run was
+discarded. The full-tree A/B above is unaffected: both arms ran under one
+interpreter, and the two are proven output-identical.
+
+### Acceptance (unchanged, still unmet)
+
+The census must reach 0 sites and the declared `EXPECTED_FAILURES` must
+empty. The measured remainder is the 7 above plus the floor-green `test_set`
+(ladder-red on A-F); none of them is a stub or a silent green — every one
+fails a real `gcc -c`/codegen/link with a named, per-file reason, which is
+the state this dict exists to declare.
