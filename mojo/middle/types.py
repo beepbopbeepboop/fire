@@ -806,6 +806,152 @@ def compile_time_call_module(module: str) -> bool:
     return module in _COMPILE_TIME_CALL_MODULES
 
 
+def _decl_scan_space(c) -> bool:
+    """`c` is one of the characters a regex `\\s` matches in this compiler's
+    own sources (ASCII whitespace)."""
+    return (c == ' ' or c == '\t' or c == '\n' or c == '\r'
+            or c == '\f' or c == '\v')
+
+
+def source_decl_ends(text: str, keywords: list, name: str, openers: str,
+                     line_start: bool = False) -> list[int]:
+    """The end offsets of every `<keyword>\\s+<name>\\s*<opener>` in `text`, in
+    order: what `[m.end() for m in re.finditer(rf'\\b(?:kw1|kw2)\\s+
+    {re.escape(name)}\\s*[<openers>]', text)]` answers (`^` instead of `\\b`,
+    with MULTILINE, when `line_start`).
+
+    THE source-text declaration scan, without a regex. The compiler asks this
+    question -- "does this module's text define NAME as a generic / an
+    overloaded function / a struct?" -- at a dozen routing sites, and every
+    one of them spelled it as a regex built at RUN time around the name. The
+    compiled compiler has no run-time regex engine (a pattern becomes program
+    tables only when it is known at compile time), so in the self-hosted
+    binary each of those calls was stubbed: `re.search` answered 0 and
+    `re.findall` raised `module 're' is not compiled into this binary`,
+    which aborted the stage2 closure compile of `emit_loops.py`. Plain
+    `find`/`startswith` scanning is the same answer on both paths.
+
+    `keywords` is a list of words (`['fn', 'def']`), `openers` the set of
+    single characters that may follow (`'('`, `'[:'`)."""
+    ends: list[int] = []
+    n = len(text)
+    nl = len(name)
+    if nl == 0:
+        return ends
+    pos = text.find(name)
+    while pos >= 0:
+        j = pos + nl
+        while j < n and _decl_scan_space(text[j]):
+            j += 1
+        if j < n and openers.find(text[j:j + 1]) >= 0:
+            k = pos - 1
+            while k >= 0 and _decl_scan_space(text[k]):
+                k -= 1
+            if k < pos - 1:
+                for kw in keywords:
+                    kws = _as_str(kw)
+                    start = k + 1 - len(kws)
+                    if start < 0 or not text.startswith(kws, start):
+                        continue
+                    if line_start:
+                        ok = start == 0 or text[start - 1] == '\n'
+                    else:
+                        ok = start == 0 or not (text[start - 1].isalnum()
+                                                or text[start - 1] == '_')
+                    if ok:
+                        ends.append(j + 1)
+                        break
+        pos = text.find(name, pos + 1)
+    return ends
+
+
+def _decl_scan_word_char(c) -> bool:
+    """`c` is a regex `\\w` character (ASCII letters, digits, `_`)."""
+    return c.isalnum() or c == '_'
+
+
+def _c_ident_char(c) -> bool:
+    """`c` is an ASCII C-identifier character (`[A-Za-z0-9_]`)."""
+    return (('a' <= c and c <= 'z') or ('A' <= c and c <= 'Z')
+            or ('0' <= c and c <= '9') or c == '_')
+
+
+def word_starts(text: str, word: str) -> list[int]:
+    """The start offsets of every `\\b<word>\\b` in `text` for an identifier
+    `word` -- `[m.start() for m in re.finditer(rf'\\b{re.escape(word)}\\b',
+    text)]` without a run-time regex (see `source_decl_ends`)."""
+    out: list[int] = []
+    n = len(text)
+    wl = len(word)
+    if wl == 0:
+        return out
+    pos = text.find(word)
+    while pos >= 0:
+        end = pos + wl
+        if ((pos == 0 or not _decl_scan_word_char(text[pos - 1]))
+                and (end >= n or not _decl_scan_word_char(text[end]))):
+            out.append(pos)
+        pos = text.find(word, pos + 1)
+    return out
+
+
+def replace_word(text: str, word: str, repl: str, before_close: bool = False) -> str:
+    """`re.sub(rf'\\b{re.escape(word)}\\b', repl, text)` for an identifier
+    `word` and a literal `repl`, without a run-time regex. `before_close`
+    adds the lookahead `(?=\\s*[,)])`: only an occurrence followed by
+    optional whitespace and then `,` or `)` is replaced."""
+    starts = word_starts(text, word)
+    if not starts:
+        return text
+    n = len(text)
+    wl = len(word)
+    parts: list[str] = []
+    last = 0
+    for _st in starts:
+        st = int(_st)
+        if before_close:
+            j = st + wl
+            while j < n and _decl_scan_space(text[j]):
+                j += 1
+            if not (j < n and (text[j] == ',' or text[j] == ')')):
+                continue
+        parts.append(text[last:st])
+        parts.append(repl)
+        last = st + wl
+    parts.append(text[last:])
+    return ''.join(parts)
+
+
+def name_in_import_list(names_text: str, name: str) -> bool:
+    """`re.search(rf'(?:^|[\\s,(]){re.escape(name)}(?:[\\s,)]|$)', names_text)`:
+    `name` appears in an import's name list as a whole entry, delimited by
+    start/end, whitespace, `,` or a paren -- without a run-time regex."""
+    n = len(names_text)
+    nl = len(name)
+    if nl == 0:
+        return False
+    pos = names_text.find(name)
+    while pos >= 0:
+        end = pos + nl
+        _pre_ok = pos == 0
+        if not _pre_ok:
+            c = names_text[pos - 1]
+            _pre_ok = _decl_scan_space(c) or c == ',' or c == '('
+        _post_ok = end >= n
+        if not _post_ok:
+            c2 = names_text[end]
+            _post_ok = _decl_scan_space(c2) or c2 == ',' or c2 == ')'
+        if _pre_ok and _post_ok:
+            return True
+        pos = names_text.find(name, pos + 1)
+    return False
+
+
+def source_declares(text: str, keywords: list, name: str, openers: str) -> bool:
+    """`source_decl_ends(...)` is non-empty: `re.search` of the same pattern."""
+    return len(source_decl_ends(text, keywords, name, openers)) > 0
+
+
 def regex_prog_for(gen, pattern: str) -> dict:
     """Compile `pattern` into `gen`'s emitted regex-program tables, reusing the
     one already built for that exact pattern text.

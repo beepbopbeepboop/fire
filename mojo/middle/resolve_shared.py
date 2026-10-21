@@ -1987,7 +1987,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
         if isinstance(s, gimple_ctypes.FunctionDef) and s.name == g and s.return_type:
             ret_ann = s.return_type
             for tp, concrete in zip(params, mangled_type_args):
-                ret_ann = gimple_ctypes.re.sub(rf'\b{gimple_ctypes.re.escape(tp)}\b', concrete, ret_ann)
+                ret_ann = gimple_ctypes.replace_word(ret_ann, _as_str(tp), _as_str(concrete))
             if materialize is not None:
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)

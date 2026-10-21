@@ -1165,7 +1165,15 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     # from build_stdlib_dylib.py's `_output_lock`. Every other decorator still
     # refuses, because those really do change what the function IS (a
     # @property result is not a generator you can drive; @deco wraps it).
-    if _decos and _decos not in (['contextlib.contextmanager'], ['contextmanager']):
+    # The ONE decorator's name, compared as a string. `_decos not in
+    # (['contextlib.contextmanager'], ['contextmanager'])` asked whether a
+    # list is in a tuple of list literals, which the compiled compiler answers
+    # by HANDLE: always "not in", so it refused every @contextmanager
+    # generator and the stage2 binary could not compile build_stdlib_dylib.py
+    # (`_scratch_dir`, `_output_lock`).
+    _only_deco = _cm_as_str(_decos[0]) if len(_decos) == 1 else ''
+    if _decos and not (_only_deco == 'contextlib.contextmanager'
+                       or _only_deco == 'contextmanager'):
         # v0: a @classmethod generator METHOD is accepted (its `cls` receiver
         # is an opaque, never-read int64_t placeholder slot -- the same ABI
         # the cpp path used and the call-site machinery in
@@ -1176,12 +1184,13 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         # reads the same `N.method_receiver_kind` verdict to leave the leading
         # parameter alone. Any other decorator, or either of these on a plain
         # (non-method) generator, still falls through.
-        if struct_name is not None and _decos in (['classmethod'], ['staticmethod']):
+        if struct_name is not None and (_only_deco == 'classmethod'
+                                        or _only_deco == 'staticmethod'):
             if any(isinstance(n, (N.IdentExpr, N.MemberExpr))
                    and getattr(n, 'name', None) == 'cls'
                    for n in _walk(fn)):
                 return False, ('classmethod generator body references `cls` (v0)'
-                               if _decos == ['classmethod'] else
+                               if _only_deco == 'classmethod' else
                                'a @staticmethod generator has no `cls` to reference')
         else:
             return False, 'decorated'

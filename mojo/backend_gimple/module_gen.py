@@ -3461,7 +3461,7 @@ def gen_module_impl(self, stmts):
             s.name for s in stmts
             if isinstance(s, FunctionDef)
             and s.name not in self._NO_OVERLOAD_MANGLE
-            and re.search(rf'\b(?:fn|def)\s+{re.escape(s.name)}\s*\[', _gsrc)
+            and gimple_ctypes.source_declares(_gsrc, ['fn', 'def'], s.name, '[')
         }
         for _gn in _local_generics:
             self._imported_generics.setdefault(_gn, self._current_filename)
@@ -6497,9 +6497,8 @@ def gen_module_impl(self, stmts):
                                     # read was a whole file that nothing freed:
                                     # ~800 MB on `--dump-full fire.py`).
                                     _ov_src = _as_str(_ov_pi[1])
-                                    if len(re.findall(
-                                            rf'\b(?:fn|def)\s+{re.escape(_rs_nm)}\s*\(',
-                                            _ov_src)) > 1:
+                                    if len(gimple_ctypes.source_decl_ends(
+                                            _ov_src, ['fn', 'def'], _rs_nm, '(')) > 1:
                                         self._imported_overloads.setdefault(sym_name, _ov_path)
                             except Exception:
                                 pass
@@ -14407,7 +14406,10 @@ def gen_module_impl(self, stmts):
                     '', signature)
                 for _ckw in ('default', 'register', 'auto', 'static', 'extern',
                              'volatile', 'inline'):
-                    signature = re.sub(r'\b' + _ckw + r'\b(?=\s*[,)])', f'_kw_{_ckw}', signature)
+                    # `replace_word`, not `re.sub(r'\b' + _ckw + ...)`: a
+                    # pattern built from the loop variable is not known at
+                    # compile time, so the compiled compiler could not run it.
+                    signature = gimple_ctypes.replace_word(signature, _ckw, f'_kw_{_ckw}', True)
                 # A `(void)` prototype is a statement about a function that
                 # takes NO arguments, and this one demonstrably does: the same
                 # translation unit already carries the defining module's own

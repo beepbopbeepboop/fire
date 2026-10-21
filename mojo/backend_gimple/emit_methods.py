@@ -2966,13 +2966,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _mgc_src = open(_mgc_path).read()
                 except Exception:
                     _mgc_src = ''
-                _mgc_name_re = gimple_ctypes.re.escape(method_name)
-                _mgc_def_count = len(gimple_ctypes.re.findall(
-                    rf'\b(?:fn|def)\s+{_mgc_name_re}\s*\(', _mgc_src))
+                _mgc_def_count = len(gimple_ctypes.source_decl_ends(
+                    _mgc_src, ['fn', 'def'], method_name, '('))
                 _mgc_is_plain_fn = (
                     _mgc_def_count == 1
-                    and not gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_mgc_name_re}\s*\[', _mgc_src)
-                    and not gimple_ctypes.re.search(rf'\bstruct\s+{_mgc_name_re}\s*(\[|\(|:)', _mgc_src))
+                    and not gimple_ctypes.source_declares(_mgc_src, ['fn', 'def'], method_name, '[')
+                    and not gimple_ctypes.source_declares(_mgc_src, ['struct'], method_name, '[(:'))
                 if _mgc_is_plain_fn:
                     # Re-dispatch as a BARE-name call through `_lower_call`
                     # (exactly `_selfhost_sibling_member_kind`'s own

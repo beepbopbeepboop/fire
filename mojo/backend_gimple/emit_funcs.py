@@ -3246,7 +3246,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     # (Elaborator.elaborate_generic_struct) this narrow, non-generic-only
     # materialization deliberately doesn't attempt to replace.
     _imp_path0, _imp_src0, _imp_mod0 = gen._parsed_import(module)
-    if _imp_src0 and gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(nm)}\s*\[', _imp_src0):
+    if _imp_src0 and gimple_ctypes.source_declares(_imp_src0, ['struct'], nm, '['):
         return False
     # Fixed-size-array fields (`var x: [ElemType; N]`, BUG-2026-008's own
     # shape) need the SAME "ElemCtype[N]" marker string the own-module
@@ -3797,7 +3797,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
                 continue
             if st.name in gen._imported_generic_structs or st.name in gen.struct_field_types:
                 continue
-            if not gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(st.name)}\s*\[', _own_src):
+            if not gimple_ctypes.source_declares(_own_src, ['struct'], st.name, '['):
                 continue
             gen._imported_generic_structs.setdefault(st.name, gen._current_filename)
 

@@ -1197,10 +1197,12 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
     path, src, mod = gen._parsed_import(module)
     if not src:
         return None
-    head = r'\bstruct\s+' if kind == 'struct' else r'\b(?:fn|def)\s+'
-    if gimple_ctypes.re.search(head + rf'{gimple_ctypes.re.escape(name)}\s*\[', src):
+    # `source_declares` / `name_in_import_list`, not regexes built around the
+    # name: the compiled compiler has no run-time regex engine (see
+    # `source_decl_ends`), so both searches answered 0 there.
+    _heads = ['struct'] if kind == 'struct' else ['fn', 'def']
+    if gimple_ctypes.source_declares(src, _heads, name, '['):
         return path
-    nm = gimple_ctypes.re.escape(name)
     # Flat [mod0, names0, mod1, names1, ...] scan instead of two
     # `re.finditer(...)` loops with `mm.group(1)/.group(2)` — the
     # self-hosted backend has no lowering for `re.finditer` (emits
@@ -1213,7 +1215,7 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
         _fmod = _fi[_j]
         _fnames = _fi[_j + 1]
         _j += 2
-        if gimple_ctypes.re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', _fnames):
+        if gimple_ctypes.name_in_import_list(_as_str(_fnames), name):
             r = gen._find_generic_source(gen._abs_module(_fmod, module), name, kind, depth + 1)
             if r:
                 return r

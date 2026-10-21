@@ -5896,8 +5896,22 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # are ordinary enclosing locals (`gcc`, `workdir`, `module_name`) plus
         # the genexp induction variables and whatever the C++ paths resolve
         # for themselves.
-        import re as _re
-        _read = set(_re.findall(r'_env->([A-Za-z_][A-Za-z_0-9]*)', body_code or ''))
+        # A plain scan, not `import re as _re; _re.findall(...)`: the compiled
+        # compiler lowers no call through a function-local regex alias, so it
+        # raised `re.findall: module 're' is not compiled into this binary`.
+        _read = set()
+        _bc = _as_str(body_code) if body_code else ''
+        _bcn = len(_bc)
+        _k = _bc.find('_env->')
+        while _k >= 0:
+            _s = _k + 6
+            _e = _s
+            if _s < _bcn and not ('0' <= _bc[_s] <= '9'):
+                while _e < _bcn and gimple_ctypes._c_ident_char(_bc[_e]):
+                    _e += 1
+            if _e > _s:
+                _read.add(_bc[_s:_e])
+            _k = _bc.find('_env->', _e)
         _final = []
         _seen_c = set()
         # …unioned with the two seeding sources, because not every lifted

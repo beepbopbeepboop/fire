@@ -638,8 +638,7 @@ def _container_home(gen, tname):
             path, src, _m = gen._parsed_import(cand)
         except Exception:
             continue
-        if path and src and re.search(
-                r'\bstruct\s+' + re.escape(tname) + r'\s*\[', src):
+        if path and src and gimple_ctypes.source_declares(src, ['struct'], tname, '['):
             return path, src
     return None, None
 
@@ -1443,7 +1442,7 @@ def _register_named(gen, src_path, names):
     except OSError:
         return
     for n in todo:
-        if re.search(rf'\bstruct\s+{re.escape(n)}\s*[\[:]', text):
+        if gimple_ctypes.source_declares(text, ['struct'], n, '[:'):
             gen._imported_generic_structs.setdefault(n, src_path)
 
 

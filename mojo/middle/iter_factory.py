@@ -51,6 +51,8 @@ from __future__ import annotations
 
 import re
 
+import mojo.middle.types as gimple_ctypes
+
 # ── the dependent-return annotation shapes (measured, closed set) ──────────
 #
 # One wrapper mention with ONE type argument, in exactly one of three forms:
@@ -213,10 +215,10 @@ def _struct_block(src: str, tname: str) -> str | None:
     column-0 line — which, once the head is consumed, is genuinely a new
     top-level statement (the measured stdlib indents docstring content, so
     no column-0 line hides inside the body's docstring)."""
-    m = re.search(rf'^struct\s+{re.escape(tname)}\s*\[', src, re.M)
-    if not m:
+    _ends = gimple_ctypes.source_decl_ends(src, ['struct'], tname, '[', True)
+    if not _ends:
         return None
-    i = _matching_bracket(src, m.end() - 1)
+    i = _matching_bracket(src, int(_ends[0]) - 1)
     if i is None:
         return None
     j = i + 1
@@ -316,11 +318,11 @@ def expand_inner(container_src: str, inner_base: str, rhs: str,
     stdlib does not write survives — a parameter left unbound with no
     default, or a `Self.` member no rule covers — and the caller then
     refuses rather than guessing."""
-    m = re.search(rf'^struct\s+{re.escape(inner_base)}\s*\[',
-                  container_src, re.M)
-    if not m:
+    _ends = gimple_ctypes.source_decl_ends(container_src, ['struct'], inner_base,
+                                           '[', True)
+    if not _ends:
         return None
-    close = _matching_bracket(container_src, m.end() - 1)
+    close = _matching_bracket(container_src, int(_ends[0]) - 1)
     if close is None:
         return None
     head = container_src[m.end():close]

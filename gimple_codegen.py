@@ -1818,7 +1818,12 @@ class GimpleGen:
         # inner dict's value type fell back to a generic default and the
         # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
         self._class_attrs: dict[str, dict[str, str]] = {}
-        self._func_attrs: dict = {}
+        # Nested-annotated for the same reason as `_class_attrs` just above:
+        # bare `dict` left the inner value kind unknown, so the compiled
+        # compiler read `self._func_attrs[fn][attr]` through
+        # `mojo_list_get_int` on the inner DICT and SIGSEGV'd emitting the
+        # `_funcattr_` decls for jit/arm64.py's `_toolchain_id._cached`.
+        self._func_attrs: dict[str, dict[str, str]] = {}
         self._emitted_funcattr_decls: set = set()
         self._class_attr_inits: list = []
         # Set when a `type(x).__name__` call was actually lowered (see
