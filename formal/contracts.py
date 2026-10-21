@@ -879,9 +879,9 @@ _MASK = (1 << 64) - 1
 # export contract `hreg`, which is where the diagnosis and the fix both live
 # (`formal/arm64_proof_gen.py::_dylib_contract_proof` discharges the frame's
 # memory round trip as its own `simp`-closed lemma first);
-# `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`
-# records the same failure on the loop-contract chain and why it is an artefact
-# of the abstraction rather than a false goal.  If a clause over `BitVec` is
+# records the same failure on a conditional branch's `hcond` chain and why it is
+# an artefact of the abstraction rather than a false goal; that defect is fixed
+# by the flag-lemma/order work (`ad54fc2f6`).  If a clause over `BitVec` is
 # ever wanted, THIS is where it goes, and the note travels with it.
 #
 # What is NOT here is anything that can leave the goal silently open.  `first`
@@ -934,7 +934,8 @@ LADDER = (
 # carry a failed rung's rewrites forward to the next one, so the rewrite and
 # the arithmetic it enables have to be ONE rung.
 #
-# `bugs/FORMAL_contract_ladder_reach.md` §4 prescribed a lemma here instead --
+# The ladder-reach bug doc (now deleted by f801d013, its fix) §4 prescribed a
+# lemma here instead --
 # `sKey_lt_iff : sKey a < sKey b ↔ a < b`, to be added to `lib/work.lean`.  That
 # lemma is FALSE, and it is worth recording why because the doc's reasoning is
 # right and only its conclusion is wrong: `sKey` flips the top bit, so
@@ -947,9 +948,9 @@ LADDER = (
 _EXTRA_SIMP = "UInt64.lt_iff_toNat_lt, UInt64.le_iff_toNat_le"
 
 # The order bridge the ladder's `simp_all` rung carries, beside `sKey` and the
-# two `u64_*_iff` lemmas.  `bugs/FORMAL_contract_ladder_reach.md` §3 measured why
-# it is needed and §4 named the shape of the fix; the measurement is the short
-# version:
+# two `u64_*_iff` lemmas.  The ladder-reach bug doc (now deleted by f801d013,
+# its fix) §3 measured why it is needed and §4 named the shape of the fix; the
+# measurement is the short version:
 #
 #   * `Lean.UInt64` is NOT an integer type `omega` has.  It is a bitvector type
 #     whose `<` and `≤` are the *order on `toNat`* but whose `^^^` is a BIT
@@ -1135,7 +1136,9 @@ def contract_theorems(contract, params, model_name=None, fn=None,
     # which is why `mini` (an `<`/`>` mismatch, now closed) stayed UNKNOWN.
     # `abspos` has the same split defect, but its goal is an EQUALITY, so the
     # split is necessary there and not sufficient -- the residual is a missing
-    # xor-cancellation fact, `bugs/FORMAL_contract_ladder_reach.md` §6.
+    # xor-cancellation fact, which the ladder-reach bug doc's §6 called out and
+    # which `f801d013` then closed by naming `work_u64_sign_zero_of_le` in
+    # `_SIGN_BRIDGE` (the doc itself is deleted; this note is what it said).
     # Appended rather than merged, because a
     # selection test that happens to equal a body condition is at worst a
     # redundant alternative: `by_cases` alternatives are independent and

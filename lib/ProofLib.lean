@@ -758,6 +758,21 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
     exact Nat.mod_eq_of_lt hab
   exact this
 
+/-- Literal offset multiplication: `ofNat a * ofNat b = ofNat (a * b)`.
+
+    The analogue of `u64_ofNat_add`/`u64_ofNat_sub` for a product, and the
+    library fact the ALL-INPUTS refinement of
+    `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
+    waiting on: an induction over the emitted model's own recursion has a
+    `UInt64` multiplication as its arithmetic goal, and this is what reduces it
+    to the specification's `Nat` form.  Unconditional, exactly as
+    `u64_ofNat_add` is, because both sides are taken modulo `2^64`. -/
+theorem u64_ofNat_mul (a b : Nat) :
+    UInt64.ofNat a * UInt64.ofNat b = UInt64.ofNat (a * b) := by
+  apply UInt64.toNat.inj
+  rw [UInt64.toNat_mul, UInt64.toNat_ofNat', UInt64.toNat_ofNat', UInt64.toNat_ofNat']
+  exact (Nat.mul_mod a b (2^64)).symm
+
 /-- **Collapse a literal difference back into a single offset.**  `u64_sub_add`
     rewrites `(sp - a) + b` into `sp - (a - b)`, so an STP pair's second half
     (`(sp - 16) + 8`) comes out as `sp - (16 - 8)` rather than the
@@ -2021,6 +2036,19 @@ theorem t32s_t16s (x : UInt64) : t32s (t16s x) = t16s x := by
 def arm64_ext_imm12 (insn : UInt32) : Nat :=
   (((insn >>> 10) &&& 0xfff).toNat) <<< (12 * (((insn >>> 22) &&& 0x1).toNat))
 
+/-- The SHIFTED register operand of an A64 add/subtract (shifted register):
+`Xd = op(Xn, Xm <<< imm6)`.  `imm6` is bits 15:10 and is a 6-bit shift count, so
+the operand is `Xm` shifted left by it.  One reader for BOTH the ADD and SUB
+arms, because a field read in one copy and dropped in another is exactly the
+duplicate-decoder defect this replaces: the `0x8b000000`/`0xcb000000` arms read
+`Xm` and added it UNSHIFTED, so every `add Xd, Xn, Xm, lsl #3/#4` — the element
+and key strides `formal/arm64_codegen.py` emits at 38 sites — stepped a state
+the machine never reached.  The arithmetic-shift variant the `S` bit selects is
+not modelled and no encoder here emits it, so `<<<` is the whole of what is
+reachable. -/
+def arm64_shifted_reg (insn : UInt32) (s : Arm64State) (rm : Nat) : UInt64 :=
+  arm64_reg rm s <<< UInt64.ofNat (((insn >>> 10) &&& 0x3f).toNat)
+
 /-- ARM64 step function: decode and execute one instruction. -/
 def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   let insn := arm64_read_insn code s.pc
@@ -2047,7 +2075,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let result := (arm64_reg rn s + arm64_reg xm s)
+    let result := (arm64_reg rn s + arm64_shifted_reg insn s xm)
     some (arm64_set_reg rd s result)
   -- SUB Xd, Xn, Xm (register, SHIFTED form): 0xcb000000
   -- `Rn` is read as the ZERO register here, NOT through `arm64_reg_or_sp`, and
@@ -2093,7 +2121,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- is why that one keeps `arm64_reg_or_sp` and this one must not. Nor is
     -- `cmp sp, x16` a counterexample: clang assembles it as `0xeb3063ff`, the
     -- EXTENDED-register class with bit 21 set, which is a different branch.
-    let result := (arm64_reg rn s - arm64_reg xm s)
+    let result := (arm64_reg rn s - arm64_shifted_reg insn s xm)
     some (arm64_set_reg rd s result)
   -- MUL Xd, Xn, Xm: 0x9b007c00
   else if (insn &&& 0xffe07c00) = 0x9b007c00 then
@@ -3241,7 +3269,8 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s + arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s
+      + arm64_shifted_reg (arm64_read_insn code s.pc) s xm)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by decide)
@@ -3265,7 +3294,8 @@ theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s - arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s
+      - arm64_shifted_reg (arm64_read_insn code s.pc) s xm)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by decide)
@@ -3394,7 +3424,10 @@ theorem arm64_step_neg_reads_zero_rn (s : Arm64State) (code : Nat → UInt8) (pc
   have hsub : (0xcb0703e0 : UInt32) &&& 0xffe00000 = 0xcb000000 := by decide
   unfold arm64_step
   rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_pos hsub]
-  simp [arm64_reg]
+  -- `arm64_shifted_reg` is unfolded because the SUB arm now reads `imm6`
+  -- through it, and this NEG word's `imm6` is 0: `UInt64.shiftLeft_zero` is the
+  -- `@[simp]` lemma that makes the shifted operand `X7` again.
+  simp [arm64_reg, arm64_shifted_reg]
 
 /-- …and `and x0, xzr, x1`, whose `Rn` is the ZERO register and not SP: the
 logical shifted-register forms have no SP encoding at all (measured — clang's
@@ -4385,6 +4418,19 @@ theorem arm64_flag_le_s (a b : UInt64) :
       ↔ (a ^^^ 0x8000000000000000) ≤ (b ^^^ 0x8000000000000000) := by
   simp only [arm64_matches_condition, arm64_subs_flags]; bv_decide
 
+/-- The sign flip preserves the order of two words that are both BELOW the sign
+    bit: for `a b : UInt64` with `a < 2^63` and `b < 2^63`, flipping bit 63
+    keeps `a < b` true exactly when it was.  This is the OTHER direction from
+    `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
+    produced the flipped order states its hypothesis in that order, and this
+    turns it back into the plain `UInt64` order.  The reusable library fact
+    `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    signed_flag.md` names as step 1. -/
+theorem arm64_slt_iff_lt (a b : UInt64)
+    (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
+    (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
+  constructor <;> intro h <;> bv_decide
+
 theorem arm64_cset_eq (a b : UInt64) :
     (if arm64_matches_condition 0 (arm64_subs_flags a b) then (1 : UInt64) else 0)
       = (if a = b then 1 else 0) := by
@@ -5087,7 +5133,7 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0x8b000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -5099,7 +5145,7 @@ theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
 theorem work_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xcb000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by

@@ -1868,6 +1868,96 @@ def check_corpus_cost(verbose: bool = False) -> list:
     return bad
 
 
+def check_module_entry_facts() -> list:
+    """Failures in the MODULE-level entry facts, as strings.
+
+    Two halves of `model.module_entry_literal_facts` and the seed it feeds.
+
+    The READER half runs the real pipeline over a small module and asserts which
+    names qualify: a folded int constant with no slot, a container-literal slot
+    NOTHING writes and nothing uses in a mutating position, and NOT a container
+    an in-place call touches (`ZS.append(1)`) — the position `mutable` and
+    `filled_by_body` cannot see because neither is a store.
+
+    The SEED half is `read_before_store`'s `entry_facts`, the parameter the fix
+    added and the whole of the second residual of
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`: a
+    module-level literal sequence must decide the loop's emptiness the same way
+    a function-local one does, and a LOCAL binding of the same name must still
+    override the module's value.
+    """
+    bad = []
+    saved_symbols = M.module_symbols()
+    saved_slots = M.module_slots()
+    try:
+        src = ("XS = []\n"
+               "YS = [1, 2]\n"
+               "ZS = []\n"
+               "ZS.append(1)\n"
+               "K = 0\n"
+               "def main():\n"
+               "    for q in XS:\n"
+               "        x = 1\n"
+               "    return 0\n")
+        stmts = parse_module(src, filename="entryfacts.mojo")
+        functions = [n for n in M.iter_nodes(stmts)
+                     if isinstance(n, F.FunctionDef)]
+        M.publish_module_symbols(M.collect_module_symbols(
+            stmts, "entryfacts.mojo"))
+        M.publish_global_slots(M.collect_global_slots(stmts, functions))
+        facts = M.module_entry_literal_facts()
+        missing = {"XS", "YS", "K"} - set(facts)
+        if missing:
+            bad.append(f"module_entry_literal_facts missed {sorted(missing)}: "
+                       f"the two untouched container literals and the folded "
+                       f"int constant must all be seeded")
+        if "ZS" in facts:
+            bad.append("module_entry_literal_facts seeded `ZS`, which "
+                       "`ZS.append(1)` can mutate in place — no STORE writes "
+                       "it, so this is the position `mutable` cannot see")
+    finally:
+        M.publish_module_symbols(saved_symbols)
+        M.publish_global_slots(saved_slots)
+
+    own = {"q", "x"}
+    body = "    for q in XS:\n        x = 1\n    return q\n"
+    fn = the_function(parse_module("def probe(n):\n" + body,
+                                   filename="entryfacts2.mojo"))
+    if M.read_before_store(fn, {"n"}, own) is not None:
+        bad.append("a loop over a name with no known value must keep the "
+                   "target defined, which is the parameter residual")
+    hit = M.read_before_store(fn, {"n"}, own,
+                              entry_facts={"XS": F.ListExpr(elements=[])})
+    if not hit or hit[0] != "q":
+        bad.append(f"an empty module-level sequence must leave the target "
+                   f"unbound; got {hit!r}")
+    if M.read_before_store(fn, {"n"}, own,
+                           entry_facts={"XS": F.ListExpr(
+                               elements=[F.IntLiteral(value=4, line=0, col=0,
+                                                      raw="4")])}
+                           ) is not None:
+        bad.append("a non-empty module-level sequence must bind the target")
+
+    local_value = "    XS = [1]\n    for q in XS:\n        x = 1\n    return q\n"
+    fn_local = the_function(parse_module("def probe(n):\n" + local_value,
+                                         filename="entryfacts3.mojo"))
+    if M.read_before_store(fn_local, {"n"}, own,
+                           entry_facts={"XS": F.ListExpr(elements=[])}
+                           ) is not None:
+        bad.append("a local `XS = [1]` must override an empty module fact — "
+                   "the seed is the function's ENTRY state, not a licence")
+    local_empty = "    XS = []\n    for q in XS:\n        x = 1\n    return q\n"
+    fn_empty = the_function(parse_module("def probe(n):\n" + local_empty,
+                                         filename="entryfacts4.mojo"))
+    if M.read_before_store(fn_empty, {"n"}, own,
+                           entry_facts={"XS": F.ListExpr(
+                               elements=[F.IntLiteral(value=4, line=0, col=0,
+                                                      raw="4")])}
+                           ) is None:
+        bad.append("a local `XS = []` must override a non-empty module fact")
+    return bad
+
+
 def check_oracle() -> list:
     """The ORACLE, checked against bodies whose answer is known — including the
     one that does not answer.
@@ -2009,6 +2099,9 @@ def main():
     for problem in check_corpus_cost(args.verbose):
         failed += 1
         print(f"  FAIL  corpus-cost: {problem}")
+    for problem in check_module_entry_facts():
+        failed += 1
+        print(f"  FAIL  module-entry-facts: {problem}")
     for problem in check_oracle():
         failed += 1
         print(f"  FAIL  {problem}")

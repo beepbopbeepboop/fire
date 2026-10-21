@@ -1004,6 +1004,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     if refines is not None:
         parts.append(SPECS.refines_section(
             func_name, f"{func_name}_prog", refines, machine_half=False,
+            go_defs=go_defs,
             missing_reason=(
                 "the end-to-end theorem above is a `sorry` on this backend, so "
                 "`main_refines_spec` would be a composition with an ADMITTED "

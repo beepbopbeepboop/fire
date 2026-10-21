@@ -74,5 +74,6 @@ statement that these two do not reach a method whose range contains an ADD/SUB
 `ADD`/`SUB` arms of those four functions (leaving the `LDR`/`STR` arm's `* 8`
 alone), add a unit row matching the probe above for each of them, run
 `python3 test_formal.py` before and after, and keep it only if the corpus is no
-worse. `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` is the
-doc that owns the arm64 contract corpus's current reds.
+worse. The arm64 contract corpus's current reds are this doc's own rows (see
+the probe above), not the `maxRecDepth`-at-a-block-start defect `f7bd05ea`
+closed, which was a different mechanism.

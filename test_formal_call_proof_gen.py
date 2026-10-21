@@ -431,6 +431,37 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertLess(defs.index("def c_go"), defs.index("def b_go"),
                         "a callee must be defined before its caller names it")
 
+    def test_a_self_call_in_another_calls_argument_is_recursive(self):
+        """`g(f(n-1))` is a self-call wherever it appears.
+
+        The three call questions used to be three hand-written walks with
+        different coverage: `_is_recursive` returned on the first `Call`
+        without descending into its arguments, so this body was invisible and
+        the model was emitted as a plain `def f_go` that calls itself — Lean
+        rejects that with "fail to show termination"; `_callees_of` had the
+        same omission.  `_calls_in` is now the one walk all three use, so the
+        answer cannot depend on which question was asked.
+        """
+        import formal.arm64_proof_gen as G
+        src = ("def g(x):\n"
+               "    return x\n"
+               "def f(n):\n"
+               "    if n == 0:\n"
+               "        return 0\n"
+               "    return g(f(n - 1))\n")
+        f = next(fn for fn in _functions(src) if fn.name == "f")
+        self.assertTrue(G._is_recursive(f),
+                        "a self-call nested in a call's argument is a self-call")
+        self.assertEqual(G._count_self_calls(f), 1)
+        self.assertEqual(G._callees_of(f), ["g", "f"],
+                         "the call graph must see the callee AND the self-call "
+                         "written inside its argument")
+        defs = _models(src, "f")
+        self.assertIn("partial def f_go", defs,
+                      "a recursive model emitted as `def` names itself and "
+                      "Lean refuses its termination proof")
+        self.assertIn("(g_go (f_go (n - (UInt64.ofNat 1))))", defs)
+
     def test_unmodelled_value_forms_are_refused_not_zeroed(self):
         """`p.x` and `a[i]` have no value in a `UInt64 -> UInt64` model."""
         import formal.arm64_proof_gen as G
@@ -738,19 +769,49 @@ class TestGeneratorSource(unittest.TestCase):
         self.assertEqual(lib.count("let imm12 := arm64_ext_imm12 insn"), 5,
                          "an `ADD`/`SUB`/`CMP` `#imm12` arm does not read "
                          "`arm64_ext_imm12`, so it drops the `lsl #12`")
-        self.assertIn("(((insn >>> 22) &&& 0x3).toNat * 12)", lib,
+        # The `sh` field is bit 22, and what is pinned here is that the helper
+        # READS IT AND SCALES BY 12 -- not which mask it uses to do it.  The
+        # pin used to be the literal `((insn >>> 22) &&& 0x3)`, which came
+        # from a SECOND copy of this definition that `6d43d4e8` removed in a
+        # dedupe; the surviving definition masks bit 22 alone, which is right:
+        # bits 28:23 are `100010` for `ADD` (immediate), `110100` for `SUB`
+        # (immediate) and `110100` for `CMP` (immediate), so bit 23 is a FIXED
+        # 0 in all three classes and `&&& 0x3` and `&&& 0x1` cannot differ on a
+        # word that reaches the helper.  The generator's arms name the helper
+        # (pinned by `test_the_imm12_shift_is_read_through_one_helper`), so no
+        # generated text has to agree with the mask at all -- and the dead
+        # `_EXT12` constant that did carry `&&& 0x3` is deleted with this.
+        m = re.search(r"def arm64_ext_imm12 \(insn : UInt32\) : Nat :=\n(.+)",
+                      lib)
+        self.assertIsNotNone(m, "`arm64_ext_imm12`'s definition is gone")
+        body = m.group(1)
+        self.assertIn("(insn >>> 10)", body,
+                      "`arm64_ext_imm12` does not read the `imm12` field")
+        self.assertIn("(insn >>> 22)", body,
                       "`arm64_ext_imm12` does not read the `sh` field")
+        self.assertIn("12", body,
+                      "`arm64_ext_imm12` reads `sh` but does not scale by 12, "
+                      "so `lsl #12` would be a shift by 1 rather than by 12")
         # The generator's own right-hand sides, word by word. `adds x11, x1,
         # x15` is `0xab0f002b` and `cmn x1, x15` is `0xab0f003f`.
+        #
+        # The flags go INSIDE and `arm64_set_reg` OUTSIDE, which is the order
+        # `lib/ProofLib.lean`'s `0xab000000` arm and `work_step_adds_reg` state
+        # it in (`a8015f3c`), so the two right-hand sides are `defeq` and the
+        # step-result `exact` closes.  The other order — set `Rd` on `s`, then
+        # attach the flags — is the same state update, so it is not a soundness
+        # question; it is a question of which text `exact` is given, and only one
+        # of the two is what the lemma's conclusion says.  The pin used to be
+        # the other one and had been stale since that commit.
         self.assertEqual(
             G._step_rhs(0xab0f002b, 66),
-            "some { (arm64_set_reg 11 s (arm64_reg 1 s + arm64_reg 15 s)) "
-            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "some (arm64_set_reg 11 { s with nzcv := arm64_adds_flags "
+            "(arm64_reg 1 s) (arm64_reg 15 s) } (arm64_reg 1 s + arm64_reg 15 s))",
             "the ADDS row does not write `Rd`")
         self.assertEqual(
             G._step_rhs(0xab0f003f, 66),
-            "some { (arm64_set_reg 31 s (arm64_reg 1 s + arm64_reg 15 s)) "
-            "with nzcv := arm64_adds_flags (arm64_reg 1 s) (arm64_reg 15 s) }",
+            "some (arm64_set_reg 31 { s with nzcv := arm64_adds_flags "
+            "(arm64_reg 1 s) (arm64_reg 15 s) } (arm64_reg 1 s + arm64_reg 15 s))",
             "the CMN row must write `Rd = 31` — `arm64_set_reg 31` is the "
             "identity, which is what makes the flags-only spelling the same "
             "statement, and writing it unconditionally is what the library "
@@ -1429,6 +1490,89 @@ the text; it does not find out whether any word can arrive there.  So:
                          "modelling `subs xd, xn, xm` as a flag-only CMP")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+        # The SHIFTED-register `imm6` field, on BOTH the generator and the
+        # model. `add x7, x1, x2, lsl #3` is `0x8b020c27` (imm6 = 3) and
+        # `sub x7, x1, x2, lsl #4` is `0xcb021027` (imm6 = 4); the generator
+        # spells the shift CONCRETELY (the `arm64_reg_or_sp` argument above) and
+        # the model reads it through the shared `arm64_shifted_reg`, and the two
+        # have to agree or `exact work_step_add_reg` does not close.
+        self.assertIn("<<< UInt64.ofNat 3", G._step_rhs(0x8b020c27, 2),
+                      "`_step_rhs`'s ADD-register arm dropped the shift again")
+        self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
+                      "`_step_rhs`'s SUB-register arm dropped the shift again")
+        self.assertEqual(
+            self.lib.count("arm64_shifted_reg insn s xm"), 2,
+            "the model's ADD and SUB (shifted register) arms must BOTH read "
+            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
+            "arm and dropped in the other is the duplicate-decoder defect this "
+            "replaces")
+
+    def test_no_arm_of_the_generic_rhs_builder_raises(self):
+        """EVERY index the decoder can produce builds a right-hand side.
+
+        `_step_rhs_generic` is the word-relative twin of `_step_rhs`, and it is
+        the one the universal-theorem closer calls (`"s.pc" in (_step_rhs_generic(
+        idx) or "")`), so an arm that raises takes the whole proof generation
+        down with a `NameError` rather than with a type error Lean would name.
+
+        It had one. The `B.cond` arm interpolated `{w & 0xf}` — a PYTHON
+        expression, where every other arm interpolates the Lean word `w` — so
+        `_step_rhs_generic(51)` raised `NameError: name 'w' is not defined`. The
+        arm was unreachable only because `51` is not in `_WORK_STEP_BY_IDX`
+        (47 rows), which is why no row saw it: sweeping the TABLE cannot see an
+        arm the table does not name. So the sweep domain here is the DECODER's
+        domain, `range(len(_STEP_CONDS))` — every index `_step_branch_index` can
+        return — not the table's keys. Today that is 69 indices against the
+        table's 47, and the 22 extra ones are exactly the arms nothing calls.
+
+        A future arm that raises is a `NameError` here, which is the cheapest
+        possible signal and the one a proof run would have taken 45 s to give.
+        """
+        import formal.arm64_proof_gen as G
+        bad = []
+        for idx in range(len(G._STEP_CONDS)):
+            try:
+                G._step_rhs_generic(idx)
+            except Exception as e:            # noqa: BLE001 — the point
+                bad.append((idx, f"{type(e).__name__}: {e}"))
+        self.assertEqual(bad, [], f"arms that raise: {bad}")
+
+    def test_the_generic_rhs_builder_reads_no_name_that_does_not_exist(self):
+        """`_step_rhs_generic` interpolates only names this module defines.
+
+        The `B.cond` bug was a class, not an arm: an f-string in a function
+        where the interpolated expression was PYTHON rather than Lean. The
+        runtime sweep above is the consequence, but it can only report the arm
+        that RAISES when it is called, and the arm that raised was unreachable.
+        The cause is visible without calling anything: `w` is not a global of
+        this module, so a reference to it in an f-string is a `NameError` by
+        construction. `symtable` reads exactly that fact out of the source —
+        every global the function reads but never assigns — so the whole class
+        is caught statically, including while the arm is still dormant.
+
+        The `B.cond` arm had `{w & 0xf}` in it -- a PYTHON expression, where
+        every other arm interpolates the Lean word `w` -- and `symtable` was
+        the way that bug was FOUND (`_step_rhs_generic w`, a free global the
+        module never binds).  So this is that reproduction turned into a guard
+        that runs on every change.  Its bug doc is deleted with the fix.
+        """
+        import builtins
+        import symtable
+        with open(PROOF_GEN) as fh:
+            src = fh.read()
+        top = symtable.symtable(src, PROOF_GEN, "exec")
+        fn = next((c for c in top.get_children()
+                   if c.get_name() == "_step_rhs_generic"), None)
+        self.assertIsNotNone(fn, "`_step_rhs_generic` is gone from the source")
+        defined = set(top.get_identifiers()) | set(dir(builtins))
+        free = sorted({s.get_name() for s in fn.get_symbols()
+                       if s.is_global() and not s.is_assigned()})
+        missing = [n for n in free if n not in defined]
+        self.assertEqual(
+            missing, [],
+            f"`_step_rhs_generic` reads {missing}, which this module does not "
+            "define; an f-string naming one raises NameError at the arm that "
+            "does so — which is how the B.cond arm failed")
 
     def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
         """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
@@ -1528,9 +1672,20 @@ _FLOOR_COMMON = [
      "some (arm64_set_reg 5 s (arm64_reg 5 s &&& arm64_reg 6 s))"),
 ]
 
+# The two `SUB (shifted register)` tails carry their `imm6` as a `<<< 0` even
+# though the assembler was asked for an unshifted subtract.  That is the
+# generator reading the shift field on every `add`/`sub` (shifted register)
+# word rather than only on a shifted one -- the fix in
+# `test_the_shifted_register_imm6_field_is_read_on_both_sides`, without which
+# every `add Xd, Xn, Xm, lsl #3` stepped a state the machine never reached.
+# It is `x <<< 0`, which is `x`, so the term is the one the row meant; the
+# library's `work_step_sub_reg` states it as `arm64_shifted_reg insn s rm`,
+# which reduces to exactly this text on the concrete word, which is what makes
+# the step-result `exact` close.
 _FLOOR_DIV_TAIL = [
     ("sub x0, x2, x5",
-     "some (arm64_set_reg 0 s (arm64_reg 2 s - arm64_reg 5 s))"),
+     "some (arm64_set_reg 0 s (arm64_reg 2 s "
+     "- (arm64_reg 5 s <<< UInt64.ofNat 0)))"),
 ]
 
 # The remainder multiplies the FLOOR-CORRECTED QUOTIENT, which is why it costs
@@ -1538,7 +1693,8 @@ _FLOOR_DIV_TAIL = [
 # `a - b * fdiv64 a b`, which is what `lib/ProofLib.lean`'s `frem64` says.
 _FLOOR_MOD_TAIL = [
     ("sub x6, x2, x5",
-     "some (arm64_set_reg 6 s (arm64_reg 2 s - arm64_reg 5 s))"),
+     "some (arm64_set_reg 6 s (arm64_reg 2 s "
+     "- (arm64_reg 5 s <<< UInt64.ofNat 0)))"),
     ("msub x0, x1, x6, x0",
      "some (arm64_set_reg 0 s (arm64_reg 0 s "
      "- (arm64_reg 1 s * arm64_reg 6 s)))"),
@@ -1793,6 +1949,96 @@ class TestFloorCorrectionDecodes(unittest.TestCase):
                     self.assertNotIn(encode(), words,
                                      f"{expr} emits `{form}`, whose word the "
                                      f"model reads as a different instruction")
+
+
+class TestAddSubImmediateShift(unittest.TestCase):
+    """The `sp` trackers read an ADD/SUB immediate's `sh` bit, not its 12 bits.
+
+    `_sp_stores`, `_frame_ldp_addrs`, `_frame_read_addrs` and `_hcond_mem_rws`
+    all tracked `sp` through the prologue's ADD/SUB immediate, and all four read
+    the immediate's 12 bits alone.  That is right while every immediate fits
+    `#4095`; the codegen's 128KB scratch is `sub sp, sp, #32, lsl #12` — whose
+    own encoder docstring (`formal/arm64.py::encode_sub_xd_xn_imm_sh`) says the
+    backend subtracts it at the top of every list base, dict, comprehension and
+    container append — and a tracker that read the immediate as 32 named a slot
+    the store was not at.  A `hcond`'s spill peel then emitted
+
+        rw [mem_read_two_writes_adj_uint _ ((s_0.sp - 32) - 16) _ _]
+
+    for a store at `s_0.sp - 131072 - 16`, and Lean's `rw` found no occurrence:
+    the red on `ifonly`, `condassign`, `elif3` and `sgt8`, where the message
+    names the goal's head (`arm64_matches_condition`) and reads like a missing
+    flag lemma rather than a stale address.
+
+    Lean-free and image-free by construction: every word is an encoder's own, so
+    this is a decode test and not a program that happens to have a large frame.
+    """
+
+    #: 32 << 12: the 128KB scratch, the first immediate this backend reaches
+    #: that does not fit the 12-bit field.
+    SCRATCH = 32 << 12
+
+    def setUp(self):
+        import formal.arm64 as A
+        self.sub = struct.unpack("<I", A.encode_sub_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        self.add = struct.unpack("<I", A.encode_add_xd_xn_imm_sh(31, 31, 32, 1))[0]
+        self.sub_plain = struct.unpack("<I",
+                                       A.encode_sub_xd_xn_imm_sh(31, 31, 16, 0))[0]
+        self.stp = struct.unpack("<I", A.encode_stp_sp_pre(0, 1, 16))[0]
+        self.ldp = struct.unpack("<I", A.encode_ldp_sp_post(0, 1, 16))[0]
+        self.words = {0x100: self.sub, 0x104: self.stp, 0x108: self.ldp}
+
+    def test_the_decode_reads_the_shift(self):
+        """The one reader, on both the plain and the `lsl #12` spelling."""
+        import formal.arm64_proof_gen as G
+        self.assertEqual(G._imm12_scaled(self.sub), self.SCRATCH)
+        self.assertEqual(G._imm12_scaled(self.add), self.SCRATCH)
+        self.assertEqual(G._imm12_scaled(self.sub_plain), 16,
+                         "an `sh = 0` immediate must NOT be scaled")
+        # The form the codegen actually emits for the scratch is a SUB, and the
+        # index is what routes it to this decode.
+        self.assertEqual(G._step_branch_index(self.sub), 12)
+
+    def test_the_sp_stores_tracker_uses_it(self):
+        import formal.arm64_proof_gen as G
+        stores = []
+        off = G._sp_stores(dict(self.words), [0x100, 0x104], 0, stores)
+        self.assertEqual(off, -(self.SCRATCH + 16),
+                         "the frame depth must be the scratch plus the pair, "
+                         "not the 12-bit field alone")
+        self.assertEqual(sorted(stores), [self.SCRATCH + 8, self.SCRATCH + 16])
+
+    def test_the_frame_read_trackers_use_it(self):
+        import formal.arm64_proof_gen as G
+        for tracker in (G._frame_read_addrs, G._frame_ldp_addrs):
+            with self.subTest(tracker=tracker.__name__):
+                if tracker is G._frame_ldp_addrs:
+                    addrs = tracker([{"instrs": [0x100, 0x104, 0x108]}],
+                                    self.words, "s_0")
+                else:
+                    addrs = tracker({"instrs": [0x100, 0x104, 0x108]},
+                                    self.words, "s_0")
+                self.assertEqual(len(addrs), 1)
+                self.assertIn(f"UInt64.ofNat {self.SCRATCH}", addrs[0],
+                              f"the LDP address does not carry the scratch: "
+                              f"{addrs[0]}")
+
+    def test_the_hcond_peel_uses_it(self):
+        """The emitted peel must name the slot the store is at.
+
+        This is the assertion the red failed: the peel's address and the
+        composed store's address have to be the same term, or `rw` finds no
+        occurrence and reports it against the goal's head.
+        """
+        import formal.arm64_proof_gen as G
+        rws = G._hcond_mem_rws([0x100, 0x104, 0x108], [0x108], self.words, "s_0")
+        self.assertTrue(rws, "a spill read in the current block produced no peel")
+        joined = ", ".join(rws)
+        self.assertIn(f"UInt64.ofNat {self.SCRATCH}", joined,
+                      f"the peel names the wrong slot, so `rw` will not find the "
+                      f"store: {joined}")
+        self.assertNotIn(f"UInt64.ofNat 32)", joined,
+                         f"the peel is reading the raw 12-bit field: {joined}")
 
 
 # Lean's `=` and `\u2260`, spelled once so the pattern and the expectation
@@ -2801,21 +3047,19 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         import formal.arm64_proof_gen as G
         import formal.build as fb
         src = os.path.join(self.tmp, "stepok.mojo")
-        # Read BOTH the bytes and the published string table: the step lemmas
-        # cover the EXECUTABLE region only, because `__TEXT` carries the
-        # interned strings after the bodies and a string byte pattern that
-        # decodes as an instruction would otherwise get a step lemma for a word
-        # no execution reaches (the trap message's `TBZ` word is the measured
-        # one). The expected set is computed over the same range the generator
-        # uses, so a filter that narrowed for any OTHER reason still fails.
+        # The step lemmas cover the EXECUTABLE region only, because `__TEXT`
+        # carries the interned strings after the bodies and a string byte
+        # pattern that decodes as an instruction would otherwise get a step
+        # lemma for a word no execution reaches (the trap message's `TBZ` word
+        # is the measured one). The expected set is computed over the SAME range
+        # the generator uses — `_exec_code_limit`, the one reader
+        # `formal/arm64_proof_gen.py` has — so a filter that narrowed for any
+        # OTHER reason still fails, and so this test cannot be a second
+        # statement of where the code ends.
         result = fb.compile_formal(src, output=src[:-5] + ".aout",
                                    prove=False, check=False)
-        code = result["code"]
-        info = result["info"]
-        base = info["base_addr"]
-        str_addrs = list((info.get("str_addrs") or {}).values())
-        code_end = (min(str_addrs) - base) if str_addrs else len(code)
-        code = code[:max(0, min(code_end, len(code)))]
+        code = result["code"][:G._exec_code_limit(result["code"])]
+        end = len(code)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, end - end % 4, 4)]
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
@@ -2934,6 +3178,109 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                               G._gen_step_result_lemmas("syn", code, 0x1000))
                 self.assertIn("rw [syn_sr_0 s h]",
                               G._gen_step_lemmas("syn", code, 0x1000))
+
+
+class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
+    """A data word in `__TEXT,__text` must not be planned a step lemma.
+
+    `__TEXT` carries every function body and THEN every interned string
+    (`arm64_codegen.compile`'s string-emission loop, which includes
+    `model.stack_trap_message`), and `_step_result_plan` walks every 4-byte word
+    of the code it is given.  A string byte pattern that decodes as an
+    instruction the step table knows gets a step-RESULT lemma, and the step-OK
+    corollary's discriminator fact is FALSE for it, so the whole generated proof
+    fails to typecheck.  Measured: `model.stack_trap_message` contains the word
+    `909189220` (`0x36312064`, `TBZ w4, #…`).
+
+    The DYLIB emitter is the live case this pins: a dylib whose export prints a
+    literal interns the string, and before `formal/arm64_proof_gen.py`'s
+    `_executable_code` was read there it emitted `dylib_sr_190` for that data
+    word (the proof the image is for is not the one that was produced, which no
+    assertion short of this one catches -- the file still elaborates until Lean
+    reaches the false corollary).  The ordinary image's half is
+    `TestStepOkDerivesFromStepResult.test_no_step_ok_lemma_was_dropped`.
+    """
+
+    SOURCE = ('def greet(n: Int) -> Int:\n'
+              '    if n > 0:\n'
+              '        print("hello")\n'
+              '    return n\n')
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.arm64_proof_gen as G
+        import formal.build as fb
+        cls.G = G
+        cls.tmp = tempfile.mkdtemp(prefix="a2-execrange-")
+        src = os.path.join(cls.tmp, "greet.mojo")
+        with open(src, "w") as fh:
+            fh.write(cls.SOURCE)
+        r = fb.compile_formal_dylib([src], output=os.path.join(cls.tmp, "greet.dylib"),
+                                    prove=True, check=False)
+        cls.code = r["code"]
+        cls.info = r["info"]
+        cls.base = cls.info["base_addr"]
+        with open(r["proof_path"], encoding="utf-8") as fh:
+            cls.text = fh.read()
+        cls.exec_code = cls.code[:G._exec_code_limit(cls.code)]
+        cls.data_idxs = sorted(
+            set(G._step_result_plan(cls.code))
+            - set(G._step_result_plan(cls.exec_code)))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_the_fixture_carries_a_decodable_data_word(self):
+        self.assertTrue(
+            self.data_idxs,
+            "the fixture's image interns no string whose bytes the step table "
+            "decodes, so this class asserts nothing -- use a source with a "
+            "string literal in an export")
+
+    def test_the_executable_region_stops_before_the_first_interned_string(self):
+        # The bound is `_exec_code_limit` \u2014 the byte after the last `RET`, which
+        # is where the function bodies end and the interned strings begin. It is
+        # the SELF-CONTAINED reader (it needs no `info`, so the dylib contract's
+        # f-string can call it), which is why the branch's exact
+        # `info["str_addrs"]` bound is not the one kept: the property this pins is
+        # \"no data word is planned\", and that is a `<=`, not an `==`.
+        addrs = list((self.info.get("str_addrs") or {}).values())
+        self.assertTrue(addrs, "the fixture must have an intern table")
+        self.assertLessEqual(len(self.exec_code), min(addrs) - self.base)
+        self.assertEqual(len(self.exec_code),
+                         self.G._exec_code_limit(self.code))
+
+    def test_no_step_lemma_is_declared_for_a_data_word(self):
+        for i in self.data_idxs:
+            with self.subTest(index=i):
+                self.assertNotIn(f"theorem dylib_sr_{i} ", self.text,
+                                 f"the step-RESULT lemma for index {i} is a "
+                                 f"data word the decoder happened to accept")
+                self.assertNotIn(f"theorem dylib_step_ok_{i} ", self.text,
+                                 f"the step-OK lemma for index {i} is false "
+                                 f"about a data word")
+
+    def test_the_step_lemmas_still_cover_the_whole_executable_region(self):
+        plan = self.G._step_result_plan(self.exec_code)
+        self.assertTrue(plan, "the executable region planned no instructions")
+        for i in plan:
+            with self.subTest(index=i):
+                self.assertIn(f"theorem dylib_sr_{i} ", self.text)
+
+    def test_the_run_tests_still_read_the_whole_code(self):
+        """`dylib_code_list` is the WHOLE image, data words included.
+
+        The step lemmas narrow to the executable region; the concrete run tests
+        execute `dylib_code`, which must keep every byte or a program that
+        prints its literal would read the wrong memory."""
+        m = re.search(r"def dylib_code_list : List UInt8 :=\n  \[(.*?)\]", self.text,
+                      re.DOTALL)
+        self.assertIsNotNone(m, "dylib_code_list is not defined")
+        n_bytes = sum(len(part.split()) for part in m.group(1).split(","))
+        self.assertEqual(n_bytes, len(self.code) + 4,
+                         "the code list lost bytes when the step lemmas "
+                         "narrowed to the executable region")
 
 
 class TestCallProofs(unittest.TestCase):
@@ -3063,6 +3410,37 @@ class TestCallProofs(unittest.TestCase):
             m, "nothing in the emitted proof continues a walk out of a callee's "
                "`RET`: the return address map is built and never read, so the "
                "callee's `ret` ends the path instead of returning")
+
+    def test_the_block_start_sequence_side_condition_is_proved_not_rfl(self):
+        """`runs_cons_seq`'s side condition for a block's FIRST step is not a
+        bare `rfl`.
+
+        That condition is `(qT0 st).pc = st.pc` (`qS0 st` is `st` by the
+        generated def), which a `rfl` proves in principle -- but on
+        `Arm64State` (36 fields) Lean's defeq walk of that projection can
+        exhaust `maxRecDepth` (100000) when the step's record update is on `sp`
+        with a large `UInt64.ofNat` immediate.  That is the measured
+        `same_image_leaf` block b3 and `mod_by_var` block 6 red (`add sp, sp,
+        #32, lsl #12`) the fix is for: the condition is discharged by
+        `first | (simp only [qT0, qS0] <;> done) | rfl`, which reduces the
+        projection without the deep walk and still closes every case the bare
+        `rfl` closed.
+
+        Read as TEXT rather than through Lean, because the Lean half is
+        `TestSameImageCallLean`/`TestExternCallTheRunDoesNotReach` and both
+        skip without a built `lib/ProofLib.olean`; this row holds on every run,
+        so a revert to the bare `rfl` cannot land unnoticed.
+        """
+        with open(self.proofs["same_image_leaf"]) as f:
+            text = f.read()
+        self.assertIn(
+            "(by first | (simp only [", text,
+            "the block-start `runs_cons_seq` side condition is a bare `rfl` "
+            "again, which is the shape that exhausted `maxRecDepth` on a block "
+            "whose first step updates `sp` by a large immediate")
+        self.assertNotIn(
+            "0 hs0 rfl", text,
+            "a block-start `runs_cons_seq` is discharged by a bare `rfl` again")
 
     def test_a_callee_that_calls_is_still_refused(self):
         """The boundary of the fix, and it is a boundary of the LEAF.
@@ -3843,9 +4221,13 @@ class TestStringValueInTheModel(unittest.TestCase):
                 addr, f"{key}: the format string is not in the intern table, "
                       f"so the model has no value for it")
             with self.subTest(arch=arch):
+                # `MojoExpr.call` carries its arguments AS A LIST; it carried
+                # one `MojoExpr` until 2026-10-05, which made a call of any
+                # arity but one unstatable.  The pin was the old splat
+                # spelling, which the inductive no longer has.
                 self.assertIn(
-                    f'MojoExpr.call "printf" (MojoExpr.int '
-                    f'(UInt64.ofNat {addr}))',
+                    f'MojoExpr.call "printf" [MojoExpr.int '
+                    f'(UInt64.ofNat {addr})]',
                     text,
                     f"{key}: the AST bridge does not carry the format "
                     f"strings interned address {addr}, so the AST and the "
@@ -4268,8 +4650,7 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
     enumerates `CSET`s and finds none. So the chain carried
     `simp [h, Arm64State.init]` with **no flag lemma at all**, and the raw
     `arm64_matches_condition 11 (arm64_subs_flags …) = true` had nothing to
-    reduce it. That is
-    `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`,
+    reduce it. That is the `B.cond`-with-no-`CSET` defect,
     and it is pinned here rather than in `test_formal.py` because the thing
     under test is the text the generator emits — which is this file's whole
     subject, and which is checkable with no Lean run at all.
@@ -4294,12 +4675,16 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
     set is necessary and not sufficient, because the chain's earlier
     `simp only` unfolds `arm64_subs_flags` / `arm64_matches_condition` — and
     `simp only` is irreversible, so a lemma in a LATER `simp` can never match
-    the term the earlier line expanded. `sum_range.mojo`'s own `hcond_4` is the
-    measured case (`0 ^^^ 0x8000… < n ^^^ 0x8000…`, a RANGE, which
-    `by_cases` + `simp [h]` cannot ground because it leaves `n` free on both
-    branches), and the chain order that would let the lemma fire is written down
-    there rather than landed here — it changes 26 of the 49 generated arm64
-    proofs and a light worker cannot Lean-verify that.
+    the term the earlier line expanded. **That order landed 2026-10-09
+    (`ad54fc2f6`), and
+    `test_the_flag_lemma_fires_before_the_flags_are_unfolded` below is its pin**:
+    the emitted chain is now `simp only [<block chain>]` → `rw [<spill pair>]` →
+    `try rw [<flag lemma>]` → `try (simp only [arm64_subs_flags,
+    arm64_matches_condition])` → `by_cases … <;> simp [h, <flag lemma>, …] <;>
+    bv_decide`, which is the order `_cond_flag_lines` already uses for a loop's
+    exit test. `sum_range.mojo`'s own `hcond_4` was the measured case; the range
+    shape is now a named refusal (see `test_both_shapes_generate`), and the
+    EQUALITY shape is what carries the order pin.
     """
 
     RANGE = ("def sum_range(n):\n"
@@ -4348,6 +4733,77 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                     out.append((pending, line.strip()))
                     pending = None
         return out
+
+    @staticmethod
+    def _hcond_blocks(text):
+        """`[(hid, [body lines])]` for every `hcond` block in a proof.
+
+        The block opens at a `have hcond_<bi> : … := by` line and runs until
+        the indentation returns to the `have` line's own level — the same "the
+        block's extent is not this file's business" rule `_hcond_closers` uses,
+        spelled as indentation rather than as two string anchors because the
+        ORDER assertion needs the whole body, not just the closer.
+        """
+        lines = text.splitlines()
+        blocks = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if "have hcond_" in line:
+                hid = line.strip().split()[1]
+                indent = len(line) - len(line.lstrip())
+                body = []
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j]
+                    if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                        break
+                    body.append(nxt)
+                    j += 1
+                blocks.append((hid, body))
+                i = j
+            else:
+                i += 1
+        return blocks
+
+    def test_the_flag_lemma_fires_before_the_flags_are_unfolded(self):
+        """The ORDER of a `hcond` chain, which a presence check cannot see.
+
+        `simp only` is IRREVERSIBLE: the moment `arm64_subs_flags` /
+        `arm64_matches_condition` are unfolded, the `arm64_flag_*` lemma's LHS
+        is gone and no later `simp` can match it. So a chain that NAMES the flag
+        lemma in its closing `simp` (the thing
+        `test_every_hcond_chain_closes_with_a_flag_lemma` pins) still hands
+        `bv_decide` an opaque `arm64_matches_condition` term — and gets the
+        "potentially spurious counterexample" this file's sibling docstring
+        describes — unless the lemma is emitted as an explicit `try rw` BEFORE
+        the `simp only` that unfolds the flags. This is the `_cond_flag_lines`
+        order applied to a branch; it landed 2026-10-09 (`ad54fc2f6`), and this
+        is the pin the sibling docstring used to say was not landed.
+        """
+        with open(self.equal) as fh:
+            text = fh.read()
+        blocks = self._hcond_blocks(text)
+        self.assertTrue(blocks, f"no hcond block in {self.equal}")
+        for hid, body in blocks:
+            flag_at = [k for k, line in enumerate(body)
+                       if "try rw [arm64_flag_" in line]
+            unfold_at = [k for k, line in enumerate(body)
+                         if "simp only [arm64_subs_flags" in line
+                         or "simp only [arm64_matches_condition" in line]
+            self.assertTrue(flag_at,
+                            f"{hid}: the chain emits no `try rw [arm64_flag_…]`, "
+                            f"so the flag lemma is left to a `simp` that runs "
+                            f"after the flags are unfolded and can never match")
+            self.assertTrue(unfold_at,
+                            f"{hid}: the chain never unfolds "
+                            f"`arm64_subs_flags`/`arm64_matches_condition`")
+            self.assertLess(
+                flag_at[0], unfold_at[0],
+                f"{hid}: `arm64_subs_flags`/`arm64_matches_condition` are "
+                f"unfolded (line {unfold_at[0]}) before the flag lemma fires "
+                f"(line {flag_at[0]}), so the lemma can never match and "
+                f"`bv_decide` is handed an opaque predicate")
 
     def test_both_shapes_generate(self):
         """The RANGE shape is now a REFUSAL, and that is the fix, not a gap.
@@ -5074,85 +5530,6 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
                                 % (key, err))
 
 
-class TestTheRecursionContractBaseCaseCarriesTheStepBody(unittest.TestCase):
-    """A SECOND, independent reason `count`/`pow2` fail their proofs, found
-    2026-10-08 while re-measuring
-    `FORMAL three examples fail their proofs on master`.
-
-    The doc's x30 frame read (`rfl` failed) is still one of the diagnostics, but
-    the generated `count_contract` now also fails in its **base-case** bullet:
-    the walk reaches the program's self-call there and emits the
-    recursion-descent code that belongs to the step case.  `hbase`'s signature
-    has no `arg`, no `hk` and no induction hypothesis, so Lean reports exactly
-    that — `Unknown identifier 'hk'`, `hbnd has type FrameBound 131152 st 0 but
-    is expected to have type FrameBound 131152 st arg` inside the application of
-    `frameBound_descend_le`, and `Unknown identifier 'ih'`.
-
-    This is a GAP pin, not a wanted-behaviour test, and it is the same shape as
-    `TestTheReturnFrameReadsX30ThroughAMaterialisedAddress`: it asserts the
-    corruption is PRESENT, so it is green while the gap is open and goes red the
-    moment the base case stops replaying the step walk — at which point the
-    defect is fixed, `test_formal.py`'s marker for `count`/`pow2` is re-measured,
-    and this class is deleted with the fix.  Lean-free: it reads the generated
-    proof's text.
-
-    The regenerate-or-die half is deliberate.  `formal/arm64_proof_gen.py` is
-    the write set of a live claim (`formal207-docs`,
-    `FORMAL_dylib_export_loops_and_frame_bounds.md`), so this pin exists to tell
-    that worker the moment the base case changes — and to tell the next reader
-    that `count` needs this fix AND the x30 lemma.
-    """
-
-    STEM = "count"
-
-    #: `frameBound_descend_le` is emitted only by the recursion-descent block,
-    #: and for `count` the only recursive call is inside the `else` arm — so in
-    #: a correct file it appears in the STEP bullet (6178+) and never in the
-    #: base bullet (5824-6177).  Its presence between the two `intro` lines is
-    #: the text signature of the defect.
-    DESCENT = "frameBound_descend_le"
-    BASE_INTRO = "· intro fuel st hb"
-    STEP_INTRO = "· intro k arg st fuel"
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="recbase-")
-        src = os.path.join(os.getcwd(), "formal", "examples",
-                           cls.STEM + ".mojo")
-        with open(src) as f:
-            text = f.read()
-        cls.proof, cls.error = _generate(cls.tmp, text, cls.STEM)
-        cls.region = None
-        if cls.proof is not None:
-            with open(cls.proof) as f:
-                whole = f.read()
-            _start = whole.index(cls.BASE_INTRO)
-            _end = whole.index(cls.STEP_INTRO, _start)
-            cls.region = whole[_start:_end]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_the_base_case_bullet_replays_the_recursion_descent(self):
-        self.assertIsNotNone(
-            self.proof,
-            "%s generated no proof at all, so this class is measuring a "
-            "generation refusal, not the base-case defect: %s"
-            % (self.STEM, self.error))
-        self.assertIsNotNone(
-            self.region,
-            "%s: the proof has no `%s` / `%s` bullet pair, so the theorem's "
-            "shape changed and this pin is reading the wrong region"
-            % (self.STEM, self.BASE_INTRO, self.STEP_INTRO))
-        self.assertIn(
-            self.DESCENT, self.region,
-            "the base-case bullet no longer applies %s — either the base case "
-            "stopped replaying the step walk (the defect is FIXED: re-measure "
-            "test_formal.py's `count`/`pow2` marker and delete this class) or it "
-            "moved to a spelling this pin does not read" % self.DESCENT)
-
-
 class TestBottomTestedRangeLoop(unittest.TestCase):
     """A `for … in range(…)` loop, whose back edge is a CONDITIONAL branch.
 
@@ -5776,12 +6153,16 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     emitted an empty file would pass the first and fail the second.
     """
 
-    #: The ten that still generate, grouped as the doc grouped them, so a
+    #: The ELEVEN that still generate, grouped as the doc grouped them, so a
     #: reader can see which family each is in. `wdiff` was family 4's other
-    #: member and moved to `REFUSED` on 2026-10-08 (see the class docstring).
+    #: member and joined `REFUSED` on 2026-10-08, when the stack-floor guard put
+    #: a `getrlimit` call in every arm64 prologue; it came back out on
+    #: 2026-10-18 because that row landed by a MERGE AFTER the fix which closed
+    #: it (the `REFUSED_OWNER` note says which commit and which order).
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
-                "both", "either")                               # family 3
+                "both", "either",                               # family 3
+                "wdiff")                                       # family 4
 
     #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
     #: is HERE rather than deleted because the refusal is the FIX and not a
@@ -5793,13 +6174,8 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
     #: generating proof that says something false.
     #:
-    #: `wdiff` was family 4 and PASSED when this census was written; it refuses
-    #: again on this tree because `bfeec991`'s stack-floor guard put a
-    #: `getrlimit` call in every arm64 prologue, and the guard's low address is
-    #: the run terminal, so the loop contract has no block to match. That is
-    #: `FORMAL the stack guards getrlimit is counted as a program call`'s
-    #: regression, and the row is recorded rather than fixed here because the
-    #: repair is a `formal/arm64_codegen.py` change owned by that doc.
+    #: `wdiff` was a second row here until 2026-10-18, and `REFUSED_OWNER` below
+    #: says exactly what happened to it.
     #:
     #: The needles are the three facts a reader needs to act, and the first two
     #: are what tell this refusal apart from "the loop shape is unrecognised"
@@ -5811,24 +6187,15 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                        "while_lt_exit_contract_bottom"],
                       "its loop test is signed and the contract is stated in "
                       "the unsigned order, so the obligation would be false"),
-        "wdiff": (["unsupported edge to",
-                   "loop back-edge / continuation; no loop contract matches"],
-                  "the stack-floor guard's `getrlimit` in the prologue is "
-                  "counted as a program call, so it becomes the theorem's halt "
-                  "boundary and the loop contract is never reached; the address "
-                  "in the message is a build detail, so the needles name the "
-                  "shape rather than the address"),
     }
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
-    #: doc is named for the DEFECT rather than for the example. BOTH rows are
-    #: here, and neither doc contains its stem: `sum_range`'s is
+    #: doc is named for the DEFECT rather than for the example. The row is here,
+    #: and the doc contains no stem: `sum_range`'s is
     #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` and `wdiff`'s is
-    #: `FORMAL the stack guards getrlimit is counted as a program call` — each
-    #: a name that says what is wrong, which is why
-    #: `test_the_owners_of_the_refusals_still_exist` cannot find either by
-    #: prefix and has to be told.
+    #: flag.md` — a name that says what is wrong, which is why
+    #: `test_the_owners_of_the_refusals_still_exist` cannot find it by prefix
+    #: and has to be told.
     #:
     #: The point of naming them is the same as the check's own: a refusal is a
     #: STOP, not a fix, and the doc is what a reader has to find to learn that.
@@ -5837,11 +6204,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: here — which is the opposite of true, because each doc records the part
     #: that is NOT done (a signed `while_lt_exit_contract_bottom` in
     #: `lib/ProofLib.lean` plus the sign-flip lemma, neither landed).
+    #:
+    #: `wdiff` WAS the second row, pinned as refusing with a bug doc of its own —
+    #: the one whose title said the stack guard's `getrlimit` was counted as a
+    #: program call — as its owner, and BOTH are gone. `806e72cb` moved the
+    #: RLIMIT_STACK read out of every arm64 prologue into the startup stub
+    #: (`_emit_stack_floor_init`, below `func_offset`) and restored the arm64
+    #: trap flush, so the guard's `getrlimit` is no longer a call the proof walk
+    #: or `_program_extern_calls` sees; that doc was deleted with the fix
+    #: (c7902a43), whose own message records this class as green.  The row came
+    #: back by a MERGE: it was written on 2026-10-08 (`1cb403ec`), which is NOT
+    #: an ancestor of the fix, so the two halves of one story landed in the
+    #: wrong order.
+    #: `test_the_owners_of_the_refusals_still_exist` is what found it — it
+    #: failed with "`wdiff` is pinned as refusing with no bug doc naming it",
+    #: which is the shape a row takes when the fix beats it to master.
     REFUSED_OWNER = {
         "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
                      "against_a_signed_flag.md",
-        "wdiff": "FORMAL_the_stack_guards_getrlimit_is_counted_as_a_program_"
-                 "call.md",
     }
 
     @classmethod
@@ -5912,15 +6292,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
 
-        **`REFUSED` has TWO rows** — `sum_range` joined it on 2026-10-05, when
-        its loop contract was declined for stating an unsigned order against a
-        signed flag, and `wdiff` joined it when the stack-floor guard put a
-        `getrlimit` in every arm64 prologue — so this check does real work for
-        both. It was vacuous while the table was empty, and an empty table and a
-        table whose rows all point at deleted docs look identical from the
-        outside: that is the difference between "nobody refuses" and "the records
-        of the refusals were thrown away". The census is asserted explicitly for
-        the same reason.
+        **`REFUSED` HAD TWO rows, and this check is what removed one.**  `sum_range`
+        joined it on 2026-10-05, when its loop contract was declined for stating
+        an unsigned order against a signed flag; `wdiff` joined it after that,
+        when the stack-floor guard put a `getrlimit` in every arm64 prologue.
+        `806e72cb` fixed the second — the RLIMIT_STACK read moved into the
+        startup stub and the trap flush came back — and the bug doc was deleted
+        with the fix, but the ROW landed afterwards by a merge (`1cb403ec`,
+        2026-10-08, is not an ancestor of the fix).  So this assertion failed
+        with "`wdiff` is pinned as refusing with no bug doc naming it", which is
+        the most useful thing a check of this kind can do: it is the shape a row
+        takes when the fix beats it to master, and it is not the same failure as
+        a row that has no owner yet.
+
+        It was vacuous while the table was empty, and an empty table and a table
+        whose rows all point at deleted docs look identical from the outside:
+        that is the difference between "nobody refuses" and "the records of the
+        refusals were thrown away". The census is asserted explicitly for the
+        same reason.
         """
         # The number is the census this class claims; a silent change to either
         # list is how a refusal goes unrecorded, and the OWNER check below is
@@ -6326,8 +6715,10 @@ class TestCfgLeafCensus(unittest.TestCase):
     census it feeds; the Lean half -- "which leaf does the corpus actually
     admit at" -- is `no_admission_fallback` plus a Lean run, which is what
     `test_formal.py`'s census reports and what
-    `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`
-    records.
+    `bugs/FORMAL_arm64_known_proof_gaps.md`'s census records.  The CBZ-leaf
+    doc that used to be cited here is deleted: its subject left when the guard
+    became a load-and-compare, and the admissions that remained were the `sh`
+    bit dropped by every `sp` tracker, fixed by 37ae3718.
     """
 
     def test_the_registry_is_exactly_the_pinned_fifteen(self):
@@ -6445,7 +6836,9 @@ class TestCfgLeafCensus(unittest.TestCase):
         which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
         place that says memory is zero, and the universal theorem's `st` is a
         free state. So this test pins the REDUCTION and not a pass, and the doc
-        that says so is `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`.
+        that says so is `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` \u2014 the
+        `st.mem`-free finding outlived the CBZ doc that used to carry it, and
+        37ae3718 is the commit that retired that doc.
         """
         import formal.arm64_proof_gen as G
         corpus = os.path.join(HERE, "formal", "examples")
@@ -6662,22 +7055,39 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                              f"divisor: {p.stdout!r}")
 
     def test_the_symbolic_divisor_fixture_still_has_its_subject(self):
-        """Lean-free: the fixture yields the admission the class patches, or it
-        refuses — never a silently empty tail.
+        """Lean-free: the fixture's outcome is one the class RECOGNIZES, and
+        when it is not the admission that names the reason — never a SILENTLY
+        empty tail.
 
         `TestTheZeroDivisorGuardAgainstLean` needs a built `lib/ProofLib.olean`,
         so on a tree without one its mechanism check cannot run at all.  This
-        row is Lean-free and pins the same invariant one level down: the fixture
-        either produces a tail carrying `_ADMIT` (the class can trace a residual)
-        or it refuses outright (the class records why) — never a tail with no
-        admission, which is what turns the class's patch into a no-op and its
-        failure into a `fdiv64` diagnosis about a goal it never saw.  That is
-        `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
-        and this is the observable half of its step 1.
+        row is Lean-free and pins the same invariant one level down.  There are
+        THREE outcomes the zero-divisor fixture can have, and all three are
+        honest because each of them NAMES why the class cannot trace a residual:
+
+        1. the tail carries `_ADMIT` — the walk terminal exists, the class can
+           replace it with `trace_state` and read the `⊢ 1 = …` goal;
+        2. the fixture REFUSES with `this walk cannot follow` — the generator
+           declined instead of emitting a value theorem;
+        3. the universal theorem is replaced by the ANNOUNCED reachability
+           theorem `q_reaches_call_at_…` (the exit block's `fflush` is the one
+           out-of-image `BL`, so there is one halt address and the generator
+           substitutes rather than refusing), and the emitted note says so by
+           naming `q_compiles_correctly_universal` as NOT emitted.
+
+        Outcome 3 is the state on this tree and is why this row was RED before
+        it was taught about it: it demanded outcome 1 or 2, and the generator had
+        moved to a third state it does not take silently.  Outcome 3 still
+        leaves `_ADMIT not in tail`, which is exactly what makes the class set
+        `cls.blind` and fail its Lean row by NAME — so accepting it here is not
+        acceptance of a blind class, it is acceptance that the blindness is
+        ANNOUNCED.  What this row forbids is the fourth state: an empty tail with
+        no announcement at all, which is `bugs/FORMAL_the_div0_guard_measurement_
+        class_traces_nothing_any_more.md`'s subject.
         """
         from formal.build import FormalBuildError
         try:
-            _head, tail = _symbolic_divisor_proof(self.tmp)
+            head, tail = _symbolic_divisor_proof(self.tmp)
         except FormalBuildError as e:
             self.assertIn("this walk cannot follow", str(e),
                           "the div0 fixture now refuses for a different reason "
@@ -6686,12 +7096,87 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                           "class_traces_nothing_any_more.md before trusting "
                           "either of its next steps")
             return
-        self.assertIn(_ADMIT, tail,
-                      "the div0 fixture generated a proof whose tail carries "
-                      f"no {_ADMIT!r}, so the class's patch is a no-op and its "
-                      "rows would report a `fdiv64` diagnosis about a residual "
-                      "they never traced: whatever the div0 residual is today, "
-                      "the measurement class is not looking at it")
+        if _ADMIT in tail:
+            return                                       # outcome 1
+        emitted = head + tail
+        self.assertIn("_reaches_call_at_", emitted,
+                      "the div0 fixture generated no tail carrying "
+                      f"{_ADMIT!r} and no announced reachability theorem either: "
+                      "the generator neither traced a residual nor said in the "
+                      "file why it did not, which is the SILENT empty tail this "
+                      "row exists to forbid (bugs/FORMAL_the_div0_guard_"
+                      "measurement_class_traces_nothing_any_more.md)")
+        self.assertIn("q_compiles_correctly_universal", emitted,
+                      "the div0 fixture was substituted by a reachability "
+                      "theorem but the emitted note does not name the absent "
+                      "`q_compiles_correctly_universal`, so the substitution is "
+                      "not announced and the class would go blind without saying "
+                      "why")
+        self.assertIn("NOT emitted", emitted,
+                      "the div0 substitution's note does not say the universal "
+                      "theorem is NOT emitted; the announcement this row checks "
+                      "is that sentence, not merely the theorem's name (a name "
+                      "can appear in a comment that does not withdraw it)")
+
+    def test_a_literal_divisor_RESTORES_the_classs_subject(self):
+        """The doc's step-2 option 2 is no longer refuted: MEASURED, not argued.
+
+        This row was the other way round until 2026-10-18 and said so: it pinned
+        `fflush` in a `a // 4` image's extern calls and no
+        `q_compiles_correctly_universal` in its proof, on the measurement that a
+        CONSTANT non-zero divisor still emitted the divide-by-zero arm and its
+        exit flush.  That measurement no longer holds, and the reason is not a
+        change in the flush — it is that the ARM IS NOT EMITTED AT ALL.  With the
+        literal divisor, arm64 builds an image whose only extern call is the
+        startup stub's `getrlimit` (below `func_offset`, subtracted by address),
+        `compiler_traps` is EMPTY, and the generated proof carries BOTH
+        `q_compiles_correctly_universal` and the walk terminal's `_ADMIT` — so
+        the class's own mechanism would fire and it would have a residual to
+        dissect.  Measured side by side, generation only, no Lean:
+
+            a // 4   extern_calls ['getrlimit']            traps []        → universal + _ADMIT
+            a // b   extern_calls ['getrlimit','fflush']   traps [0x…04]  → q_reaches_call_at_0x…04
+
+        `formal/model.py::division_needs_zero_guard` is what decides it, and a
+        non-zero literal divisor is decidable at build time, so the arm is
+        correctly absent.  This row is pinned rather than merely re-measured
+        because the doc's option list depends on it: option 2 is no longer a
+        refutation, and the one next step left is the FIXTURE SWITCH, which
+        changes what the class measures and needs a Lean run to confirm.
+        """
+        import formal.build as fb
+        src = os.path.join(self.tmp, "litdiv.mojo")
+        with open(src, "w") as f:
+            f.write("def q(a):\n    return a // 4\n")
+        out = os.path.join(self.tmp, "litdiv.aout")
+        raw = fb.compile_formal(src, arch="arm64", output=out, prove=False,
+                                check=False)
+        inner = raw["info"]
+        syms = [c.get("sym") for c in (inner.get("extern_calls") or ())]
+        self.assertNotIn(
+            "fflush", syms,
+            "a `// 4` image emits the divide-by-zero arm's exit flush again, so "
+            "there is an out-of-image call on the universal path and the doc's "
+            "option 2 is refuted once more — re-measure both cases before "
+            "believing either")
+        self.assertEqual(
+            [hex(a) for a in (inner.get("compiler_traps") or ())], [],
+            "a `// 4` image records a compiler trap, so the divide-by-zero arm "
+            "is still being emitted for a divisor that cannot trap")
+        info = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                                 check=False)
+        text = open(info["proof_path"]).read()
+        self.assertIn("theorem q_compiles_correctly_universal", text,
+                      "a `// 4` fixture no longer emits the UNIVERSAL theorem, "
+                      "so the doc's option 2 does NOT restore the class's "
+                      "subject after all — re-measure and say so in the doc "
+                      "rather than leaving option 2 called working")
+        self.assertIn(
+            _ADMIT, text,
+            "a `// 4` fixture emits the universal theorem but not the walk "
+            "terminal's admission, so the class's mechanism still would not "
+            "fire and it still traces nothing — the theorem alone is not the "
+            "class's subject")
 
 
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
@@ -6823,6 +7308,17 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     when it really measured a residual.
     """
 
+    #: The two spellings, and each one's patch (the doc's next step, applied).
+    #: ONE table, read by `setUpClass` AND by all three rows below, because a
+    #: spelling that is listed in one place and hard-coded in another is a
+    #: spelling that can be measured in one place and not the other -- and the
+    #: merge that produced this tree had exactly that, which is why one row read
+    #: `self.SPELLINGS` (an attribute nobody defined) and the other two read a
+    #: literal.  `AttributeError: no attribute 'SPELLINGS'` is what a half-applied
+    #: merge of a class attribute looks like, and it is invisible until the
+    #: `lib/ProofLib.olean` the class skips without is built.
+    SPELLINGS = (("as_emitted", False), ("doc_next_step", True))
+
     @classmethod
     def setUpClass(cls):
         lean = _lean()
@@ -6846,7 +7342,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         #: truth is "there is no residual here to move".  The check is
         #: `test_the_measurement_class_can_still_see_what_it_measures`.
         cls.blind = {}
-        for label, patch in (("as_emitted", False), ("doc_next_step", True)):
+        for label, patch in cls.SPELLINGS:
             try:
                 head, tail = _symbolic_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
@@ -6857,37 +7353,47 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 cls.out[label] = ""
                 continue
             if _ADMIT not in tail:
-                # WHICH drift took the residual away, not just that one did.
-                # The walk substitutes a REACHABILITY theorem for a program
-                # whose run halts at a call it cannot follow, and `q(a, b)`'s
-                # divide-by-zero arm ends in the compiler's own `BL fflush` —
+# Two ways to have no admission, and they are different news:
+                # the generator SUBSTITUTED the universal theorem (announced,
+                # one out-of-image call), or it did not and the tail is empty
+                # for a reason nothing names. Naming WHICH is what makes this
+                # failure message actionable, and it is the difference between
+                # "the residual moved" and "there is no residual here to move":
+                # the walk substitutes a REACHABILITY theorem for a program whose
+                # run halts at a call it cannot follow, and `q(a, b)`'s
+                # divide-by-zero arm ends in the compiler's own `BL fflush` --
                 # the trap `formal/arm64_codegen.py` records in
-                # `info["compiler_traps"]` — so the halt address is that call
+                # `info["compiler_traps"]` -- so the halt address is that call
                 # and no terminal value flow (and so no `_ADMIT`) is emitted.
-                # Naming the substitution is what makes the red actionable: it
-                # says the residual is not "moved", it is behind
-                # `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
-                # conditional_path.md`, and this class goes green the way that
-                # doc's step 1 describes.  The substitution is pinned, Lean
+                # Naming the substitution says the residual is not "moved", it is
+                # behind `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_
+                # a_conditional_path.md`, and this class goes green the way that
+                # doc's step 1 describes: until the walk can discharge a call on
+                # a conditional path, there is no `_ADMIT` in the tail for
+                # `tail.replace(_ADMIT, _TRACE)` to patch, so nothing here can
+                # trace the div0 residual. The substitution is pinned, Lean
                 # free, by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`.
                 reach = re.search(r"^theorem (\w+)_reaches_call_at_", head + tail,
                                   re.M)
                 if reach:
                     cls.blind[label] = (
-                        f"the fixture substitutes a REACHABILITY theorem "
-                        f"(`{reach.group(0)[len('theorem '):]}`) for the "
-                        f"universal one: the div0 arm's `BL fflush` is the halt "
-                        f"address the walk stops at, so the terminal value flow "
-                        f"that states `{_ADMIT}` is never emitted and no goal "
-                        f"can be traced: whatever the div0 residual is today, "
-                        f"this class is not looking at it")
+                        f"the generator SUBSTITUTED `q_compiles_correctly_"
+                        f"universal` with the announced reachability theorem "
+                        f"(`{reach.group(1)}_reaches_call_at_…`), because the "
+                        f"div0 arm's `BL fflush` is the one out-of-image call "
+                        f"and one halt address cannot carry a value theorem: "
+                        f"there is no `{_ADMIT}` in the tail for "
+                        f"`tail.replace(_ADMIT, _TRACE)` to patch, so this class "
+                        f"cannot trace the div0 residual until the walk can "
+                        f"discharge a call on a conditional path")
                 else:
                     cls.blind[label] = (
                         f"the fixture generates no `q_compiles_correctly_"
-                        f"universal` carrying `{_ADMIT}`, so `tail.replace("
-                        f"_ADMIT, _TRACE)` is a no-op and no goal can be "
-                        f"traced: whatever the div0 residual is today, this "
-                        f"class is not looking at it")
+                        f"universal` carrying `{_ADMIT}` and does not announce "
+                        f"a substitution either, so `tail.replace(_ADMIT, "
+                        f"_TRACE)` is a no-op and no goal can be traced: "
+                        f"whatever the div0 residual is today, this class is "
+                        f"not looking at it")
             if patch:
                 tail = _with_branch_facts_in_the_terminal_flow(tail)
             text = head + tail.replace(_ADMIT, _TRACE)
@@ -6913,7 +7419,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         it.md` records for `bootstrap-stage2-dumps` — a check that did not look
         at what it produced.  This row is the one that says so.
         """
-        for label in ("as_emitted", "doc_next_step"):
+        for label, _patch in self.SPELLINGS:
             with self.subTest(spelling=label):
                 self.assertIsNone(
                     self.blind.get(label),
@@ -6944,7 +7450,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
         """The doc's next step, measured: identical goals, byte for byte."""
         goals = {}
-        for label in ("as_emitted", "doc_next_step"):
+        for label, _patch in self.SPELLINGS:
             self.assertIsNone(self.blind.get(label),
                               f"{label}: {self.blind.get(label)}")
             got, keep = [], False
@@ -7130,6 +7636,18 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
         # mismatch), so the sum is byte-identical on both sides.
         ("adds x7, x1, x15", lambda A: A.encode_adds_xd_xn_xm(7, 1, 15)),
         ("cmn x1, x15", lambda A: A.encode_cmn_xn_xm(1, 15)),
+        # The SHIFTED-register `ADD`: `imm6` (bits 15:10) is the shift count and
+        # `arm64_step` read `Xm` and added it UNSHIFTED, so every
+        # `add Xd, Xn, Xm, lsl #3/#4` — the list/dict element and key strides
+        # `formal/arm64_codegen.py` emits at 38 sites — stepped a state the
+        # machine never reached. `lsl #3` and `lsl #4` are the two the emitter
+        # produces, and the UNSHIFTED row is the anti-rot: a fix that always
+        # shifted would pass the first two and fail this one.
+        ("add x7, x1, x2, lsl #3",
+         lambda A: A.encode_add_xd_xn_xm_lsl3(7, 1, 2)),
+        ("add x7, x1, x2, lsl #4",
+         lambda A: A.encode_add_xd_xn_xm_lsl4(7, 1, 2)),
+        ("add x7, x1, x2", lambda A: A.encode_add_xd_xn_xm(7, 1, 2)),
         # The `#imm12` forms with their `sh` field (`LSL #12`), on BOTH classes
         # (ADD and SUB), plus an UNSHIFTED row: the decode used to read the
         # 12-bit field and drop its shift, and a fix that always shifted would
@@ -7760,56 +8278,100 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
 
 
 class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
-    """`floordiv` and `udivmod` are refused at GENERATION time, and the reason
-    is the call walk rather than anything about division.
+    """`floordiv` and `udivmod` no longer stop at GENERATION, and what replaced
+    the stop is pinned rather than assumed.
 
     These two were the only red `formal/examples` stems that
     `test_formal.py::EXPECTED_FAILURES` did not name, so a whole-corpus run
     reported them as FAILURES with no document anywhere saying why — and the
     natural next reading, "the floor correction has no proving case", is wrong:
     measured through `compile_formal(prove=True, check=False)` the generator
-    RAISES, so no `<stem>_proof.lean` is ever written and there is no Lean
+    RAISED, so no `<stem>_proof.lean` was ever written and there was no Lean
     residual goal to read at all.
 
-    The refusal is the universal theorem's call walk refusing to follow TWO call
-    sites of ONE callee — `//` and `%` each lower to a call to the same
-    divide-and-correct helper — with a single halt address. That is item 2 of
-    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`,
-    and it is why `test_formal.py`'s entry for these two says so.
+    The refusal was the universal theorem's call walk refusing to follow TWO
+    call sites of ONE callee — `//` and `%` each lower to a call to the same
+    divide-and-correct helper — with a single halt address.  That is item 2 of
+    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`.
 
-    Pinned in both directions because both failure modes are real and neither is
-    the interesting one: a generator that STOPPED raising would leave a proof
-    file whose residual goal nobody has read (the state this class was written
-    against), and a generator that raised for a DIFFERENT reason would leave the
-    marker in `test_formal.py` describing a defect that is gone.
+    **Measured 2026-10-18: that refusal no longer fires.**  Both stems now reach
+    a `*_compiles_correctly_universal` carrying the walk terminal, so the row
+    that pinned "no proof file exists" is replaced by one that pins WHAT the
+    file contains — a universal theorem and its walk terminal, and NOT a
+    `q_reaches_call_at_…` substitution, which would mean the universal path
+    still halts at an out-of-image call.  What that does not settle is whether
+    the emitted theorem TYPECHECKS: both files still admit `sorry`, and that is
+    the whole-corpus Lean run `test_formal.py`'s markers own, so those rows stay
+    with their reason corrected rather than deleted.
     """
 
     STEMS = ("floordiv", "udivmod")
 
-    def test_both_are_refused_before_a_proof_file_exists(self):
+    def test_both_now_reach_the_universal_theorem(self):
+        """They are NOT refused at GENERATION any more, and that is pinned.
+
+        Measured 2026-10-18 on this tree, generation only, no Lean:
+
+            formal/examples/floordiv.mojo  ->  floordiv_compiles_correctly_universal
+            formal/examples/udivmod.mojo   ->  udivmod_compiles_correctly_universal
+
+        with `all_goals (first | done | sorry)` — the walk terminal the
+        div0/floor-correction classes dissect — present in both.  The refusal
+        this class was written against ("the universal theorem's call walk
+        cannot follow two call sites of ONE callee, because `//` and `%` each
+        lower to a call to the same helper and ONE halt address cannot discharge
+        them") no longer fires for either stem, so a generator that STOPPED
+        raising is exactly the state to catch: what it writes is unreviewed
+        until something reads it.
+
+        Both directions are still real and neither is the interesting one.  The
+        interesting failure is a proof file nobody has read, so this row
+        asserts the file EXISTS and carries the theorem plus the walk terminal
+        (a `_reaches_call_at_…` substitution would mean the universal path still
+        halts at an out-of-image call, which is the state this class existed to
+        distinguish from "no proof at all").  A refusal for a DIFFERENT reason is
+        the other one: it would leave `test_formal.py`'s marker describing a
+        defect that is gone.
+
+        **What this does NOT establish.** "Generates" is not "proves": both
+        files still admit `sorry`, and whether the emitted theorem TYPECHECKS is
+        what `test_formal.py`'s `EXPECTED_FAILURES` rows cover, which is a
+        whole-corpus Lean run and not a light worker's.  So the marker stays,
+        with its reason corrected to what is now true.
+        """
         import formal.build as fb
         for stem in self.STEMS:
-            tmp = tempfile.mkdtemp(prefix=f"a2-divrefuse-{stem}-")
+            tmp = tempfile.mkdtemp(prefix=f"a2-divreach-{stem}-")
             try:
                 src = os.path.join(HERE, "formal", "examples", f"{stem}.mojo")
-                with self.assertRaises(fb.FormalBuildError) as caught:
-                    fb.compile_formal(src, arch="arm64",
-                                      output=os.path.join(tmp, f"{stem}.aout"),
-                                      prove=True, check=False)
-                text = str(caught.exception)
-                self.assertIn("universal theorem", text)
-                self.assertIn("halt address", text)
-                self.assertIn("calls this walk cannot follow", text)
-                # …and the decisive half: NO proof file, so there is nothing for
-                # Lean to have rejected and nothing for a residual-goal
-                # measurement to be about.
-                written = [f for f in os.listdir(tmp) if f.endswith("_proof.lean")]
-                self.assertEqual([], written,
-                                 f"{stem} wrote a proof file, so whatever it "
-                                 f"contains is unreviewed")
+                try:
+                    info = fb.compile_formal(src, arch="arm64",
+                                             output=os.path.join(
+                                                 tmp, f"{stem}.aout"),
+                                             prove=True, check=False)
+                except fb.FormalBuildError as e:
+                    self.fail(
+                        f"{stem} refuses at GENERATION again ({e}); the "
+                        f"two-call-site walk refusal came back, or it now "
+                        f"refuses for a different reason and `test_formal.py`'s "
+                        f"marker is naming the wrong subject")
+                text = open(info["proof_path"]).read()
+                self.assertIn(f"theorem {stem}_compiles_correctly_universal",
+                              text,
+                              f"{stem} wrote a proof file with no universal "
+                              f"theorem in it: that is not a proof of anything, "
+                              f"and it is how a silent substitution would look")
+                self.assertNotIn("_reaches_call_at_", text,
+                                 f"{stem}'s universal path still halts at an "
+                                 f"out-of-image call, so the file carries a "
+                                 f"reachability statement instead — read THAT "
+                                 f"before treating it as a value theorem")
+                self.assertIn(
+                    _ADMIT, text,
+                    f"{stem}'s proof carries no walk terminal, so the residual "
+                    f"measurement classes have nothing to dissect in it")
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
-
     def test_the_image_itself_is_fine_without_the_proof(self):
         # The refusal is at PROOF GENERATION, so `--no-prove` builds both
         # architectures and both spellings run and answer. If this stopped being
@@ -8495,6 +9057,52 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
                                           "nothing")
                 ok, detail, _sorries = got
                 self.assertTrue(ok, f"{name}: {detail}")
+
+
+class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
+    """`arm64_slt_iff_lt` is present, states the sign-flip equivalence, and proves.
+
+    `_gen_range_loop` refuses a signed loop test rather than emitting an
+    obligation that is FALSE about the machine, and lifting that refusal needs
+    this lemma (`bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_
+    against_a_signed_flag.md`, step 1).  Pinning the statement keeps a later
+    edit from weakening the fact the generator half is written against; the
+    elaboration is what makes the pin mean "provable" rather than "present".
+    """
+
+    STATEMENT = ("theorem arm64_slt_iff_lt (a b : UInt64)\n"
+                 "    (hr : a < 0x8000000000000000) "
+                 "(hb : b < 0x8000000000000000) :\n"
+                 "    (a ^^^ 0x8000000000000000) < "
+                 "(b ^^^ 0x8000000000000000) ↔ a < b")
+
+    def test_the_statement_is_in_the_library(self):
+        with open(os.path.join(HERE, "lib", "ProofLib.lean"),
+                  encoding="utf-8") as f:
+            lib = f.read()
+        self.assertIn(
+            self.STATEMENT, lib,
+            "lib/ProofLib.lean no longer states `arm64_slt_iff_lt` with the "
+            "equivalence the signed range-loop contract needs, so step 1 of "
+            "that document is undone")
+
+    def test_the_lemma_elaborates(self):
+        tmp = tempfile.mkdtemp(prefix="a2-slt-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "slt_lemma.lean")
+        with open(path, "w") as f:
+            f.write("import ProofLib\n\n"
+                    "example (a b : UInt64)\n"
+                    "    (hr : a < 0x8000000000000000)\n"
+                    "    (hb : b < 0x8000000000000000) :\n"
+                    "    (a ^^^ 0x8000000000000000) < "
+                    "(b ^^^ 0x8000000000000000) ↔ a < b :=\n"
+                    "  arm64_slt_iff_lt a b hr hb\n")
+        got = _check_proof(path)
+        if got is None:
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        ok, detail, _sorries = got
+        self.assertTrue(ok, detail)
 
 
 if __name__ == "__main__":

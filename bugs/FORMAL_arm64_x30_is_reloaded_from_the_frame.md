@@ -117,9 +117,10 @@ two this doc's §"What is broken" describes, and the first is
 
 inside a `rw [runs_cons_seq …]` over a `sp ± 131072` step — the same shape
 (`maximum recursion depth` on a `sp`-arithmetic step in a run proof) that
-`bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md` records for
-`mod_by_var` and `same_image_leaf` and attributes to the `arm64_ext_imm12`
-merge. **So steps 0–2 below are still the right work and still generator-only,
+`mod_by_var` and `same_image_leaf` were both measured in and attributed to the
+`arm64_ext_imm12` merge (`f7bd05ea` discharges a block-start `runs_cons_seq`
+side condition with `first | (simp only [qT0, qS0] <;> done) | rfl` rather than
+a bare `rfl`). **So steps 0–2 below are still the right work and still generator-only,
 but no dec1 example can be shown to typecheck until that separate fix lands**,
 and a proof that has not typechecked is not a fix. The `FrameOk` and `hx30fr`
 sites this doc names are still among the six (`…:4564:16` is the frame window's

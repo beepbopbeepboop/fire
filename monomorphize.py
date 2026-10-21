@@ -224,7 +224,16 @@ def _check_no_value_shadow(src: str, type_params) -> None:
     fail loudly rather than emit wrong code."""
     for tp in type_params:
         e = re.escape(tp)
-        if re.search(rf'\b(?:var|for)\s+{e}\b', src) or \
+        # The `var`/`for` match must not be a MEMBER ACCESS: the function
+        # type parameter's owned-parameter convention (`def(var
+        # InnerIteratorType.Element) thin -> OutputType` in std/iter's
+        # _MapIterator, measured 2026-10-21 (further)) spells `var
+        # <Type>.Element` in an ANNOTATION — a type position, not a binding —
+        # and the bare-word substitution rewrites it to `var
+        # <inner>.Element`, which is exactly what the substituted annotation
+        # should read. A real statement-level `var T` / `for T` is followed
+        # by `=`, `in`, or end-of-line, never `.`.
+        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
            re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "
@@ -358,15 +367,43 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
 
     # Drop the [type-params] block and rename the definition (fn or struct).
     src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]
+    # A type parameter that is ITSELF spelled like a receiver convention
+    # (`_ListIter[mut: Bool, ...]` — `mut` is both the parameter name and the
+    # receiver convention): the bare-word pass must not rewrite the `mut` of a
+    # receiver marker (`def __next__(mut self)`), or the marker is destroyed
+    # and the method compiles with an EXTRA parameter glued to the receiver —
+    # the C signature takes 2 args where the caller's `next(<struct>)`
+    # dispatch passes 1, a hard gcc "too few arguments" error. The receiver
+    # position is exactly `<modifier> self` (the modifier may sit on its own
+    # line, as stdlib spells it), and only that occurrence is excluded.
+    # (The parameter's other mentions — its own declaration block, docstring,
+    # annotation use — are still substituted; the docstring rewrite is
+    # cosmetic and codegen-irrelevant.)
     # Substitute each type parameter with its concrete type (whole-word),
     # skipping any nested scope that shadows this specific name. The
     # `Self.<param>` pass runs FIRST and consumes those occurrences whole.
     for tp, concrete in type_args.items():
         spans = _shadowed_spans(src, tp)
+        if tp in _RECEIVER_MODS:
+            spans = spans + [
+                (m.start(), m.end())
+                for m in re.finditer(rf'\b{re.escape(tp)}\s+(?=\bself\b)', src)
+            ]
         src = _sub_outside_spans(rf'\bSelf\.{re.escape(tp)}\b', str(concrete),
                                  src, spans)
         src = _sub_outside_spans(rf'\b{re.escape(tp)}\b', str(concrete), src, spans)
     return mangled, src
+
+
+# Receiver-convention spellings a type parameter may be named after (the
+# parser's ownership vocabulary, fire_compiler's `_CONV_*` sets plus the
+# transfer/move spellings). `monomorphize_source` must protect a
+# `<param> self` receiver marker when the parameter is spelled like one of
+# these, and `instantiate` folds that guard into the CAS key (a pre-guard
+# cache entry for such a template carries the corrupted `True self` form).
+_RECEIVER_MODS = frozenset(
+    {'mut', 'inout', 'out', 'var', 'owned', 'read', 'ref', 'imm',
+     'borrowed', 'borrow', 'delete'})
 
 
 def compile_fn(fn_src: str, gcc: str = None) -> tuple:
@@ -401,12 +438,22 @@ ELAB_DEPTH: list = [0]
 
 
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
-                gcc: str = None) -> tuple:
+                gcc: str = None, nested_defs: list = None,
+                renames: list = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
     return convention: an artifact path, not its bytes), matching the
     existing `object_path_or_None` contract exactly.
+
+    `nested_defs` / `renames` splice nested-struct definitions into the
+    translation unit (see the note at the splice site below): each entry of
+    `nested_defs` is a monomorphized, mangled-named struct definition to
+    place AHEAD of the template, and each `(raw, mangled)` pair of `renames`
+    is rewritten throughout the template (and the nested defs) so a by-value
+    nested field resolves to the real layout. Both fold into the CAS key, so
+    a nested instantiation never collides with the plain one of the same
+    (template, type_args).
 
     `cpp_object_path` is non-None exactly when the instantiated template
     contains a nested `async def`/generator this codegen compiles to a real
@@ -436,7 +483,52 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     silently_wrong.md's test_tracing.mojo analysis)."""
     gcc = gcc or find_gcc()
     mangled, concrete = monomorphize_source(template_src, type_args)
-    key = cas.instantiation_key(template_src, type_args, comptime_args, gcc, _OBJ_FLAGS)
+    # A nested generic-struct TYPE ARGUMENT (a mention like `_ListIter[True,
+    # Int, ...]` substituted for the template's parameter) does not resolve in
+    # the isolated translation unit: a fresh GimpleGen has no registration for
+    # it, so a BY-VALUE field `var _inner: _ListIter[...]` erases to int64_t —
+    # one word where the layout is three — and every method the wrapper calls
+    # on it (`next(self._inner)`) falls into the `next`-on-unresolvable-
+    # receiver refusal. `nested_defs` splices the nested struct's own
+    # monomorphized DEFINITION (fields + methods, already renamed to its
+    # mangled name by monomorphize_source) ahead of the template, and
+    # `renames` rewrites each nested mention in the template body to that
+    # mangled name, so the by-value field gets the real layout and the method
+    # calls resolve against the definition in the same TU. (The
+    # explicit-bracket path's established behaviour — the mangled nested name
+    # erases to int64_t/pointer inside the isolated body — stands for
+    # pointer-only uses, which are ABI-harmless; this splice is what a by-
+    # value use needs. See Elaborator.elaborate_generic_struct's `nested`.)
+    # CAS-key guard for the receiver-marker fix in monomorphize_source: a
+    # template whose parameter list is named after a receiver convention
+    # (`_ListIter[mut: Bool, ...]`) monomorphizes to DIFFERENT text than it
+    # did before that fix (the `<param> self` marker is preserved instead of
+    # rewritten to the concrete value) — but the pre-fix output is keyed on
+    # the SAME (template, type_args) content. Any such entry cached before
+    # the fix (a `True self`-corrupted `__next__` with an extra parameter)
+    # would be served to this build and link as the wrong signature. The
+    # guard is a deterministic function of (template, type_args), so folding
+    # it into the key material reroutes ONLY the affected instantiations to a
+    # fresh entry; every other plain instantiation keeps its exact v1 key and
+    # its cached object.
+    _recv_guard = any(_tp in _RECEIVER_MODS for _tp in (type_args or {}))
+    _nested_extra = None
+    if nested_defs or renames or _recv_guard:
+        # Longest mention first: a nested mention CONTAINS its deeper
+        # mentions verbatim, so replacing the inner one first would break the
+        # outer match (`A[B[C]]` — rename `B[C]` first and `A[B[C]]` no
+        # longer matches as a whole).
+        for _raw, _repl in sorted(renames or [], key=lambda r: -len(r[0])):
+            concrete = concrete.replace(_raw, _repl)
+        _defs = []
+        for _d in (nested_defs or []):
+            for _raw, _repl in sorted(renames or [], key=lambda r: -len(r[0])):
+                _d = _d.replace(_raw, _repl)
+            _defs.append(_d)
+        concrete = '\n'.join(_defs) + '\n' + concrete
+        _nested_extra = (tuple(renames or []), tuple(_defs), _recv_guard)
+    key = cas.instantiation_key(template_src, type_args, comptime_args, gcc,
+                                _OBJ_FLAGS, extra=_nested_extra)
 
     _log = os.environ.get('MOJO_ELAB_LOG')
     if _log:

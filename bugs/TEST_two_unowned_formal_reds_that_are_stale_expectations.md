@@ -5,10 +5,10 @@
 > and the doc the row cited (`FORMAL_sum_range_generation_refused_and_it_is_not_an_
 > expected_failure`) was itself deleted with commit `cbf00b9f`, which is what
 > closed the generation refusal.  What was left of that doc was a TYPECHECK
-> failure, which was a different subject from "does it generate" (a `B.cond`
-> chain whose closing `simp` named no flag lemma; fixed, and the order that lets
-> the flag lemma fire pinned in `test_formal_call_proof_gen.py`).  §1 below is
-> the whole of what is still open here.
+> failure (a `B.cond` chain closing with no flag lemma, and the order that lets
+> the lemma fire — fixed in the flag-lemma/order work, `ad54fc2f6`) and
+> is a different subject from "does it generate".  §1 below is the whole of
+> what is still open here.
 
 **Area:** `test_formal_sweep_truth.py::TestAxiomClosureCensus` (via
 `test_formal_admitted.py::AXIOM_CLOSURE`) and

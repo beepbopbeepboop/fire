@@ -53,6 +53,7 @@ import sys
 import tempfile
 
 import fire_compiler as F
+from formal import model as M
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -439,6 +440,22 @@ CASES = [
      "    print(\"v:\", R[0][1], R[1][0])\n"
      "    return 0\n",
      "v: 2 3\n"),
+    # …and the OTHER side of the same shape, which is what keeps the subscript
+    # refusal from being an arm keyed on the literal's element kind alone:
+    # `v` starts as `[1]` and `append` puts a `[2]` in it, so `v[1][0]` is a
+    # subscript of a LIST and must answer 2.  `own_shape_kind("v")` still says
+    # `list:int` — the literal said so and the append never retracted it — so a
+    # refusal that read only the kind would refuse this correct program.  The
+    # append scan (`ValueKinds.appended_names`) is the second half of the
+    # question, and this row is why it is not optional.
+    ("a_subscript_of_a_list_that_was_appended_to_is_a_number",
+     "def main(n):\n"
+     "    var v = [1]\n"
+     "    v.append([2])\n"
+     "    var s = v[1][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "2"),
     # The MODULE-GLOBAL spelling of the same literal, which is a DIFFERENT
     # reader (`formal/model.py::global_slot_kind` →
     # `container_literal_elem_kind`) and refused identically before the change.
@@ -978,7 +995,50 @@ LAYOUT_CASES = [
      "main", None),
 ]
 
-# ── the tuple-store target shapes ──
+# ── the static-initializer walk, at the MODEL level and with no image ───────
+#
+# `model._static_container_words` is the reader that decides a module-level
+# container literal's blob, and `model.container_element_without_a_word` asks it
+# WHICH element it could not answer so the refusal can quote it.  Both are pure
+# functions over an AST node, so they are checked here without a build: the
+# bug this pins was a `NameError` out of the reader (the two arms appended to a
+# local `missing` that stopped existing when the walk became a `ContextVar`),
+# which no build-and-run row can see — the reader raises before anything is
+# compiled, and the only caller that can reach it was added with the variable.
+UNIT_CHECKS = [
+    ("a_list_element_the_build_cannot_fold_is_NAMED_not_a_traceback",
+     lambda: _missing_element_named(
+         F.ListExpr(elements=[F.IntLiteral(value=1), F.IdentExpr(name="q")])),
+     "q"),
+    ("a_dict_key_the_build_cannot_fold_is_NAMED_not_a_traceback",
+     lambda: _missing_element_named(
+         F.DictExpr(pairs=[[F.IntLiteral(value=1), F.IdentExpr(name="q")]])),
+     "q"),
+    ("a_dict_key_that_IS_a_word_is_no_missing_element",
+     lambda: _missing_element_named(
+         F.DictExpr(pairs=[[F.IntLiteral(value=1), F.IntLiteral(value=2)]])),
+     None),
+    ("the_walk_is_still_None_with_no_reporter_listening",
+     lambda: _static_words(F.ListExpr(
+         elements=[F.IntLiteral(value=1), F.IdentExpr(name="q")])),
+     None),
+    ("the_walk_still_lays_out_an_all_word_literal",
+     lambda: _static_words(F.ListExpr(elements=[F.IntLiteral(value=1),
+                                               F.IntLiteral(value=2)])),
+     [2, 1, 2]),
+]
+
+
+def _missing_element_named(node):
+    """The NAME of the element `container_element_without_a_word` reports."""
+    element = M.container_element_without_a_word(node)
+    return getattr(element, "name", None)
+
+
+def _static_words(node):
+    """`_static_container_words` with nobody listening, as the hot path calls it."""
+    return M._static_container_words(node)
+
 #
 # `a, b = rhs` is one construct with four target shapes, and the two
 # architectures used to disagree about two of them.  arm64's `_tup_slot` already
@@ -2120,6 +2180,21 @@ REFUSALS = [
      "    printf(\"a=%d\", a)\n"
      "    return 0\n",
      "asks for a container element"),
+    # …and the same fault with the base written as a SUBSCRIPT, which is the one
+    # base shape the scalar evidence did not ask about: `v = [1]` gives `v[0]`
+    # the kind `int` (from the literal's element kind), and the element address
+    # is then that word plus 8.  Measured on both architectures from a GREEN
+    # build: SIGSEGV, exit 139, nothing on stderr.  The needle is the named-base
+    # sentence's own clause, so this cannot pass by refusing something else; the
+    # append-corrected row beside it in `CASES` is what stops the fix from being
+    # an arm that reads the literal's kind without asking whether the list grew.
+    ("an_element_of_a_subscript_of_a_list_of_integers_is_refused",
+     "def main(n):\n"
+     "    var v = [1]\n"
+     "    var s = v[0][0]\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     "asks for a container element"),
     # `%s` OF AN INTEGER, and the same argument for putting it here: the
     # defect is SHARED by the two backends, so only a refusal that is required
     # to read identically from each can see it.  `%s` is the one printf
@@ -2875,6 +2950,21 @@ def main():
         return 2
 
     passed = failed = 0
+    # The model-level rows first, and they are the only ones that need no image:
+    # a reader that raises cannot be reached by a build, which is the whole point
+    # of the first two rows.
+    for name, thunk, want in UNIT_CHECKS:
+        try:
+            got = thunk()
+        except Exception as e:
+            got, want = f"{type(e).__name__}: {e}", "<no exception>"
+        if got == want:
+            passed += 1
+            if args.verbose:
+                print(f"  PASS  {name}")
+        else:
+            failed += 1
+            print(f"  FAIL  {name}: got {got!r}, want {want!r}")
     with tempfile.TemporaryDirectory() as tmpdir:
         for entry, kind in selected:
             try:

@@ -2820,7 +2820,18 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # the length is read once and the slots after the star are counted
             # from its END (`a, *mid, z` over "abcd" -> `mid == ['b', 'c']`).
             # `starred_slot_index` is the model for the arithmetic.
-            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
+            # GIMPLE strict calls take SIMPLE operands: an inline cast in a call
+            # argument (`mojo_strlen ((char *) k)`) is a hard error
+            # ("expected expression before '(' token" / "invalid argument to
+            # gimple call") in `__GIMPLE`-tagged functions — the ones WITHOUT
+            # setjmp (see emit_funcs/emit_loops `_sig_kw`) — while the same line
+            # parses fine in setjmp-tagged ones. The starless-dict loops this
+            # check guards landed in three such functions in the selfhost
+            # closure (solvers/coro/myinterpreter) and the whole build failed to
+            # compile. Hoist the cast to its own CONVERSION statement; behavior
+            # is unchanged in both tag classes.
+            _key_cstr = gen._new_val('char *', f"(char *) {key_tmp}")
+            _klen = gen._new_val('int64_t', f"mojo_strlen ({_key_cstr})")
             _n = gen._new_val('int64_t', f"{_n_after}LL")
             # CPython raises ValueError when a starred target's non-starred
             # slots outnumber the item's elements ("not enough values to unpack
@@ -2870,6 +2881,76 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                                     f"{_as_str(_pos)}, {_as_str(_plus)})")
                 gen._emit(f"  {gen._cname(_svn)} = {_chr};")
         else:
+            # A starless tuple target over a DICT unpacks the KEY, and a
+            # key is a string, so this loop's arity is the key's LENGTH and
+            # not the pair the target spells. CPython refuses any key that
+            # is not exactly `len(var_names)` characters — `for k, v in
+            # {"abc": 1}` is `ValueError: too many values to unpack
+            # (expected 2)`, `for k, v in {"a": 1}` the "not enough" arm —
+            # and the interpreter already raises both
+            # (`myinterpreter._check_exact_arity`, item-is-a-str wording).
+            # The compiled path was the one engine that never checked: it
+            # bound the whole key to the first name and the literal 0 to
+            # every other, so a three-character key printed `abc 0` and
+            # exited 0. Printing a wrong answer with no diagnostic is the
+            # worse shape by this project's ordering; a raise is what the
+            # other two engines already do, so this is the compiled half of
+            # that rule.
+            #
+            # TWO comparisons, one per direction, so each carries CPython's
+            # own wording for that direction — and together they are the
+            # `!=` the check must be. A `<`-only guard (the shape the STAR
+            # branch above needs, whose danger is a NEGATIVE index) would
+            # still let the long key through silently, which is the case
+            # this was found on. Same emission idiom as that branch:
+            # `_emit_call('void', '', 'mojo_raise_value_error', ...)`.
+            #
+            # What this deliberately does NOT change: a key of exactly the
+            # right length still binds the whole key plus the 0 stand-in
+            # below, which is this lowering's shape (the value slots are
+            # declared int64_t for the sibling list arm — see the note
+            # above). This adds a refusal and takes no binding away, so a
+            # loop that worked before still works.
+            #
+            # The dict arm of the runtime-dispatch sibling (the boxed
+            # `for name, func in self.funcs:` where funcs is really a LIST)
+            # never executes this — `mojo_is_registered_list` routes it to
+            # the list arm — so real code that iterates a list of pairs is
+            # not newly refused by a check written here.
+            # GIMPLE strict calls take SIMPLE operands: an inline cast in a call
+            # argument (`mojo_strlen ((char *) k)`) is a hard error
+            # ("expected expression before '(' token" / "invalid argument to
+            # gimple call") in `__GIMPLE`-tagged functions — the ones WITHOUT
+            # setjmp (see emit_funcs/emit_loops `_sig_kw`) — while the same line
+            # parses fine in setjmp-tagged ones. The starless-dict loops this
+            # check guards landed in three such functions in the selfhost
+            # closure (solvers/coro/myinterpreter) and the whole build failed to
+            # compile. Hoist the cast to its own CONVERSION statement; behavior
+            # is unchanged in both tag classes.
+            _key_cstr = gen._new_val('char *', f"(char *) {key_tmp}")
+            _klen = gen._new_val('int64_t', f"mojo_strlen ({_key_cstr})")
+            _nslots = gen._new_val('int64_t', f"{len(var_names)}LL")
+            _long = gen._new_val('_Bool', f"{_as_str(_klen)} > {_as_str(_nslots)}")
+            _bb = gen._new_bb(); _bo = gen._new_bb()
+            gen._emit(f'  if ({_long}) goto {_bb}; else goto {_bo};')
+            gen._emit_label(_bb)
+            gen._emit_call('void', '', 'mojo_raise_value_error',
+                           [('char *', gen._intern_string(
+                               f'too many values to unpack '
+                               f'(expected {len(var_names)})'))])
+            gen._emit(f'  goto {_bo};')
+            gen._emit_label(_bo)
+            _short = gen._new_val('_Bool', f"{_as_str(_klen)} < {_as_str(_nslots)}")
+            _sb = gen._new_bb(); _so = gen._new_bb()
+            gen._emit(f'  if ({_short}) goto {_sb}; else goto {_so};')
+            gen._emit_label(_sb)
+            gen._emit_call('void', '', 'mojo_raise_value_error',
+                           [('char *', gen._intern_string(
+                               f'not enough values to unpack '
+                               f'(expected {len(var_names)}, got a shorter '
+                               'string)'))])
+            gen._emit(f'  goto {_so};')
+            gen._emit_label(_so)
             # Assign key to first name, NULL (zero) to remaining names
             vn0 = var_names[0]
             cvn0 = gen._cname(vn0)
@@ -3681,39 +3762,72 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     gen._emit(f"  goto {bb_cond};")
 
     gen._emit_label(bb_cond)
-    if has_next_fn in gen.func_return_types:
+    # A struct that drives the loop with Python's exhaustion-by-RAISE —
+    # `__next__` that `raise StopIteration`s (lowers to
+    # `mojo_exc_type_set (...)` + `mojo_raise ()`) and no `__has_next__` —
+    # cannot test a loop condition at all: the condition IS the call, and
+    # only a setjmp region can see the longjmp `mojo_raise` makes. So the
+    # frame below is pushed ONCE at loop entry (the same idiom as
+    # _gen_stmt_TryStmt / the assert_raises with-frame: bump
+    # _mojo_exc_top, checkpoint the cleanup-thunk stack, setjmp) and stays
+    # live across every iteration — `mojo_raise` longjmps to
+    # _mojo_exc_stack[_mojo_exc_top] regardless of the call stack, so the
+    # raise out of `__next__` lands in bb_exc and becomes the loop exit.
+    # The frame is popped exactly once on every way OUT of the region:
+    # bb_exc (exhaustion), a `break` (intercepted below — it jumps straight
+    # to bb_after, past bb_exc), or a `return` (same intercept). Anything
+    # that is NOT StopIteration is re-raised, not swallowed.
+    use_raise_exhaustion = (
+        has_next_fn not in gen.func_return_types
+        and next_fn in gen.func_return_types
+        and iter_base in getattr(gen, '_intu_prereg_structs', ()))
+    bb_exc = None
+    if use_raise_exhaustion:
+        gen._func_used_setjmp = True
+        bb_exc    = gen._new_bb()
+        sj_ret    = gen._new_temp('int')
+        cond_t    = gen._new_temp('_Bool')
+        temp_top1 = gen._new_temp('int')
+        temp_inc  = gen._new_temp('int')
+        temp_top2 = gen._new_temp('int')
+        gen._emit(f"  {temp_top1} = _mojo_exc_top;")
+        gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
+        gen._emit(f"  _mojo_exc_top = {temp_inc};")
+        gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+        gen._emit("  mojo_cleanup_checkpoint_save ();")
+        gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
+        gen._emit(f"  {cond_t} = {sj_ret} != 0;")
+        gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_body};")
+    elif has_next_fn in gen.func_return_types:
         hn_t   = gen._new_temp('int')
         cond_t = gen._new_temp('_Bool')
         gen._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
         gen._emit(f"  {cond_t} = {hn_t} != 0;")
+        gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     else:
-        # Python spells exhaustion by RAISING StopIteration out of `__next__`,
-        # and this loop has no way to see a raise: `raise StopIteration` inside
-        # the method lowers to `mojo_exc_type_set (...)` + `mojo_raise ()`
-        # (measured, `Counter___next__` in the generated C), which unwinds
-        # past the loop with nothing left to test. So a struct with `__next__`
-        # and no `__has_next__` has no expressible loop condition.
-        #
-        # It USED to emit `cond = 0` with a `/* TODO */` marker, which is the
-        # same zero-iteration behaviour the runtime diagnostic is built to
-        # describe — `mojo_unsupported_iter`'s own message ends "the loop body
-        # runs zero times" — except SILENTLY. So the program exits 0 having
-        # done nothing and nothing says which of its loops was dropped:
-        #
-        #     class Counter: __iter__ / __next__ but no __has_next__
-        #     for x in c: print(x)          # prints nothing, exit 0
-        #
-        # Calling the shared refusal is strictly that plus a greppable
-        # diagnostic naming the type and the loop's file:line, which is the
-        # whole reason `_emit_unsupported_iter` exists. It is the same call
-        # `_gen_for_iter`'s dispatch makes for a type with NEITHER method, so
-        # "this iterator protocol has no lowering" stops being a property of
-        # which half of the protocol the type happens to implement.
-        gimple_ctypes._debug_note('iterator loop has no __has_next__ (Python-style __next__ exhaustion is a raise)', iter_base)
+        # No expressible loop CONDITION: either neither `__has_next__`
+        # nor `__next__`, or a `__next__`-only struct the raise-exhaustion
+        # frame above declined to trust — one that is NOT in-TU
+        # materialized (a user-defined `class Counter` with a Python-style
+        # `__next__`). The setjmp loop is enabled only for the codegen's
+        # own `_intu_prereg_structs` wrappers, whose raise protocol is
+        # spelled by this compiler's own `mojo_exc_type_set` +
+        # `mojo_raise`; a user struct's exhaustion-by-raise stays a NAMED
+        # refusal, the pinned behaviour of test_gimple.py's
+        # next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (its
+        # docstring: "making the loop actually work is the type-inference
+        # project the doc parks, and inventing a wrong loop here would be
+        # worse than both"). It USED to emit `cond = 0` with a
+        # `/* TODO */` marker — the same zero-iteration behaviour the
+        # runtime diagnostic is built to describe, except SILENTLY. The
+        # shared refusal is strictly that plus a greppable diagnostic
+        # naming the type and the loop's file:line; it is the same call
+        # `_gen_for_iter`'s dispatch makes for a type with NEITHER method.
+        gimple_ctypes._debug_note('iterator loop has no __has_next__/__next__ (no expressible loop condition)', iter_base)
         gen._emit_unsupported_iter(f'{iter_base} (no __has_next__)', node)
         cond_t = gen._new_temp('_Bool')
         gen._emit(f"  {cond_t} = 0;")
-    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
@@ -3724,10 +3838,50 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gimple_ctypes._debug_note('iterator loop body has no __next__', iter_base)
         gen._emit(f"  /* TODO: no __next__ on {iter_base} */")
     gen.loop_stack.append((bb_post, bb_after))
-    gen._gen_loop_body(body)
+    if use_raise_exhaustion:
+        # A `break` out of this loop lowers to `goto <bb_after>;`, which
+        # leaves the setjmp region WITHOUT passing bb_exc — pop on the way
+        # out. `continue` targets bb_post and stays inside (the frame must
+        # remain live for the next `__next__`); a `return` also leaves and
+        # is intercepted the same way the assert_raises frame intercepts
+        # its exits. An inner loop's `break` names the INNER loop's
+        # bb_after label, so it does not match and is correctly untouched.
+        _sx_orig_emit = gen._emit
+
+        def _sx_emit(line, rv=None, rt=None):
+            stripped = line.strip() if isinstance(line, str) else ''
+            if stripped == f'goto {bb_after};' or stripped.startswith('return'):
+                _sx_orig_emit("  mojo_exc_pop ();")
+            _sx_orig_emit(line)
+
+        gen._emit = _sx_emit
+        try:
+            gen._gen_loop_body(body)
+        finally:
+            gen._emit = _sx_orig_emit
+    else:
+        gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    gen._emit(f"  goto {bb_cond};")
+    if use_raise_exhaustion:
+        # Loop back straight to `__next__`: the frame at bb_cond already
+        # ran once and stays live (a second push here would leak a level
+        # off _mojo_exc_top every iteration).
+        gen._emit(f"  goto {bb_body};")
+        gen._emit_label(bb_exc)
+        gen._emit("  mojo_exc_pop ();")
+        # StopIteration is the loop exit; any other exception raised inside
+        # the body or by `__next__` is NOT consumed by this loop — the pop
+        # above already restored _mojo_exc_top to the enclosing frame, so
+        # re-raising propagates there (or exits uncaught at the top).
+        exc_t   = gen._new_temp('int64_t')
+        is_stop = gen._new_temp('_Bool')
+        gen._emit(f"  {exc_t} = mojo_exc_type_get ();")
+        gen._emit(f"  {is_stop} = {exc_t} == (int64_t){gen._exc_type_id('StopIteration')};")
+        gen._emit(f"  if ({is_stop}) goto {bb_after};")
+        gen._emit("  mojo_raise ();")
+    else:
+        gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)

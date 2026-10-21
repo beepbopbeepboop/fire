@@ -2442,6 +2442,17 @@ class GimpleGen:
         # Populated from the CURRENT file's own AST only (same-file resolution);
         # a struct imported from elsewhere without local source has no entry here.
         self._struct_method_signatures: dict[str, list] = {}  # _sms_key(struct, method) -> [candidate-overload dicts]
+        # struct name -> {method name -> that method's mangled C symbol}, the
+        # METHOD half of a generated `_mojo_getattr_<Struct>` (its FIELD half
+        # is `struct_field_types`). Written by module_gen's
+        # `_emit_struct_method_prototypes` — beside the prototypes it names,
+        # so an arm cannot reference a symbol nothing declared — and read by
+        # `_emit_reflection_dispatch`, which emits
+        # `mojo_bound_method_new(<symbol>, obj)` for each entry: the same
+        # value a typed receiver's `c.add` builds (see
+        # `_lower_bound_method_value`), for the one receiver spelling it
+        # cannot reach, a value erased to int64_t.
+        self._getattr_method_arms: dict = {}
         # mangled C symbol -> full param C-type list (incl. self), for a
         # not-yet-emitted overload's forward-referenced call to be coerced
         # correctly by _emit_call. Deliberately kept separate from the shared
@@ -5251,6 +5262,8 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
+    def _materialize_in_tu_wrapper(self, csn: str, w: str) -> str:
+        return ginf._materialize_in_tu_wrapper(self, csn, w)
     def _stringify_value(self, et: str, ev: str, enode=None) -> str:
         return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:

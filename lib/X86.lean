@@ -691,6 +691,57 @@ theorem x86_shift_post_mem (s : X86State) (i digit : Nat) (a : UInt64)
   · exact x86_set_reg_mem s i a
   · simp only [x86_set_flag4, x86_set_reg_mem]
 
+/-- …and its program counter, which it never writes: both arms are a register
+    write and a flag write.
+
+    Stated separately from the `.mem` fact above for the reason that one is
+    separate from `x86_set_reg_mem`: a `.rip` projection is not a `.mem`
+    projection, and `formal/x86_64_endtoend_test.py`'s closing `hrip` reads the
+    former.  The `if k = 0` cannot reduce while `k` is a symbolic count, so
+    unfolding the definition is not enough and this fact is what the simplifier
+    needs to walk past the shift at all. -/
+theorem x86_shift_post_rip (s : X86State) (i digit : Nat) (a : UInt64)
+    (k : Nat) :
+    (x86_shift_post s i digit a k).rip = s.rip := by
+  simp only [x86_shift_post]
+  split
+  · simp only [x86_set_reg]
+    split <;> rfl
+  · simp only [x86_set_flag4, x86_set_reg]
+    split <;> rfl
+
+/-- …and its stack pointer, for an index that is NOT RSP.
+
+    `shl rsp, 1` is a legal encoding, so the unconditional statement is FALSE
+    and the hypothesis is what makes this fact true rather than convenient.  It
+    exists because a closing read whose address is a frame register projects
+    `s_k.rsp` down the whole successor chain, and a shift anywhere on the path
+    stops that projection at its `ite` unless the register it does not write is
+    named.  `formal/x86_64_endtoend_test.py`'s `_unfold` therefore carries this
+    lemma, and the symbolic index it is asked about is always a decoded ModRM
+    `rm` plus `REX.B` -- a small literal the `x86_rex_*` decodings reduce, so
+    the side condition is discharged by `simp` rather than left open. -/
+theorem x86_shift_post_rsp (s : X86State) (i digit : Nat) (a : UInt64)
+    (k : Nat) (h : i ≠ 4) :
+    (x86_shift_post s i digit a k).rsp = s.rsp := by
+  simp only [x86_shift_post]
+  split
+  · simp only [x86_set_reg]
+    split <;> simp_all
+  · simp only [x86_set_flag4, x86_set_reg]
+    split <;> simp_all
+
+/-- …and its frame pointer, the same fact one index along. -/
+theorem x86_shift_post_rbp (s : X86State) (i digit : Nat) (a : UInt64)
+    (k : Nat) (h : i ≠ 5) :
+    (x86_shift_post s i digit a k).rbp = s.rbp := by
+  simp only [x86_shift_post]
+  split
+  · simp only [x86_set_reg]
+    split <;> simp_all
+  · simp only [x86_set_flag4, x86_set_reg]
+    split <;> simp_all
+
 /-- A signed number as the 64-bit PATTERN the machine keeps: two's complement,
     truncated to 64 bits.
 

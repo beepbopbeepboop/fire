@@ -672,6 +672,16 @@ dylib_exports: list = None, globals_base: int = None,
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
+        # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
+        # parameters each function measures as TEXT, transitively through calls
+        # that forward a bare parameter (`model.text_measured_parameters`).
+        # None means "not computed"; the same one-table-per-compile shape as
+        # `_returnless` and for the same reason.
+        self._text_measured = None
+        # Lazily filled by `_callee_returned_parameter`: `{name: index or None}`
+        # for the call whose result is its own argument handed back. Computed
+        # once per callee, because it walks the callee's body.
+        self._returned_parameter: dict = {}
         self._structs: dict = {}
         # Filled by `compile()`: a callable NAME -> the label a call to it lands
         # on, and the per-definition labels it points at, which are not
@@ -1503,8 +1513,8 @@ dylib_exports: list = None, globals_base: int = None,
         # default `ulimit -s 8176` the same binary refuses at depth 59 with a
         # status and never crashes, because 8 372 224 is not a multiple of
         # 131 072 and the extra frame lands inside `STACK_FLOOR_MARGIN_BYTES`.
-        # See `model.stack_floor_charge`, which is the arithmetic and the
-        # measurement; `model.stack_floor_guarded_names` is which prologues get
+        # See `model.stack_floor_budget_for_limit`, which is the arithmetic and
+        # the measurement; `model.stack_floor_guarded_names` is which prologues get
         # this at all, and `model.stack_floor_address` is the sequence.
         #
         # It is safe here because it touches no stack memory: the floor word and
@@ -2077,7 +2087,7 @@ dylib_exports: list = None, globals_base: int = None,
         register to be polite about. That is also why this is only sound at the
         guard's current position — after the prologue has set up its frame there
         WOULD be live values here, which is the same placement argument
-        `stack_floor_charge` carries.
+        `_emit_stack_floor_guard`'s own docstring carries.
 
         The text is interned like any other string, so it is a `__TEXT` address
         and the ADRP/ADD pair is the addressing this backend already proves.
@@ -2491,12 +2501,20 @@ dylib_exports: list = None, globals_base: int = None,
         if isinstance(stmt, F.PassStmt):
             return
 
-        if isinstance(stmt, F.GlobalStmt):
+        if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
             # `global NAME` is a binding declaration only — it emits no
             # runtime operation. formal's locals are callee-saved registers
             # (or stack slots); there is no separate module-global storage
             # to redirect subsequent stores into, so the declaration is a
             # no-op and the following AssignStmt still targets the local.
+            #
+            # `nonlocal NAME` is the same kind of declaration for the capture
+            # ABI: a READ resolves to the by-value parameter `_flatten_closures`
+            # prepends, so the statement emits nothing, and a WRITE never
+            # reaches here — `model.nonlocal_write_refusal` refuses it in the
+            # shared pipeline, because a write would change only the lifted
+            # copy. So the only `nonlocal` that gets this far is the read-only
+            # spelling, and it lowers to nothing exactly as `global` does.
             return
 
         if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
@@ -2615,6 +2633,8 @@ dylib_exports: list = None, globals_base: int = None,
                 return
             if isinstance(stmt.target, F.MemberExpr):
                 slot = _member_slot_key(stmt.target)
+                if slot is None and self._try_member_frame_aug(stmt):
+                    return
                 if slot is None:
                     # A base that is an EXPRESSION has no name to key on, and
                     # that is a question about the BINDING of the base rather
@@ -3847,9 +3867,10 @@ dylib_exports: list = None, globals_base: int = None,
         leaves keep the star, and refuses the target at the identifier check
         with the one shared sentence the x86-64 site gives it. The rest-blob
         machinery this method used to own (`_emit_for_unpack_star_rest`) was
-        deleted with that refusal — the option (1) resolution of
-        `FORMAL a starred for target is broken on both backends` —
-        rather than left as dead code that reads as support."""
+        deleted with that refusal — the option (1) resolution, pinned by
+        `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target` and its
+        two sibling rows — rather than left as dead code that reads as
+        support."""
         if isinstance(tree, str):
             self._store_var(tree, 0)
             return
@@ -4460,6 +4481,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
                 fn, e, self._structs, self._functions),
@@ -4925,6 +4947,26 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returned_parameter(self, name):
+        """The positional index of a parameter `name` hands straight back.
+
+        `model.returned_parameter_position` is the whole reader — every exit is
+        a bare parameter name and they all name the same one — and this is the
+        cache, because it walks the callee's body and every call site asks the
+        same question about the same declaration. The answer is what lets
+        `ValueKinds` carry a FOREIGN-BYTES argument through
+        `def ident(s: String): return s`, which a declared `-> String` cannot
+        say and whose loss was a wrong number on both architectures.
+
+        `None` for a callee this image does not declare, which leaves the call
+        result classified exactly as it was.
+        """
+        if name not in self._returned_parameter:
+            fn = self._functions.get(name)
+            self._returned_parameter[name] = (
+                None if fn is None else M.returned_parameter_position(fn))
+        return self._returned_parameter[name]
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -5882,7 +5924,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         business, and this one would not answer it.
         """
         kind = self._expr_str_kind(obj)
-        evidence = M.scalar_container_base_evidence(obj, kind)
+        evidence = M.scalar_container_base_evidence(
+            obj, kind, getattr(self, "_vkinds", None))
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
@@ -6650,6 +6693,39 @@ ctor_field_value=self._ctor_field_value_for(name),
         if reason is not None:
             raise CodegenError(reason)
 
+    def _refuse_foreign_bytes_into_text_parameter(self, name, e: F.CallExpr) -> None:
+        """Raise when KERNEL BYTES are passed into a parameter the callee `len`s.
+
+        The `FOREIGN_BYTES_KIND` kind is attached to the expression that read the
+        kernel's bytes and not to the word, so it is dropped the moment a value
+        crosses a call boundary: the DIRECT `len(x)` is refused, and
+        `def nchars(s: String): return len(s)` emitted a `strlen` that answered
+        6 for `héllo` where CPython answers 5. This is the call boundary's half
+        of that refusal, and the decision and the words are
+        `model.foreign_bytes_into_text_parameter_refusal`, read by x86-64 from
+        the same one, so the two architectures cannot disagree about one call.
+
+        A no-op unless the callee is a function THIS image declares and its body
+        indeed measures the parameter as text — directly, or through the
+        transitive closure `model.text_measured_parameters` computes over the
+        image's calls — so it can only fire where a kernel string is handed to
+        a `len`, which is exactly the wrong answer it exists to stop. The
+        RETURNED spelling (`def ident(s): return s`, then `len(y)`) is carried
+        by `ValueKinds` through `_callee_returned_parameter` instead, because
+        the wrong answer there is at the caller's `len` and not at this call.
+        """
+        callee = self._functions.get(name)
+        if callee is None:
+            return
+        if self._text_measured is None:
+            self._text_measured = M.text_measured_parameters(
+                self._functions.values())
+        reason = M.foreign_bytes_into_text_parameter_refusal(
+            name, callee, list(e.args or ()), self._expr_str_kind,
+            measured=self._text_measured.get(name))
+        if reason is not None:
+            raise CodegenError(reason)
+
     def _refuse_return_annotation_kind_mismatch(self, value) -> None:
         """Raise when this function returns a double under an integer annotation.
 
@@ -7129,6 +7205,10 @@ ctor_field_value=self._ctor_field_value_for(name),
     # next statement reads.
     def _emit_pointer_store(self, target: F.CallExpr, value) -> None:
         obj = target.func.obj
+        # The VALUE's kind decides whether a store through a DOUBLE pointee is
+        # exact (a double: store its bits) or a silent wrong answer (an integer:
+        # `p.value() = 1` writes a denormal). `_expr_str_kind` is the same
+        # reader the LOAD's consumers ask, so the two sides agree.
         how, why = M.pointer_store_lowering(
             self._cur_fn, target, self._structs, self._functions, self._structs,
             value=value, class_of=self._printf_arg_conversion_class)
@@ -7151,6 +7231,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         else:
             self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))  # pop the value back into X0
+
+    def _try_member_frame_aug(self, stmt) -> bool:
+        """`p.value().b <op>= v` — a member of a frame a POINTER names.
+
+        The plain store `p.value().b = v` already resolves the frame
+        (`model.pointer_frame_expression`, the same decision the read arm
+        makes), so the augmented form DESUGARS onto the two arms that exist —
+        `p.value().b = p.value().b <op> v` — rather than growing a second
+        read-modify-write that would have to restate every operator's lowering
+        a third time. That is the same desugaring the named-holder arm already
+        does for the operators it delegates to `_emit_binop`.
+
+        It is offered only when the dereference's receiver is a NAME, because
+        the desugaring emits the base once for the read and once for the store,
+        and a receiver that is a CALL would run twice. A name is a register
+        read, so both emissions are the same load.
+
+        Returns True when the statement was emitted; False when the base is not
+        this shape, so the caller keeps its own refusal instead.
+        """
+        base = M.member_base_node(stmt.target)
+        if not (isinstance(base, F.CallExpr)
+                and isinstance(base.func, F.MemberExpr)
+                and isinstance(base.func.obj, F.IdentExpr)):
+            return False
+        st, _why = M.pointer_frame_expression(
+            self._cur_fn, base, self._structs, self._structs)
+        if st is None:
+            return False
+        op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
+            else stmt.op
+        self._emit_stmt(F.AssignStmt(
+            target=stmt.target,
+            value=F.BinaryOp(op=op, left=stmt.target, right=stmt.value)))
+        return True
 
     # A STORE into a frame a POINTER names — `p.value().field = v`, the store
     # half of the member-read arm's `p.value().field`.  It exists because the
@@ -7671,6 +7786,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         byte for byte so the class is a red row rather than a shorter sentence.
         """
         label = self._intern_string(text)
+        # X2 is the interned blob's BYTE length, not `len(text)`; the text is
+        # UTF-8 and several of the stop messages are not ASCII, which is the
+        # truncation `model.diagnostic_length` documents.
         self.asm.emit_adrp_add(1, label)                   # X1 = text
         self.asm.emit(encode_movz_xd_imm(0, 2))            # X0 = fd = stderr
         self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))
@@ -10709,6 +10827,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         # pattern plus one on both architectures where the interpreter answers
         # 4.9; `model.call_argument_kind_refusal` says why in the words.
         self._refuse_word_position_kind_mismatch(name, e)
+        # …and a KERNEL-BYTES argument reaching a parameter the callee measures
+        # as TEXT. Beside the check above and for the same reason — this is the
+        # last point where the resolved callee and its arguments are both in
+        # hand — and a different rule: that one reads the DECLARATION, this one
+        # reads the callee's own BODY, because a `String` annotation is the
+        # honest type and the foreignness is a fact about the bytes.
+        self._refuse_foreign_bytes_into_text_parameter(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -10733,7 +10858,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # payload type, rather than the pointer model's.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and not M.string_operand_is_string(
+                and not M.is_non_pointer_string(
                     self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:
@@ -10750,6 +10875,19 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
             return
+        # …and a METHOD call on a MODULE GLOBAL is neither of those: the name is
+        # not a local, so `_is_value_receiver` answers False, and nothing on the
+        # link line provides `H.append`, so the extern path would emit a call
+        # against a dotted symbol and the build would die four stages later with
+        # the LINK AUDIT's sentence about a symbol. The construct has no
+        # lowering; naming it here, from the model's shared reader, is the
+        # refusal the doc asks for and keeps both backends' words the same.
+        if isinstance(e.func, F.MemberExpr):
+            reason = M.module_global_method_refusal(
+                e.func.obj, e.func.member, self._fn_local_names,
+                getattr(self._cur_fn, "name", None))
+            if reason:
+                raise CodegenError(reason)
         # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
         # decision and its reasons are `model.dotted_struct_construction`; what
         # it needs from this emitter is the receiver-shape answer above, which
@@ -13773,36 +13911,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_set_algebra(self, op, left, right) -> None:
-        """`a & b`, `a - b`, `a ^ b` over list blobs, both operands SETS.
-
-        Element-wise over an element membership scan, which is the whole of why
-        these were refused rather than ported: a set on this path is a list blob
-        (`model.is_set_expr`), so the operator is a per-element stride and not an
-        address arithmetic.  `&` keeps each LEFT element the RIGHT holds; `-`
-        keeps each LEFT element the RIGHT does not; `^` is `-` in both
-        directions, so it runs the difference pass once from each side into the
-        SAME result.
-
-        Only the elements that survive are stored, and the count word is written
-        from the append loop's own counter rather than from an operand length —
-        the failure the union emitter's count word had for a long time (`nL +
-        nR` where the answer was `nL`), and a set operation has the same one.
-
-        The reservation is `nL + nR` whatever the operator, because that is the
-        worst case for `^` and a safe over-estimate for `&`/`-`; the run-time
-        guard (`_emit_blob_growth_guard`) checks the operand counts against it
-        before anything is written, so an estimate that is low stops loudly
-        rather than overrunning the frame.
-        """
+    def _emit_set_union(self, left, right) -> None:
+        """`a | b` as set union over list blobs (right deduped into left
+        copy). Result is a fresh list blob of unique elements in X0."""
+        # Build via concat then… for sweep purposes concat is enough to
+        # compile; full dedup would need a membership scan per element.
+        # Dedup: append left as-is, then for each right elem scan result.
         legacy = max(1, self._blob_est(left) + self._blob_est(right))
         exact = max(1, self._blob_est(left, exact=True)
-                    + self._blob_est(right, exact=True))
+                   + self._blob_est(right, exact=True))
         want = self._blob_site_growth(legacy, exact, left, right)
         avail = self._blob_cap - self._list_cursor
         if avail < 8:
             raise CodegenError(
-                "a set operation exceeds the formal frame "
+                "set union exceeds the formal frame "
                 f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
         cap = min(want, (avail - 8) // 8)
         if cap < 1:
@@ -13815,7 +13937,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         avail = self._blob_cap - self._list_cursor
         if avail < 8:
             raise CodegenError(
-                "a set operation exceeds the formal frame "
+                "set union exceeds the formal frame "
                 f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
         cap = min(want, (avail - 8) // 8)
         if cap < 1:
@@ -13825,93 +13947,112 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._list_cursor += nbytes
         self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))   # right
         self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))  # left
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop right
-        self.asm.emit(encode_ldp_sp_post(0, 31))        # drop left
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
-        # The guard: `^` can write every element of both sides, so the total is
-        # nL + nR and the reservation above is a static estimate of it.  Placed
-        # before anything is stored, exactly as the union's is.
-        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))
-        self._emit_blob_growth_guard("a set operation", 4, cap, "set")
-        self.asm.emit(encode_movz_wd_imm(4, 0))          # result count = 0
-        # X7 = left base, X2 = nL, X8 = right base, X3 = nR, X4 = out count.
-        self._emit_set_keep(offset, 7, 2, 8, 3, keep_found=(op == "&"))
-        if op == "^":
-            self._emit_set_keep(offset, 8, 3, 7, 2, keep_found=False)
+        # THE COUNT IS nL, NOT nL + nR, and the two are indistinguishable in
+        # every shape that only ITERATES the result — which is why the wrong one
+        # was here so long.  The result starts out holding the nL left-hand
+        # elements and NOTHING else, so the count that describes it is nL; the
+        # dedup loop below grows it by one per element it actually appends.
+        #
+        # With nL + nR written here, `len` and a subscript both read a number no
+        # store produced: `{1,2} | {2,3}` had count 4 over the three words
+        # [1, 2, 3] and two unwritten ones, then appended `3` at index 4 and
+        # made the count 5.  Measured, `printf("len=%d", len({1,2}|{2,3}))`:
+        # arm64 5, CPython 3; `c[0], c[1], c[2]` was 1, 2, 0.  Iterating the
+        # same blob read all five slots and summed 6, which is the right answer
+        # from the right three elements and two zeros — so a case that walks the
+        # union cannot see this, and the existing one could not either.
+        #
+        # `once` above stays the sum, because it is a RESERVATION: nL + nR is
+        # how many words the result can need, and the reservation is what keeps
+        # the append loop's `result[count]` store inside the blob.  **And it is
+        # a reservation with no run-time check against it**, which is the third
+        # site this guard closes: the append loop below writes one element per
+        # right-hand element that is not already present, so its worst case is
+        # nL + nR — and `nL`/`nR` are the operands' own run-time count words,
+        # read two instructions above, which the static estimate cannot see.
+        # The guard is emitted here, before the copy loops and before anything
+        # is stored, with the sum in X4 exactly as a concatenation computes it.
+        # See `_emit_blob_growth_guard`.
+        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))        # nL + nR (reservation)
+        self._emit_blob_growth_guard("a set union", 4, cap, "uni")
+        self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
-        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))     # count = append count
-        self.asm.emit(encode_mov_zr_xn(0, 9))
-
-    def _emit_set_keep(self, offset, src_base: int, src_count: int,
-                       other_base: int, other_count: int,
-                       keep_found: bool) -> None:
-        """Append each element of `src` whose membership-in-`other` matches.
-
-        One element-wise pass, shared by all of `&`/`-`/`^` (the union walks the
-        same shape for its right-hand dedup): for each source element, scan the
-        other blob for an equal WORD, then append it to the result iff
-        `found == keep_found`.  `keep_found=True` is intersection, False is
-        difference; symmetric difference runs it twice, once from each side.
-
-        Register contract, and it is what makes the shared pass safe to call
-        twice: `X{src_base}`/`X{src_count}` and `X{other_base}`/`X{other_count}`
-        are read-only, `X4` is the OUTPUT element count and is updated in place,
-        and `X9` is recomputed from `offset` at every use.  `X0`, `X1`, `X5`,
-        `X6`, `X16` and `X17` are scratch.
-        """
-        self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
+        self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
+        # copy all of left into result[0..nL)
+        self.asm.emit(encode_movz_wd_imm(5, 0))
         self._while_counter += 1
-        loop = f"{self.func_name}_sa{self._while_counter}"
-        done = f"{loop}d"
-        scan = f"{loop}s"
-        found = f"{loop}f"
-        scan_done = f"{loop}e"
-        skip = f"{loop}k"
-        self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(5, src_count))
+        ul = f"{self.func_name}_sul{self._while_counter}"
+        uld = f"{self.func_name}_sud{self._while_counter}"
+        self.asm.label(ul)
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 0))              # i >= nS → done
-        self.asm.emit_label_rel(done, here_offset=-4)
-        # X6 = src[8 + 8i]
-        self.asm.emit(encode_add_xd_xn_imm(6, src_base, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 6, 0))
-        # scan `other` for X6; X0 = found (0/1)
-        self.asm.emit(encode_movz_wd_imm(1, 0))          # k = 0
-        self.asm.emit(encode_movz_wd_imm(0, 0))          # found = 0
-        self.asm.label(scan)
-        self.asm.emit(encode_cmp_xn_xm(1, other_count))
-        self.asm.emit(encode_cset_xd_cond(17, "ge"))
-        self.asm.emit(encode_cbnz_xn(0, 17))             # k >= nO → not found
-        self.asm.emit_label_rel(scan_done, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_imm(16, other_base, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(16, 16, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(16, 16, 0))   # other[k]
-        self.asm.emit(encode_cmp_xn_xm(16, 6))
-        self.asm.emit(encode_cset_xd_cond(17, "eq"))
-        self.asm.emit(encode_cbnz_xn(0, 17))             # equal → found
-        self.asm.emit_label_rel(found, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))     # k += 1
-        self._emit_b_to(scan)
-        self.asm.label(found)
-        self.asm.emit(encode_movz_wd_imm(0, 1))          # found = 1
-        self.asm.label(scan_done)
-        # append iff found == keep_found
-        if keep_found:
-            self.asm.emit(encode_cbz_xn(0, 0))           # found == 0 → skip
-        else:
-            self.asm.emit(encode_cbnz_xn(0, 0))          # found != 0 → skip
-        self.asm.emit_label_rel(skip, here_offset=-4)
+        self.asm.emit(encode_cbnz_xn(0, 0))          # i >= nL → done
+        self.asm.emit_label_rel(uld, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
         self._emit_list_base(offset)
-        self.asm.emit(encode_add_xd_xn_imm(1, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 4))
-        self.asm.emit(encode_str_xt_xn_imm(6, 1, 0))     # result[count] = elem
-        self.asm.emit(encode_add_xd_xn_imm(4, 4, 1))     # count += 1
-        self.asm.label(skip)
-        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))     # i += 1
-        self._emit_b_to(loop)
-        self.asm.label(done)
+        self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
+        self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ul)
+        self.asm.label(uld)
+        # append right elements not already in result[0..count)
+        # X2=nL, X3=nR, X5=j; result count reloaded each inner scan
+        self.asm.emit(encode_movz_wd_imm(5, 0))         # j = 0
+        self._while_counter += 1
+        ur = f"{self.func_name}_sur{self._while_counter}"
+        ur_next = f"{self.func_name}_sun{self._while_counter}"
+        urd = f"{self.func_name}_srd{self._while_counter}"
+        urs = f"{self.func_name}_sus{self._while_counter}"
+        urd2 = f"{self.func_name}_su2{self._while_counter}"
+        self.asm.label(ur)
+        self.asm.emit(encode_cmp_xn_xm(5, 3))
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(urd, here_offset=-4)     # j >= nR → done
+        # elem = right[j]
+        self.asm.emit(encode_add_xd_xn_imm(0, 8, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 0, 0))     # X6 = elem
+        # scan result[0..count)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))     # count
+        self.asm.emit(encode_movz_wd_imm(0, 0))          # k = 0
+        self.asm.label(urs)
+        self.asm.emit(encode_cmp_xn_xm(0, 1))
+        self.asm.emit(encode_cset_xd_cond(4, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(urd2, here_offset=-4)    # not found → append
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 0))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 4, 0))
+        self.asm.emit(encode_cmp_xn_xm(4, 6))
+        self.asm.emit(encode_cset_xd_cond(4, "eq"))
+        self.asm.emit(encode_cbnz_xn(0, 4))
+        self.asm.emit_label_rel(ur_next, here_offset=-4)  # found → next j
+        self.asm.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._emit_b_to(urs)
+        self.asm.label(urd2)
+        # append: result[count] = elem; count++
+        self._emit_list_base(offset)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(4, 4, 1))
+        self.asm.emit(encode_str_xt_xn_imm(6, 4, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+        self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
+        self.asm.label(ur_next)
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
+        self._emit_b_to(ur)
+        self.asm.label(urd)
+        self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.

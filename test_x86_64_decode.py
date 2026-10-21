@@ -236,8 +236,8 @@ for label, raw, why in (
 
 # The SSE2 scalar-`double` forms: the four arithmetic ops, the flag-setting
 # compare, the zeroing XOR and the int-to-double conversion. `formal/x86_64_codegen.py`
-# emits all of them and the decoder named none: the SSE2 scalar-double
-# coverage gap, closed 2026-10-08.
+# emitted all of them and the decoder named none — the gap the SSE2 decoder
+# arms below close.
 for enc, name in ((X.encode_addsd_xmm, "addsd"), (X.encode_subsd_xmm, "subsd"),
                   (X.encode_mulsd_xmm, "mulsd"), (X.encode_divsd_xmm, "divsd")):
     for dst, src in ((0, 1), (7, 2)):

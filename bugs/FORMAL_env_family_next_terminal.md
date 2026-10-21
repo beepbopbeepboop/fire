@@ -290,7 +290,6 @@ untouched by this; nothing here re-measures the 55, and step 3 (the
 `formal_sweep.py --stdlib-subtrees` re-run) is still not done — it remains the
 gate runner's, for the reason this document gives: tens of minutes and hundreds
 of builds.
-
 ## Status, 2026-10-08 (`formal229-docs`): the file's OWN round trip was red, and that is fixed
 
 `test_formal_external_call.py`'s `env_round_trip` is `env.mojo`'s three functions
@@ -323,3 +322,67 @@ backends. `test_formal_external_call.py` is **52/52** (was 51/1) and
 refusal it bounds (`a_string_conversion_of_an_integer_is_refused`, i.e. `str(n)`
 with no such keyword) still fires. The family's TERMINAL is untouched: step 3 is
 still the gate runner's.
+
+## 2026-10-13 (`work/formal394-docs`): the test of the closed half had a
+
+## regression, and it was not this document's terminal — FIXED
+
+The same `env_round_trip` case was **RED on this tree again**, and the regression
+was in the shape of the ONE construct this family reaches rather than in the
+family's own terminal. `env_round_trip` — the case that transcribes
+`std/os/env.mojo`'s `setenv`/`unsetenv`/`getenv` verbatim and diffs them against
+`os.environ` in CPython — refused at BUILD time with
+
+```
+build: String(ptr) is refused on this path: String is a string type
+  constructor … and this build classifies ptr as 'int'
+```
+
+about
+
+```mojo
+var ptr = external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)
+return String(unsafe_from_utf8_ptr=ptr)
+```
+
+`ptr` is a `char *` and `String(unsafe_from_utf8_ptr=…)` on it is the identity;
+the value model had bound the local to the "a word is an integer" default because
+`ValueKinds.kind_of` cannot classify an `external_call[…]` call at all — its
+`_flat_callee` answers None for a subscript callee, so the DECLARED return type
+(here a pointer) never reached the value-kind table.
+
+**What landed, and why BOTH mechanisms are kept.** Two answers to the same
+question landed a week apart and both are here, because they answer different
+halves of it and each covers what the other does not:
+
+* `model.string_conversion_pointer_intent` (2026-10-08, above) is the
+  CONVERSION-SITE exemption: a conversion whose operand is named by the
+  `unsafe_from_utf8_ptr` keyword is the identity the source asked for, whatever
+  the kind table says. It is what makes `str(n)` still a refusal.
+* `formal/model.py::external_call_result_value_kind` (this branch) is the
+  CALL-RESULT answer: `ValueKinds.kind_of` cannot classify an `external_call[…]`
+  call at all, so it asks this, which reads the declared return type. A
+  byte-pointer return is the new `POINTER_KIND`: string-shaped for `String(ptr)`,
+  `%s`, `print` and `==` (through `string_operand_is_string`), with a truthiness
+  that is the pointer's own NULL test and not a `strlen` — so `if not ptr:` on an
+  absent variable does not walk address 0 (measured: classifying it
+  `FOREIGN_BYTES_KIND` instead made that exact case die of SIGSEGV (exit -11) on
+  both architectures). The dereference intercept in both backends asks the new
+  `is_non_pointer_string`, so `ptr.value()` is still a dereference.
+
+Neither subsumes the other: the keyword exemption alone leaves `printf("%s", ptr)`,
+`print(ptr)` and `ptr == other` classifying `ptr` as an integer word, and
+`external_call_result_value_kind` alone leaves a conversion refused whenever the
+pointer arrives from anywhere the declared return type does not describe. So both
+are live and the union of their tests is the contract: `test_formal_external_call.py`
+(whose rows were the reds — `env_round_trip`, `env_getenv_null_is_a_null_pointer`
+and the two `…_with_the_…_spelling` round trips) plus `test_formal_value_model.py`'s
+`a_string_conversion_of_an_integer_is_refused`, the check that the first mechanism
+bounds.
+
+`test_formal_external_call.py` is **52/52** on both architectures (it grew past
+the "29 cases" this document's §"What this worker verified" records; the count
+here is the current one). **The family's terminal and the three-step plan above
+are unchanged** — this repair is of the test that guards the closed half, not of
+`env.mojo`'s two named capability questions, and step 3 is still the gate
+runner's.

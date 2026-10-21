@@ -2737,6 +2737,84 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                     materialize=lambda _a: _materialize_return_struct_mentions(
                         gen, _a, source))
         else:
+            # False-green guard (2026-10-21, measured in clean master's C):
+            # INSIDE a still-generic definition-site method body, an argument
+            # read from a field whose annotation names an UNBOUND TYPE
+            # PARAMETER of the enclosing struct has ERASED to a plain scalar
+            # (`int64_t`) — inference then binds the callee's type parameter
+            # to that scalar (`next(self._inner)` in `_MapIterator.__next__`
+            # -> `next[IteratorType := Int64]`), and the emitted call
+            # (`next_12_IteratorType_5_Int64`) is a monomorphization of a
+            # template whose parameter is trait-bounded (Iterator) by a type
+            # that does not conform — nothing that compiles can define it,
+            # and the -fsyntax-only gate cannot see that. 4 such calls in
+            # std/iter alone. Refuse, so the transactional fallback in
+            # module_gen's struct-method loop drops THIS method to
+            # prototype-only instead of emitting the guaranteed-undefined
+            # call. Only fires where `gen._current_struct_type_params` is
+            # non-None (the loop sets it around `_gen_struct_method` and
+            # restores it after), so free functions / closures / the
+            # instantiating TU elaborate exactly as before.
+            #
+            # The CONTAINER DISCRIMINATOR below is load-bearing, measured:
+            # the first cut refused on the erased-field argument alone and
+            # broke `StridedRange._unsigned_count` — its `ceildiv(
+            # self.end - self.start, self.step)` arguments are the same
+            # erased `Scalar[Self.dtype]` fields, but `ceildiv[T:
+            # CeilDivable](numerator: T, denominator: T) -> T` has no
+            # type-member access on `T`, so `ceildiv[Int64]` is a REAL
+            # scalar monomorphization, defined by other TUs (measured:
+            # bench_heap_parallel / test_math / _swisstable all define
+            # `ceildiv_1_T_5_Int64`), and the Part 1 tree emitted exactly
+            # this body and linked it. The discriminator: the guard fires
+            # only when the callee's own template treats its type parameter
+            # as a CONTAINER — a `<param>.Element` / `.IteratorType` /
+            # `.IteratorOwnedType` type-member access in its signature or
+            # body (`next[IteratorType: Iterator] -> IteratorType.Element`
+            # matches; `ceildiv` does not).
+            _tp = getattr(gen, '_current_struct_type_params', None)
+            if _tp:
+                for _a, (_ct, _v) in zip(node.args, arg_pairs):
+                    if not (isinstance(_a, gimple_ctypes.MemberExpr)
+                            and isinstance(_a.obj, gimple_ctypes.IdentExpr)
+                            and _a.obj.name == 'self'):
+                        continue
+                    _sn = getattr(gen, '_current_struct_name', None)
+                    _ann = (getattr(gen, '_field_annotations', None) or {}).get(
+                        f"{_sn}.{_a.member}") if _sn else None
+                    if not (_ann and any(re.search(rf'\b{re.escape(p)}\b', _ann)
+                                         for p in _tp)):
+                        continue
+                    try:
+                        _tmpl = elaborate.extract_fn_source(
+                            module_src, g, arg_count=len(arg_pairs))
+                    except Exception:
+                        _tmpl = None
+                    if not _tmpl:
+                        continue
+                    _container = False
+                    for _p in elaborate.type_param_names(_tmpl):
+                        if re.search(
+                                rf'\b{re.escape(_p)}\s*\.\s*'
+                                r'(?:Element|IteratorType|IteratorOwnedType)\b',
+                                _tmpl):
+                            _container = True
+                            break
+                    if not _container:
+                        continue
+                    raise RuntimeError(
+                        "cannot compile module: `{}(...)` in function "
+                        "`{}` is called with a field whose annotation "
+                        "(`{}`) names an unbound type parameter of the "
+                        "enclosing struct — the field erases to a plain "
+                        "scalar here, so the type argument inferred from it "
+                        "is a placeholder, and the callee's own template "
+                        "treats that parameter as a container — no "
+                        "monomorphization of the callee can be defined "
+                        "(measured: std/iter's `next_12_IteratorType_5_"
+                        "Int64`, 1 declaration, 0 definitions); the "
+                        "definition-site body cannot be emitted".format(
+                            g, gen.current_func_name, _ann))
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs])
     except RuntimeError:

@@ -31,14 +31,6 @@ their fixtures are a fixed, small, intentional number that a ceiling can
 honestly bound.
 """
 BASELINE = {
-    'bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md': 1,
-    'bugs/FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md': 1,
-    'bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md': 1,
-    'bugs/FORMAL_proof_census_tool_has_no_prooflib_dep.md': 2,
-    'formal/arm64_proof_gen.py': 2,
-    'formal/contracts.py': 4,
-    'test_formal_call_proof_gen.py': 3,
-    'test_formal_contracts.py': 2,
     'test_suite.py': 6,
 }
 

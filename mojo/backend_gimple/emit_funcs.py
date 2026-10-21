@@ -2907,10 +2907,27 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
     # feature; this file only ever calls in at these two points.
-    gen._begin_function(node)
-    for stmt in node.body:
-        gen.gen_stmt(stmt)
-    gen._emit_fallthrough_frees(node)
+    #
+    # `_emitting_plain_func` marks the body of a TOP-LEVEL function — the
+    # ONE emission context whose C is never `__GIMPLE`-tagged (this
+    # function's signature line above has no tag; struct methods and
+    # lifted closures are tagged unless their body used setjmp).
+    # emit_calls._lower_immpointer_ctor reads it to pick the ImmPointer
+    # `to=` storage shape: only HERE may it take the address of a
+    # function-scoped `static` (the strict -fgimple dialect rejects `&`
+    # of ordinary variables inside a `__GIMPLE`-tagged function —
+    # measured 2026-10-21 on std/python/python.mojo's `Python.__init__`:
+    # "expected expression before '&' token"). Every other context gets
+    # the heap shape, which is valid in both worlds. Set/restore spans
+    # exactly the body lowering, where the call sites are emitted.
+    gen._emitting_plain_func = True
+    try:
+        gen._begin_function(node)
+        for stmt in node.body:
+            gen.gen_stmt(stmt)
+        gen._emit_fallthrough_frees(node)
+    finally:
+        gen._emitting_plain_func = False
 
     # Add implicit return 0 for main if it returns int but has no explicit
     # return. Deliberately NOT `gen.body_lines[-1:]`/`gen.body_lines[-1]`

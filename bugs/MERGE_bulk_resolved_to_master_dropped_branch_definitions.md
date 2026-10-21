@@ -1,14 +1,13 @@
 # MERGE: the bulk `merge-qwen4-r2` merges resolved every conflict to master, which dropped the branch half of some signatures and definitions
 
-**Status: PARTIAL.** All the branches on the task list were merged (except the two
-`merge-*` branches that touch `mojo/`/`gimple_codegen.py`/`runtime/`), the
-interrupted `work/formal59-docs` merge is resolved, the doc index and the
-dangling-refs ratchet are green, and every `.py` file in the tree `compile()`s.
-**The three interaction failures listed under "Known-open interaction failures"
-below are CLOSED (2026-10-16), and the two competing mechanisms they named have
-been decided — the decision and its reason are in that section, because a reader
-who skips it will otherwise re-open it.** What is NOT finished is the rest of
-the conflict-resolution cleanup, and this doc is the queue for it.
+**Status: DONE (2026-10-19).** The merge-damage cleanup this doc was the queue
+for is finished. Every branch on the task list is merged, `suite-self-test`'s
+dangling-citation census is green, `s | t` on two sets works, and
+`SET_ALGEBRA_OPS` has one definition. What remains of the two bunny tasks that
+worked this queue (`bunny-reds`, `bunny-merge26-r2-r2`) is FORMAL work, out of
+`check`, and is tracked by its own bug docs rather than here (see "What is left").
+This doc now stands as the record of how the damage went, the two shapes it
+named, and the detector for them.
 
 ## What the round of 2026-10-16 closed
 
@@ -51,26 +50,26 @@ find them and a gate job's anti-rot did.
 
 ## What is left, and what it is not
 
-* **Five dangling citations remain**, and every one is in another worker's claim
-  (`python3 ../mojo-reference/tools/control.py claims`): the docs
-  `FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot`,
-  `FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim`,
-  `FORMAL_contract_ladder_reach`, `FORMAL_proof_census_baseline_has_a_stale_`
-  `fact_row` and `FORMAL_the_committed_proof_baseline_is_stale_for_fact_mojo`.
-  They are what `suite-self-test`'s dangling-citation census is red on. They
-  were re-checked against the claims registry on 2026-10-16 and all five are
-  held; the fix is theirs (or their branch's merge's), not this one's.
-* **`ARM64Codegen._emit_set_union` does not exist and `_emit_binop` calls it**, so
-  `s | t` on two sets raises `AttributeError` out of the compiler. Filed as
-  `MERGE_arm64_set_union_emitter_is_gone_and_a_set_union_raises_AttributeError.md`
-  and NOT fixed here: `formal407-docs` holds
-  `FORMAL_container_operators_that_need_a_per_element_stride`, which is that
-  area. It is found by `test_formal_run.py`'s `blob-growth-guard` row, which
-  cannot report anything about a site that does not compile.
-* **`test_formal_run.py` is 1287 pass / 24 fail on this tree**, all 24
-  pre-existing and unrelated to the comprehension change above (the failure set
-  was diffed by name before and after: identical). It is not in the `check`
-  bucket, so `suite.py check` does not report it.
+* **Five dangling citations — RESOLVED (2026-10-18).**
+  `bunny-merge26-r2-r2` (55c0d477) rewrote the three that were on master's path
+  and ratcheted the baseline down; `suite-self-test`'s dangling-citation census
+  is green and `suite.py check` is 53/53 on this tree.
+* **`ARM64Codegen._emit_set_union` — RESOLVED (2026-10-18).** The set-union
+  emitter and the `SET_ALGEBRA_OPS` duplication it sat beside were both fixed by
+  `bunny-merge26-r2-r2` (498f72fd), and the doc of its own was deleted with the
+  fix. `SET_ALGEBRA_OPS` has one definition again.
+* **What is genuinely left is FORMAL work, out of `check`, tracked by its own
+  docs — not this one's queue:**
+  * `test_formal_run.py` is **1328 pass / 4 fail** on this tree (was 1287/24 when
+    this doc was written): the host-import wall (tag-generator), a comptime
+    binding in another module, and two `wide-receiver-by-reference` rows — the
+    last named in `bugs/FORMAL_wide_receiver_by_reference.md`. Not in the `check`
+    bucket, so `suite.py check` does not report it.
+  * `test_formal_call_proof_gen.py` has **6 failures**, all in
+    `TestTheZeroDivisorGuardAgainstLean` (5) and `TestSameImageCallLean` (1) —
+    Lean-gated, needing library/walk work rather than a test edit, tracked in
+    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` and
+    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`.
 
 ## What happened
 

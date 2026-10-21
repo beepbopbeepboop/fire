@@ -1544,6 +1544,16 @@ class MojoClass:
                     if array_default is not None:
                         setattr(instance, f.name, array_default)
                         continue
+                    # A `List`/`Dict`/`Set` field (bare or `List[T]` spelling)
+                    # with no initializer binds a fresh empty container of the
+                    # declared kind — the compiled path's answer and real
+                    # Mojo's — instead of None. Own local + `continue`, never
+                    # folded into `value`: same self-host inference reason as
+                    # the `_array_field_default` branch directly above.
+                    container_default = self.interpreter._container_field_default(getattr(f, 'type_ann', None))
+                    if container_default is not None:
+                        setattr(instance, f.name, container_default)
+                        continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
@@ -4275,6 +4285,37 @@ class Interpreter:
         'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
     }
     _FLOAT_TYPE_NAMES = {'Float16', 'Float32', 'Float64', 'BFloat16'}
+    # Container kinds this interpreter models, mapped to the builtin
+    # constructor that produces the EMPTY value — the same constructors the
+    # scope defines `List`/`Dict`/`Set` to (see _MojoGenericCtor). A
+    # container-annotated declaration with no initializer is an empty
+    # container of the declared kind in real Mojo and on the compiled path,
+    # not None; see `_container_field_default`.
+    _CONTAINER_FIELD_CTORS = {'List': list, 'Dict': dict, 'Set': set}
+
+    def _container_field_default(self, type_ann):
+        """A `List`/`Dict`/`Set` declaration with NO explicit initializer —
+        a struct field (`var xs: List[Int]` in a class body) or a local
+        (`var xs: List[Int]` in a function body) — is an empty container of
+        the declared kind, same as real Mojo and the compiled path, not None
+        (a `List[Int]` field with no initializer read as None, so
+        `q.xs.append(1)` raised `'NoneType' object has no attribute
+        'append'` where the language and the compiled path accept it).
+        Both the bare `List` spelling and the `List[T]`/`Dict[K,V]`/
+        `Set[T]` subscript spelling the parser records name the kind the same
+        way (the compiler stores the subscript with no spaces, e.g.
+        `Dict[String,Int]`), so only the pre-`[` base name is read. Returns
+        None — leaving the value untouched — for any other annotation (a
+        scalar, a `String`, a container this interpreter does not model such
+        as `Deque`, or a `borrowed ...` prefix), the same conservative rule
+        `_coerce_to_declared_type`'s scalar arm and `_array_field_default`
+        follow: a default this interpreter cannot name is never invented."""
+        if not isinstance(type_ann, str):
+            return None
+        ctor = self._CONTAINER_FIELD_CTORS.get(type_ann.split('[', 1)[0].strip())
+        if ctor is None:
+            return None
+        return ctor()
 
     def _coerce_to_declared_type(self, value, type_ann):
         """Coerce a var's initializer to its declared scalar type, mirroring
@@ -4306,6 +4347,17 @@ class Interpreter:
 
     def execute_VarDecl(self, node: N.VarDecl):
         """Execute variable declaration."""
+        if node.value is None and ',' not in node.name:
+            # A `List`/`Dict`/`Set` local with no initializer is an empty
+            # container of the declared kind — the compiled path's answer
+            # and real Mojo's — not None. Same helper and same conservative
+            # scope as the struct-field arm in `MojoClass.__call__`; the
+            # `','` guard keeps the tuple-unpacking shape (`var a, b`) on
+            # its own path below, where one value feeds both names.
+            container_default = self._container_field_default(getattr(node, 'type_ann', None))
+            if container_default is not None:
+                self.scope.define(node.name, container_default)
+                return container_default
         value = self.eval_expr(node.value)
         # `var a, b = expr` (tuple unpacking) is parsed as a single VarDecl
         # whose `name` is a comma-joined string ("a,b") — see

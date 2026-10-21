@@ -1181,6 +1181,19 @@ CASES = [
     # no-home clause and NOT "'Box' is read at line N before anything in this
     # function stores it", which is what a value read would say and is not what
     # this is.
+# `Box.length` read through the struct's OWN NAME -- which USED to be refused
+    # here ("'Box' has no home: the module-level symbol table is empty for this
+    # unit") and now BUILDS and answers `3`, the `comptime length = 3` the
+    # struct declares.  The refusal was a compile-time inability to find a home
+    # for the name, and what answers it now does not fabricate a value: `3` is
+    # what CPython's own evaluation of the same declaration gives, and the
+    # sibling row that reads the SAME constant as `Self.length` inside a method
+    # is what says the two spellings agree.
+    #
+    # A refusal row only said the construct was refused, which is a fact about
+    # the compiler; this one says what the program COMPUTES, which is a fact
+    # about the language.  `--no-prove` because the proof layer is a different
+    # subject and has its own rows.
     ("comptime_class_attribute_of_a_generic_struct_read_through_its_name",
      "struct Box[T: AnyType]:\n"
      "    comptime length = 3\n"
@@ -1194,8 +1207,7 @@ CASES = [
      "def main(n) -> Int:\n"
      "    printf(\"%d\", show())\n"
      "    return 0\n",
-     "refuse:'Box' has no home: the module-level symbol table is empty for this "
-     "unit", None),
+     0, "3"),
 
     # THE FOLD, and the one shape `the variadic bracket arity and the `len(<display>)` fold (landed in e72a5f93)`
     # §5 item 2 measured as the whole of what was left: `len(<a display the
@@ -4879,6 +4891,48 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A ONE-FIELD STRUCT RETURNED BY AN IMPORTED FUNCTION, and the identity the
+    # same-image fix already applied to a callee in THIS module.
+    # `_call_returns_one_word_struct` read a local function's `-> T` out of
+    # `functions_by_name` and claimed nothing across the boundary, so `r.v` was
+    # refused with "… nothing … establishes [what r holds]" on both
+    # architectures even though `CP` is one field and its value IS `r`. The
+    # declaration is now read from the imported module's own source
+    # (`_imported_function_defs`), for both spellings a call has: the bare name
+    # `from byref_xmod import make` binds, and the `byref_xmod.make(...)` chain
+    # `import byref_xmod` binds. `both: True` because the identity is a shared
+    # build-pass decision and a boundary is exactly where a divergence would be
+    # invisible — the two sides are separate compilations. Each reads the field
+    # TWICE in one expression (`v*10 + v`), so a backend that read the wrong
+    # word answers a different number rather than merely failing.
+    ("cross_module_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "from byref_xmod import make\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = make(7)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 77, None),
+    ("cross_module_dotted_returned_one_field_struct_reads_through_its_field",
+     {"mod": "struct CP:\n"
+             "    var v: Int\n"
+             "\n"
+             "def make(n: Int) -> CP:\n"
+             "    var c = CP()\n"
+             "    c.v = n\n"
+             "    return c\n",
+      "main": "import byref_xmod\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = byref_xmod.make(9)\n"
+              "    return r.v * 10 + r.v\n",
+      "both": True}, 99, None),
     # A ONE-FIELD MUTATOR across the boundary, and the third of the three
     # measured shapes that used to drop the receiver write-back: the old
     # statement-shaped rewrite was built from `one_field_mutating_methods`, a
@@ -6401,6 +6455,51 @@ ASSIGNED_TYPE_CASES = [
      "    var xs = [a + b + c for a, (b, c) in [(1, (2, 3)), (10, (20, 30))]]\n"
      "    printf(\"n=%d s=%d\\n\", len(xs), xs[0] + xs[1])\n"
      "    return 0\n", 0, "n=2 s=66"),
+    # A parameter's OWN DEFAULT is a claim on its kind. Before this, the only
+    # evidence was the CALL SITES, and `f()` passes no argument at all, so an
+    # unannotated `x` fell through to "a word is an integer" and the emitter
+    # put a `char *` into a slot the callee was told held a number. Measured on
+    # both backends: the row below printed a pointer and the comparison row was
+    # refused with "compares a NUMBER with a string", where CPython answers
+    # `plain` and `1`. The INTEGER control is here so a fix that turned every
+    # default into a string would fail rather than pass.
+    ("both_arch_a_string_parameter_default_is_the_string",
+     "def f(x=\"plain\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[plain]"),
+    ("both_arch_a_string_parameter_default_compares_as_text",
+     "def f(x=\"plain\"):\n"
+     "    if x == \"plain\":\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f())\n"
+     "    return 0\n", 0, "1"),
+    ("both_arch_an_integer_parameter_default_stays_the_number",
+     "def f(x=7):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f())\n"
+     "    return 0\n", 0, "7"),
+    # THE CONTROL for the unanimity rule: a `None` default says NOTHING about
+    # what the parameter holds, so it must not enter the claim set as a veto.
+    # Without this row, `def f(x=None)` called `f("plain")` stopped being a
+    # string comparison and was refused with "compares a NUMBER with a string"
+    # — a regression the call site's own evidence had already answered.
+    ("both_arch_a_none_default_does_not_retract_the_call_sites_string",
+     "def f(x=None):\n"
+     "    if x == \"plain\":\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d\", f(\"plain\"))\n"
+     "    return 0\n", 0, "1"),
 ]
 
 # Positive cases built and RUN on BOTH backends, which is what
@@ -6450,9 +6549,8 @@ BOTH_ARCH_CASES = [
     # A TUPLE target with no star: before the fix, every leaf of a tuple
     # for-target was classified as the element's CONTAINER kind, so
     # `printf("%d", a)` refused with the `%d`-reads-a-CONTAINER sentence about
-    # an integer (the bug `FORMAL_a_tuple_for_target_leaf_is_classified_as_the_
-    # element_container.md` records).  Nested on purpose — a group's leaves are
-    # elements one level further down.
+    # an integer.  Nested on purpose — a group's leaves are elements one level
+    # further down.
     ("both_arch_a_tuple_for_target_binds_each_leaf_one_level_down",
      "def main():\n"
      "    for a, b in [(1, 2)]:\n"
@@ -7016,6 +7114,41 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+
+    # ── TWO INSTANTIATIONS OF ONE TEMPLATE, EACH SETTLED BY ITS RECEIVER ─────
+    #
+    # The same ambiguous-name resolution as the row above, for the case the
+    # binding tables used to MISS entirely: a ZERO-FIELD struct.  `Pair[T,
+    # *values]` carries a `comptime` and no runtime field at all, so
+    # `struct_is_framed` is False of it and `struct_is_one_field` is False of it
+    # — it was in NEITHER `one_word` nor `bound` — and the two mangled
+    # instantiations `Pair_…_1` and `Pair_…_5_6` BOTH declare `size`, so
+    # `_method_owners` popped `size` as ambiguous and `_rewrite_method_calls`
+    # declined both calls.  Refused identically on both backends ("p.size() is a
+    # method call on a value …"), on the FIRST receiver, while one instantiation
+    # in one function also answered 1.
+    #
+    # The fix is `_bound_receiver_structs`'s `unit_structs`: a local bound from a
+    # zero-field struct's constructor is recorded like any other construction
+    # binding, so the bare-receiver arm of `_rewrite_one_word_field_method_calls`
+    # can read which instantiation `p` holds and lift `p.size()` to
+    # `Pair_…_1_size(p)` and `q.size()` to `Pair_…_5_6_size(q)`.  `len=1 2` is
+    # CPython's answer (`p`'s values are `(1,)`, `q`'s are `(5, 6)`); a fix that
+    # lifted both to ONE instantiation would answer `1 1` or `2 2`, which is why
+    # the row reads BOTH receivers rather than one.  On both backends because
+    # the walk is shared and its two emitters must not come apart on one source.
+    ("both_arch_two_variadic_instantiations_settle_each_receiver",
+     "struct Pair[T: AnyType, *values: T]:\n"
+     "    comptime length = len(Self.values)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair[Int, 1]()\n"
+     "    var q = Pair[Int, 5, 6]()\n"
+     "    printf(\"len=%d %d\", p.size(), q.size())\n"
+     "    return 0\n", 0, "len=1 2"),
 
     # ── AN ENUM-TYPED PARAMETER, AND `.value` OFF IT ─────────────────────────
     #
@@ -14244,6 +14377,34 @@ PRINTF_TEXT_CASES = [
     #
     #     printf("v=%d\n", [1, 2, 3])   arm64 1809329920   x86-64 1870638832
     #
+    # THE EVIDENCE, and where it moved.  Every needle below names the CONVERSION
+    # and the OPERAND, because that is what makes the rows discriminating: the
+    # dict rows would pass against a needle that only said "is a container", and
+    # the `%s` row would pass against one that only said "reads `xs`".
+    #
+    # **What these needles used to name, and why they do not any more.**  Two
+    # branches implemented "refuse a CONTAINER handed to a printf conversion" in
+    # parallel: `9bae9cec` (2026-10-08) wrote rows against a message that echoed
+    # the operand's kind (`reads `xs` as a NUMBER, and `xs` is `list:int``), and
+    # `8a720a1e` (2026-10-08) wrote rows against `is a container (kind
+    # `list:int`)`.  Neither is an ancestor of the other.  The implementation
+    # that is in `formal/model.py` is `e67c27c4`'s (2026-10-07,
+    # `printf_container_conversion_refusal`), whose message has NEVER named the
+    # kind -- it says "is a CONTAINER — its one word is the address of its
+    # blob".  So the twelve red rows were pinned against a message this tree has
+    # never produced, which is the union-of-both-sides question with only one
+    # side's IMPLEMENTATION surviving: the message is the better of the two and
+    # re-pinning the rows to it is a correction, not a weakening.
+    #
+    # **What that costs, stated plainly.**  The comment below used to say "the
+    # needle names the conversion, the operand and its kind, so a reword that
+    # stops naming the kind fails here" -- and that row was RIGHT, against a
+    # message that does not exist on this tree.  The kind-driven evidence is
+    # still there, but it is no longer in the message: it is
+    # `printf_container_conversion_refusal`'s own `is_list_kind(kind_of(args[j]))`,
+    # and what the table still proves end to end is that a `bytearray` (kind
+    # `list:byte`) and a `Dict` get the SAME answer as a `List`, which is what a
+    # check reading a constructor NAME would not give.
     # two DIFFERENT heap addresses for one program, where CPython raises
     # `TypeError: %d format: a real number is required, not list`.  The evidence
     # is the operand's own `list:`-prefixed kind (`is_list_kind`), so one row
@@ -14254,13 +14415,13 @@ PRINTF_TEXT_CASES = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%d\\n\", xs)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     ("printf_d_of_a_dict_container_is_refused",
      "def main(n):\n"
      "    var d = {\"a\": 1}\n"
      "    printf(\"v=%d\\n\", d)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `d` as a number, and `d` is a CONTAINER", None),
     # A byte blob is the row that separates the KIND from the constructor: its
     # kind is `list:byte` (`model.byte_blob_kind`), not `list:int`, and a test
     # that only read a `ListExpr` would let this one print an address.
@@ -14270,7 +14431,7 @@ PRINTF_TEXT_CASES = [
      "    b.append(65)\n"
      "    printf(\"v=%x\\n\", b)\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:byte`)", None),
+     "refuse:reads `b` as a number, and `b` is a CONTAINER", None),
     # A CONTAINER PARAMETER, and it is a different evidence path from the three
     # above: the name is bound by the CALL SITE rather than by a statement in
     # this function, and `ValueKinds.kind_of` still answers `list:int` for it —
@@ -14283,7 +14444,7 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    show([1, 2, 3])\n"
      "    return 0\n",
-     "refuse:is a container (kind `list:int`)", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # THE GUARDS, and they are the reason this is a row about the CONVERSION
     # rather than about the container: an element and a count are numbers and
     # must keep printing — a refusal that also stopped these would be an
@@ -15422,6 +15583,18 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 # diverging by architecture is the same defect with a different subject.
 #
 # (name, mojo_source, want_exit, stderr_needles)
+#
+#: The FULL text `model.list_append_overflow_message` returns for the two rows
+#: below, as a needle. The message is NOT ASCII (an em dash and an ellipsis:
+#: 774 characters are 778 bytes) and `_emit_stop_diagnostic` used to tell
+#: `write(2)` the CHARACTER count, which wrote every run-time stop four bytes
+#: short — this one ended at "...the overflow follows the appe". The
+#: two-architecture byte-for-byte comparison cannot see that (both machines
+#: truncated the same), and every needle the rows carried was early in the
+#: text, so the model's own sentence is what pins the ending.
+_APPEND_OVERFLOW_TEXT = __import__(
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
+
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
     # One site, three executions, and the capacity is ONE — which is the whole
@@ -15435,6 +15608,17 @@ STDERR_CASES = [
     # overflow" would leave a reader unable to tell this from a frame-budget
     # refusal (`frame_blob_refusal`), which has a different and differently
     # fixable remedy.
+    #
+    # **AND THE WHOLE SENTENCE IS A NEEDLE, which is the half that was missing
+    # and is why a real defect lived here.** The three needles above are all
+    # early in the text; the message is NOT ASCII — it carries an em dash and an
+    # ellipsis, so its 774 characters are 778 BYTES — and both emitters told
+    # `write(2)` the CHARACTER count, so every run-time stop was written four
+    # bytes short and this one ended mid-word at "...the overflow follows the
+    # appe". The byte-for-byte two-architecture comparison below could not see
+    # it (both machines truncated identically) and no needle reached the end.
+    # `_APPEND_OVERFLOW_TEXT` is the whole message from the model, so the
+    # truncation is a FAILURE and not a sentence nobody read to the end.
     ("list_append_overflow_is_loud",
      "def main(n):\n"
      "    xs = []\n"
@@ -15444,7 +15628,8 @@ STDERR_CASES = [
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES"]),
+     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
+         _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
     # the capacity each one sees is its own", and that repair does not work: the
@@ -15474,7 +15659,8 @@ STDERR_CASES = [
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
      1, ["SITES outside any loop", "for … in range(n)",
-         "Moving the appends into a function of their own does NOT help"]),
+         "Moving the appends into a function of their own does NOT help",
+         _APPEND_OVERFLOW_TEXT]),
     # `d[k] = v` for a key the blob does NOT hold, which is CPython's INSERT and
     # used to be a key scan that missed and stopped the program having printed
     # nothing. The reservation is `formal/model.py`'s `dict_store_capacity` —
@@ -15631,14 +15817,15 @@ STDERR_CASES = [
          "IndexError: bytearray index out of range"]),
     # `xs * n` and `a | b` are NOT rows here, and the reason is a harness
     # limitation worth stating rather than a gap. `run_stderr_case` requires the
-    # program to build on BOTH architectures, and x86-64 refuses `a | b` by name
-    # (`model.set_union_refusal` — lowering it as a concatenation answers
-    # `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-    # comparison has nothing to compare. What is checkable for all three sites
-    # on both backends is the question this row's mechanism cannot ask — does
-    # the site have a guard at all — and that is
-    # `check_blob_growth_guards` / `_BLOB_GROWTH_PROBES`, which is where `*`
-    # and `|` are pinned. `*` builds on both, so the difference there is that
+    # program to build on BOTH architectures, and x86-64 used to refuse `a | b`
+    # by name (`model.set_union_refusal` — lowering it as a concatenation
+    # answers `[1,2] | [2,3]` with four elements).  x86-64 grew the union
+    # emitter on 2026-10-13, so the refusal half is gone, but the site still
+    # cannot be a stderr row: what is checkable for all three sites on both
+    # backends is the question this row's mechanism cannot ask — does the site
+    # have a guard at all — and that is `check_blob_growth_guards` /
+    # `_BLOB_GROWTH_PROBES`, which is where `*` and `|` are pinned (both
+    # architectures now). `*` builds on both, so the difference there is that
     # its reservation is exact for a literal operand: the run-time total cannot
     # exceed the estimate without a name in one of them.
     #
@@ -16778,6 +16965,28 @@ POINTER_DEREF_CASES = [
      "    if t.b != 5:\n"
      "        return 90 + got\n"
      "    return got\n", 5, None),
+    # `p.value().b += 5` — the augmented form with the frame as an EXPRESSION,
+    # and the last shape of this family that used to be refused.  The plain
+    # store above answers `p.value().b = 41` by resolving the frame through
+    # `model.pointer_frame_expression`, so the augmented form DESUGARS onto the
+    # read and that store — `p.value().b = p.value().b + 5` — rather than
+    # growing a third read-modify-write of its own.  The caller check is the
+    # named row's, for its reason: the write has to reach `t.b`, not a scratch
+    # copy in the callee.
+    ("deref_struct_pointee_augmented_directly_is_one_slot_read_modify_write",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def bump(p: Pointer[P3]) -> Int:\n"
+     "    p.value().b += 5\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    var got = bump(t)\n"
+     "    if t.b != 5:\n"
+     "        return 90 + got\n"
+     "    return got\n", 5, None),
     # `return p.value()` — the frame-LIFETIME half, and the case that says why
     # the answer above is safe rather than merely reachable.  Without
     # `_frame_return_status` recognising it, `give` was classified
@@ -16911,39 +17120,6 @@ POINTER_DEREF_REFUSALS = [
      "    return store_bad(t)\n",
      "refuse:stores into 'zz' of a P3 this pointer points at, and that struct's",
      None),
-    # `p.value().b += 5` — the ONE shape of this family that is still refused,
-    # and it is pinned so it is a recorded limit rather than a surprise.  The
-    # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a
-    # `_frame_slots` key), and a base that is an EXPRESSION has no name to key
-    # on, so both backends refuse it — but they refuse it with ONE sentence,
-    # `model.member_access_refusal`, because the real premise is the BINDING of
-    # the base and not the shape of the target.  The named spelling is answered:
-    # `deref_struct_pointee_augmented_through_a_name`.
-    #
-    # **This row carried `refuse_either:` until arm64 caught up** (its augmented
-    # arm raised a literal of its own, "unsupported augmented assignment target
-    # on the formal arm64 path", while x86-64 raised `_refuse_member_target`).
-    # Both sentences were about the same construct and the arm64 one was FALSE
-    # about its own file — a `MemberExpr` target IS lowered on both machines
-    # when the member is a frame slot (`a.n += 1` builds and answers 5 on both).
-    # The `refuse_either:` is GONE rather than narrowed, which is the point of
-    # removing it: a two-needle row goes green either way, so it would have
-    # survived the fix and reported the divergence forever after it was over.
-    # The needle is the clause that names the BASE rather than the whole
-    # sentence, for the reason every other needle in this file is a clause: the
-    # sentence is one function's and the clause is the fact.
-    ("deref_refuse_augmented_through_a_pointer_frame",
-     "struct P3:\n"
-     "    var a: Int64\n"
-     "    var b: Int64\n"
-     "    var c: Int64\n"
-     "def bump(p: Pointer[P3]) -> Int:\n"
-     "    p.value().b += 5\n"
-     "    return Int(p.value().b)\n"
-     "def main(n: Int) -> Int:\n"
-     "    var t = P3()\n"
-     "    return bump(t)\n",
-     "refuse:is a field access through 'p.value(...)'", None),
     # A FLOAT pointee.  A formal value has no float kind distinct from an int
     # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
     # would put IEEE binary32 bits in a register the program then treats as an
@@ -16983,6 +17159,25 @@ POINTER_DEREF_REFUSALS = [
      "    printf(\" [%d]\", trunc(b))\n"
      "    return 0\n",
      0, "[1.000000] [1]"),
+    # …and the STORE half of the same pointee, which the LOAD's enablement did
+    # not carry: `p.value() = 1.5` writes 1.5's own 64 bits into the double
+    # slot, which is exact, and `p.value() = 1` (the row in the REFUSALS group)
+    # would write 0x1, a denormal, because the slot has no kind at run time.
+    # The decision is the VALUE's kind, asked of the same reader
+    # (`_expr_str_kind`) the load's consumers ask, so the two sides agree.
+    ("deref_a_binary64_pointee_store_of_a_double_is_exact",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p.value() = 1.5\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g]\", p.value())\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    store(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[1.5]"),
     # …and the SAME kind reaches the two consumers that were already refused by
     # name, which is what makes the load safe rather than merely emittable: a
     # double in WORD position and a double returned under `-> Int`.  Both are
@@ -17469,6 +17664,21 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return at(s, 0)\n",
      "refuse:reads an element of a FLOAT pointee", None),
+    # The `.value()` STORE of a value this path cannot establish as a double:
+    # `p.value() = 1` writes 0x1, a denormal rather than 1.0, and the refusal
+    # names the value's own kind. Its answering twin is
+    # `deref_a_binary64_pointee_store_of_a_double_is_exact` above; the two are
+    # the two halves of the kind check, so a rule that refused every store
+    # through a double pointee would fail the first, and one that answered
+    # every store would fail this.
+    ("deref_refuse_a_binary64_value_store_of_an_integer",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p.value() = 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b)\n",
+     "refuse:would write 0x1, a denormal rather than 1.0", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A
@@ -18224,13 +18434,37 @@ COMPREHENSION_ELEMENT_CASES = [
     #
     # A nested comprehension whose produced values are words is accepted too
     # (`a_nested_comprehension_whose_result_is_words_is_per_iteration`), by the
-    # same copy over the shared predicate. The rows after the nested acceptance
-    # are the shapes whose per-iteration materialisation is still refused — a
-    # nested comprehension whose own result holds containers, a list of lists,
-    # and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_
-    # blob_base.md`) a slice or a constructor call, whose runtime blob base is
+    # same copy over the shared predicate. A SLICE is accepted on the same
+    # reasoning one node further out — a slice copies element words out of its
+    # base, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site — and its own rows
+    # (`…_that_is_a_slice_of_a_name_…`, `…_of_a_literal_…`, `…_of_a_list_of_
+    # lists_…`, `a_slice_element_is_a_distinct_object_per_iteration`) sit beside
+    # the nested ones. The rows after them are the shapes whose per-iteration
+    # materialisation is still refused — a nested comprehension whose own result
+    # holds containers, a list of lists, a slice whose base carries a scratch
+    # address, and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_
+    # runtime_blob_base.md`) a constructor call, whose runtime blob base is
     # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
     # so a refusal about anything else fails the case.
+    # same copy over the shared predicate. A SLICE whose base is a NAME is
+    # accepted by the same copy and no relocation at all
+    # (`a_slice_element_of_a_name_is_per_iteration`): a slice copies its base's
+    # element WORDS into a fresh blob, so the copy is sound exactly when the base
+    # does not build the containers they reference \u2014 the base owns them and keeps
+    # them, which is what CPython's own slice shares too. A CALL is accepted too,
+    # and every call rather than only the empty/sized container construction: the
+    # callee is elsewhere, so whether the result is a blob this site builds is a
+    # fact about the call SITE, and `test_formal_value_model.py`'s
+    # `a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_
+    # one` is the row that decides it. The rows after the accepted shapes are the
+    # ones whose per-iteration materialisation is still refused \u2014 a nested
+    # comprehension whose own result holds containers, a list of lists, and a
+    # slice whose BASE builds a container (see
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`),
+    # whose runtime blob base is genuinely needed. The refusal needle is the
+    # CONSTRUCT and not the remedy, so a refusal about anything else fails the
+    # case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -18273,6 +18507,139 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", s)\n"
      "    return 0\n",
      0, "63"),
+    # A SLICE element is materialised per iteration on the same reasoning one
+    # node further out: a slice copies element words out of its BASE into a blob
+    # of its own, so the per-iteration copy is sound whenever the base's produced
+    # values are not addresses of a blob built at this site. `a[0:y]` under a
+    # NAME is the measured shape, and the length read is the one a content read
+    # cannot fake: an aliased element would carry the LAST iteration's slice, so
+    # three of these would read `3 3 3`.
+    ("a_comprehension_element_that_is_a_slice_of_a_name_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", len(r[0]), len(r[1]), len(r[2]))\n"
+     "    return 0\n",
+     0, "1 2 3"),
+    # The same slice read through MUTATION, which is the other half of "distinct
+    # objects": writing element 0 must not be visible through element 1. CPython
+    # gives `99 10 10`; an aliased result would give `99 99 99`.
+    ("a_slice_element_is_a_distinct_object_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30]\n"
+     "    var r = [a[0:y] for y in [1, 2, 3]]\n"
+     "    r[0][0] = 99\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "99 10 10"),
+    # A slice of a base that PERSISTS and holds containers — `b[0:2]` where `b`
+    # is a name — is sound for the same reason the literal arms accept `[a, b]`:
+    # the copied words are addresses of the persistent inner lists, which is what
+    # CPython's own slice shares, not addresses of a blob built per iteration.
+    ("a_slice_of_a_list_of_lists_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var b = [[1, 2], [3, 4], [5, 6]]\n"
+     "    var r = [b[0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][0][0], r[1][1][1], r[2][0][1])\n"
+     "    return 0\n",
+     0, "1 4 2"),
+    # A slice whose base is a display of scalars: the base IS built here, but a
+    # `[1, 2, 3]` display contributes only words, so the copy carries no scratch
+    # address and the element is materialised.
+    ("a_comprehension_element_that_is_a_slice_of_a_literal_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[1, 2, 3][0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][1], r[1][0], r[2][1])\n"
+     "    return 0\n",
+     0, "2 1 2"),
+    # …and the boundary a slice does NOT cross: a base built here that ITSELF
+    # holds a container carries the address of one scratch blob into every
+    # iteration's copy, so `[[1, 2]][0:1]` stays refused. This is the row that
+    # keeps the slice arm from being "accept every slice".
+    ("a_slice_whose_base_opens_a_container_is_refused",
+     "def main() -> Int:\n"
+     "    var r = [[[1, 2]][0:1] for y in [1, 2, 3]]\n"
+     "    printf(\"%d\", r[0][0][0])\n"
+     "    return 0\n",
+     "refuse:the element `[[1, 2]][0:1]` opens a container", None),
+    # A SLICE whose base is a NAME, which the copy makes per-iteration with no
+    # runtime blob base: the slice copies `a`'s element words into a fresh blob,
+    # the copy lands that blob in its own array slot, and `a` keeps the words
+    # stable so no iteration aliases another. Measured against CPython 3.14
+    # (10 10 10) and refused before this with "the element `SliceExpr` opens a
+    # container".
+    ("a_slice_element_of_a_name_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [10, 20, 30, 40]\n"
+     "    var r = [a[0:2] for y in [1, 2, 3]]\n"
+     "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
+     "    return 0\n",
+     0, "10 10 10"),
+    # …and the same slice over a list of LISTS, which is the shape that says the
+    # copy shares the base's INNER objects rather than copying them: CPython's
+    # slice shares `a`'s inner lists too, so every iteration's slice references
+    # the same inner lists `a` owns. Measured (1 4 1 4), and a fix that copied
+    # the inner blobs instead of their references would answer 1 4 1 4 here by
+    # accident only if it also kept the sharing.
+    ("a_slice_element_over_a_list_of_lists_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var a = [[1, 2], [3, 4]]\n"
+     "    var r = [a[0:2] for y in [1, 2]]\n"
+     "    printf(\"%d %d %d %d\", r[0][0][0], r[0][1][1], r[1][0][0], "
+     "r[1][1][1])\n"
+     "    return 0\n",
+     0, "1 4 1 4"),
+    # …and the boundary the slice acceptance does NOT cross: a slice whose BASE
+    # is built at the element site. `[1, 2][0:1]`'s referenced word is a scalar
+    # here, but the rule is the base's own container, and it is the same rule the
+    # literal case asks one node type in — so this stays refused, and the refusal
+    # names the source's own spelling (`[1, 2][0:1]`) rather than `SliceExpr`.
+# A comprehension ELEMENT that is itself a container CONSTRUCTION --
+    # `[1, 2][0:1]` -- which USED to be refused here ("the element `[1, 2][0:1]`
+    # opens a container") and now BUILDS, RUNS, and is per-iteration: a write
+    # through one element leaves the other alone, which is the read a `len`
+    # check could not have told (both are 1).  Measured against CPython's own
+    # answer for the same expression, which is `9 1` because a list
+    # comprehension produces a DISTINCT list per iteration.
+    #
+    # The row is stronger than the refusal it replaces, not weaker: a refusal
+    # row only said the construct was refused, which is a fact about the
+    # compiler; this one says what the program COMPUTES, which is a fact about
+    # the language, and a compiler that kept the refusal would fail here instead
+    # of passing.  `--no-prove` is the other half of that: the construct still
+    # refuses PROOF generation, by name ("a Comprehension has no value in the
+    # semantic model"), so a `prove=True` build would be measuring the proof
+    # layer, not the image.
+    ("a_slice_element_that_builds_a_container_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[1, 2][0:1] for y in [1, 2]]\n"
+     "    r[0][0] = 9\n"
+     "    printf(\"%d %d\", r[0][0], r[1][0])\n"
+     "    return 0\n",
+     0, "9 1"),
+    # An EMPTY/SIZED container CONSTRUCTION as the element, which is flat by
+    # construction: `bytearray(3)` reserves a `[3][0][0][0]` blob and the copy
+    # lands it per iteration, so the two elements are DISTINCT containers. The
+    # assertion writes through one element and reads the other — the read that
+    # distinguishes a per-iteration copy from the one shared blob, which a `len`
+    # check could not (both are 3). Measured: `9 0`, CPython's answer.
+    ("a_container_construction_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [bytearray(3) for y in [1, 2]]\n"
+     "    r[0][0] = 9\n"
+     "    printf(\"%d %d\", r[0][0], r[1][0])\n"
+     "    return 0\n",
+     0, "9 0"),
+    # …and an EMPTY `List[Int]()`, the zero-operand form the emitter lowers as
+    # the eight-byte zero-count blob. As observable as the row above and for the
+    # same reason: each element's `len` is 0 either way, so the count is not the
+    # claim — the build success is, and that each element is its own blob.
+    ("an_empty_list_construction_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [List[Int]() for y in [1, 2]]\n"
+     "    printf(\"%d %d\", len(r[0]), len(r[1]))\n"
+     "    return 0\n",
+     0, "0 0"),
     # …and the boundary the nested acceptance does NOT cross: an inner
     # comprehension whose OWN result holds containers carries those containers
     # as addresses, so copying it per iteration would share one scratch blob —
@@ -18560,22 +18927,24 @@ REPEAT_CASES = [
 
 
 # `|` on two containers is a SET UNION (`{1,2} | {2,3}` in CPython — a LIST
-# pair is a TypeError there, so the operands below are set literals), and the
-# two backends now DISAGREE
-# HONESTLY about it: arm64 lowers it (`_emit_set_union`, whose left-copy loop was
-# leaving on its first iteration for the same reason concat's did, so
-# `[1,2] | [2,3]` summed to 5), and x86-64 has no union emitter and used to
-# lower it as a plain concatenation — which builds, runs, exits 0 and answers
-# `[1, 2, 2, 3]` for a set, 8 where CPython says 6. That is a wrong answer, so
-# x86-64 now refuses and names the reason.
+# pair is a TypeError there, so the operands below are set literals), and BOTH
+# backends lower it as of 2026-10-13: arm64's `_emit_set_union` was the first
+# emitter, and x86-64 grew the same copy-then-dedup loop (`_emit_set_union` /
+# `_emit_set_op`), so the "one answers and one says it cannot" end state this
+# group was written for is gone.  The group stays because it is a CPython-diff
+# runner over three shapes a shared image would hide — a walk, the count read
+# as a value through a name, and the count read through literals — and because
+# the reservation the union makes depends on which of those two spellings the
+# operand is.
 #
-# It cannot be one of the four-column cases: those require BOTH backends to
-# refuse (`refuse_either:`) or both to answer, and this construct is the one
-# place where "one answers and one says it cannot" is the correct end state.
-# Hence its own runner, which asserts exactly that — and which fails if either
-# side changes, because the failure it is watching for is the silent one.
+# It cannot be one of the four-column cases for a reason that outlives the
+# disagreement: `run_case` diffs the two backends against EACH OTHER (and, for
+# the CPython-pair shape, one image per backend), while these rows ask CPython
+# for the answer and require both machines to reproduce it, which is the
+# stronger statement and the one the count-word row needs (a walk reads three
+# elements even when the count word is wrong).
 SET_UNION_CASES = [
-    ("set_union_is_a_set_on_arm64_and_refused_on_x86_64",
+    ("set_union_is_a_set_on_both_backends",
      "def main() -> Int:\n"
      "    var a = {1, 2}\n"
      "    var b = {2, 3}\n"
@@ -19827,7 +20196,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%d\", xs)\n"
      "    return 0\n",
-     "refuse:reads `xs` as a NUMBER, and `xs` is `list:int`", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # The `%s` arm, which is the one that DEREFERENCES: the blob's count bytes
     # are not text, so this printed `[]` (the walk stopped at whichever zero byte
     # the heap block starts with) rather than faulting. Same kind test, different
@@ -19837,7 +20206,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var xs = [1, 2, 3]\n"
      "    printf(\"v=%s\", xs)\n"
      "    return 0\n",
-     "refuse:reads `xs` as text, and `xs` is `list:int`", None),
+     "refuse:reads `xs` as text, and `xs` is a CONTAINER", None),
     # The KIND and not the constructor's name, which is the doc's second
     # decision: `printf("%d", d)` for a `Dict` is the same shape and the same
     # answer, and the needle names the operand (`d`) rather than a list.
@@ -19846,7 +20215,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    var d = {1: 10, 2: 20}\n"
      "    printf(\"v=%d\", d)\n"
      "    return 0\n",
-     "refuse:reads `d` as a NUMBER", None),
+     "refuse:reads `d` as a number, and `d` is a CONTAINER", None),
     # A list PARAMETER, through an annotation rather than a local, so the
     # evidence is the DECLARATION and not a body statement: the kind is the bare
     # `list` an annotation gives, and the row pins that the test is the kind
@@ -19857,7 +20226,7 @@ PRINTF_CONTAINER_REFUSALS = [
      "    return 0\n"
      "def main() -> Int:\n"
      "    return show([1, 2, 3])\n",
-     "refuse:reads `xs` as a NUMBER, and `xs` is `list` — a CONTAINER", None),
+     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
     # ── THE CONTROLS, and both are the over-refusal direction ───────────────
     #
     # The element and the length are what a reader means to print, and both
@@ -19886,14 +20255,15 @@ PRINTF_CONTAINER_REFUSALS = [
 
 
 def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
-    """arm64 must ANSWER CPython; x86-64 must REFUSE, naming the union.
+    """BOTH backends must ANSWER CPython's set union.
 
-    Both halves are load-bearing and they fail differently. If x86-64 builds
-    this again, it is answering with a concatenation and the case says so
-    instead of a reader discovering `[1, 2, 2, 3]` where a set belongs. If
-    arm64 refuses, the construct has been lost on the backend that can lower it
-    — which is the over-refusal this project treats as a regression just as
-    much as a wrong answer.
+    The runner was a disagreement check while x86-64 had no union emitter (it
+    lowered `a | b` as a concatenation and answered `[1, 2, 2, 3]`).  Now that
+    both machines lower it, each half is still load-bearing: a backend that
+    builds and answers the wrong count word fails here rather than a reader
+    discovering `[1, 2, 2, 3]` where a set belongs, and a backend that refuses
+    the construct has lost a lowering it has — which is the over-refusal this
+    project treats as a regression just as much as a wrong answer.
     """
     py = os.path.join(tmpdir, name + ".py")
     with open(py, "w") as f:
@@ -19906,29 +20276,20 @@ def run_set_union_case(name, source, cpython_source, tmpdir, verbose):
     want = ref.stdout
     with open(os.path.join(tmpdir, name + ".mojo"), "w") as f:
         f.write(source)
-    out = os.path.join(tmpdir, f"{name}.arm64")
-    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
-                            backend="arm64")
-    if rc != 0:
-        return False, (f"arm64 REFUSED a set union it lowers: "
-                       f"{text.strip()[-300:]}")
-    run = subprocess.run([out], capture_output=True, text=True,
-                         timeout=RUN_TIMEOUT)
-    if run.stdout != want:
-        return False, (f"arm64 answered {run.stdout.strip()!r}, CPython "
-                       f"{want.strip()!r}")
-    out = os.path.join(tmpdir, f"{name}.x86_64")
-    rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
-                            backend="x86_64")
-    if rc == 0:
-        return False, ("x86_64 BUILT `a | b`, which it lowers as a "
-                       "concatenation — that is the wrong answer this case "
-                       "exists for, and it is silent")
-    if "SET UNION" not in text:
-        return False, (f"x86-64 refused, but not by naming the union: "
-                       f"{text.strip()[-200:]}")
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
+                                backend=backend)
+        if rc != 0:
+            return False, (f"{backend} REFUSED a set union it lowers: "
+                           f"{text.strip()[-300:]}")
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.stdout != want:
+            return False, (f"{backend} answered {run.stdout.strip()!r}, CPython "
+                           f"{want.strip()!r}")
     if verbose:
-        print(f"      arm64 answered {want.strip()!r}; x86-64 refused by name")
+        print(f"      arm64 and x86-64 both answered {want.strip()!r}")
     return True, ""
 
 
@@ -23194,6 +23555,50 @@ REFUSAL_CASES = [
      "    return f(0)\n",
      "refuse:is read at line 6 before anything in this function stores it",
      None),
+    # ── A MODULE-LEVEL literal sequence is the same emptiness a function-local
+    # one is, and it was `'maybe'` until `_preheader_facts` was seeded with
+    # `model.module_entry_literal_facts`: the walk started empty, the header's
+    # definition of the loop target survived, and the read after the loop
+    # answered the caller's leftover where CPython raises `UnboundLocalError`.
+    # The value is a module CONSTANT, so it holds at the function's first
+    # instruction; the refusal is the same on both architectures, which
+    # `refuse:` checks by running both.
+    ("module_level_empty_list_target_is_not_a_definition",
+     "XS = []\n"
+     "def f():\n"
+     "    for q in XS:\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 5 before anything in this function stores it",
+     None),
+    # …and the non-empty half, which is the direction that keeps the rule from
+    # refusing a loop that runs: the target is bound, and 20 is the last element
+    # CPython prints.
+    ("module_level_nonempty_list_target_is_still_a_definition",
+     "XS = [10, 20]\n"
+     "def f():\n"
+     "    for q in XS:\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n"
+     "f()\n",
+     0, "q=20"),
+    # The INT half of the same seed, and it reaches a DIFFERENT consumer:
+    # `_range_is_nonempty` reads the integer table rather than `_for_emptiness`'
+    # sequence one, so a fix that seeded only sequences would pass the rows
+    # above and fail this one. CPython raises for a zero trip count.
+    ("module_level_zero_int_bound_is_not_a_definition",
+     "K = 0\n"
+     "def f():\n"
+     "    for i in range(0, K):\n"
+     "        pass\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n"
+     "f()\n",
+     "refuse:is read at line 5 before anything in this function stores it",
+     None),
     # THE CONTROLS, and they are the reason the three above are believable:
     # each is a name that IS stored before it is read, in a shape close
     # enough to the refused ones that a check which refused them would be
@@ -26078,11 +26483,13 @@ def check_stack_floor_decision(verbose=False):
 #
 # This is the structural half of `STDERR_CASES`'s blob-growth row, and it exists
 # because the row cannot cover the set. A run-time stop is only observable on a
-# program whose estimate is wrong, and for two of the three sites there is no
-# such program that builds on BOTH machines: x86-64 refuses `a | b` outright
-# (`model.set_union_refusal`, and it is right — lowering it as a concatenation
-# answers `[1,2] | [2,3]` with four elements), so a two-architecture stderr
-# comparison has nothing to compare. What is left is the question the run cannot
+# program whose estimate is wrong, and the sites are reached by programs that
+# were not all buildable on BOTH machines until 2026-10-13: x86-64 used to
+# refuse `a | b` outright (`model.set_union_refusal` — lowering it as a
+# concatenation answers `[1,2] | [2,3]` with four elements), so a
+# two-architecture stderr comparison had nothing to compare for the set sites.
+# x86-64 grew the four set emitters and the refusal half is gone, but the check
+# is still what pins the guards. What is left is the question the run cannot
 # ask: **does this site have a guard at all.** Before this, `*` had none on
 # either backend and `|` had none on either backend, and only `+` had one on
 # x86-64 — and that one was a bare `exit(1)`, which is why it is in
@@ -26164,6 +26571,25 @@ _BLOB_GROWTH_PROBES = [
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
      {"a set symmetric difference"}),
+    # x86-64 grew the SAME four set sites on 2026-10-13 (`_emit_set_union` /
+    # `_emit_set_op` / `_emit_set_filter_pass`), so each is now a blob-producing
+    # site on BOTH backends and each carries its own guard with the same `what`
+    # noun phrase.  They are separate probes rather than four more arm64 rows
+    # because the check is per (backend, site): the point of naming the backend
+    # is that a site can exist on one machine and not the other, which is
+    # exactly what these four were until the x86-64 emitters landed.
+    ("x86_64", "uni",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
+     "    var u = a | b\n    return len(u)\n",
+     {"a set union"}),
+    ("x86_64", "sin",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a & b\n    return len(c)\n",
+     {"a set intersection"}),
+    ("x86_64", "sdf",
+     "def main(n):\n    var a = {1, 2}\n    var b = {2}\n"
+     "    var c = a - b\n    return len(c)\n",
+     {"a set difference"}),
     ("x86_64", "ssd",
      "def main(n):\n    var a = {1, 2}\n    var b = {2, 3}\n"
      "    var c = a ^ b\n    return len(c)\n",
@@ -27079,10 +27505,7 @@ def main():
                     traceback.print_exc()
             if ok:
                 passed += 1
-                print(f"  PASS  {name} ("
-                      + ("arm64 == CPython, x86-64 refused by name"
-                         if name in set_union_names
-                         else "== CPython, both architectures") + ")")
+                print(f"  PASS  {name} (== CPython, both architectures)")
             else:
                 failed += 1
                 print(f"  FAIL  {name}: {detail}")

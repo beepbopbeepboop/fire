@@ -1356,7 +1356,17 @@ AXIOM_CLOSURE = {
     # The partition still closes (312 = 61 + 243 + 0 + 8).
     # Re-pinned by the bulk merge of the formal-worker branches: one more theorem
     # asked, four more kernel-checked clean, three fewer closure-only.
-    "ProofLib": (313, 61, 247, 0, 5, 0),
+    # +2 asked and +1 reaching with the `bunny-merge26` merge, and BOTH are the
+    # two library facts that merge added to `lib/ProofLib.lean`, named here so
+    # the row can be read rather than only diffed:
+    #   `u64_ofNat_mul`   is `clean` — proved by `UInt64.toNat.inj`, three
+    #                     rewrites and `Nat.mul_mod`, so it reaches no axiom.
+    #   `arm64_slt_iff_lt` REACHES, because its proof is `bv_decide` over the
+    #                     sign bit, which is the same decide-axiom arrival the
+    #                     `arm64_flag_*` facts beside it already record.
+    # The partition still closes exactly (315 = 62 + 248 + 0 + 5), which is the
+    # assertion that makes this a measurement rather than a number somebody typed.
+    "ProofLib": (315, 62, 248, 0, 5, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
@@ -1376,7 +1386,11 @@ AXIOM_CLOSURE = {
     # partition still closes (151 = 2 + 148 + 0 + 1).
     # Re-pinned by the bulk merge of the formal-worker branches: two more clean
     # theorems (153 = 2 + 150 + 0 + 1).
-    "X86": (153, 2, 150, 0, 1, 0),
+    # Re-pinned 2026-10-20 after landing work/formal637-docs: its three
+    # shift-successor projections (`x86_shift_post_rbp`, `_rsp`, `_rip`) are
+    # `simp` facts that reach no decide axiom, so `asked` and `clean` both move
+    # by three (156 = 2 + 153 + 0 + 1).
+    "X86": (156, 2, 153, 0, 1, 0),
     # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
     # closed the contract ladder's last two unreached contracts and put the fact
     # it needed in this module rather than in `ProofLib.lean` -- deliberately,
@@ -1435,6 +1449,34 @@ AXIOM_CLOSURE = {
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
     # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
+    # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
+    # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
+    # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
+    # `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`, `UInt64.toNat_ofNat'`
+    # and `Nat.mul_mod`, so it reaches no axiom), so `asked` and `clean` rose
+    # together and `reaches` stayed 0: the same shape this row has moved in three
+    # times, and the shape that says the ARRIVAL is specification theorems and
+    # not new trusted evaluation.  Partition closed at 67 = 0 + 67 + 0 + 0.
+    #
+    # That copy was then DELETED, so the row is back where it was.  It restated
+    # `lib/ProofLib.lean`'s theorem of the same name -- stated beside
+    # `u64_ofNat_add`/`u64_ofNat_sub`, which is where it belongs -- and it
+    # existed only so the generated all-inputs induction would have the name in
+    # scope without rebuilding ProofLib's `.olean`.  Measured, that objection
+    # does not survive contact with the tree: `lib/Specs.lean` rebuilds in 1.1 s
+    # / 0.2 GB, and the emitted clause now cites the BARE `u64_ofNat_mul` (there
+    # is no `ProofLib` namespace), which
+    # `test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks`
+    # elaborates with Lean.  So the NUMBER is unchanged either way; what changed
+    # is that ONE theorem is counted once instead of twice.
+    #
+    # Re-measured after the deletion, generation only:
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` answers
+    # 66 of 66, 0 reaching a decide axiom, 66 clean, 0 text_only /
+    # closure_only / ofReduceBool -- partition closes (66 = 0 + 66 + 0 + 0).  The
+    # other seven rows are NOT re-measured here; this row is the only one that
+    # moved, and it moved because a declaration LEFT the module, not because a
+    # proof stopped being kernel-checked.
     "Specs": (66, 0, 66, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
     # the same way on the same run.  Fourteen askable declarations, of which TEN

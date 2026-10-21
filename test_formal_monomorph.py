@@ -25,6 +25,14 @@ boundary. Generalising the helper to take a dict of files would have meant
 editing a 10,000-line file several other formal branches are also editing, for a
 runner this file needs about thirty lines of.
 
+That reason covers a case that is not about generics at all, and one such case
+lives here: a ONE-FIELD STRUCT returned by an IMPORTED CALL, read through its
+field (`test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_
+field` and its module-qualified twin). The construct is a cross-module BINDING
+rather than an instantiation, but the shape is this file's: a library declaring
+the struct and its factory, a program that calls it, and a CPython differential
+on both architectures.
+
 The unit cases are the other half and are not differential on purpose: they pin
 the DECISIONS (which names are templates, what a concrete type argument is,
 which call sites get rewritten) and those are properties of the source, not of
@@ -2646,6 +2654,109 @@ def test_a_bare_literal_value_parameter_instantiates(tmpdir):
               f"value the bracket supplied")
 
 
+# The typed-bracket parameter is a compile-time parameter, not storage: a
+# template whose head declares `origin: Int` used to measure one field WIDER
+# than its own one-field instantiation, so a free function taking the
+# instantiation was compiled as a FRAME receiver while the caller passed the
+# field by value.  The program built and then SEGFAULTED on both architectures.
+# These two programs are that case in its two admitted spellings — a comptime
+# VALUE argument and a display — and both read the one field through the call
+# boundary, which is the read that faults when the contract is wrong.
+TYPED_BRACKET_LIB = """\
+struct Tagged[T, origin: Int]:
+    var v: T
+
+def untag_int(t: Tagged[Int, 7]) -> Int:
+    return t.v
+"""
+
+TYPED_BRACKET_PROG = """\
+from taglib import Tagged, untag_int
+
+def main():
+    var t = Tagged[Int, 7]()
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_CPYTHON = """\
+class Tagged:
+    def __init__(self, origin):
+        self.v = 0
+        self.origin = origin
+
+def untag_int(t):
+    return t.v
+
+def main():
+    t = Tagged(7)
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_DISPLAY_LIB = """\
+struct Tagged[T, keys: List[T]]:
+    var v: T
+
+def untag_int(t: Tagged[Int, [1, 2]]) -> Int:
+    return t.v
+"""
+
+TYPED_BRACKET_DISPLAY_PROG = """\
+from taglib import Tagged, untag_int
+
+def main():
+    var t = Tagged[Int, [1, 2]]()
+    t.v = 5
+    print(untag_int(t))
+"""
+
+TYPED_BRACKET_DISPLAY_CPYTHON = """\
+class Tagged:
+    def __init__(self, keys):
+        self.v = 0
+        self.keys = keys
+
+def untag_int(t):
+    return t.v
+
+def main():
+    t = Tagged([1, 2])
+    t.v = 5
+    print(untag_int(t))
+"""
+
+
+def test_a_typed_bracket_parameter_is_not_instance_storage(tmpdir):
+    """A one-field instantiation crosses a free function's boundary by VALUE.
+
+    The head `[T, origin: Int]` declares a compile-time parameter; the parser
+    keeps the annotated one in `StructDef.fields` for the interpreter's member
+    read, but `formal/model.py::struct_field_names` must not count it as
+    storage.  Counting it made the TEMPLATE `Tagged` two fields wide while
+    `Tagged[Int, 7]` is one, so the callee compiled `t.v` as a frame slot and
+    the caller — a one-field receiver, whose value IS its field — passed the
+    word itself: SIGSEGV, exit 139, on both architectures.  The answer 5 is
+    whatever `t.v` was set to, and the build is the assertion; CPython's twin
+    is the same call with the head's parameter written as an argument.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_typedbr", TYPED_BRACKET_LIB,
+                            TYPED_BRACKET_PROG, TYPED_BRACKET_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, 7]` read through a "
+              f"free function taking the instantiation")
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_typedbrdisp",
+                            TYPED_BRACKET_DISPLAY_LIB, TYPED_BRACKET_DISPLAY_PROG,
+                            TYPED_BRACKET_DISPLAY_CPYTHON,
+                            libname="taglib.mojo")
+        check(got == "5\n",
+              f"[{arch}] printed {got!r} for `Tagged[Int, [1, 2]]` read through "
+              f"a free function taking the instantiation")
+
+
 def test_a_bare_literal_is_only_a_value_when_the_declaration_says_so(tmpdir):
     """The declaration decides: `Pair[2]` and `widen[3]` are still not demands.
 
@@ -3640,6 +3751,103 @@ def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
           f"of a template's name was rewritten into a mangled struct name")
 
 
+# ── A ONE-FIELD STRUCT RETURNED BY AN IMPORTED CALL ─────────────────────────
+#
+# The cross-module half of the same-image binding `both_arch_one_field_struct_
+# returned_by_a_call_reads_through_its_field` (in `test_formal_run.py`) pins.
+# `_call_returns_one_word_struct` read a callee's declared `-> T` only for a
+# function THIS unit compiled — `functions_by_name` is built from the module's
+# own function list — so `var r = make(7)` under `from pairlib import make` was
+# refused at its first field read ("'r.returncode' is a field access through
+# 'r'") even though BOTH the callee's declaration and the struct's were in the
+# image. A one-field struct has no frame, so `r.returncode` is the identity `r`,
+# and the image must answer CPython's number.
+#
+# Both spellings are covered, because they reach the callee by different routes:
+# a bare `make` (whose declaration `formal/imports.py::imported_function_defs`
+# folds under the local name a call site spells) and a module-qualified
+# `pairlib.make` (whose declaration `imported_module_function_defs` resolves
+# through the imported module's local name). 7 and 9 are the two answers, so a
+# fix that read one spelling's callee as the other's, or that dropped the field
+# read, prints a number neither program computes on one of the two.
+#
+# The module-qualified spelling is the UNALIASED `import pairlib`: `import
+# pairlib as L; L.make(…)` is a separate, pre-existing refusal ("'L' has no
+# home") that this change does not address and that is not what it is about.
+
+CP_LIB = """\
+struct CP:
+    var returncode: Int = 0
+
+def make(n: Int) -> CP:
+    var c = CP()
+    c.returncode = n
+    return c
+"""
+
+CP_CPYTHON_FROM = """\
+class CP:
+    def __init__(self):
+        self.returncode = 0
+
+def make(n):
+    c = CP()
+    c.returncode = n
+    return c
+
+def main():
+    r = make(7)
+    print(r.returncode)
+"""
+
+CP_CPYTHON_QUAL = """\
+class CP:
+    def __init__(self):
+        self.returncode = 0
+
+def make(n):
+    c = CP()
+    c.returncode = n
+    return c
+
+def main():
+    r = make(9)
+    print(r.returncode)
+"""
+
+CP_FROM_PROG = """\
+from pairlib import make
+
+def main():
+    var r = make(7)
+    print(r.returncode)
+"""
+
+CP_QUAL_PROG = """\
+import pairlib
+
+def main():
+    var r = pairlib.make(9)
+    print(r.returncode)
+"""
+
+
+def test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field(
+        tmpdir):
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_cpfrom", CP_LIB, CP_FROM_PROG,
+                            CP_CPYTHON_FROM)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field(
+        tmpdir):
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_cpqual", CP_LIB, CP_QUAL_PROG,
+                            CP_CPYTHON_QUAL)
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -3741,6 +3949,10 @@ TESTS = [
      test_the_census_does_not_count_this_worktrees_scratch),
     ("a variadic bracket parameter takes the extra arguments",
      test_a_variadic_bracket_parameter_takes_the_extra_arguments),
+    ("a one-field struct from an imported bare call reads through its field",
+     test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field),
+    ("a one-field struct from a module-qualified call reads through its field",
+     test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field),
 ]
 
 EXPECTED_FAILURES: dict = {}

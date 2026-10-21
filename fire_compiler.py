@@ -826,6 +826,37 @@ class StructDef:
     # dispatch's fallback: `s._fieldwise_ctor_synthesized = True` on a
     # StructDef with no such field in struct_field_types).
     _fieldwise_ctor_synthesized: bool = False
+    # The names the struct's BRACKET declares (`struct Tagged[T, origin: Int]`).
+    # They are compile-time parameters, NOT instance storage — a value
+    # parameter's value is supplied at the application (`Tagged[Int, 7]`) and
+    # has no slot in an instance.  `_parse_struct_params_as_fields` still puts
+    # the annotated ones in `fields`, because this parser's other consumers
+    # (the interpreter's member read) spell a parameter through the receiver;
+    # this list is what tells a STORAGE reader which of those `fields` came from
+    # the head rather than from the body.  `formal/model.py::struct_field_names`
+    # is the reader that must not count them: counting one made the unapplied
+    # TEMPLATE one field wider than its instantiation, so a free function taking
+    # `Tagged[Int, 7]` read the parameter as a frame address and segfaulted.
+    bracket_params: list = field(default_factory=list)  # parameter names
+    # EVERY name in the struct's bracket block, INCLUDING the trait-bounded
+    # TYPE parameters (`T: Iterator`) that _parse_struct_params_as_fields
+    # deliberately keeps out of `fields`/`bracket_params` (a trait-bound name
+    # is not a comptime VALUE parameter, so it is not a field). `bracket_params`
+    # therefore reads EMPTY for exactly the structs a type-checker calls
+    # generic — which is why this second list exists. The definition-site
+    # method-emission loop (module_gen's StructDef arm) reads it only to scope
+    # the false-green guard in emit_resolve (gen._current_struct_type_params):
+    # a struct with UNBOUND type parameters is the one whose type-parameter-
+    # typed fields erase to int64_t at the definition site, so an argument
+    # read from such a field can only infer a placeholder type argument for a
+    # container-bounded callee — and a generic struct's individual method
+    # BODIES that refuse to lower (a `next(self._inner)` in one) take
+    # module_gen's transactional fallback to prototype-only rather than
+    # failing the whole module (the instantiating TU emits the mangled copy).
+    # Measured: std/itertools `_Product2` and std/collections/string
+    # `BytesIter[origin]` refused compilation on precisely these bodies
+    # (2026-10-21).
+    type_param_names: list = field(default_factory=list)  # all bracket names
 
 @dataclass
 class TraitDef:
@@ -4243,8 +4274,14 @@ class Parser:
         name = self._ident()
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
+        bracket_params = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
+            bracket_params = [f.name for f in param_fields
+                              if isinstance(f, VarDecl)]
+            type_param_names = list(getattr(self, '_struct_param_names', []) or [])
+        else:
+            type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
         # base-class list. Capture the top-level names (skipping keyword
         # args like `metaclass=X` and trait-bound expressions we can't
@@ -4492,7 +4529,9 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         comptime_aliases=aliases, bases=bases)
+                         comptime_aliases=aliases, bases=bases,
+                         bracket_params=bracket_params,
+                         type_param_names=type_param_names)
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -6427,6 +6466,11 @@ class Parser:
         Handles //, * separators and nested brackets in type annotations and defaults."""
         self._expect("LBRACKET")
         fields = []
+        # Every parameter name, trait-bound type parameters included: the
+        # VarDecl list below drops the trait-bound ones on purpose (they are
+        # not comptime VALUE parameters), but the StructDef's type_param_names
+        # must still see them — see that field's comment.
+        self._struct_param_names = []
         while True:
             t = self._peek()
             if t.kind in ('RBRACKET', 'EOF'):
@@ -6444,6 +6488,7 @@ class Parser:
             # Try to parse: name: Type [= default]
             if t.kind == 'NAME':
                 name = t.value
+                self._struct_param_names.append(name)
                 self._advance()
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'

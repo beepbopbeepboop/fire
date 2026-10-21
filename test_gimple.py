@@ -6750,7 +6750,15 @@ def root_cas_hash_call(parts) -> str:
                 print(f"FAIL  {name}: {e}")
                 _FAIL += 1
                 return
-        start = c_src.find("Sub___eq__ (")
+        # The DEFINITION, not the first occurrence of the name: a prototype
+        # ends in `;` and has no body to carry any `#line` at all, and the
+        # prototype block is emitted ahead of the method bodies (it has to be
+        # — `_mojo_getattr_Sub`'s bound-method arm takes the ADDRESS of this
+        # symbol, and a declaration after its use is an implicit one). Only a
+        # definition's header carries the `__GIMPLE` tag between the return
+        # type and the name — the same distinction
+        # `selfhost_emitted_return_type` above matches on.
+        start = c_src.find("__GIMPLE Sub___eq__ (")
         if start < 0:
             print(f"FAIL  {name}: Sub___eq__ was never emitted (inheritance merge did not run)")
             _FAIL += 1

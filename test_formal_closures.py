@@ -106,16 +106,34 @@ CASES = [
     # difference between the refused and the answered program is the ONE WORD
     # `nonlocal c` — `_flatten_closures` has already turned the capture into a
     # leading parameter, and what the declaration adds is a statement the
-    # emitters do not lower. What is left refusing, and is filed rather than
-    # answered here, is that declaration on its own:
-    # `bugs/FORMAL_a_read_only_nonlocal_is_refused_though_the_capture_it_
-    # declares_is_already_a_parameter.md`.
+    # emitters now lower to nothing beside `global` (see the row below).
     ("capture_read_without_the_nonlocal_spelling_answers_cpython",
      "def main():\n"
      "    c = 5\n"
      "    def read():\n"
      "        return c\n"
      "    print(read())\n"
+     "    return 0\n"),
+    # A `nonlocal` that only READS is ORDINARY code and must build. It is its
+    # own row because the read-half was never exercised and was broken two
+    # ways: the refusal crashed (it called a walk that lives in
+    # `formal/build.py`, not in `formal/model.py`), and even with that walk it
+    # asked the ENCLOSING frame whether it writes the name — so this program,
+    # where `outer` writes `c` twice and `get` only reads it through
+    # `nonlocal`, was refused too. Both emitters now treat `NonlocalStmt` as a
+    # no-op beside `global`, and `nonlocal_write_refusal` counts a store only
+    # at or AFTER the declaration, which is what tells this program from
+    # `nonlocal_writes_to_a_captured_cell` below. CPython answers 8.
+    ("a_read_only_nonlocal_builds_when_the_enclosing_frame_writes_the_cell",
+     "def outer(n):\n"
+     "    c = 5\n"
+     "    c = c + n\n"
+     "    def get():\n"
+     "        nonlocal c\n"
+     "        return c\n"
+     "    return get()\n"
+     "def main():\n"
+     "    print(outer(3))\n"
      "    return 0\n"),
     # TRANSITIVE capture, which is the part a one-level pre-pass gets wrong: the
     # middle function does not use `a` itself and still has to pass it down, so
@@ -787,25 +805,13 @@ REFUSALS = [
      "def main():\n"
      "    print(make())\n"
      "    return 0\n",
-     ["a captured name has no shared cell for a write to reach"]),
-    # The same refusal with the store in the MAIN body rather than in `make`,
-    # and it is a separate row because the FRAME is what the fix turns on: the
-    # write is decided by asking whether the name is stored in the frame that
-    # DECLARES the `nonlocal`, and a reader that asked the enclosing function
-    # instead would see `x = 0` there and could not tell this program from the
-    # read-only one (`formal/model.py::nonlocal_write_refusal`'s docstring shows
-    # both and why one is refused and one is not).
-    ("nonlocal_writes_a_name_the_main_body_also_binds",
-     "def main():\n"
-     "    var x = 0\n"
-     "    def bump():\n"
-     "        nonlocal x\n"
-     "        x = x + 1\n"
-     "        return x\n"
-     "    bump()\n"
-     "    print(x)\n"
-     "    return 0\n",
-     ["a captured name has no shared cell for a write to reach"]),
+     # The needles are the two facts only the REAL refusal carries. They used to
+     # be `["nonlocal"]`, and that needle could not tell the refusal from the
+     # `NameError` this construct actually raised: the traceback's own frame
+     # name is `nonlocal_write_refusal`, which CONTAINS "nonlocal". A needle
+     # that a crash satisfies is the same defect as a marker that a pass
+     # satisfies — the row reported PASS while the construct was a traceback.
+     ["`nonlocal` writes", "captures by VALUE"]),
 
     # ── higher-order builtins ──
     #

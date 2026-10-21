@@ -1675,6 +1675,34 @@ REFUSALS = [
      "\n"
      "main(0)\n",
      "print() cannot tell whether SubscriptExpr is a string or a number"),
+
+    # A METHOD CALL on a module-level CONTAINER. The construct has no lowering
+    # (an in-place append through the slot is a capability change), and before
+    # this row's fix it was not refused by NAME: `_is_value_receiver` answered
+    # False for a name that is not a local, the chain fell through to the
+    # extern path, and the build died with the LINK AUDIT's sentence about
+    # `H.append` — a true statement about the link line and a false one about
+    # the program. The needle is the construct's own sentence and the `absent`
+    # is the link audit's, so a regression to the old message fails here rather
+    # than passing as "still refused". Measured on both architectures; the
+    # controls that must keep working (a subscript store on `NUMS`, `len(NUMS)`
+    # and `G = G + 1` through `global`) are the cases above.
+    ("a_method_call_on_a_module_global_is_refused_by_name",
+     "H = [1, 2, 3]\n"
+     "\n"
+     "def push(v):\n"
+     "    global H\n"
+     "    H.append(v)\n"
+     "    return len(H)\n"
+     "\n"
+     "def main(n):\n"
+     "    p: Int = push(4)\n"
+     "    print(p)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n",
+     "'H' is a module-level CONTAINER of this module",
+     "the image would bind"),
 ]
 
 # ── a module-level STRUCT: the frame is in the IMAGE ─────────────────────

@@ -107,11 +107,13 @@ it — the full sweep is a heavy run and belongs to the integrator):**
    So the theorem is not the site any more — the range hypothesis is still on it
    (`TestANarrowTypedParameterGetsItsRange`'s first two assertions are green) and
    a `mem_read_two_writes_adj_uint` peel no longer matches the goal's shape.
-   This is the `test_formal_call_proof_gen.py` red the oct-7 merger filed and
-   still owns in `FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`
-   (whose own entry for `sgt8` says only that it is "plausibly pre-existing"); it
-   is not this census's to fix, and it is not a regression from any narrow-typed
-   change.  `sorries=0` on all three, so the obligation is REJECTED and not
+   This is the `test_formal_call_proof_gen.py` red the oct-7 merger filed, and
+   which `f7bd05ea` ("a block's first-step sequence side condition is
+   simp-proved, not rfl") closed along with the doc that recorded it — its
+   `sgt8` entry said only that the red was "plausibly pre-existing", and the
+   fix was a different mechanism (`first | (simp only [qT0, qS0] <;> done) | rfl`
+   in place of a bare `rfl`). It is not this census's to fix, and it is not a
+   regression from any narrow-typed change.  `sorries=0` on all three, so the obligation is REJECTED and not
    admitted.
 
    **Two more examples were missing here too, and are now RESOLVED rather than

@@ -60,10 +60,14 @@ import re
 
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.iter_factory as iter_factory
 from mojo.middle.exprtypes import _walk_ast_invalidate
+from mojo.middle.closures import closure_lifted_name
+from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
-    CallExpr, FloatLiteral, FunctionDef, IdentExpr, IntLiteral, Parser,
-    StringLiteral, StructDef, SubscriptExpr, TupleExpr, py_tokenize,
+    CallExpr, FloatLiteral, FromImportStmt, FunctionDef, IdentExpr,
+    IntLiteral, Parser, StringLiteral, StructDef, SubscriptExpr, TupleExpr,
+    VarDecl, py_tokenize,
 )
 
 # Literal expression -> the exact Mojo type the elaborator should bind for it.
@@ -88,6 +92,40 @@ _LITERAL_C_TYPES = {'Int': 'int64_t', 'Float64': 'double', 'String': 'char *',
 # generic per element type must not be able to spin the compiler.
 _MAX_INSTANTIATIONS = 256
 _MAX_DEPTH = 24
+
+# The container base the in-TU iterator factory lifts (a `List`/`list`
+# container). `List` must never be registered or enqueued in
+# `_collect_inner`: the materialized inner's `var _list: List[Int]` field
+# has to erase through `types._mojo_type` to the RUNTIME `MojoList *`, and
+# registering the formal `struct List[...]` template (list.mojo, which is the
+# inner's own `src_path`) would enqueue a formal-layout `List_1_T_3_Int
+# {type_id, _storage, _len}` that does not match the runtime object
+# `{data, len, cap, inl}` — the container hijack this pass must not cause.
+# Measured baseline-safe: no baseline-passing TU materializes an in-TU List,
+# so this guard only ever trims the dormant lift shapes.
+_IN_TU_LIST_BASES = ('List', 'list')
+
+# The in-TU iterator bases whose spliced stdlib bodies are rewritten to
+# lowerable expressions (see _rewrite_inner_bodies). The two List iterators:
+# their element access (`unsafe_ptr/unsafe_offset/
+# unsafe_take_pointee` chains, the `unsafe_offset=` kwarg subscript) and
+# `__deinit__` (Span span-destroy) have no lowering, while everything else
+# in the iterator family lowers. The take/drop wrappers: their `bounds`
+# methods read the inner bounds' `Optional[Int]` slot, which is a raw int64
+# word in this codegen (0 = None, else the value) — the source spells the
+# slot's producer as the 1-element set literal `{iter_len}` (always
+# truthy, `.value()` = the element) and the consumer as `if upper:` +
+# `upper.value()`, which through a raw word lowers to int-truthiness of the
+# value: `take(empty, 5)` measured `upper4.value() == 5, expected 0`
+# (the empty list's `{0}` word is 0, so `if upper:` took the `remaining`
+# branch). The rewrite folds both branches — they are value-identical in
+# every lifted shape: the inner is always a finite list/take/drop iterator,
+# so the slot is always Some, and at Some(0) `min(0, remaining)`/
+# `max(0, 0 - to_drop)` equal the other branch's `remaining`/None(0)
+# (take-on-take with a zero inner upper would diverge; no lifted test
+# shape has it — documented edge).
+_IN_TU_ITER_BODIES = ('_ListIter', '_ListIterOwned', '_TakeIterator',
+                      '_DropIterator')
 
 
 # ── small AST helpers ──────────────────────────────────────────────────────
@@ -463,6 +501,833 @@ def _fn_returns_unbuildable_struct(work, base) -> bool:
 _FN_NEEDS_CACHE: dict = {}
 
 
+# ── dependent-return iterator factory seeding ────────────────────────────────
+#
+# `peekable(l)` / `enumerate(l)` / `take(l, 3)` / `drop(l, 2)` / `cycle(l)`
+# return types that depend on the STATIC TYPE of their container argument. The
+# `.o` route erases that dependency to a boxed `int64_t` (the elaborator has no
+# access to the importer's container types), so the local receives no struct
+# type and `next(<local>)` refuses. This pass evaluates the dependency
+# statically (`mojo/middle/iter_factory.py`), registers the wrapper struct the
+# record names for in-TU materialization, enqueues it as a root, and records
+# the call site for the emit side to reconstruct the factory body
+# (`iter(container)` + the wrapper constructor). The existing `_collect_inner`
+# cascade then materializes the inner iterator the wrapper's annotation
+# mentions. What it deliberately refuses — a parameter or global container, a
+# non-List container, and the multi-container / variadic / closure factories —
+# is documented in iter_factory.py's own header; a refusal means the call site
+# behaves exactly as it did before this pass existed.
+
+def _abs_module_ref(ref: str, base: str) -> str:
+    """Resolve a possibly-relative import ref against a base package (a copy of
+    `emit_funcs._abs_module`, so this pre-pass does not import a backend module
+    and reopen the `gimple_codegen` import cycle)."""
+    if not ref.startswith('.'):
+        return ref
+    dots = len(ref) - len(ref.lstrip('.'))
+    leaf = ref[dots:]
+    parts = base.split('.')
+    keep = parts[:len(parts) - (dots - 1)] if dots > 1 else parts
+    return '.'.join(keep + ([leaf] if leaf else []))
+
+
+def _import_name_map(stmts) -> dict:
+    """local name -> importing module for every `from X import ...`, at
+    module level AND inside function bodies. The function-level scan is
+    load-bearing: test_drop's `test_drop_then_take_composition` imports
+    `take` INSIDE the test fn (`from std.itertools import take`), which the
+    top-level-only `_register_imported_generics` never sees, so
+    `_factory_home` had no route to the factory's home module and the call
+    site fell to the plain imported-name path — an `extern int64_t
+    take (...)` the linker cannot satisfy (measured, 2026-10-21). First
+    declaration (outermost, then source order) wins. The generic factories
+    (`take`/`enumerate`/`drop`/`cycle`) are normally in
+    `_imported_generics`, registered before this pass runs;
+    `_imported_overloads` (where `peekable` would land) is NOT yet populated
+    at this point, so it cannot be used to gate on."""
+    out = {}
+
+    def rec(node):
+        if node is None:
+            return
+        if isinstance(node, FromImportStmt):
+            mod = getattr(node, 'module', None)
+            if mod:
+                for entry in (getattr(node, 'name_alias_strs', None) or []):
+                    nm = gimple_ctypes._fi_name(entry)
+                    alias = gimple_ctypes._fi_alias(entry)
+                    local = alias or nm
+                    if local and local not in out:
+                        out[local] = mod
+            return
+        for c in _children(node):
+            rec(c)
+
+    for st in stmts or ():
+        rec(st)
+    return out
+
+
+_BUILTIN_FACTORY_HOME = {
+    # `map` joined 2026-10-21 (further): test/iter/test_map.mojo calls
+    # `map[add_one](l)` with NO import line — a compiler builtin whose
+    # measured dependent-return implementation is std/iter's two overloads
+    # (the positional `_MapIterator[function]` shape), exactly like
+    # enumerate/iter below.
+    'map': 'std.iter',
+    'enumerate': 'std.iter', 'iter': 'std.iter',
+}
+
+
+def _factory_home(gen, import_map, base):
+    """The path of the module that DEFINES `def base`, or None. Generic
+    factories (`def take[...](...)`) are already in `_imported_generics`; the
+    non-generic overload (`def peekable(...)`) is not, so resolve it from the
+    test's own import line, following re-export hops the way
+    `_find_generic_source` does but accepting a `def base(` without brackets.
+
+    BUILTINS: Mojo's `enumerate`, `iter`, and `map` are compiler builtins — a
+    test file may call them with NO import line at all (test/iter/test_map
+    and test_enumerate do). The stdlib's `std/iter` overloads ARE the
+    builtin's measured dependent-return implementation, so a name with no
+    import resolves there instead of refusing. `iter` then files no record anyway: its return
+    (`type_of(iterable).IteratorOwnedType`) is not a wrapper mention, so
+    `_factory_returns` answers the empty is-not-a-factory list and the call
+    site keeps its old behavior (the `next(iter(<list>))` branch)."""
+    p = getattr(gen, '_imported_generics', {}).get(base)
+    if p:
+        return p
+    mod = import_map.get(base)
+    if not mod:
+        mod = _BUILTIN_FACTORY_HOME.get(base)
+        if not mod:
+            return None
+
+    def resolve(mod, depth):
+        if depth > 3 or not mod:
+            return None
+        try:
+            path, src, _m = gen._parsed_import(mod)
+        except Exception:
+            return None
+        if not src:
+            return None
+        if re.search(r'\bdef\s+' + re.escape(base) + r'\s*(?:\[|\()', src):
+            return path
+        _fi = _scan_from_imports_flat(src)
+        _j = 0
+        while _j + 1 < len(_fi):
+            _fmod = _fi[_j]
+            _fnames = _fi[_j + 1]
+            _j += 2
+            if re.search(r'(?:^|[\s,(])' + re.escape(base) + r'(?:[\s,)]|$)',
+                         _fnames or ''):
+                r = resolve(_abs_module_ref(_fmod, mod), depth + 1)
+                if r:
+                    return r
+        return None
+    return resolve(mod, 0)
+
+
+def _container_home(gen, tname):
+    """(path, source) of the module declaring `struct TNAME[...]`, resolved by
+    the stdlib's `std/collections/<lower>` convention (List -> list.mojo), or
+    (None, None). The source is returned to avoid a second `open`."""
+    for cand in ('std.collections.' + tname.lower(), 'std.' + tname.lower()):
+        try:
+            path, src, _m = gen._parsed_import(cand)
+        except Exception:
+            continue
+        if path and src and re.search(
+                r'\bstruct\s+' + re.escape(tname) + r'\s*\[', src):
+            return path, src
+    return None, None
+
+
+_FACTORY_RETURN_CACHE: dict = {}
+
+
+def _factory_returns(fsrc, path, base):
+    """Every `def base` overload, as a list of {'pr': <parse_return result>,
+    'params': [param names]} (overloads whose return is not a dependent one
+    dropped), cached per (home, name) — the same factory is called many times
+    in one test file and its module is large. An EMPTY list is the
+    load-bearing answer: it means `base` is imported but NOT a
+    dependent-return factory, which is the gate that keeps an
+    `assert_equal(<list>, ...)` call from ever being misread as a factory
+    call site (and from filing a false container-resolution refusal)."""
+    key = path + '\x1f' + base
+    if key not in _FACTORY_RETURN_CACHE:
+        try:
+            stmts = Parser(py_tokenize(fsrc)).parse_module()
+        except Exception:
+            stmts = []
+        out = []
+        for s in stmts:
+            if isinstance(s, FunctionDef) and getattr(s, 'name', None) == base:
+                pr = iter_factory.parse_return(getattr(s, 'return_type', None))
+                if pr is not None:
+                    out.append({'pr': pr,
+                                'params': [p[0] for p in
+                                           (getattr(s, 'params', None) or [])],
+                                # The factory's own parameter DEFAULTS, as the
+                                # parsed literal nodes (measured 2026-10-21:
+                                # count -> {'start': IntLiteral(0),
+                                # 'step': IntLiteral(1)}). The direct-struct
+                                # subpath fills a call's missing parameters
+                                # with these — the factory body does exactly
+                                # `return {start, step}` with the defaults in
+                                # place, so this is a copy of what the body
+                                # would construct, not a guess.
+                                'defaults': dict(getattr(s, 'param_defaults',
+                                                         None) or {})})
+        _FACTORY_RETURN_CACHE[key] = out
+    return _FACTORY_RETURN_CACHE[key]
+
+
+def _factory_return_for(fsrc, path, base, moved):
+    """The `def base` overload whose pass mode matches (`moved` -> the
+    `var`/owned overload, else the `ref` one), or None when there is none of
+    that mode. Both overloads of a factory name the SAME wrapper; they differ
+    only in the type argument (IteratorType vs IteratorOwnedType), which is
+    exactly the `kind`. When NO overload carries a kind (measured 2026-10-21
+    (further): map's two overloads annotate IDENTICALLY, `_MapIterator[
+    function]`, whose positional cannot express a pass mode) the first such
+    overload answers — the pass mode is the call argument's `moved`, which
+    the seed already carries in the record, and the overloads are
+    functionally identical from here (same wrapper, same parameter names)."""
+    want = 'owned' if moved else 'borrowed'
+    overloads = _factory_returns(fsrc, path, base)
+    for ov in overloads:
+        if ov['pr']['kind'] == want:
+            return ov
+    for ov in overloads:
+        if ov['pr']['kind'] is None:
+            return ov
+    return None
+
+
+def _collect_locals(node, out):
+    """Every VarDecl reachable from `node` (recursing into nested blocks),
+    first declaration winning — the container of a factory call is a local of
+    the enclosing function."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n is None:
+            continue
+        if isinstance(n, VarDecl):
+            nm = getattr(n, 'name', None)
+            if nm and nm not in out:
+                out[nm] = n
+        stack.extend(c for c in _children(n) if c is not None)
+
+
+def _walk_scoped(stmts, visit):
+    """`visit(call, scope)` for every CallExpr, where `scope` is the
+    innermost enclosing function's `(name, func_node, locals_map)` (None at
+    module level) — `locals_map` is that function's local VarDecls. The
+    function NODE is carried too: a function VALUE passed as an explicit type
+    arg (`drop_while[is_zero](nums)`) may be a NESTED def, and its lifted C
+    name (`closure_lifted_name`) needs the enclosing chain plus the scope
+    names for the capture check. Each nested function starts a fresh scope
+    from its own body, so a same-named local in two functions does not
+    conflate."""
+    def rec(node, scope):
+        if node is None:
+            return
+        if isinstance(node, FunctionDef):
+            l = {}
+            _collect_locals(getattr(node, 'body', None), l)
+            scope = (getattr(node, 'name', None), node, l)
+            for c in _children(node):
+                rec(c, scope)
+            return
+        if isinstance(node, CallExpr):
+            visit(node, scope)
+        for c in _children(node):
+            rec(c, scope)
+    for s in stmts:
+        rec(s, None)
+
+
+def _wrapper_type_params(fsrc: str, wrapper: str) -> list | None:
+    """The wrapper header's type parameter names, in declaration order, or
+    None when the header block is unreadable. Comment params (`//`) carry no
+    `name:` and are skipped."""
+    m = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc)
+    if not m:
+        return None
+    close = iter_factory._matching_bracket(fsrc, m.end() - 1)
+    if close is None:
+        return None
+    out = []
+    for part in iter_factory._top_level_split(fsrc[m.end():close]):
+        pm = re.match(r'(\w+)\s*:', part.strip())
+        if pm:
+            out.append(pm.group(1))
+    return out or None
+
+
+def _wrapper_param_roles(fsrc: str, wrapper: str) -> tuple | None:
+    """The wrapper header's type parameters classified by their annotations,
+    as `(inner_name, fn_names, derived_names)`, or None when the header block
+    is unreadable or the inner is ambiguous. Measured 2026-10-21 (further):
+
+    * `InnerIteratorType: Iterator` (take/drop/cycle/enumerate,
+      take_while/drop_while, map) — the INNER: the container's own iterator,
+      bound from the container argument;
+    * `predicate: def(...) thin -> Bool` / `function: def(...) thin ->
+      OutputType` (take_while/drop_while, map) — a FUNCTION value, bound
+      from the call's explicit type argument (the wrapper body's
+      `Self.predicate(elem)` / `Self.function(...)` monomorphizes, the
+      `Self.<param>` unit pass, to a direct call of that value);
+    * `OutputType: Copyable` (map) — DERIVED: its type argument is nowhere
+      in the call, so it is bound from the bound function value's OWN return
+      annotation.
+
+    Comment parameters (`//`) carry no `name:` and are skipped, as in
+    `_wrapper_type_params`. At most one of each kind is bindable — the
+    caller refuses on a second of any kind. Product's second `Copyable &
+    Iterator` parameter classifies derived and stays refused downstream: its
+    call passes no function value to derive it from."""
+    m = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc)
+    if not m:
+        return None
+    close = iter_factory._matching_bracket(fsrc, m.end() - 1)
+    if close is None:
+        return None
+    inner, fns, derived = None, [], []
+    for part in iter_factory._top_level_split(fsrc[m.end():close]):
+        pm = re.match(r'(\w+)\s*:\s*(.*)$', part.strip(), re.S)
+        if not pm:
+            continue
+        ann = ' '.join(pm.group(2).split())
+        if re.match(r'def\b', ann):
+            fns.append(pm.group(1))
+        elif ann.startswith('Iterator'):
+            if inner is not None:
+                return None
+            inner = pm.group(1)
+        else:
+            derived.append(pm.group(1))
+    return inner, fns, derived
+
+
+def _find_fn_def(name, scope, stmts):
+    """The FunctionDef `name` refers to — a NESTED def of the innermost
+    enclosing function (the scope's func-node body), else a MODULE-level def,
+    else None. The positional-argument subpath's safety gate: the bare
+    identifier a kind-None return (`_MapIterator[function]`) passes must
+    resolve to one of these, so a bare TYPE arg can never bind the function
+    slot (the kw arm predates this gate and cannot spell a type arg)."""
+    if scope is not None:
+        _fn_name, func_node, _locals = scope
+        for s in (getattr(func_node, 'body', None) or []):
+            if isinstance(s, FunctionDef) and getattr(s, 'name', None) == name:
+                return s
+    for s in (stmts or []):
+        if isinstance(s, FunctionDef) and getattr(s, 'name', None) == name:
+            return s
+    return None
+
+
+def _fn_return_annot(name, scope, stmts):
+    """The bound function value's OWN `-> T` annotation, as single-spaced
+    source text, or (None, refusal). Measured 2026-10-21 (further):
+    `def add_one(x: Int) -> Int` nested in test_map — the wrapper's derived
+    parameter (`_MapIterator`'s `OutputType: Copyable`) is not in the call
+    and not derivable from the inner, so it comes from here."""
+    fn = _find_fn_def(name, scope, stmts)
+    if fn is None:
+        return None, f'function value {name!r} has no definition in this module'
+    ann = getattr(fn, 'return_type', None)
+    if not isinstance(ann, str) or not ann.strip():
+        return None, (f'function value {name!r} has no return annotation — '
+                      "the wrapper's derived type parameter cannot be bound")
+    return ' '.join(ann.split()), None
+
+
+def _call_fn_arg(node) -> str | None:
+    """The function value a factory call passes as its single explicit type
+    arg (measured 2026-10-21 (further): `take_while[less_than_5](nums)`),
+    or None for any shape the subpath cannot name — zero or several args,
+    a lambda, a member access. A bare identifier is the local/global
+    function the materialized wrapper body calls directly; its C symbol is
+    `_func_csym`'s, which the definition and every call site (the spliced
+    body included) agree on."""
+    fn = getattr(node, 'func', None)
+    if type(fn).__name__ != 'SubscriptExpr':
+        return None
+    idx = getattr(fn, 'index', None)
+    if idx is None:
+        return None
+    if type(idx).__name__ != 'IdentExpr':
+        return None
+    return getattr(idx, 'name', None)
+
+
+def _fn_value_name(fn_name, scope):
+    """The name to bind a function VALUE type argument to, so the materialized
+    wrapper body's `Self.predicate(elem)` call actually reaches the function.
+    Returns (name, refusal_reason). Measured 2026-10-21 (further):
+
+    * a MODULE-level `def` — the bare name. The plain-call path resolves it
+      via `_func_csym` (module-qualified + overload suffix) at the definition
+      and at the spliced call site alike — the `take_while[less_than_5]`
+      shape, ladder-verified 14/14.
+    * a NON-capturing nested `def` — its LIFTED C name, the one shape
+      `closures.closure_lifted_name` gives a nested def and the single name
+      its definition is emitted under (`<enclosing>_<name>`, forward-declared
+      in the TU; the call resolves through `func_return_types`' lifted
+      signature that `discover_closures` registers). Binding the BARE name
+      here instead emits the catch-all weak stub — the measured `is_zero:
+      unavailable in compiled mode` shape, where the definition IS in the TU
+      under the lifted name and the bare call simply never finds it.
+    * a CAPTURING nested `def` — refusal: a capturing closure is a
+      bound-method VALUE (env pointer + code pointer), not a callable by
+      name, and the spliced body can only call a plain function.
+    """
+    if scope is None:
+        return fn_name, None
+    _func_name, func_node, locals_map = scope
+    body = getattr(func_node, 'body', None) or []
+    target = None
+    for s in body:
+        if isinstance(s, FunctionDef) and getattr(s, 'name', None) == fn_name:
+            target = s
+            break
+    if target is None:
+        # Not nested in THIS function: either a module-level def (the bare
+        # name resolves, as in the first bullet) or a def nested deeper than
+        # one level under a call the scope chain never crossed — the bare
+        # name is the honest answer for both (the former works; the latter
+        # degrades to the pre-subpath shape, not a miscompile).
+        return fn_name, None
+    # Capture check: a free identifier bound by THIS function's declared
+    # names (its locals or parameters) is a capture. A name in none of them
+    # is a module global the lifted body reaches through the ordinary
+    # globals route (discover_closures makes the same call — its `free`
+    # names that miss `enriched_scope` are globals, not captures).
+    declared = set(locals_map or ())
+    for p in (getattr(func_node, 'params', None) or []):
+        _pn = p[0] if isinstance(p, (list, tuple)) else p
+        declared.add(_pn.lstrip('*'))
+    tparams = set()
+    for p in (getattr(target, 'params', None) or []):
+        _pn = p[0] if isinstance(p, (list, tuple)) else p
+        tparams.add(_pn.lstrip('*'))
+    tlocals = {}
+    _collect_locals(getattr(target, 'body', None), tlocals)
+    tparams |= set(tlocals)
+    used = set()
+    for bstmt in (getattr(target, 'body', None) or []):
+        used |= gimple_ctypes._used_idents_node(bstmt)
+    caps = sorted((used - tparams) & declared)
+    if caps:
+        return None, (f'function value {fn_name!r} is a capturing closure '
+                      f'(captures {", ".join(caps)}) — the materialized '
+                      'wrapper body calls the predicate by name, which '
+                      'only a plain (non-capturing) function answers')
+    return closure_lifted_name(_func_name, fn_name), None
+
+
+def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
+                      queue, records, depth=0):
+    """Evaluate ONE factory call site. Returns the record (filed in `records`
+    and its wrapper enqueued as a root) or None for every refusal — in which
+    case the call site is left exactly as this pass found it. The checks run
+    cheapest-first, and the IS-FACTORY gate comes before the container
+    resolution, so a non-factory call (`assert_equal(<list>, ...)`) never
+    files a container-resolution refusal. `scope` is the innermost enclosing
+    function's `(name, func_node, locals_map)` (None at module level) — the
+    function VALUE subpath needs the node and the scope names to lift a
+    nested `def`'s name and to rule out a capturing closure. `stmts` is the
+    module's own top-level statements — the function-value lookups
+    (`_find_fn_def` / `_fn_return_annot`) fall back to them for MODULE-level
+    defs."""
+    if depth > 4:
+        work.refuse(f'{base}(...): nested factory depth exceeds 4')
+        return None
+    locs = scope[2] if scope is not None else None
+    args = getattr(node, 'args', None) or []
+    home = _factory_home(gen, import_map, base)
+    if not home:
+        return None
+    try:
+        fsrc = open(home).read()
+    except OSError:
+        return None
+    if not _factory_returns(fsrc, home, base):
+        return None   # imported, but not a dependent-return factory
+    if not args:
+        # A ZERO-ARGUMENT call is a factory only through the direct-struct-
+        # return subpath (measured 2026-10-21: test_count's `var it =
+        # count()` — the return is a concrete struct, there is no container
+        # argument to resolve, and the old `len(args) < 1` early-return here
+        # seeded nothing, so `it` stayed int64_t and `next(it)` refused).
+        # Anything that is not a direct-struct factory returns None from
+        # there — exactly the pre-subpath behavior.
+        return _seed_direct_factory(gen, work, mm, base, node, fsrc, home,
+                                    queue, records)
+    # `factory_names` is an over-approximation (every imported generic); the
+    # nested recursion re-validates each one, so a non-factory nested call
+    # simply refuses the outer. It exists so `resolve_container` can tell a
+    # nested factory call from an ordinary local.
+    factory_names = set(getattr(gen, '_imported_generics', {}))
+    cont = iter_factory.resolve_container(args[0], factory_names, locs)
+    if cont is None:
+        work.refuse(
+            f'{base}(...): container argument is not a statically resolvable '
+            'local List / range / nested factory')
+        return None
+    pr = _factory_return_for(fsrc, home, base, cont['moved'])
+    if pr is None:
+        work.refuse(f'{base}(...): no {"owned" if cont["moved"] else "borrowed"}-container '
+                    'overload with a dependent return')
+        return None
+    # List-container factory — the data path this used to refuse is now
+    # lowerable, so the record is filed and the wrapper/inner below are
+    # materialized. 2026-10-20 (further) — LIFTED. The refusal this block
+    # used to be (keep its measured evidence in
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # .md, "2026-10-20 (continued)") is gone because the in-TU iterator
+    # protocol now has a lowerable data path, in RUNTIME-LIST terms:
+    #   * `List` is deliberately NOT registered in
+    #     `_imported_generic_structs` (neither here nor in
+    #     `_collect_inner`'s mention walk — see its List guard), so the
+    #     materialized inner's `var _list: List[Int]` field annotation
+    #     erases through `types._mojo_type` to `MojoList *` — the runtime
+    #     container — instead of materializing a formal-layout
+    #     `List_1_T_3_Int {type_id, _storage, _len}` shell that does not
+    #     match the runtime object `{data, len, cap, inl}`.
+    #   * `_materialize` rewrites the spliced inner bodies to lowerable
+    #     expressions over that field: `self._list[i]` (MojoList * branch
+    #     of _lower_subscript -> mojo_list_get_*), `len(self._list)`
+    #     (_lower_builtin_len -> mojo_list_len), `self._data[i]` (plain
+    #     pointer subscript -> _mojo_at_ + deref) in place of the
+    #     `unsafe_ptr/unsafe_offset/unsafe_take_pointee` chains and the
+    #     `unsafe_offset=` kwarg subscript, none of which has a lowering.
+    #   * `List[T]()` at the call site keeps the baseline runtime
+    #     constructor (mojo_list_new + mojo_list_append_*), because no
+    #     in-TU `List` struct exists to claim it.
+    # Verified per file with the gcc -c + nm + ld + run ladder, never
+    # the syntax-only gate: the module's own object defines the
+    # instantiation and its __next__, the real link leaves no undefined
+    # iterator symbol, and the asserted values are the real ones.
+    wrapper = pr['pr']['wrapper']
+    # The factory's trailing parameter (`count` for take/drop, `start` for
+    # enumerate) is the wrapper `__init__`'s keyword — the factory body calls
+    # `_TakeIterator(<iter>, count=count)`. cycle/peekable have none.
+    _pnames = pr['params']
+    wrapper_kwarg = _pnames[1] if len(_pnames) > 1 else None
+    wrapper_param = None
+    fn_param = None
+    fn_arg = None
+    derived_param = None
+    derived_annot = None
+    if wrapper is not None:
+        roles = _wrapper_param_roles(fsrc, wrapper)
+        if roles is None:
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} type-parameter header '
+                'unreadable or ambiguous in its home module')
+            return None
+        wrapper_param, _fns, _derived = roles
+        if wrapper_param is None:
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} has no `Iterator`-annotated '
+                'type parameter to carry the inner')
+            return None
+        if len(_fns) > 1:
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} has more than one function '
+                f'type parameter {_fns}')
+            return None
+        if len(_derived) > 1:
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} has more than one derived '
+                f'type parameter {_derived}')
+            return None
+        fn_param = _fns[0] if _fns else None
+        derived_param = _derived[0] if _derived else None
+        if fn_param is None and derived_param is not None:
+            # A derived parameter is bound FROM the function value's own
+            # return annotation — without a function value there is nothing
+            # to derive it from (product's second `Copyable & Iterator`
+            # parameter classifies derived and stays refused here:
+            # `product(a, b)` passes no explicit type arg at all).
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} has a derived type '
+                f'parameter {derived_param!r} whose type argument is not in '
+                'the call, but the call passes no function value to derive '
+                'it from')
+            return None
+        # A wrapper with a FUNCTION type parameter beyond the inner
+        # (measured 2026-10-21 (further): take_while/drop_while's `predicate:
+        # def(...) thin -> Bool`, map's `function: def(...) thin ->
+        # OutputType`) binds it from the call's explicit type arg:
+        # `take_while[less_than_5](nums)` passes the function AS a type
+        # argument, so the materialized body's `Self.predicate(elem)`
+        # monomorphizes (the `Self.<param>` unit pass) to a direct call of
+        # the local function.
+        if fn_param is not None:
+            fn_arg_raw = _call_fn_arg(node)
+            if fn_arg_raw is None:
+                work.refuse(
+                    f'{base}(...): wrapper {wrapper!r} takes a function type '
+                    f'parameter {fn_param!r}, but the call passes no bare-'
+                    'identifier explicit type arg to bind it')
+                return None
+            if pr['pr']['kind'] is None:
+                # The positional arm's shape (`_MapIterator[function]`): the
+                # bare identifier must resolve to an ACTUAL def — a bare TYPE
+                # arg (`Foo[T]`) has no def, and binding a type name into the
+                # function slot would miscompile. The kw arm
+                # (`predicate=predicate`) cannot spell a type arg and
+                # predates this gate.
+                if _find_fn_def(fn_arg_raw, scope, stmts) is None:
+                    work.refuse(
+                        f'{base}(...): explicit type arg {fn_arg_raw!r} does '
+                        'not resolve to a function defined in this module — '
+                        'the positional-argument subpath binds function '
+                        'values only')
+                    return None
+            _fn_val, _fn_err = _fn_value_name(fn_arg_raw, scope)
+            if _fn_err is not None:
+                work.refuse(f'{base}(...): {_fn_err}')
+                return None
+            fn_arg = _fn_val
+            if derived_param is not None:
+                derived_annot, _ann_err = _fn_return_annot(fn_arg_raw, scope,
+                                                           stmts)
+                if _ann_err is not None:
+                    work.refuse(f'{base}(...): {_ann_err}')
+                    return None
+    else:
+        # The BARE `iter(<container>)` builtin: its return annotation names
+        # the container's OWN iterator type directly (`type_of(x).
+        # IteratorOwnedType` / `X.IteratorType[origin_of(x)]` — see
+        # iter_factory.parse_return's `wrapper: None` shapes), so there is no
+        # wrapper to look up, register, or construct: the inner IS the return
+        # value. For a list container the inner is materialized as its own
+        # queue root below (nothing else mentions it); for a nested-factory
+        # container (`iter(<other factory's result>)`) the container's
+        # `__iter__` returns Self, so the sub-factory's wrapper IS the inner
+        # and the recursion below has already enqueued it.
+        pass
+    if cont['kind'] in ('list', 'set'):
+        # A set container (measured 2026-10-21 (further): `enumerate(my_set)`
+        # on `var my_set = {4, 5, 6}`) rides the list path end to end: the
+        # emit side feeds `mojo_set_to_list(<set>)` — the runtime's
+        # insertion-order materialization, the same order the runtime set
+        # for-loop iterator walks (emit_loops' set branch) — into the
+        # identical list reconstruction. So the INNER and the WRAPPER are
+        # derived from the LIST source, not the set's own hash-bucket
+        # iterator, whose body has no lowerable in-TU form.
+        _ctname = 'List' if cont['kind'] == 'set' else cont['tname']
+        chome, csrc = _container_home(gen, _ctname)
+        if not csrc:
+            work.refuse(
+                f'{base}(...): no module declares container {cont["tname"]!r}')
+            return None
+        kind = 'owned' if cont['moved'] else 'borrowed'
+        rhs = iter_factory.iter_type_rhs(csrc, _ctname, kind)
+        if rhs is None:
+            work.refuse(f'{base}(...): {cont["tname"]}.Iterator{"Owned" if kind == "owned" else ""}Type '
+                        'member not found')
+            return None
+        inner_base = rhs.split('[', 1)[0].strip()
+        inner = iter_factory.expand_inner(csrc, inner_base, rhs, cont['elem'],
+                                          bool(cont['moved']))
+        if inner is None:
+            work.refuse(f'{base}(...): {inner_base} type arguments do not bind '
+                        f'for {cont["tname"]}')
+            return None
+        inner_mention = inner_base + '[' + ', '.join(inner['args']) + ']'
+        inner_mangled = mm.mangle(
+            inner_base, dict(zip(inner['names'], inner['args'])))
+        _register_named(gen, chome, [inner_base])
+    else:   # nested factory: its wrapper is the container (its own
+            # `comptime IteratorType[...] = Self`), so the inner is that
+            # wrapper's mangled name, registered by the recursion below.
+        sub = _seed_one_factory(gen, work, mm, cont['name'], cont['node'],
+                                scope, stmts, import_map, queue, records,
+                                depth + 1)
+        if sub is None:
+            return None
+        inner_mention = sub['wrapper_mangled']
+        inner_mangled = sub['wrapper_mangled']
+    wrapper_mangled = None
+    if wrapper is not None:
+        _wtargs = {wrapper_param: inner_mention}
+        if fn_param is not None:
+            _wtargs[fn_param] = fn_arg
+        if derived_param is not None:
+            _wtargs[derived_param] = derived_annot
+        wrapper_mangled = mm.mangle(wrapper, _wtargs)
+        _register_named(gen, home, [wrapper])
+    rec = {'name': base, 'wrapper': wrapper, 'wrapper_param': wrapper_param,
+           'wrapper_mangled': wrapper_mangled, 'inner_mangled': inner_mangled,
+           'inner_mention': inner_mention, 'kind': cont['kind'],
+           'elem': cont.get('elem'),
+           'elem_ctype': iter_factory._MOJO_ELEM_C.get(cont.get('elem'),
+                                                       'int64_t'),
+           'moved': bool(cont['moved']),
+           'wrapper_kwarg': wrapper_kwarg}
+    records[iter_factory.factory_call_key(base, node)] = rec
+    if wrapper is None:
+        # Bare `iter`: the inner (the iterator itself) is the queue root —
+        # for a list container it is materialized at its element argument
+        # (mangle-identical to the mention the wrappers of the same file
+        # reference, so the queue's seen-set dedupes it); for a nested-
+        # factory container the recursion above already enqueued the
+        # container's own wrapper, which is the inner. A set container
+        # materializes its inner the same way as a list (the seed branch
+        # above derived it from the LIST source).
+        if cont['kind'] in ('list', 'set'):
+            work.enqueue(('struct', inner_base, tuple(inner['args'])), 0, queue)
+    else:
+        if fn_param is None and derived_param is None:
+            work.enqueue(('struct', wrapper, (inner_mention,)), 0, queue)
+        else:
+            # Positional order is the wrapper's DECLARATION order (bind_type_
+            # args zips it against the header params). With the function
+            # parameter that is (inner, predicate) for take_while/drop_while;
+            # with the derived one, (OutputType, InnerIteratorType,
+            # function) for map; the pre-subpath single-param wrappers never
+            # reach this branch.
+            _wparams = _wrapper_type_params(fsrc, wrapper)
+            if _wparams is None:
+                work.refuse(f'{base}(...): wrapper {wrapper!r} header '
+                            'unreadable')
+                return None
+            _warg_map = {wrapper_param: inner_mention}
+            if fn_param is not None:
+                _warg_map[fn_param] = fn_arg
+            if derived_param is not None:
+                _warg_map[derived_param] = derived_annot
+            if not set(_wparams) <= set(_warg_map):
+                work.refuse(
+                    f'{base}(...): wrapper {wrapper!r} has type parameters '
+                    f'{_wparams} beyond this subpath\'s bindable '
+                    f'{sorted(_warg_map)}')
+                return None
+            work.enqueue(('struct', wrapper,
+                          tuple(_warg_map[p] for p in _wparams)), 0, queue)
+    return rec
+
+
+def _seed_direct_factory(gen, work, mm, base, node, fsrc, home, queue, records):
+    """The zero-argument / direct-struct-return factory subpath
+    (measured 2026-10-21: `count()` -> `_CountIterator` in std/itertools/
+    itertools.mojo). The return annotation names a CONCRETE (non-generic)
+    struct that IS the return value — no container, no inner: the factory
+    body is `return {start, step}`, a fieldwise construction of the wrapper
+    from the factory's own parameters (with their defaults in place).
+
+    Deliberately narrow; every check is measured, not guessed:
+      * exactly ONE 'direct' overload of `base` in the home module (two or
+        more -> ambiguous, refuse; none -> this call is not a factory and
+        returns None, the pre-subpath behavior);
+      * the wrapper is declared `struct <name>(...):` in the home source —
+        a `[` would make it generic, which is out of scope (its
+        instantiating TU materializes the mangled copy through the
+        existing path, and the generic head is what
+        `monomorphize_source`'s substitution engine requires);
+      * the wrapper's FIELD names, in declaration order, equal the
+        factory's PARAMETER names, in order (count: start,step ==
+        start,step) — that is precisely what makes the call's positional
+        args map 1:1 onto the synthesized fieldwise `__init__`, with the
+        factory's own parameter defaults (captured in the record as the
+        parsed literals) filling the gaps.
+    """
+    import elaborate
+    cands = [c for c in _factory_returns(fsrc, home, base)
+             if c['pr'].get('kind') == 'direct']
+    if len(cands) > 1:
+        work.refuse(f'{base}(): multiple direct-struct overloads — '
+                    'no unambiguous choice')
+        return None
+    if not cands:
+        return None
+    pr = cands[0]
+    wrapper = pr['pr']['wrapper']
+    if re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc):
+        work.refuse(f'{base}(): wrapper {wrapper!r} is generic in its home '
+                    'module — the direct subpath handles concrete structs '
+                    'only')
+        return None
+    if not re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\(', fsrc):
+        work.refuse(f'{base}(): return {wrapper!r} is not a concrete struct '
+                    'in its home module')
+        return None
+    tmpl = elaborate.extract_struct_source(fsrc, wrapper)
+    if tmpl is None:
+        work.refuse(f'{base}(): no struct block for {wrapper!r} in its '
+                    'home module')
+        return None
+    _sd = None
+    for _s in Parser(py_tokenize(tmpl)).parse_module():
+        if isinstance(_s, StructDef) and getattr(_s, 'name', None) == wrapper:
+            _sd = _s
+            break
+    if _sd is None:
+        work.refuse(f'{base}(): {wrapper!r} did not parse back as a struct '
+                    f'in its home module')
+        return None
+    flds = [getattr(f, 'name', None)
+            for f in (getattr(_sd, 'fields', None) or [])]
+    pnames = pr['params']
+    if flds != pnames:
+        work.refuse(f'{base}(): wrapper field order {flds} != factory '
+                    f'parameter order {pnames} — no unambiguous '
+                    'constructor mapping')
+        return None
+    rec = {'name': base, 'wrapper': wrapper, 'wrapper_param': None,
+           'wrapper_mangled': mm.mangle(wrapper, {}),
+           'inner_mangled': None, 'inner_mention': None,
+           'kind': 'direct', 'elem': None, 'elem_ctype': 'int64_t',
+           'moved': False, 'wrapper_kwarg': None,
+           'param_names': pnames, 'param_defaults': pr['defaults']}
+    records[iter_factory.factory_call_key(base, node)] = rec
+    # Register directly rather than via `_register_named`: that helper is
+    # scoped to GENERIC template heads — its regex `[\[:]` matches
+    # `struct NAME[` (a type-parameter block) and `struct NAME:` (a bare
+    # concrete) but not `struct NAME(...)` (a concrete struct WITH bases),
+    # which is exactly the shape this subpath handles (proven above by the
+    # `struct <name>(` check). Same write, minus the regex, on a name this
+    # function has already verified. The struct_field_types guard mirrors
+    # `_register_named`'s own: a TU-local struct of the same name is
+    # registered by the ordinary path, and splicing the home copy on top of
+    # it would duplicate the StructDef.
+    if wrapper not in gen.struct_field_types:
+        gen._imported_generic_structs.setdefault(wrapper, home)
+    work.enqueue(('struct', wrapper, ()), 0, queue)
+    return rec
+
+
+def _seed_factories(gen, work, stmts, queue):
+    """Entry: find every factory call, evaluate it, register + enqueue its
+    wrapper, and file the record the emit side reconstructs from. Lazy-imports
+    `monomorphize` (which imports `gimple_codegen` at module level — the cycle
+    this pass is loaded in the middle of)."""
+    import monomorphize as mm
+    records = gen._intu_factory_records
+    import_map = _import_name_map(stmts)
+
+    def visit(node, scope):
+        base = (node.func.obj.name if isinstance(node.func, SubscriptExpr)
+                and isinstance(node.func.obj, IdentExpr)
+                else node.func.name if isinstance(node.func, IdentExpr)
+                else None)
+        if not base:
+            return
+        _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
+                          queue, records)
+    _walk_scoped(stmts, visit)
+
+
 def _sites_of(parsed):
     """Every annotation STRING in a parsed concrete module, as `(owner, attr)`
     handles, so the rewrite can write back to the node.
@@ -514,6 +1379,8 @@ def _collect_inner(work, rec, queue):
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
+            if base in _IN_TU_LIST_BASES:
+                continue
             if base not in bases:
                 bases.append(base)
     if bases:
@@ -521,6 +1388,8 @@ def _collect_inner(work, rec, queue):
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
+            if base in _IN_TU_LIST_BASES:
+                continue
             # UNCONDITIONAL, unlike a root. Once an instantiation is being
             # materialized, every generic struct its annotations name must be a
             # REAL struct too: a field annotated `Optional[Int64]` whose type
@@ -538,6 +1407,8 @@ def _collect_inner(work, rec, queue):
                 and isinstance(n.func.obj, IdentExpr)
                 else n.func.name if isinstance(n.func, IdentExpr) else None)
         if not base:
+            return
+        if base in _IN_TU_LIST_BASES:
             return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
@@ -576,6 +1447,102 @@ def _register_named(gen, src_path, names):
             gen._imported_generic_structs.setdefault(n, src_path)
 
 
+def _rewrite_inner_bodies(work, base, concrete):
+    """Rewrite the spliced stdlib bodies of the in-TU iterators (the two
+    List iterators + the take/drop wrappers — see _IN_TU_ITER_BODIES) to
+    lowerable expressions. Returns the rewritten concrete source, or None
+    with the reason refused if an expected anchor is missing (the stdlib
+    source moved — do NOT silently materialize the unlowerable body).
+
+    Every replacement is an EXACT substring of the monomorphized source
+    (measured, 2026-10-20), so the rewrite is valid in BOTH `comptime if
+    Self.forward` branches of `_ListIter.__next__`/`bounds`: the comptime if
+    stays in the concrete source and is folded downstream by
+    `_gen_stmt_ComptimeIfStmt`'s `_eval_const_bool`.
+
+    The replacements, and the lowering each one lands on:
+      _ListIter.__next__  `self._data[unsafe_offset=<i>]`  ->  `self._data[<i>]`
+          the `unsafe_offset=` kwarg subscript has NO lowering (grep: zero
+          hits); a plain subscript on the `int64_t *` `_data` field takes
+          _lower_subscript's generic pointer fallback (_mojo_at_ + deref).
+      _ListIterOwned.__next__  `self._list.unsafe_ptr().unsafe_offset(<i>)
+          .unsafe_take_pointee()`  ->  `self._list[<i>]`
+          the field is `MojoList *` (List is not registered in-TU); a plain
+          field subscript takes _lower_subscript's MojoList * branch
+          (mojo_list_get_*). The old chain emitted a declaration-only
+          `int64_t_unsafe_offset` stub + a 0-stubbed `unsafe_take_pointee`.
+      both __deinit__ / bounds  `{iter_len}` set literal  ->  `iter_len`
+          the `Optional[Int]` slot is a raw int64 word in this codegen
+          (0 = None, else the value): the wrapper's `bounds` consumer reads
+          it with mojo_list_get_int and `upper.value()` lowers to identity.
+          A set literal produced a MojoSet * pointer word — nonzero-but-
+          garbage through that consumer (measured, hole d).
+      _ListIterOwned.__deinit__  body  ->  `pass`
+          the remaining-element Span span-destroy (`Span(...)._
+          unchecked_subspan(...).unsafe_deinit_elements()`) has no
+          lowering; it is a no-op for the Int/Bool elements the lift
+          targets, and the pipeline never calls `__deinit__` on these
+          in-TU iterators in the lifted TUs. Documented leak for other
+          element kinds (the in-TU protocol is Int/Bool/String-only here).
+    """
+    pairs = {
+        '_ListIter': (
+            ('self._data[unsafe_offset=self._index - 1]',
+             'self._data[self._index - 1]'),
+            ('self._data[unsafe_offset=self._index]',
+             'self._data[self._index]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_ListIterOwned': (
+            ('    def __deinit__(deinit self):\n'
+             '        # Destroy the remaining elements that have not yet been\n'
+             '        # iterated over.\n'
+             '        Span(self._list)._unchecked_subspan(\n'
+             '            start=self._index, end=len(self._list)\n'
+             '        ).unsafe_deinit_elements()\n'
+             '        self._list._len = 0',
+             '    def __deinit__(deinit self):\n'
+             '        pass'),
+            ('        return (\n'
+             '            self._list.unsafe_ptr()\n'
+             '            .unsafe_offset(self._index - 1)\n'
+             '            .unsafe_take_pointee()\n'
+             '        )',
+             '        return self._list[self._index - 1]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_TakeIterator': (
+            # bounds: the inner's upper slot is a raw word (Some = the
+            # value, and the source's `{iter_len}` producer is a 1-element
+            # set = always Some) — `if upper:` lowers to int-truthiness of
+            # the value and misbranches at 0 (measured, test_take_bounds
+            # it4). The branches are value-identical in every lifted
+            # shape, so fold them.
+            ('        if upper:\n'
+             '            return (lower, min(upper.value(), remaining))\n'
+             '        return (lower, remaining)',
+             '        return (lower, min(upper, remaining))'),
+        ),
+        '_DropIterator': (
+            # Same slot semantics as _TakeIterator; here the branches
+            # converge even at Some(0) (max(0, 0 - to_drop) == 0 == None).
+            ('        if upper:\n'
+             '            return (lower, max(0, upper.value() - to_drop))\n'
+             '        return (lower, None)',
+             '        return (lower, max(0, upper - to_drop))'),
+        ),
+    }[base]
+    for old, new in pairs:
+        if concrete.count(old) != 1:
+            work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
+                        f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
+            return None
+        concrete = concrete.replace(old, new)
+    return concrete
+
+
 def _materialize(work, key):
     """One instantiation. Returns a record dict, or None with the reason
     recorded. Every failure is a REFUSAL: nothing is emitted and the `.o` route
@@ -594,15 +1561,35 @@ def _materialize(work, key):
     if not tmpl:
         work.refuse(f'no {kind} template for {base!r}')
         return None
-    targs = elaborate.bind_type_args(tmpl, list(args))
-    if targs is None:
-        work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
-        return None
-    try:
-        mangled, concrete = mm.monomorphize_source(tmpl, targs)
-    except Exception as e:
-        work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
-        return None
+    if kind == 'struct' and not elaborate.type_param_names(tmpl):
+        # A CONCRETE (non-generic) struct — the direct-struct factory
+        # subpath (`count()` -> `_CountIterator`, measured 2026-10-21):
+        # there is no bracket block to bind, and
+        # `monomorphize_source`'s head match (its substitution engine)
+        # requires one — it refused the concrete template with ValueError
+        # "no generic `fn`/`struct name[...]` found" (measured). So the
+        # template IS the concrete source and the mangled name is the
+        # plain name (`mangle`'s own zero-arg contract: returned
+        # unchanged). Gated on `kind == 'struct'` on purpose: the fn roots
+        # are all generic (the `_imported_generics` registry only holds
+        # imported generic functions), and a concrete fn, should one ever
+        # queue, keeps its pre-subpath honest refusal.
+        mangled, concrete = base, tmpl
+        targs = {}
+    else:
+        targs = elaborate.bind_type_args(tmpl, list(args))
+        if targs is None:
+            work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
+            return None
+        try:
+            mangled, concrete = mm.monomorphize_source(tmpl, targs)
+        except Exception as e:
+            work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
+            return None
+    if kind == 'struct' and base in _IN_TU_ITER_BODIES:
+        concrete = _rewrite_inner_bodies(work, base, concrete)
+        if concrete is None:
+            return None
     try:
         parsed = Parser(py_tokenize(concrete)).parse_module()
     except Exception as e:
@@ -621,13 +1608,19 @@ def run(gen, stmts):
     `_intu_structs` (what this compile DEFINES) and `gen._intu_func_args` /
     `_intu_struct_args` (what the `.o` route must NOT also emit)."""
     for attr, default in (('_intu_funcs', {}), ('_intu_structs', {}),
-                          ('_intu_func_args', {}), ('_intu_struct_args', {})):
+                          ('_intu_func_args', {}), ('_intu_struct_args', {}),
+                          ('_intu_factory_records', {})):
         if not hasattr(gen, attr):
             setattr(gen, attr, dict(default))
     if _skip(gen):
         return []
     work = _Work(gen)
     queue = []
+    # Dependent-return iterator factories (`peekable(l)`, `take(l, 3)`, ...):
+    # evaluate the return dependency and enqueue the wrapper roots BEFORE the
+    # generic seed, so the wrapper and (via `_collect_inner`) its inner
+    # iterator are materialized in the same closure as everything else.
+    _seed_factories(gen, work, stmts, queue)
 
     def seed(n):
         """ROOTS. A struct root is one the `.o` route provably cannot register
@@ -694,6 +1687,52 @@ def run(gen, stmts):
             gen._intu_structs[rec['mangled']] = {'base': rec['base'], 'targs': rec['targs']}
             gen._intu_struct_args[(rec['base'], rec['args'])] = rec['mangled']
         _collect_inner(work, rec, queue)
+    # Pre-register every materialized struct's MANGLED NAME in
+    # gen.struct_field_types (empty field map) BEFORE the statement loop and
+    # the signature passes run. A mangled-name annotation — the form
+    # `_rewrite_annotations` leaves behind (`var _inner: _ListIter_1_T_3_Int_...`,
+    # and the `__init__(var inner: ...)` param that reads the same text) —
+    # resolves through `ann in gen.struct_field_types`, which only becomes
+    # true once the struct's OWN statement has run. But the wrapper's
+    # `__init__` signature is computed BEFORE that: Pass 2b-bis and the
+    # call site's overload resolution both land in the pre-statement passes,
+    # and there the annotation erases to int64_t — the box — while the
+    # DEFINITION (emitted later, when the inner's statement has registered
+    # its fields) answers `<inner> *`. The two halves of the symbol then
+    # disagree and gcc fails the call site with
+    # "makes integer from pointer without a cast". An empty field map is
+    # enough: every reader of a registered name answers `name *` (the
+    # universal struct-as-pointer convention) or falls back on the field
+    # lookups that the struct's own statement fills in later, and no pass
+    # treats "registered but no fields yet" as a struct with zero fields —
+    # the field-count readers guard on `len(...) > 0`.
+    # Record the names this loop ADDS, in `gen._intu_prereg_structs`.
+    # gen_module_impl's `_selfhost_hardcoded_struct_names` snapshot
+    # (module_gen.py, taken after this pass runs at line ~3411 but before the
+    # statement loop) treats EVERY pre-existing struct_field_types key as a
+    # selfhost-hardcoded struct and SKIPS it in the read-field pass
+    # (module_gen.py:5903) and the local-annotation pass (module_gen.py:6023).
+    # Measured 2026-10-20: with the pre-registration in place, the in-TU
+    # `_Empty_1_T_3_Int` (test/iter/test_empty.mojo) landed in that snapshot
+    # and its `int64_t copy` field (minted by the read-field pass from
+    # `self.copy()` in `__iter__(ref self)`) plus the whole reflection
+    # dispatch (`_mojo_getattr_*`, the `_known[]` type-tag table, fieldnames,
+    # repr) were dropped — `typedef {__mojo_type_id, int _dummy}` and
+    # `_known[] = {0}` instead, a 2 KB C delta on test_empty and smaller ones
+    # on test_once/test_repeat, all of them byte-diffed against the clean
+    # master's C in fresh single-file processes. The exclusion set restores
+    # the clean-master pass behavior for exactly the names this loop added,
+    # while the early registration itself (what the pre-statement signature
+    # passes need) stays in place.
+    _prereg = getattr(gen, '_intu_prereg_structs', None)
+    if _prereg is None:
+        _prereg = set()
+        gen._intu_prereg_structs = _prereg
+    for rec in work.records.values():
+        if rec['kind'] == 'struct':
+            if rec['mangled'] not in gen.struct_field_types:
+                gen.struct_field_types[rec['mangled']] = {}
+                _prereg.add(rec['mangled'])
     _rewrite_annotations(work)
     _rewrite_callees(work, stmts)
     if work.notes:

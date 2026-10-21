@@ -35,8 +35,10 @@ test_formal_call_proof_gen.py`, 9 failures, 105 s) with
 
     same_image_leaf_proof.lean:3890:56: error: maximum recursion depth has been reached
 
-which is the same class `bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge.md`
-records for `mod_by_var` and attributes to the `arm64_ext_imm12` merge. The
+which is the class `mod_by_var` was measured in and attributed to the
+`arm64_ext_imm12` merge — closed for its own half by `f7bd05ea`, which
+discharges the block-start `runs_cons_seq` side condition with
+`first | (simp only [qT0, qS0] <;> done) | rfl` rather than a bare `rfl`. The
 generator still follows the call (it generates a proof, and the doc's §Status
 "what landed" is unchanged); what is not true on today's tree is the word
 "proved". So **step 1 (two call sites) and step 3 (recursion) below cannot be
