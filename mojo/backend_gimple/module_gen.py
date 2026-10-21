@@ -2568,6 +2568,25 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
+def _gmi_assigns_global_at_toplevel(stmt_list, gname: str) -> bool:
+    """True when the module body `stmt_list` binds `gname` itself at top
+    level (a plain/annotated assignment, a `var`, or one target of a chained
+    assignment), looking through top-level try/if blocks the way
+    `_gmi_collect_global_stmts` does."""
+    for stmt in _gmi_collect_global_stmts(stmt_list):
+        if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+            if _as_str(stmt.target.name) == gname:
+                return True
+        elif isinstance(stmt, VarDecl):
+            if _as_str(stmt.name) == gname:
+                return True
+        elif isinstance(stmt, MultiAssignStmt):
+            for _t in stmt.targets:
+                if isinstance(_t, IdentExpr) and _as_str(_t.name) == gname:
+                    return True
+    return False
+
+
 def _gmi_declare_table_global(gen, gname, global_decls) -> bool:
     """Declare the module global `gname` with the C type
     `dispatch_table_global_ctype` gives it, and record that type in BOTH of
@@ -13012,6 +13031,11 @@ def gen_module_impl(self, stmts):
             _seed.add(_as_str(_e[0]) + '\x00' + _as_str(_e[1])
                       + '\x00' + _as_str(_e[2]))
         self._module_global_names[current_mod_name] = _seed
+    # The dispatch-table names this module declares ONLY because a
+    # `from <owner> import NAME` of one reached the FromImportStmt branch
+    # below -- a re-declaration, not a definition (see
+    # `_gmi_assigns_global_at_toplevel` at the ownership registration).
+    _fi_table_names = {}
     _declared_globals = {}  # dict not set: self-hosted `sorted(<set>)` at the field-order loop below sorts boxed str slots by ADDRESS (nondeterministic _<mod>_toplev field order in --dump-full); dict keys sort by content via mojo_dict_sorted_keys
     all_scan = stmts
     for stmt in all_scan:
@@ -13099,6 +13123,7 @@ def gen_module_impl(self, stmts):
                         # across this site, the two declaration scans and the
                         # early-cdecl seed is what makes them one answer.
                         _declared_globals[check_name] = True
+                        _fi_table_names[check_name] = True
                         _gmi_declare_table_global(self, check_name, global_decls)
         elif isinstance(stmt, ImportStmt):
             for local_name in gimple_ctypes._import_local_names(stmt):
@@ -13717,7 +13742,23 @@ def gen_module_impl(self, stmts):
                 # into the nested attr too (for any cross-invocation read).
                 _this_mod_inits[_gname_s] = init_code
                 self._module_global_inits[current_mod_name][_gname_s] = init_code
-                self._global_to_module[_gname_s] = current_mod_name
+                # A table global this module only from-IMPORTS does not make
+                # it the name's owner. `_global_to_module` is the shared,
+                # whole-closure answer to "whose field does a bare read of
+                # NAME load" (`bare_global_read_plan`'s arm 3), and the
+                # importer's re-declared field is never assigned: claiming it
+                # here pointed every later module's read at the LAST importer
+                # compiled, so the compiled compiler read NULL for
+                # `_LIBM_FN_RETVALS` in `GimpleGen.__init__` (no libm builtin
+                # as a value -- `scope.define('pow', pow)` became a 0),
+                # `_SCALAR_FLOAT_TYPES` in emit_calls and `_C_RESERVED_FUNCS`
+                # in solvers. A module that ASSIGNS the name at top level owns
+                # its own binding, as Python says, and still registers.
+                if not (_gname_s in _fi_table_names
+                        and self._global_to_module.get(_gname_s) is not None
+                        and not _gmi_assigns_global_at_toplevel(
+                            all_global_scan, _gname_s)):
+                    self._global_to_module[_gname_s] = current_mod_name
 
     _mg_list = self._module_globals.get(current_mod_name) or []
     # `len(...) > 0`, NOT bare truthiness: the self-hosted compiler's
