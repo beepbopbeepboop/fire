@@ -214,10 +214,21 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # without a cast", self-hosted myinterpreter.py's
             # Interpreter__call_dunder). Mirrors the precedence the
             # gen_module forward-declaration loop applies.
+            # `_as_str` on both halves of the key, for the reason the `self`
+            # arm above gives: `self_struct` defaults to None, so the
+            # compiled compiler formatted the struct name's pointer as a
+            # DECIMAL here, every lookup missed, and the `*args` method's
+            # unannotated params stayed int64_t in `func_param_types` while
+            # the definition declared the inferred type -- the stage2 binary
+            # then boxed `'__enter__'` to int64_t at every
+            # `self._call_dunder(ctx, '__enter__')` the reference passed bare.
             _msig_ct = None
             if pt is None and self_struct and hasattr(gen, '_inferred_param_types'):
-                _msig_ct = gen._inferred_param_types.get(
-                    f"{self_struct}_{node.name}", {}).get(pn)
+                _msig_key = f"{_as_str(self_struct)}_{_as_str(node.name)}"
+                if _msig_key in gen._inferred_param_types:
+                    _msig_tbl = _as_dict(gen._inferred_param_types[_msig_key])
+                    if pn in _msig_tbl:
+                        _msig_ct = _as_str(_msig_tbl[pn])
             if _msig_ct is not None:
                 out.append(_msig_ct)
             else:
