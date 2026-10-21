@@ -876,6 +876,24 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # parameter usage guess, say) is not something a store site may overturn.
     if vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
         gen._actual_types.setdefault(tname, vtype)
+    elif (isinstance(vtype, str) and vtype.endswith(' *')
+            and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
+        # An in-TU iterator-factory wrapper stored into a module global
+        # (`z = enumerate(x)` at module level after the lift). The
+        # setdefault above deliberately cannot reach it (the kind list is
+        # the three runtime containers), and the `v in _actual_types`
+        # propagation at the top recorded nothing either, because the
+        # factory dispatch returns the wrapper pointer's own ctype for its
+        # temp without registering an overlay entry. Without a record the
+        # read-back stays a boxed int64_t, the print/len/list consumers see
+        # no pointer kind, and a module-level `print(z)` repr'd the struct
+        # header as a garbage list (measured: test_gimple_runner's
+        # gimple_global_from_enumerate_call printed nothing). Assignment,
+        # NOT setdefault, on purpose: any earlier pass's conclusion for the
+        # name is the pre-pass's static `MojoList *` table guess — stale for
+        # exactly this value — and the emitted ctype is ground truth, the
+        # same trust rule as the plain-AssignStmt first-bind fix below.
+        gen._actual_types[tname] = vtype
     # The same carry, for the same reason, one table over: "this value is a
     # plain integer" (`gen._int_word_vals`) has to survive the store or a
     # module-level key is asked of the runtime's range-only discriminator,
@@ -1174,6 +1192,25 @@ def _gen_stmt_AssignStmt(gen, node):
                 if func_key and hasattr(gen, '_inferred_var_types'):
                     if func_key in gen._inferred_var_types and tname in gen._inferred_var_types[func_key]:
                         ctype = gen._inferred_var_types[func_key][tname]
+                        # The pre-pass's builtin table still lists the
+                        # iterator-factory family (`enumerate`/`take`/...)
+                        # as `MojoList *` (the old materialized pair-list
+                        # model), but the lifted factory dispatch emits an
+                        # in-TU wrapper struct pointer — the freshly-lowered
+                        # ctype is ground truth, and the VarDecl twin above
+                        # (`node.type_ann is None: ctype = vtype`) already
+                        # trusts it. Pinning the stale `MojoList *` here
+                        # cast the wrapper into a list header: `len(z)`
+                        # read a struct field as a length and `print(z)`
+                        # walked garbage (measured: test_gimple_runner's
+                        # gimple_enumerate_value_printed printed the
+                        # pointer bits `4376269232` instead of `2`).
+                        if (isinstance(node.value, gimple_ctypes.CallExpr)
+                                and isinstance(vtype, str)
+                                and vtype.endswith(' *')
+                                and ctype != vtype
+                                and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
+                            ctype = vtype
                     else:
                         ctype = vtype
                 else:
@@ -3959,6 +3996,20 @@ def _gen_stmt_ExprStmt(gen, node):
 
 
 def _gen_stmt_AssertStmt(gen, node):
+    # `comptime assert` is a COMPILE-TIME check in Mojo — it has no runtime
+    # semantics. Lowering it like a plain assert is measured-wrong: the
+    # drop iterator's `comptime assert conforms_to(Self.Element,
+    # Deinitable)` (std/itertools/itertools.mojo, spliced into every
+    # lifted `_DropIterator`) became a value-path branch on `conforms_to`
+    # (an undefined runtime symbol) plus a `__builtin_trap` in the hot
+    # `__next__` loop. No runtime lowering; the compile-time check itself
+    # is not implemented here (honest note — this is not swallowing a
+    # runtime check, since real Mojo runs none either).
+    if getattr(node, 'is_comptime', False):
+        gimple_ctypes._debug_note(
+            'comptime assert: no runtime lowering (compile-time '
+            'checking not implemented)')
+        return
     _, v = gen.lower_expr(node.value)
     bb_trap = gen._new_bb()
     bb_ok   = gen._new_bb()
@@ -4616,6 +4667,36 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
             gen._emit(f"  /* with: __exit__ ({sn}) */")
 
 
+def _with_is_assert_raises(expr):
+    """`with assert_raises():` — the std.testing error-expectation marker.
+
+    The struct is IMPORTED into the test TU (the tests spell `from
+    std.testing import ...`), so its `__enter__`/`__exit__` are never
+    elaborated into this TU: the generic context-protocol path finds no
+    methods (the struct name erases to the plain type), emits placeholder
+    comments, and runs the body with NO setjmp frame at all. The expected
+    failure then calls `mojo_raise()` with `_mojo_exc_top < 0`, which the
+    runtime treats as an uncaught exception and `exit(1)`s — the test
+    cannot continue past the `with` and value-level checking is impossible.
+
+    Recognized by source spelling only: a call spelled `assert_raises`
+    (optionally dotted), because the import scan mangles the symbol name
+    (bare vs `std_testing___init___`-prefixed) while the source spelling
+    is stable. Callers must additionally verify the struct's `__exit__` is
+    NOT visible in `gen.func_return_types`, so a TU where the struct is
+    genuinely elaborated (a real in-TU `__exit__`) keeps the existing
+    generic-protocol lowering untouched.
+    """
+    if type(expr).__name__ != 'CallExpr':
+        return False
+    fn = expr.func
+    if type(fn).__name__ == 'IdentExpr':
+        return getattr(fn, 'name', None) == 'assert_raises'
+    if type(fn).__name__ == 'MemberExpr':
+        return getattr(fn, 'member', None) == 'assert_raises'
+    return False
+
+
 def _gen_stmt_WithStmt(gen, node):
     # `contexts` tracks the ORIGINAL context-manager value (`ctx_v`,
     # `ctx_t`) for each item, separately from the user-visible bound
@@ -4738,6 +4819,107 @@ def _gen_stmt_WithStmt(gen, node):
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
+
+    # `with assert_raises():` — the items loop above already emitted the
+    # marker CALL (driver-side `assert_raises` arms the expectation) and a
+    # placeholder `__enter__` comment, because the imported struct's methods
+    # are not in-TU. The generic protocol cannot build a setjmp frame here
+    # (no `__exit__` to find), so take over now and lower the block to the
+    # same setjmp idiom as _gen_stmt_TryStmt, with the marker's swallowing
+    # semantics:
+    #   body raises        -> bb_exc: pop the frame, SWALLOW, continue —
+    #                         the block is REQUIRED to raise, and it did,
+    #                         so the statement's assertion is satisfied
+    #   body returns       -> assert_raises_no_raise() (driver aborts: the
+    #                         block failed to raise), then the return
+    #   body breaks/continues -> same no_raise call, then the loop jump
+    #   body falls through -> assert_raises_no_raise() + continue
+    # The `assert_raises_no_raise` extern goes into gen.decls, which is
+    # flushed at the top of the function body before any statement — the
+    # file-scope import preamble cannot know about a symbol this statement
+    # invents (see _reset_func's decls handling). Message matching for
+    # `assert_raises(contains=...)` / error-type arguments is NOT verified:
+    # the driver's marker takes no arguments; documented simplification.
+    # Scoped to a single bare `with assert_raises():` whose struct has no
+    # in-TU `__exit__` — anything else (multi-context, `as` binding, a
+    # genuinely elaborated struct) keeps the existing lowering.
+    if (len(node.items) == 1
+            and node.items[0].alias is None
+            and _with_is_assert_raises(node.items[0].expr)):
+        _ar_sn = _ctx_sns[0] if _ctx_sns else None
+        _ar_has_exit = _ar_sn is not None and (
+                gen._struct_method_csym(_ar_sn, '__exit__', '') in gen.func_return_types
+                or f"{_ar_sn}___exit__" in gen.func_return_types)
+        if not _ar_has_exit:
+            # Same setjmp/__GIMPLE hazard as the has_exit branch below: a
+            # function whose body emits a real setjmp must not be tagged
+            # __GIMPLE (see _reset_func's _func_used_setjmp comment).
+            gen._func_used_setjmp = True
+            _ar_extern = '  extern void assert_raises_no_raise (void);'
+            if _ar_extern not in gen.decls:
+                gen.decls.append(_ar_extern)
+            sj_ret = gen._new_temp('int')
+            cond_t = gen._new_temp('_Bool')
+            bb_try   = gen._new_bb()
+            bb_exc   = gen._new_bb()
+            bb_after = gen._new_bb()
+            temp_top1 = gen._new_temp('int')
+            temp_inc  = gen._new_temp('int')
+            temp_top2 = gen._new_temp('int')
+            gen._emit(f"  {temp_top1} = _mojo_exc_top;")
+            gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
+            gen._emit(f"  _mojo_exc_top = {temp_inc};")
+            gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+            # Checkpoint the cleanup-thunk stack exactly like the try/
+            # except idiom: on the longjmp the runtime unwinds to it.
+            gen._emit("  mojo_cleanup_checkpoint_save ();")
+            gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
+            gen._emit(f"  {cond_t} = {sj_ret} != 0;")
+            gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
+
+            gen._emit_label(bb_try)
+            for s in node.body:
+                if type(s).__name__ == 'ReturnStmt':
+                    # A `return` out of the block is normal control flow:
+                    # the block did NOT raise, so the expectation fails.
+                    # (Pop first, so the stack is balanced if the driver
+                    # no_raise call ever becomes a no-op.)
+                    gen._emit("  mojo_exc_pop ();")
+                    gen._emit("  assert_raises_no_raise ();")
+                # break/continue lower to a bare `goto <loop label>;` and
+                # leave this protected region without raising — the block
+                # failed to raise, so no_raise before the jump (same leak
+                # pattern the has_exit branch handles with its teardown).
+                original_emit = gen._emit
+                def intercepted_emit(line, rv=None, rt=None):
+                    stripped = line.strip()
+                    if gen.loop_stack and stripped in (
+                        f"goto {gen._loop_continue_bb()};",
+                        f"goto {gen._loop_break_bb()};"):
+                        original_emit("  mojo_exc_pop ();")
+                        original_emit("  assert_raises_no_raise ();")
+                        original_emit(line)
+                        return
+                    original_emit(line)
+                gen._emit = intercepted_emit
+                gen.gen_stmt(s)
+                gen._emit = original_emit
+
+            if not gen._last_was_terminal:
+                gen._emit("  mojo_exc_pop ();")
+                gen._emit("  assert_raises_no_raise ();")
+                gen._emit(f"  goto {bb_after};")
+
+            gen._emit_label(bb_exc)
+            gen._emit("  mojo_exc_pop ();")
+            # The block raised, as required: swallow and continue. The
+            # exception state (type tag / message) is left as-is — the
+            # marker's driver-side bookkeeping owns it, and the next
+            # assert site reads no exception state.
+            gen._emit(f"  goto {bb_after};")
+
+            gen._emit_label(bb_after)
+            return
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):

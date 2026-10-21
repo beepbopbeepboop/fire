@@ -5178,6 +5178,8 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
+    def _materialize_in_tu_wrapper(self, csn: str, w: str) -> str:
+        return ginf._materialize_in_tu_wrapper(self, csn, w)
     def _stringify_value(self, et: str, ev: str, enode=None) -> str:
         return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:

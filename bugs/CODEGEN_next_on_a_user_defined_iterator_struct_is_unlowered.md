@@ -1401,3 +1401,240 @@ in-TU List storage end-to-end (allocator + subscript). Then verify with the
 `gcc -c` + `nm` + `ld` + run ladder (the 2026-10-03 pattern): the module's
 own object must DEFINE the instantiation and its `__next__`, and a real
 link must leave no undefined symbol. Never the syntax-only gate.
+## 2026-10-20 (further): the refusal is lifted — List-container factories
+materialize in-TU over the runtime list, value-ladder-verified, 596/14
+
+### What the lift does (measured end-to-end, not gate-only)
+
+The refusal filed in "2026-10-20 (continued)" is gone. The dependent-return
+iterator factory now FIRES for `List` containers, and its value is a real,
+linkable, runnable in-TU struct:
+
+- The runtime `MojoList *` container is KEPT as the iterable's storage (the
+  in-TU `List_1_T_3_Int` shell from the (continued) session — with its
+  `int64_t_unsafe_offset` stub, its layout mismatch against the runtime
+  object, its 0-stubbed storage — is not used; no in-TU `List_*` struct
+  exists anywhere in the generated C, the regression probe from the previous
+  session holds).
+- `_ListIter`/`_ListIterOwned` are materialized in-TU with RUNTIME-TYPED
+  fields (`MojoList * _list`, `int64_t _index`, `int64_t * _data`,
+  `int64_t _length`), and their `__init__`/`__iter__`/`__next__`/`bounds`
+  bodies are the spliced stdlib bodies REWRITTEN to lowerable expressions
+  (`elab_intu._IN_TU_LIST_BASES` 3-site guard + `_IN_TU_ITER_BODIES` +
+  `_rewrite_inner_bodies`): `mojo_list_len`/`mojo_list_get_*` over the
+  `MojoList *`, exhaustion spelled `mojo_exc_type_set(590612416);
+  mojo_raise ()` — exactly the raise protocol the runtime's
+  `StopIteration` uses.
+- The wrapper (`_Enumerate[...]`, `_TakeIterator[...]`, `_DropIterator[...]`,
+  `_CycleIterator[...]`, `_PeekableIterator[...]`, ...) is allocated by a
+  generated `_alloc_` (malloc + generated `_init_`), its registered
+  `__init__` overload is direct-emitted, and the spliced wrapper bodies
+  delegate to the inner.
+
+### The mechanism fixes that came with it (all measured, all in tree)
+
+1. `parse_return` for the factory family: `{'wrapper': None}` — the factory
+   RETURNS the inner iterator directly when the wrapper is identity.
+2. Bare `iter(<container>)`: the seed enqueues the inner as a root
+   (`wrapper=None`) and `emit_calls` returns it directly — 3-part change.
+3. **Setjmp raise-exhaustion for-loop** (`emit_loops._gen_for_struct_iter`):
+   a `__next__`-only iterator struct cannot test a loop condition (the
+   condition IS the call, and only a setjmp region can see the longjmp), so
+   the frame is pushed once at entry, `bb_post` loops straight to `bb_body`,
+   `break`/`return` are intercepted (`mojo_exc_pop` prepended), and `bb_exc`
+   pops + tag-checks `== 590612416` -> `bb_after`, else `mojo_raise()`.
+   **Gate (fixed 2026-10-21, see below): trusted only for in-TU
+   materialized wrappers** (`iter_base in gen._intu_prereg_structs`).
+4. **Wrapper `bounds` branch-folding rewrite**: the inner's `{iter_len}`
+   set-literal slot lowers to a RAW WORD (0 == None), so `if upper:` +
+   `upper.value()` in `take`/`drop`'s spliced `bounds` must be folded to
+   int-truthiness + identity — measured: `test_take_bounds` it4
+   `take(empty, 5)` returned `upper=5`, must be 0. `_IN_TU_ITER_BODIES`
+   covers the 4 list-backed bases; take -> `return (lower, min(upper,
+   remaining))`, drop -> `return (lower, max(0, upper - to_drop))`;
+   `_PeekableIterator`/`_Enumerate` bounds delegate (no rewrite).
+5. **`.copy()` protocol lowering for in-TU structs** (`emit_methods`):
+   registered `__init__` overload set resolved on the `copy` kwarg ->
+   alloc + DIRECT ctor emit (NOT `_lower_struct_constructor` — its coercion
+   reads `func_param_types`, which at statement-loop emission still holds
+   the erased `int64_t` for the `copy: Self` param — measured box + gcc
+   int-conversion error); else a synthesized FIELDWISE DEEP copy
+   (`_emit_fw_copy`, depth < 4): each field via a temp (GIMPLE rejects
+   `component_ref` store RHS), in-TU struct-pointer fields get a fresh
+   `_alloc_` + recursive copy. Measured: aliased inner cursors broke
+   `test_cycle_copyable` (computed 1 / expected 3); the shared `MojoList *`
+   buffer stays shared (real Mojo implicit-copy semantics).
+6. **`iter(<in-TU iterator struct local>)` = protocol copy**: real Mojo's
+   `iter(x)` calls `x.__iter__()`; for the lifted family the spliced body is
+   exactly `return self.copy()`. The old identity echo was a measured
+   aliasing bug (`test_cycle_iterator_protocol`). Two sites in `emit_calls`,
+   gated `rec['kind'] == 'factory'` + in-TU struct-pointer `inner_t` +
+   `IdentExpr` arg — the kind gate is load-bearing (without it
+   `iter(<list local>)` echoed the list and broke `test_enumerate_bounds`:
+   computed 0 / expected 3).
+7. **`comptime assert` no-op** (`emit_stmts._gen_stmt_AssertStmt`): real
+   Mojo runs no runtime check; the spliced `_DropIterator.__next__`'s
+   `comptime assert conforms_to(...)` was leaking to a value-path branch on
+   undefined `conforms_to` + `__builtin_trap` (test_drop link failure
+   `_conforms_to`). Compile-time checking is not implemented (honest note).
+8. **Function-level import factory homes** (`elab_intu._import_name_map`
+   recurses into function bodies; first declaration, outermost-then-source
+   order, wins): a function-level `from std.itertools import take`
+   (`test_drop_then_take_composition`) previously left the call on the plain
+   imported-name path (`extern int64_t take(...)` -> link fail). See the
+   R2 doc's "2026-10-20 (further)" for the imported-generic side.
+9. **`unsafe_take()` consume** (`emit_methods._lower_method_call` scalar
+   region): two-step zero — Gimple requires it (single-expression
+   `x = 0; return old` mis-erased).
+10. **`ImmPointer[T](to=x)` dual storage shape** (`emit_calls.
+    _lower_immpointer_ctor`): measured emission-context rule — inside
+    `__GIMPLE`-tagged fns, `&` of local/static/global is ALL rejected
+    (gtest1/gtest2.c), so (a) the STATIC word-slot shape
+    (`_lk_peekdata`/`_lk_peekview`/`_lk_peekword` function-scope statics,
+    two-level P->word->view) ONLY in safe-untagged contexts — gate
+    `gen._emitting_plain_func or gen._func_used_setjmp` (a function whose
+    body already emitted setjmp is guaranteed untagged; the verified peek
+    site is safe via that); (b) HEAP shape everywhere else —
+    `mojo_list_new()` + `mojo_list_append_int(view, word)`, the returned
+    pointer IS the view list (one allocation, no `&`), matching the measured
+    python.mojo accessor contract (`self._impl[]` casts P directly to
+    `MojoList *`, no word indirection). The two contracts are mutually
+    exclusive per site; each site's consumer was measured. This fix also
+    repaired the `std/python/python.mojo` regression the static shape had
+    caused there (zero `_lk_peek*` refs in the python TU after; the tag rule
+    is `'' if _func_used_setjmp else '__GIMPLE '`).
+11. **`with assert_raises():` setjmp frame** (`emit_stmts._gen_stmt_WithStmt`):
+    the bare form whose struct has no in-TU `__exit__` lowers to a try-frame
+    (body raise -> `mojo_exc_pop(); goto bb_after`; normal exit ->
+    `mojo_exc_pop(); assert_raises_no_raise()`). Blast radius ~55 files.
+    The `contains=`/error-type matching is NOT verified (documented edge);
+    multi-context and `as` forms keep the old lowering.
+12. **Ladder module-name bug fix**: `ladder.py` now mirrors the sweep's
+    exact module naming (full rel path, `os.sep`/`-` -> `_`) — the mangle
+    prefix of every emitted symbol derives from it; the old basename
+    spelling produced different C bytes than the sweep gates.
+
+### Value-ladder evidence (real `gcc -c`, `nm -g`, link, run, checked values)
+
+Re-verified 2026-10-21 AFTER every one of the fixes above, fresh process,
+sweep module naming:
+
+| file | result |
+|---|---|
+| `test/iter/test_peek.mojo` | PASS 6/6 — generated C BYTE-IDENTICAL to the previously verified `ladder_test_peek.c` (cmp; the invariant re-holds after the ImmPointer dual-shape change and the 2026-10-21 bucket fixes) |
+| `test/iter/test_enumerate.mojo` | PASS 6/6 |
+| `test/itertools/test_take.mojo` | PASS 13/13 |
+| `test/itertools/test_drop.mojo` | PASS 14/14 |
+| `test/itertools/test_cycle.mojo` | RED by design — 15/17 sites work with real values (Int/String/Bool lists, `List[Int]()`, `range(...)`, copyable/iterator-protocol/for-loop/composition forms; scratch copy without the 2 user-owned tests: ladder PASS 15/15). The 2 remaining (`cycle(_owned3(1,2,3))` :283, `cycle(_owned1(42))` :302) hit the local-generic-elaboration refusal `next(...) on next(IdentExpr) (receiver typed int64_t) has no lowering` — the SAME failure surface on clean master (measured in both A/B trees; the message is byte-identical, the mechanism differs underneath). |
+
+### Sweep, warn set, A/B (all 2026-10-21, final code state)
+
+- Sweep: **596 PASSED / 14 FAILED — 14 expected, 0 unexpected, EXIT 0**
+  (baseline 592/18). The 14 are exactly the `EXPECTED_FAILURES` set (3
+  distinct reasons; see the R2 doc). The warn set is identical to clean
+  master and to the pre-lift runs: the same 15 files / 248
+  "generic struct elaboration(s) failed … NOT being cached" warnings, file
+  for file and count for count.
+- Full-tree A/B vs clean master worktree (de890235), BOTH run shapes:
+  pool (12-worker, sweep shape): 18 -> 14 errors, 493 unchanged, 4
+  ERROR->C (the lifted files), 0 C->ERROR, 113 C->C hash-changed.
+  Fresh-process (one interpreter per file, the trustworthy per-file shape,
+  610-row TSVs): the SAME 493/4/0/113 split — so the 113 are real
+  cross-tree changes, not pool contamination. `test_cycle`'s ERROR row is a
+  byte-identical message in both trees. The 113 are the documented blast
+  radii of the fixes above (assert_raises frame ~55, setjmp for-loop,
+  comptime-assert no-op, `.copy()`, iter-struct copy, ImmPointer heap in
+  python.mojo, import map, lift files); the regression probes
+  `test_list`/`test_random` are byte-identical (the (continued) session's
+  2-file regression stays fixed).
+
+### The bucket regressions the lift exposed, and their fixes (2026-10-21)
+
+The check bucket (`tools/suite.py`) dropped to 51/53; both failures were
+measured, not guessed:
+
+1. **`gimple` job — the named refusal was swallowed.** The raise-exhaustion
+   setjmp for-loop (fix 3) gated on "`__has_next__` absent + `__next__`
+   present", which fires for ANY such struct — including a USER-defined
+   `class Counter` with a Python-style `__next__`. test_gimple.py's
+   `next_on_a_user_struct_lowers_and_its_for_loop_says_why_not` pins that
+   the loop over such a struct is a NAMED refusal (`mojo_unsupported_iter`
+   + `Counter (no __has_next__)`) — its docstring: "making the loop actually
+   work is the type-inference project the doc parks, and inventing a wrong
+   loop here would be worse than both". Fix: the gate additionally requires
+   `iter_base in gen._intu_prereg_structs` — the frame is trusted only for
+   the codegen's own materialized wrappers, whose raise protocol is spelled
+   by this compiler's own `mojo_exc_type_set` + `mojo_raise`; user structs
+   keep the named refusal + zero iterations. `test_gimple.py`: 395/395
+  EXIT 0.
+2. **`gimplerunner` job — the stale pre-pass table meets the wrapper.**
+   `z = enumerate([7, 8])` (function scope) declared `z` `MojoList *`
+   (the pre-pass's `_BUILTIN_RET_CTYPES` guess — the old materialized
+   pair-list model) while the value is the in-TU `_Enumerate_... *`:
+   `len(z)` read a struct field as a length (printed `4376269232`),
+   `print(z)` walked garbage (printed nothing). The `var`-declared twin was
+   already fine (unannotated `VarDecl` trusts the emitted ctype). Six-part
+   fix: (a) plain `AssignStmt` first-bind trusts the emitted vtype when it
+   is an in-TU struct pointer and the pre-pass said something else;
+   (b) `len(<wrapper>)` answers the NON-consuming `bounds()` upper (the
+   in-TU `bounds` returns a boxed 2-element tuple list `[lower, upper]`;
+   enumerate delegates to its inner list, take's rewritten body answers
+   `min(count, remaining)`, drop's `max(0, len - n)` — materializing in
+   `len` would consume the iterator, which the bucket's
+   `print(len(z)); print(z)` sequence proves wrong); (c) a new shared
+   materializer (`emit_infra._materialize_in_tu_wrapper`) consumes the
+   wrapper with the exact setjmp frame idiom of fix 3 into a fresh
+   `MojoList *` and appends the raw element word — the in-TU `__next__`
+   raises by longjmp on exhaustion, so the frame is mandatory; (d)
+   `print(<wrapper>)` routes through it and the pair-aware
+   `mojo_repr_list_pairs` (the measured baseline spelling for the old
+   materialized pair list; `_Enumerate`'s element is a boxed tuple-PAIR
+   list, so the materialized list gets `_elem_types = 'MojoList *'` +
+   nested `[int64, int64]`); (e) `list(<bound wrapper local>)` materializes
+   too (the comprehension route has no in-TU struct-pointer arm and would
+   emit an empty list — a regression against the baseline's materialized
+   pair list; the inline `list(enumerate(...))` shortcut is untouched);
+   (f) module-level `z = enumerate([7, 8])` — the global read-back arrives
+   boxed (`int64_t`) with the actual type carried in `_actual_types`;
+   `_note_global_store_types` now records the in-TU wrapper vtype directly
+   (the `setdefault` kind list is the three runtime containers, and the
+   factory temp has no overlay entry), so the read retypes to the wrapper
+   and (d) fires. `test_gimple_runner.py`: 461/461 EXIT 0, including
+   `gimple_enumerate_value_printed` (`2` + `[(0, 7), (1, 8)]`) and
+   `gimple_global_from_enumerate_call`.
+
+3. **`no-new-casts` guard — my own cast tripped the R3 tripwire.** The
+   `len` branch of (2b) hand-wrote its `(MojoList *)` reinterpret in an
+   emitted-C template string, and `test_no_new_container_casts.py` counts
+   exactly those (baseline 17; the guard's text scan deliberately sees
+   casts the generated program really executes). Fixed at the chokepoint
+   the guard exists to enforce: the branch now calls
+   `gen._coerce_to_type('int64_t', 'MojoList *', ...)` (emit_resolve.py —
+   the one file the count excludes), which emits the same cast with one
+   extra GIMPLE-safe register copy (verified: the normalized generated-C
+   diff is that single line plus temp renumbering; gate exit 0). Guard
+   back to its baseline 17.
+
+Final bucket state on the complete fix set: `tools/suite.py` **53/53,
+exit 0** (51/53 at the start of the session's bucket work; the two jobs
+above plus the guard, in order).
+
+Ground truth check for (1)/(2): real stdlib's `_Enumerate` (std/iter/
+__init__.mojo:388) has NO `__len__` and NO `__repr__` — the bucket's
+`len`/`print` contract is this codebase's own materialized-pair-list model,
+and the lift preserves THAT contract through the lazy wrapper, which is
+what the pinned tests assert.
+
+### What is NOT verified (honest list)
+
+- `assert_raises`'s `contains=` / error-type matching: the frame verifies
+  "raised" vs "did not raise" only.
+- `comptime assert`: no compile-time checking is implemented — the
+  statement is a no-op, matching real Mojo's runtime behaviour, not its
+  compile-time conformance check.
+- The materializer's element repr tracking: `_Enumerate` over a non-int
+  inner list defaults the pair's second slot to `int64_t` (the tracked
+  inner element type is not resolvable at the print site); the bucket and
+  the ladders exercise the int case, which is what the baseline pinned.
+- `test_cycle`'s 2 user-owned sites remain the local-generic-elaboration
+  gap (R2 sibling), unchanged in surface from clean master.

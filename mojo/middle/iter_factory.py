@@ -68,6 +68,14 @@ _RE_QUAL = re.compile(
     r'^(\w+)\[\s*(?:type_of\((\w+)\)\s*\.|(\w+)\s*\.)'
     r'(IteratorType|IteratorOwnedType)\s*(?:\[[^\]]*\])?\s*\]$')
 _RE_TYPEOF_ITER = re.compile(r'^(\w+)\[\s*type_of\(\s*iter\((\w+)\)\s*\)\s*\]$')
+# The BARE `iter` builtin names the container's OWN iterator type directly —
+# no wrapper mention. Two overloads, two shapes (std/iter/__init__.mojo):
+#   owned    `type_of(iterable).IteratorOwnedType`
+#   borrowed `IterableType.IteratorType[origin_of(iterable)]`
+# `wrapper: None` in the answer is the discriminator the seed/emit sides use
+# (the inner IS the return value, so it is materialized as its own root).
+_RE_BARE_ITER_OWNED = re.compile(r'^type_of\(\s*(\w+)\s*\)\s*\.\s*IteratorOwnedType$')
+_RE_BARE_ITER_BORROWED = re.compile(r'^(\w+)\s*\.\s*IteratorType\s*\[[^\]]*\]$')
 
 
 def parse_return(ann) -> dict | None:
@@ -85,6 +93,12 @@ def parse_return(ann) -> dict | None:
     m = _RE_TYPEOF_ITER.match(s)
     if m:
         return {'wrapper': m.group(1), 'kind': 'borrowed', 'x': m.group(2)}
+    m = _RE_BARE_ITER_OWNED.match(s)
+    if m:
+        return {'wrapper': None, 'kind': 'owned', 'x': m.group(1)}
+    m = _RE_BARE_ITER_BORROWED.match(s)
+    if m:
+        return {'wrapper': None, 'kind': 'borrowed', 'x': m.group(1)}
     return None
 
 

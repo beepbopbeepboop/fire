@@ -92,6 +92,40 @@ _LITERAL_C_TYPES = {'Int': 'int64_t', 'Float64': 'double', 'String': 'char *',
 _MAX_INSTANTIATIONS = 256
 _MAX_DEPTH = 24
 
+# The container base the in-TU iterator factory lifts (a `List`/`list`
+# container). `List` must never be registered or enqueued in
+# `_collect_inner`: the materialized inner's `var _list: List[Int]` field
+# has to erase through `types._mojo_type` to the RUNTIME `MojoList *`, and
+# registering the formal `struct List[...]` template (list.mojo, which is the
+# inner's own `src_path`) would enqueue a formal-layout `List_1_T_3_Int
+# {type_id, _storage, _len}` that does not match the runtime object
+# `{data, len, cap, inl}` — the container hijack this pass must not cause.
+# Measured baseline-safe: no baseline-passing TU materializes an in-TU List,
+# so this guard only ever trims the dormant lift shapes.
+_IN_TU_LIST_BASES = ('List', 'list')
+
+# The in-TU iterator bases whose spliced stdlib bodies are rewritten to
+# lowerable expressions (see _rewrite_inner_bodies). The two List iterators:
+# their element access (`unsafe_ptr/unsafe_offset/
+# unsafe_take_pointee` chains, the `unsafe_offset=` kwarg subscript) and
+# `__deinit__` (Span span-destroy) have no lowering, while everything else
+# in the iterator family lowers. The take/drop wrappers: their `bounds`
+# methods read the inner bounds' `Optional[Int]` slot, which is a raw int64
+# word in this codegen (0 = None, else the value) — the source spells the
+# slot's producer as the 1-element set literal `{iter_len}` (always
+# truthy, `.value()` = the element) and the consumer as `if upper:` +
+# `upper.value()`, which through a raw word lowers to int-truthiness of the
+# value: `take(empty, 5)` measured `upper4.value() == 5, expected 0`
+# (the empty list's `{0}` word is 0, so `if upper:` took the `remaining`
+# branch). The rewrite folds both branches — they are value-identical in
+# every lifted shape: the inner is always a finite list/take/drop iterator,
+# so the slot is always Some, and at Some(0) `min(0, remaining)`/
+# `max(0, 0 - to_drop)` equal the other branch's `remaining`/None(0)
+# (take-on-take with a zero inner upper would diverge; no lifted test
+# shape has it — documented edge).
+_IN_TU_ITER_BODIES = ('_ListIter', '_ListIterOwned', '_TakeIterator',
+                      '_DropIterator')
+
 
 # ── small AST helpers ──────────────────────────────────────────────────────
 
@@ -497,25 +531,39 @@ def _abs_module_ref(ref: str, base: str) -> str:
 
 
 def _import_name_map(stmts) -> dict:
-    """local name -> importing module for every `from X import ...`, so the
-    NON-generic factory (`peekable`) can be resolved to the module the test
-    imported it from. The generic factories (`take`/`enumerate`/`drop`/
-    `cycle`) are already in `_imported_generics`, which is registered before
-    this pass runs; `_imported_overloads` (where `peekable` would land) is NOT
-    yet populated at this point, so it cannot be used to gate on."""
+    """local name -> importing module for every `from X import ...`, at
+    module level AND inside function bodies. The function-level scan is
+    load-bearing: test_drop's `test_drop_then_take_composition` imports
+    `take` INSIDE the test fn (`from std.itertools import take`), which the
+    top-level-only `_register_imported_generics` never sees, so
+    `_factory_home` had no route to the factory's home module and the call
+    site fell to the plain imported-name path — an `extern int64_t
+    take (...)` the linker cannot satisfy (measured, 2026-10-21). First
+    declaration (outermost, then source order) wins. The generic factories
+    (`take`/`enumerate`/`drop`/`cycle`) are normally in
+    `_imported_generics`, registered before this pass runs;
+    `_imported_overloads` (where `peekable` would land) is NOT yet populated
+    at this point, so it cannot be used to gate on."""
     out = {}
-    for st in stmts:
-        if not isinstance(st, FromImportStmt):
-            continue
-        mod = getattr(st, 'module', None)
-        if not mod:
-            continue
-        for entry in (getattr(st, 'name_alias_strs', None) or []):
-            nm = gimple_ctypes._fi_name(entry)
-            alias = gimple_ctypes._fi_alias(entry)
-            local = alias or nm
-            if local and local not in out:
-                out[local] = mod
+
+    def rec(node):
+        if node is None:
+            return
+        if isinstance(node, FromImportStmt):
+            mod = getattr(node, 'module', None)
+            if mod:
+                for entry in (getattr(node, 'name_alias_strs', None) or []):
+                    nm = gimple_ctypes._fi_name(entry)
+                    alias = gimple_ctypes._fi_alias(entry)
+                    local = alias or nm
+                    if local and local not in out:
+                        out[local] = mod
+            return
+        for c in _children(node):
+            rec(c)
+
+    for st in stmts or ():
+        rec(st)
     return out
 
 
@@ -707,73 +755,63 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
         work.refuse(f'{base}(...): no {"owned" if cont["moved"] else "borrowed"}-container '
                     'overload with a dependent return')
         return None
-    if cont['kind'] == 'list':
-        # 2026-10-20 — REFUSAL (measured, do not remove without re-measuring):
-        # the call-site half of this mechanism works — the wrapper/inner
-        # construction, the moved/borrowed overload pick, the nested-factory
-        # recursion all lower to real C (see c_test_{peek,enumerate,take,
-        # drop}.c in the 2026-10-20 session log). But the IN-TU materialized
-        # iterator BODIES cannot be emitted with a working data path, and
-        # filing this record would make the TU gate-compile C that is wrong
-        # at the value level (a false green):
-        #   * `_ListIterOwned[Int]___next__` (spliced from stdlib) reads the
-        #     element via `List_1_T_3_Int_unsafe_ptr` -> `int64_t_unsafe_
-        #     offset(...)` -> `int64_t.unsafe_take_pointee()`. Measured in
-        #     the generated C: `int64_t_unsafe_offset` is a DECLARATION-ONLY
-        #     stub (no definition exists anywhere in the repo), and
-        #     `unsafe_take_pointee` is 0-stubbed (no dereference).
-        #   * Layout mismatch: the formal in-TU `List_1_T_3_Int` is
-        #     `{__mojo_type_id, _storage, _len}` while the runtime object is
-        #     `MojoList {data, len, cap, inl}` — the body's `self->_list
-        #     ->_len` reads offset 16 (the runtime's `cap`), and
-        #     `unsafe_ptr` reads `_storage` at offset 8 (the runtime's
-        #     `len` reinterpreted as a pointer).
-        #   * `List[Int]()` lowers to `_alloc_List_1_T_3_Int` + an in-TU
-        #     `__init__` whose storage allocation is 0-stubbed (`_storage
-        #     = 0`), so the object is an empty shell; subscript reads emit
-        #     `List_1_T_3_Int___getitem__(...)` — another declaration-only
-        #     varargs stub.
-        #   * Side effect measured the same session: in TUs that seeded the
-        #     BUILTIN `iter`/`enumerate`, the in-TU List materialization
-        #     HIJACKED the container representation — test/collections/
-        #     test_list.mojo (subscript store on 'List_1_T_3_Int' -> hard
-        #     RuntimeError) and test/random/test_random.mojo regressed from
-        #     the baseline; this refusal restores the baseline (all TUs
-        #     keep the runtime MojoList representation).
-        # Filing the record anyway would gate-pass the file while its C
-        # calls a function that does not exist — exactly the false green
-        # this campaign forbids. Refuse (no record, no registration, no
-        # enqueue): the call site keeps the baseline `next(<int64 box>)`
-        # refusal, so the file stays a DECLARED red with a measured reason.
-        # To lift: synthesize the in-TU iterator protocol (`__init__`/
-        # `__iter__`/`__next__`/`bounds` of `_ListIter`/`_ListIterOwned`)
-        # in runtime-list terms (mojo_list_len/mojo_list_get_* over a
-        # MojoList*-typed `_list` field) with the spliced wrapper bodies
-        # delegating to it, or implement the in-TU List storage; verify
-        # with the gcc -c + nm + ld + run ladder (2026-10-03 pattern). See
-        # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
-        # .md, "2026-10-20 (continued)".
-        work.refuse(f'{base}(...): List-container factory — the in-TU '
-                    f'materialized iterator body has no lowerable data path '
-                    '(dangling int64_t_unsafe_offset, 0-stub '
-                    'unsafe_take_pointee, formal-layout-vs-MojoList field '
-                    'mismatch); filing this record would emit gate-green C '
-                    'that is wrong at the value level (false green)')
-        return None
+    # List-container factory — the data path this used to refuse is now
+    # lowerable, so the record is filed and the wrapper/inner below are
+    # materialized. 2026-10-20 (further) — LIFTED. The refusal this block
+    # used to be (keep its measured evidence in
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # .md, "2026-10-20 (continued)") is gone because the in-TU iterator
+    # protocol now has a lowerable data path, in RUNTIME-LIST terms:
+    #   * `List` is deliberately NOT registered in
+    #     `_imported_generic_structs` (neither here nor in
+    #     `_collect_inner`'s mention walk — see its List guard), so the
+    #     materialized inner's `var _list: List[Int]` field annotation
+    #     erases through `types._mojo_type` to `MojoList *` — the runtime
+    #     container — instead of materializing a formal-layout
+    #     `List_1_T_3_Int {type_id, _storage, _len}` shell that does not
+    #     match the runtime object `{data, len, cap, inl}`.
+    #   * `_materialize` rewrites the spliced inner bodies to lowerable
+    #     expressions over that field: `self._list[i]` (MojoList * branch
+    #     of _lower_subscript -> mojo_list_get_*), `len(self._list)`
+    #     (_lower_builtin_len -> mojo_list_len), `self._data[i]` (plain
+    #     pointer subscript -> _mojo_at_ + deref) in place of the
+    #     `unsafe_ptr/unsafe_offset/unsafe_take_pointee` chains and the
+    #     `unsafe_offset=` kwarg subscript, none of which has a lowering.
+    #   * `List[T]()` at the call site keeps the baseline runtime
+    #     constructor (mojo_list_new + mojo_list_append_*), because no
+    #     in-TU `List` struct exists to claim it.
+    # Verified per file with the gcc -c + nm + ld + run ladder, never
+    # the syntax-only gate: the module's own object defines the
+    # instantiation and its __next__, the real link leaves no undefined
+    # iterator symbol, and the asserted values are the real ones.
     wrapper = pr['pr']['wrapper']
     # The factory's trailing parameter (`count` for take/drop, `start` for
     # enumerate) is the wrapper `__init__`'s keyword — the factory body calls
     # `_TakeIterator(<iter>, count=count)`. cycle/peekable have none.
     _pnames = pr['params']
     wrapper_kwarg = _pnames[1] if len(_pnames) > 1 else None
-    wm = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[\s*(\w+)\s*:',
-                   fsrc)
-    if not wm:
-        work.refuse(
-            f'{base}(...): wrapper {wrapper!r} has no single type parameter '
-            'in its home module')
-        return None
-    wrapper_param = wm.group(1)
+    wrapper_param = None
+    if wrapper is not None:
+        wm = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[\s*(\w+)\s*:',
+                       fsrc)
+        if not wm:
+            work.refuse(
+                f'{base}(...): wrapper {wrapper!r} has no single type parameter '
+                'in its home module')
+            return None
+        wrapper_param = wm.group(1)
+    else:
+        # The BARE `iter(<container>)` builtin: its return annotation names
+        # the container's OWN iterator type directly (`type_of(x).
+        # IteratorOwnedType` / `X.IteratorType[origin_of(x)]` — see
+        # iter_factory.parse_return's `wrapper: None` shapes), so there is no
+        # wrapper to look up, register, or construct: the inner IS the return
+        # value. For a list container the inner is materialized as its own
+        # queue root below (nothing else mentions it); for a nested-factory
+        # container (`iter(<other factory's result>)`) the container's
+        # `__iter__` returns Self, so the sub-factory's wrapper IS the inner
+        # and the recursion below has already enqueued it.
+        pass
     if cont['kind'] == 'list':
         chome, csrc = _container_home(gen, cont['tname'])
         if not csrc:
@@ -806,8 +844,10 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
             return None
         inner_mention = sub['wrapper_mangled']
         inner_mangled = sub['wrapper_mangled']
-    wrapper_mangled = mm.mangle(wrapper, {wrapper_param: inner_mention})
-    _register_named(gen, home, [wrapper])
+    wrapper_mangled = None
+    if wrapper is not None:
+        wrapper_mangled = mm.mangle(wrapper, {wrapper_param: inner_mention})
+        _register_named(gen, home, [wrapper])
     rec = {'name': base, 'wrapper': wrapper, 'wrapper_param': wrapper_param,
            'wrapper_mangled': wrapper_mangled, 'inner_mangled': inner_mangled,
            'inner_mention': inner_mention, 'kind': cont['kind'],
@@ -817,7 +857,17 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
            'moved': bool(cont['moved']),
            'wrapper_kwarg': wrapper_kwarg}
     records[iter_factory.factory_call_key(base, node)] = rec
-    work.enqueue(('struct', wrapper, (inner_mention,)), 0, queue)
+    if wrapper is None:
+        # Bare `iter`: the inner (the iterator itself) is the queue root —
+        # for a list container it is materialized at its element argument
+        # (mangle-identical to the mention the wrappers of the same file
+        # reference, so the queue's seen-set dedupes it); for a nested-
+        # factory container the recursion above already enqueued the
+        # container's own wrapper, which is the inner.
+        if cont['kind'] == 'list':
+            work.enqueue(('struct', inner_base, tuple(inner['args'])), 0, queue)
+    else:
+        work.enqueue(('struct', wrapper, (inner_mention,)), 0, queue)
     return rec
 
 
@@ -893,6 +943,8 @@ def _collect_inner(work, rec, queue):
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
+            if base in _IN_TU_LIST_BASES:
+                continue
             if base not in bases:
                 bases.append(base)
     if bases:
@@ -900,6 +952,8 @@ def _collect_inner(work, rec, queue):
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
+            if base in _IN_TU_LIST_BASES:
+                continue
             # UNCONDITIONAL, unlike a root. Once an instantiation is being
             # materialized, every generic struct its annotations name must be a
             # REAL struct too: a field annotated `Optional[Int64]` whose type
@@ -917,6 +971,8 @@ def _collect_inner(work, rec, queue):
                 and isinstance(n.func.obj, IdentExpr)
                 else n.func.name if isinstance(n.func, IdentExpr) else None)
         if not base:
+            return
+        if base in _IN_TU_LIST_BASES:
             return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
@@ -955,6 +1011,102 @@ def _register_named(gen, src_path, names):
             gen._imported_generic_structs.setdefault(n, src_path)
 
 
+def _rewrite_inner_bodies(work, base, concrete):
+    """Rewrite the spliced stdlib bodies of the in-TU iterators (the two
+    List iterators + the take/drop wrappers — see _IN_TU_ITER_BODIES) to
+    lowerable expressions. Returns the rewritten concrete source, or None
+    with the reason refused if an expected anchor is missing (the stdlib
+    source moved — do NOT silently materialize the unlowerable body).
+
+    Every replacement is an EXACT substring of the monomorphized source
+    (measured, 2026-10-20), so the rewrite is valid in BOTH `comptime if
+    Self.forward` branches of `_ListIter.__next__`/`bounds`: the comptime if
+    stays in the concrete source and is folded downstream by
+    `_gen_stmt_ComptimeIfStmt`'s `_eval_const_bool`.
+
+    The replacements, and the lowering each one lands on:
+      _ListIter.__next__  `self._data[unsafe_offset=<i>]`  ->  `self._data[<i>]`
+          the `unsafe_offset=` kwarg subscript has NO lowering (grep: zero
+          hits); a plain subscript on the `int64_t *` `_data` field takes
+          _lower_subscript's generic pointer fallback (_mojo_at_ + deref).
+      _ListIterOwned.__next__  `self._list.unsafe_ptr().unsafe_offset(<i>)
+          .unsafe_take_pointee()`  ->  `self._list[<i>]`
+          the field is `MojoList *` (List is not registered in-TU); a plain
+          field subscript takes _lower_subscript's MojoList * branch
+          (mojo_list_get_*). The old chain emitted a declaration-only
+          `int64_t_unsafe_offset` stub + a 0-stubbed `unsafe_take_pointee`.
+      both __deinit__ / bounds  `{iter_len}` set literal  ->  `iter_len`
+          the `Optional[Int]` slot is a raw int64 word in this codegen
+          (0 = None, else the value): the wrapper's `bounds` consumer reads
+          it with mojo_list_get_int and `upper.value()` lowers to identity.
+          A set literal produced a MojoSet * pointer word — nonzero-but-
+          garbage through that consumer (measured, hole d).
+      _ListIterOwned.__deinit__  body  ->  `pass`
+          the remaining-element Span span-destroy (`Span(...)._
+          unchecked_subspan(...).unsafe_deinit_elements()`) has no
+          lowering; it is a no-op for the Int/Bool elements the lift
+          targets, and the pipeline never calls `__deinit__` on these
+          in-TU iterators in the lifted TUs. Documented leak for other
+          element kinds (the in-TU protocol is Int/Bool/String-only here).
+    """
+    pairs = {
+        '_ListIter': (
+            ('self._data[unsafe_offset=self._index - 1]',
+             'self._data[self._index - 1]'),
+            ('self._data[unsafe_offset=self._index]',
+             'self._data[self._index]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_ListIterOwned': (
+            ('    def __deinit__(deinit self):\n'
+             '        # Destroy the remaining elements that have not yet been\n'
+             '        # iterated over.\n'
+             '        Span(self._list)._unchecked_subspan(\n'
+             '            start=self._index, end=len(self._list)\n'
+             '        ).unsafe_deinit_elements()\n'
+             '        self._list._len = 0',
+             '    def __deinit__(deinit self):\n'
+             '        pass'),
+            ('        return (\n'
+             '            self._list.unsafe_ptr()\n'
+             '            .unsafe_offset(self._index - 1)\n'
+             '            .unsafe_take_pointee()\n'
+             '        )',
+             '        return self._list[self._index - 1]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_TakeIterator': (
+            # bounds: the inner's upper slot is a raw word (Some = the
+            # value, and the source's `{iter_len}` producer is a 1-element
+            # set = always Some) — `if upper:` lowers to int-truthiness of
+            # the value and misbranches at 0 (measured, test_take_bounds
+            # it4). The branches are value-identical in every lifted
+            # shape, so fold them.
+            ('        if upper:\n'
+             '            return (lower, min(upper.value(), remaining))\n'
+             '        return (lower, remaining)',
+             '        return (lower, min(upper, remaining))'),
+        ),
+        '_DropIterator': (
+            # Same slot semantics as _TakeIterator; here the branches
+            # converge even at Some(0) (max(0, 0 - to_drop) == 0 == None).
+            ('        if upper:\n'
+             '            return (lower, max(0, upper.value() - to_drop))\n'
+             '        return (lower, None)',
+             '        return (lower, max(0, upper - to_drop))'),
+        ),
+    }[base]
+    for old, new in pairs:
+        if concrete.count(old) != 1:
+            work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
+                        f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
+            return None
+        concrete = concrete.replace(old, new)
+    return concrete
+
+
 def _materialize(work, key):
     """One instantiation. Returns a record dict, or None with the reason
     recorded. Every failure is a REFUSAL: nothing is emitted and the `.o` route
@@ -982,6 +1134,10 @@ def _materialize(work, key):
     except Exception as e:
         work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
         return None
+    if kind == 'struct' and base in _IN_TU_ITER_BODIES:
+        concrete = _rewrite_inner_bodies(work, base, concrete)
+        if concrete is None:
+            return None
     try:
         parsed = Parser(py_tokenize(concrete)).parse_module()
     except Exception as e:

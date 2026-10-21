@@ -1023,3 +1023,56 @@ ONE true full-tree C delta against clean master was the 3 iterator test
 files, and it is since fixed to zero; see
 `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`,
 "2026-10-20 (continued)".
+## 2026-10-20 (further): the function-level import hole is closed for factory
+names; the declared-red population is 14 files, 3 reasons, EXIT 0
+
+### What changed for this family
+
+The lift documented in the R1 doc
+(`CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`,
+"2026-10-20 (further)") closed the first end-to-end slice of this family's
+imported-name half. The piece that belongs to THIS doc: `elab_intu.
+_import_name_map` now recurses into FUNCTION bodies (a `FromImportStmt`
+anywhere; first declaration, outermost-then-source-order, wins). Before, a
+function-level `from std.itertools import take` — exactly the shape of
+`test_drop_then_take_composition`, which imports INSIDE the test function —
+was invisible to the factory-home lookup, so the call stayed on the plain
+imported-name path: `extern int64_t take(...)` with nothing that defines it,
+a link failure with the same "imported generic, never elaborated, calls
+nothing that defines" signature this doc is named for. Measured before/after
+in the generated C; the function now seeds through its home module and the
+call resolves to the in-TU materialization (test_drop: ladder 14/14 with
+real values, including that composition test).
+
+NON-factory imported names are still refused, not stubbed: their
+`_factory_returns` is empty, so the plain-imported-name path declines to
+emit the call — the declared-red behaviour this dict exists to publish, not
+a silent `extern`.
+
+### Where the population stands now (measured sweep, 2026-10-21, final code)
+
+Sweep **596 PASSED / 14 FAILED — 14 expected, 0 unexpected, EXIT 0**
+(baseline of this campaign: 592/18). The 14 declared-red entries, 3 distinct
+reasons:
+
+| reason | files |
+|---|---|
+| `_NEXT_ON_STRUCT` — the dependent-return imported-iterator family (the reason text's "UPDATE 2026-10-20" records the materialization half closed by the nested monomorphization fix; what remains is the CALL itself: overload selection (pass-mode + conformance), dependent-return resolution, and call-site container-iterator construction — see the R1 doc) | `std/collections/string/iterators.mojo`, `std/itertools/itertools.mojo`, `test/collections/string/test_iterators.mojo`, `test/collections/test_set.mojo`, `test/iter/test_chain.mojo`, `test/iter/test_map.mojo`, `test/iter/test_zip.mojo`, `test/itertools/test_count.mojo`, `test/itertools/test_drop_while.mojo`, `test/itertools/test_product.mojo`, `test/itertools/test_take_while.mojo`, `test/python/test_python_object.mojo` |
+| `test_cycle` narrowed — 15/17 sites work with real values; the 2 user-owned `IterableOwned` sites are the local-generic-elaboration gap (R2 sibling), same failure surface on clean master | `test/itertools/test_cycle.mojo` |
+| `getsize` — the 2 remaining defects of the "Landed 2026-10-20" section above (cross-stdlib `stat` + the out-param result model) | `test/os/path/test_getsize.mojo` |
+
+Of the four List-container members of the first population
+(`test_peek`/`test_enumerate`/`test_take`/`test_drop`), the lift removed all
+four from the dict with value-ladder evidence (the REMOVED-2026-10-21 comment
+in `compile_stdlib.py` carries the per-file counts). The 12 that remain
+exercise the shapes the lift did not take on — multi-container factories
+(`chain`, `zip`, `product`), `peekable`'s overload-ambiguous call site,
+`map`/`count`/`drop_while`/`take_while` and the string-iterator family — and
+their reason strings say exactly which half is missing, per file.
+
+### Acceptance (unchanged, still unmet)
+
+The census must reach **0 sites** and the declared `EXPECTED_FAILURES` must
+empty. The measured remainder is the 14 above; none of them is a stub or a
+silent green — every one of the 14 fails a real `gcc -c`/link with a named
+reason, which is the state this dict exists to declare.

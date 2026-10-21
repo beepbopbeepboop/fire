@@ -3570,6 +3570,106 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Must happen BEFORE the opaque-int→container coercion block, which
     # would cast int64_t to char* and route through _lower_str_method.
     if method == 'copy':
+        # A STRUCT-POINTER receiver is NOT an identity: `.copy()` is the
+        # Copyable protocol — alloc + copy constructor. The blanket
+        # identity was a measured aliasing bug (test_take_copy_
+        # independent_advance: `it2 = it1.copy()` lowered to `it2 = it1`,
+        # so two "independent" cursors advanced one object). Scoped to
+        # in-TU materialized structs (the only shapes with the lowering
+        # ingredients in this pass; every other receiver keeps the
+        # historical identity):
+        #   (a) a registered `__init__` overload set that resolves on the
+        #       `copy` kwarg (the explicit copy constructor spelling —
+        #       the take/drop wrappers) -> the constructor machinery
+        #       (alloc + that __init__), the same _lower_struct_
+        #       constructor the factory ctor calls use;
+        #   (b) no __init__ overload resolvable on the `copy` kwarg
+        #       (the fieldwise structs: _ListIterOwned, _CycleIterator)
+        #       -> a synthesized FIELDWISE copy: alloc + one copy per
+        #       source field (struct_field_types, the same table the ctor
+        #       fallback writes), deep for in-TU struct-pointer fields —
+        #       real Mojo's implicit copy for a fieldwise struct (the
+        #       `_list` buffer is shared, the `_index` cursor is
+        #       independent — exactly what the tests' independent-
+        #       advance asserts need).
+        if (len(node.args) == 0 and not (getattr(node, 'kwargs', None))
+                and isinstance(ot, str) and ot.endswith(' *')):
+            _csn = gimple_exprtypes._struct_name_of(ot)
+            if _csn and _csn in getattr(gen, '_intu_prereg_structs', ()):
+                _ccands = gen._struct_method_signatures.get(
+                    _gmm_sms_key(_csn, '__init__'))
+                _cch = None
+                if _ccands:
+                    _recv_local = gen._ensure_local(ot, ov)
+                    _recv_expr = gimple_ctypes.IdentExpr(name=_recv_local)
+                    _cch = gen._resolve_overload(
+                        _ccands, [], [('copy', _recv_expr)])
+                if _cch is not None:
+                    # Emit the ctor call DIRECTLY (both operands are
+                    # simple locals; the preamble's prototype for the
+                    # in-TU method type-checks them). NOT via
+                    # _lower_struct_constructor: its arg coercion reads
+                    # func_param_types[<ctor>], which at statement-loop
+                    # emission time still holds the erased int64_t for
+                    # the `copy: Self` param (the module-level refresh
+                    # that refines it runs AFTER the function bodies
+                    # are emitted) — measured: the receiver pointer was
+                    # boxed `_tN = (int64_t)(void *)recv` and gcc-15
+                    # rejected the call with "makes pointer from
+                    # integer without a cast".
+                    t = gen._new_temp(f'{_csn} *')
+                    gen._struct_allocs_needed.add(_csn)
+                    gen._emit(f"  {t} = _alloc_{_csn} ();")
+                    init_fname = gen._struct_method_csym(
+                        _csn, '__init__', _cch['overload_id'])
+                    gen._emit(
+                        f"  {init_fname} ({t}, {_recv_local});")
+                    return f'{_csn} *', t
+                # (b) no copy __init__ resolvable on the `copy` kwarg
+                # (the fieldwise structs: _ListIterOwned, and the
+                # _CycleIterator wrapper — note the latter DOES register
+                # a fieldwise __init__, so the gate is "resolvable on
+                # the copy kwarg", not "has any __init__"). Synthesize
+                # real Mojo's implicit fieldwise copy: alloc + one copy
+                # per source field (struct_field_types, the same table
+                # the ctor fallback writes), DEEP for fields that are
+                # pointers to other in-TU structs (a pointer alias
+                # shares the field's mutable state — measured: the
+                # cycle wrapper's aliased inner cursor, test_cycle_
+                # copyable). GIMPLE: a component_ref is not a valid
+                # store RHS (`invalid RHS for gimple memory store:
+                # 'component_ref'`, measured) — every field read and
+                # every deep-copied store goes through a local.
+                _cf = gen.struct_field_types.get(_csn)
+                if _cf:
+                    t = gen._new_temp(f'{_csn} *')
+                    gen._struct_allocs_needed.add(_csn)
+                    gen._emit(f"  {t} = _alloc_{_csn} ();")
+                    _recv_local = gen._ensure_local(ot, ov)
+
+                    def _emit_fw_copy(dst, src_local, sname, depth):
+                        for _fn in (gen.struct_field_types.get(sname)
+                                    or {}):
+                            _fnm = gimple_ctypes._safe_field(_as_str(_fn))
+                            _ft = _as_str((gen.struct_field_types
+                                            .get(sname) or {})[_fn])
+                            _fv = gen._new_temp(_ft)
+                            gen._emit(f"  {_fv} = {src_local}->{_fnm};")
+                            _fsn = (gimple_exprtypes._struct_name_of(_ft)
+                                    if _ft.endswith(' *') else None)
+                            if (_fsn and depth < 4
+                                    and _fsn in getattr(
+                                        gen, '_intu_prereg_structs', ())):
+                                _sub = gen._new_temp(_ft)
+                                gen._struct_allocs_needed.add(_fsn)
+                                gen._emit(
+                                    f"  {_sub} = _alloc_{_fsn} ();")
+                                _emit_fw_copy(_sub, _fv, _fsn, depth + 1)
+                                _fv = _sub
+                            gen._emit(f"  {dst}->{_fnm} = {_fv};")
+
+                    _emit_fw_copy(t, _recv_local, _csn, 0)
+                    return f'{_csn} *', t
         return ot, ov
 
     # `.get(<float literal>)` on an opaque/unresolved int64_t receiver is
@@ -4002,6 +4102,41 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 fv_local = tmp
             t = gen._new_val(res_type, f"{ov_local} ? {tv_local} : {fv_local}")
             return res_type, t
+        # `x.unsafe_take()` — the Optional's CONSUMING read (real fire:
+        # `Optional.unsafe_take` takes the value out and leaves the
+        # Optional `None`). The single construction path that needs it is
+        # `_PeekableIterator.__next__` (std/iter/__init__.mojo):
+        # `if self._next: return self._next.unsafe_take()` — without the
+        # consume, the cached word is never cleared, `next()` returns the
+        # FIRST element forever, the iterator never exhausts, and every
+        # `with assert_raises(): next(iter)` expects a StopIteration that
+        # never comes (measured on test/iter/test_peek: 4 identical
+        # `wrap_next: _next=1` returns on a 3-element list). In this
+        # runtime's word model `None == 0`, so the consume is read-then-
+        # zero-store. Only the one receiver shape with a writable lvalue
+        # in hand is lowered — a single field on a plain struct-pointer
+        # local/param (`self._next`); any other receiver falls through to
+        # the echo stub below, unchanged.
+        if (method == 'unsafe_take'
+                and not node.args
+                and not getattr(node, 'kwargs', None)
+                and isinstance(func.obj, gimple_ctypes.MemberExpr)
+                and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)):
+            _ut_base = func.obj.obj.name
+            _ut_field = _as_str(func.obj.member)
+            _ut_var = gen._c_names.get(_ut_base, _ut_base)
+            if re.match(r'^[A-Za-z_]\w*$', _as_str(_ut_var)):
+                _ut_lv = f'{_ut_var}->{gimple_ctypes._c_id(_ut_field)}'
+                t = gen._new_temp(ot)
+                gen._emit(f'  {t} = {_ut_lv};')
+                # GIMPLE wants the zero in a register first (a bare `0` is
+                # "non-trivial conversion in 'integer_cst'" and an inline
+                # cast store is "non-register as LHS of unary operation" —
+                # the same two-step temp pattern the loop emitters use).
+                z = gen._new_temp(ot)
+                gen._emit(f'  {z} = ({ot})0;')
+                gen._emit(f'  {_ut_lv} = {z};')
+                return ot, t
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')

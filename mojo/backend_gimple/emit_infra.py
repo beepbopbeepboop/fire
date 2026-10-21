@@ -3831,6 +3831,69 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     return fn, args
 
 
+def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
+    """Consume an in-TU iterator-factory wrapper local (`_Enumerate_... *`
+    / `_TakeIterator_... *` / ... — the lifted `enumerate`/`take`/`drop`/
+    ... bindings, whose mangled name is in `gen._intu_prereg_structs`)
+    into a plain `MojoList *` of the element words its `__next__` would
+    yield, and return the list's temp name.
+
+    The in-TU `__next__` raises by `mojo_exc_type_set(StopIteration);
+    mojo_raise()` (a longjmp) on exhaustion (measured ladder C: the
+    `_ListIterOwned___next__` tail), so the consumer must hold a setjmp
+    frame across the call — the exact frame idiom the raise-exhaustion
+    for-loop in emit_loops._gen_for_struct_iter emits (measured byte-for-
+    byte in the take ladder C): push once, `setjmp`, the longjmp returns
+    to the `!= 0` arm, `mojo_exc_pop()` + tag check, `mojo_raise()` for
+    anything that is not StopIteration, and the body loops back to itself
+    so the single frame stays live across every iteration.
+
+    The element word is appended raw (`mojo_list_append_int`) exactly as
+    that same ladder C's for-loop consumption does. An `_Enumerate`
+    wrapper's element is a boxed tuple-PAIR list pointer word, so its
+    list gets the same repr tracking `_lower_builtin_enumerate_value`
+    sets on the pair list it builds (`_elem_types` = 'MojoList *' +
+    `_nested_elem_types` = ['int64_t', elem]) — that is what routes the
+    print to the pair-aware `mojo_repr_list_pairs` (measured baseline C:
+    `mojo_repr_list_pairs (z)` for the old materialized pair list). The
+    materialization CONSUMES the iterator — that is the print contract
+    (and `len()` deliberately does NOT route through here; it reads the
+    non-consuming `bounds()` upper instead, see _lower_builtin_len).
+    """
+    out = gen._new_temp('MojoList *')
+    gen._emit(f'  {out} = mojo_list_new ();')
+    bb_push = gen._new_bb(); bb_body = gen._new_bb()
+    bb_exc = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f'  goto {bb_push};')
+    gen._emit_label(bb_push)
+    fsave = gen._new_val('int64_t', '_mojo_exc_top')
+    fpush = gen._new_val('int64_t', f'{fsave} + (int64_t)1')
+    gen._emit(f'  _mojo_exc_top = {fpush};')
+    ftop = gen._new_val('int64_t', '_mojo_exc_top')
+    gen._void_call('mojo_cleanup_checkpoint_save', [])
+    fret = gen._new_val('int64_t', f'setjmp (_mojo_exc_stack[{ftop}])')
+    fnz = gen._new_val('_Bool', f'{fret} != 0')
+    gen._emit(f'  if ({fnz}) goto {bb_exc}; else goto {bb_body};')
+    gen._emit_label(bb_body)
+    nxsym = gen._struct_method_csym(csn, '__next__', '')
+    e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
+    gen._void_call('mojo_list_append_int', [('MojoList *', out), ('int64_t', e64)])
+    gen._emit(f'  goto {bb_body};')
+    gen._emit_label(bb_exc)
+    gen._void_call('mojo_exc_pop', [])
+    tag = gen._new_val('int64_t', 'mojo_exc_type_get ()')
+    iss = gen._new_val('_Bool', f'{tag} == (int64_t){gen._exc_type_id("StopIteration")}')
+    gen._emit(f'  if ({iss}) goto {bb_after};')
+    gen._void_call('mojo_raise', [])
+    gen._emit_label(bb_after)
+    if csn.startswith('_Enumerate'):
+        gen._elem_types[out] = 'MojoList *'
+        gen._nested_elem_types[out] = ['int64_t', 'int64_t']
+    else:
+        gen._elem_types[out] = 'int64_t'
+    return out
+
+
 def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
     Python `str()` semantics. Shared by f-string interpolation, `%`
@@ -5839,6 +5902,35 @@ def _gen_print(gen, args: list, kwargs: list = None):
                                _owned_reprs)
                 aval = rv
                 atype = 'char *'
+        # An in-TU iterator-factory wrapper (`z = enumerate(x)` /
+        # `take(x, n)` / ... after the lift): the value is a LAZY iterator
+        # struct, and this codebase's print contract for the old
+        # materialized pair-list model is the element list itself —
+        # consume it here and let the `MojoList *` arm of the emission
+        # loop below repr the materialized result (for enumerate that is
+        # the pair-aware `mojo_repr_list_pairs`, the measured baseline
+        # spelling). The module-global read-back arrives boxed (int64_t)
+        # with the wrapper pointer in `_actual_types`, so resolve the
+        # actual type first. Before this, a directly-typed wrapper local
+        # fell to the generic numeric path and printed nothing, and the
+        # boxed global printed the raw pointer (measured: test_gimple_
+        # runner's gimple_enumerate_value_printed /
+        # gimple_global_from_enumerate_call).
+        _wct = None
+        if isinstance(atype, str) and atype.endswith(' *') \
+                and atype[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+            _wct = atype
+        else:
+            _wact = gen._get_actual_type(atype, aval)
+            if isinstance(_wact, str) and _wact.endswith(' *') \
+                    and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+                _wct = _wact
+                aval = gen._new_val(_wact, f'({_wact}){aval}')
+        if _wct is not None and gen._struct_defines_method(
+                _wct[:-2], '__next__'):
+            _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
+            resolved_parts.append(('MojoList *', _wout))
+            continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):

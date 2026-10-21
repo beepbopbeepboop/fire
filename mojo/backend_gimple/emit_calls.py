@@ -363,6 +363,146 @@ def _lower_pointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype}){vp}")
 
 
+def _lower_immpointer_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`ImmPointer[T](to=x)` — the `to:` constructor, whose real-fire
+    signature is `ref to: Self.T` (std/memory/pointer.mojo: `lit.ref.
+    to_pointer`): the result is a pointer to x's OWN storage. The
+    construction sites in the tree are `_PeekableIterator.peek`
+    (std/iter/__init__.mojo:821, `to=` kwarg — the ORIGINAL one this
+    lowering was built for):
+
+        return ImmPointer[Self.Element](to=self._next.unsafe_value())
+
+    i.e. "a pointer at the wrapper's cached next-element slot", and
+    `Python.__init__` (std/python/python.mojo:90, `to=` kwarg, a
+    `__GIMPLE`-tagged struct METHOD — the site that forced the
+    emission-context split documented below):
+
+        self._impl = ImmPointer[CPython, MutAnyOrigin](to=cpython)
+
+    This codegen cannot take a field's address from an expression
+    (`&self->_next` has no generic emitter), so it materializes the
+    pointer the way the consumer of such a value reads it, using a
+    one-element VIEW LIST whose element 0 is the value — the storage
+    shape and the indirection depth depend on the consumer AND on the
+    emission context (the strict -fgimple address-of rules); the two
+    measured site/consumer pairs and the split are documented below.
+
+    The `to=` argument of `self._field.unsafe_value()` lowers through
+    the RECEIVER directly: an Optional is a raw word in this runtime, so
+    `unsafe_value()` is identity and the receiver IS the value (its
+    storage is exactly what the pointer must refer to).
+
+    Two construction sites exist in the tree, and they are lowered in
+    two different EMISSION contexts, so there are two storage shapes
+    (chosen on `gen._emitting_plain_func`, set around gen_func's body
+    loop — the ONE emission context whose C is never `__GIMPLE`-tagged;
+    struct methods and lifted closures ARE tagged unless their body
+    used setjmp):
+
+    SAFE-UNTAGGED CONTEXTS (the only places the static shape may
+    appear): (1) a top-level function body (`gen._emitting_plain_func` —
+    never tagged), and (2) any function whose body has ALREADY emitted
+    a setjmp frame (`gen._func_used_setjmp` — the tag rule
+    `'' if _func_used_setjmp else '__GIMPLE '` makes it untagged, and a
+    later setjmp can only reinforce that). The verified `peek` site is
+    case (2): its `next(self._inner)` call lowers a setjmp try-frame
+    before the `ImmPointer` construction. `&` of a function-scoped
+    `static` is rejected inside a `__GIMPLE`-tagged function (measured,
+    2026-10-21: std/python/python.mojo's `Python.__init__`, a tagged
+    method, got "expected expression before '&' token" / "non-register
+    as LHS of unary operation" on this exact shape; `&local`, `&static`
+    and `&global` all fail there — the strict -fgimple dialect takes
+    the address of nothing but allocated storage), so the static shape
+    is confined to the safe-untagged contexts. Its consumer is
+    `_lower_subscript`'s fixed word-fallback (`W = *P`, then
+    `mojo_list_get_<elem>((MojoList *)W, 0)`) — hence the two-level
+    P → word → view indirection.
+
+    EVERY OTHER CONTEXT (methods, lifted closures, toplevel): a HEAP
+    shape — `mojo_list_new()` + `mojo_list_append_int(view, word)` and
+    the returned pointer is the VIEW LIST ITSELF (one allocation, no
+    `&` anywhere, valid in both tagged and untagged C). Its consumer is
+    the measured one: the `self._impl[]` accessor in python.mojo loads
+    the field and casts it DIRECTLY to `MojoList *` (no word
+    indirection — `mojo_list_get_int((MojoList *)P, 0)`), so P = the
+    list is exactly the value the read-back needs. (The word-slot
+    contract and this one are mutually exclusive per site; each existing
+    site's consumer was measured, and the flag keys on the emission
+    context in which each site lowers. A FUTURE site in a method
+    context whose consumer is the word-fallback would need the slot
+    shape in allocated storage — none exists; document it if one does.)
+    One leak per construction (the static shape's stated tradeoff
+    inverted): these are constructor sites, not hot loops.
+    """
+    _to_expr = None
+    for _ki in range(len(getattr(node, 'kwargs', None) or [])):
+        _kp = (getattr(node, 'kwargs', None) or [])[ _ki]
+        if _as_str(_kp[0]) == 'to':
+            _to_expr = _kp[1]
+            break
+    if _to_expr is None:
+        if node.args:
+            return _lower_pointer_ctor(gen, node)
+        # `ImmPointer[T]()` — null pointer, matching _lower_pointer_ctor.
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+        elem_ann = gen._type_expr_to_ann(elems[0]) if elems else None
+        ptr_ctype = gen._resolve_type(f"ImmPointer[{elem_ann}]") if elem_ann else 'int64_t *'
+        if not ptr_ctype.endswith(' *'):
+            ptr_ctype = ptr_ctype + ' *'
+        return ptr_ctype, gen._new_val(ptr_ctype, f"({ptr_ctype})0")
+    if (isinstance(_to_expr, gimple_ctypes.CallExpr)
+            and isinstance(_to_expr.func, gimple_ctypes.MemberExpr)
+            and _to_expr.func.member == 'unsafe_value'
+            and not _to_expr.args):
+        at, av = gen.lower_expr(_to_expr.func.obj)
+    else:
+        at, av = gen.lower_expr(_to_expr)
+    av64 = av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}')
+    # The static word-slot shape is only emitted where the enclosing C
+    # function is GUARANTEED untagged: a top-level function (never
+    # tagged) or a function whose body has ALREADY emitted a setjmp
+    # frame (the tag decision is `'' if gen._func_used_setjmp else
+    # '__GIMPLE '` — a later setjmp can only REMOVE the tag, never add
+    # it, so the heap shape below stays valid in either world; the
+    # reverse — static where a tag will appear — is the measured
+    # python.mojo breakage). The verified `peek` site is the second
+    # case: its body lowers `next(self._inner)` (a setjmp try-frame)
+    # BEFORE the `ImmPointer` construction.
+    if (getattr(gen, '_emitting_plain_func', False)
+            or getattr(gen, '_func_used_setjmp', False)):
+        # The static word-slot shape (measured-clean ONLY in untagged C —
+        # see the docstring). A function-scoped `static` provides the
+        # stability (a local word would be dead stack when the consumer
+        # derefs after return). Single-threaded, and the consumer reads
+        # immediately in the same statement, so one shared slot per TU-
+        # instantiation is sound.
+        if not getattr(gen, '_lk_peek_view_done', False):
+            gen._lk_peek_view_done = True
+            gen.decls.append('  static int64_t _lk_peekdata;')
+            gen.decls.append('  static MojoList _lk_peekview;')
+            gen.decls.append('  static int64_t _lk_peekword;')
+        gen._emit(f'  _lk_peekdata = {av64};')
+        gen._emit('  _lk_peekview.data = (int64_t *)&_lk_peekdata;')
+        gen._emit('  _lk_peekview.len = (int64_t)1;')
+        gen._emit('  _lk_peekview.cap = (int64_t)1;')
+        gen._emit('  _lk_peekword = (int64_t)&_lk_peekview;')
+        t = gen._new_temp('int64_t *')
+        gen._emit(f'  {t} = (int64_t *)&_lk_peekword;')
+        return 'int64_t *', t
+    # Heap shape: the returned pointer IS the one-element view list (the
+    # measured python.mojo accessor contract — direct `(MojoList *)P`
+    # cast, no word indirection). Valid in strict GIMPLE: calls and casts
+    # only, no address-of.
+    tview = gen._new_temp('MojoList *')
+    gen._emit(f'  {tview} = mojo_list_new ();')
+    gen._emit(f'  mojo_list_append_int ({tview}, {av64});')
+    t = gen._new_temp('int64_t *')
+    gen._emit(f'  {t} = (int64_t *){tview};')
+    return 'int64_t *', t
+
+
 def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """`UnsafePointer[T].alloc(n)` (also `OwnedPointer`/`ArcPointer`/`Pointer`)
     — the static heap-allocation constructor. `node.func` is a MemberExpr
@@ -644,7 +784,11 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
             if cont_t != 'MojoList *':
                 return None
             _elem = gen._elem_types.get(cont_v) or rec['elem_ctype']
-            _data = gen._new_val(f'{_elem} *', f'{cont_v}->data')
+            # `cont->data` is an `int64_t *` (the runtime list's word
+            # slots); the `_data` field is `<elem> *` — an explicit cast,
+            # because a non-Int element (`char *`, `_Bool`) makes a bare
+            # assignment an incompatible-pointer error under gcc-15.
+            _data = gen._new_val(f'{_elem} *', f'({_elem} *){cont_v}->data')
             _ln = gen._new_val('int64_t', f'{cont_v}->len')
             _idx = gimple_ctypes.IntLiteral(value=0)
             _it, inner_v = gen._lower_struct_constructor(
@@ -652,6 +796,36 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                 [_idx, gimple_ctypes.IdentExpr(name=_data),
                  gimple_ctypes.IdentExpr(name=_ln)])
         inner_t = f"{rec['inner_mangled']} *"
+    if rec.get('wrapper') is None:
+        # Bare `iter(<container>)`: the container's OWN iterator IS the
+        # return value — no wrapper constructor to feed the inner to. For a
+        # list container that is the freshly built `_ListIter*`; for a
+        # nested-factory container it is the container pointer itself
+        # (the wrapper's `__iter__` returns Self).
+        if (rec['kind'] == 'factory'
+                and inner_t.endswith(' *')
+                and gimple_exprtypes._struct_name_of(inner_t) in
+                getattr(gen, '_intu_prereg_structs', ())
+                and isinstance(node.args[0], gimple_ctypes.IdentExpr)):
+            # `iter(<in-TU iterator struct local>)`: the container's own
+            # `__iter__` is the family's ref overload, whose spliced body
+            # is exactly `return self.copy()` (measured in all five
+            # wrappers). The identity above was a measured aliasing bug
+            # (test_cycle_iterator_protocol: `it2 = iter(it)` shared it's
+            # cursor — next(it)=1, then next(it2)=2, expected 1). Lower
+            # it as the protocol copy (the same branch `.copy()` takes:
+            # alloc + copy ctor, or the deep fieldwise copy). A
+            # non-local container expression (a nested factory call)
+            # keeps the historical identity — no lifted test shape has
+            # it, and re-lowering a call expression as a receiver would
+            # build the factory twice.
+            _member = gimple_ctypes.MemberExpr(
+                obj=node.args[0], member='copy',
+                line=getattr(node, 'line', 0))
+            return gen._lower_method_call(gimple_ctypes.CallExpr(
+                func=_member, args=[], kwargs=[],
+                line=getattr(node, 'line', 0)))
+        return inner_t, inner_v
     # The wrapper's `__init__` takes the inner positionally and the factory's
     # trailing parameter as a keyword (`_TakeIterator(<it>, count=count)`).
     # The keyword is spelled at the factory call either as the trailing
@@ -1374,6 +1548,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._new_val('int64_t', f'(int64_t){av}' if at.endswith(' *') else av)
                 return 'int64_t', t
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
+        if base == 'ImmPointer':
+            # `ImmPointer[T](to=x)` — the `to:` ref constructor; see
+            # _lower_immpointer_ctor for why it is NOT _lower_pointer_ctor
+            # (that one reinterprets a pointer argument, this one points AT
+            # the argument's storage).
+            return _lower_immpointer_ctor(gen, node)
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             return _lower_pointer_ctor(gen, node)
     if not isinstance(node.func, gimple_ctypes.IdentExpr):
@@ -2086,6 +2266,29 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # iter(x) — the container is already iterable (for-loops consume it directly),
     # so model the builtin as identity rather than emitting an undefined `iter` call.
     if fname_raw == 'iter' and len(node.args) == 1 and 'iter' not in gen.func_return_types:
+        # `iter(<in-TU iterator struct local>)` is NOT identity: real Mojo
+        # calls x.__iter__(), and for the lifted iterator family the ref
+        # overload's spliced body is exactly `return self.copy()` (family
+        # convention, measured in all five wrappers). The identity model
+        # was a measured aliasing bug (test_cycle_iterator_protocol:
+        # `it2 = iter(it)` shared it's cursor — next(it)=1, then
+        # next(it2)=2, expected 1). Lower it as the protocol copy (the
+        # same branch `.copy()` takes for in-TU structs: alloc + copy
+        # ctor, or the deep fieldwise copy). Every other argument shape
+        # keeps the historical identity.
+        if isinstance(node.args[0], gimple_ctypes.IdentExpr):
+            _argt, _ = gen.lower_expr(node.args[0])
+            _arg_sn = (gimple_exprtypes._struct_name_of(_argt)
+                       if isinstance(_argt, str) and _argt.endswith(' *')
+                       else None)
+            if (_arg_sn and _arg_sn in
+                    getattr(gen, '_intu_prereg_structs', ())):
+                return gen._lower_method_call(gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.MemberExpr(
+                        obj=node.args[0], member='copy',
+                        line=getattr(node, 'line', 0)),
+                    args=[], kwargs=[],
+                    line=getattr(node, 'line', 0)))
         return gen.lower_expr(node.args[0])
 
     # repr(x): dispatch by the argument's own static type instead of
@@ -2782,6 +2985,46 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _cur is not None:
         return 'int64_t', itc.remaining(gen, _cur)
     at, av = gen.lower_expr(node.args[0])
+    # An in-TU iterator-factory wrapper (`z = enumerate(x)` / `take(x, n)`
+    # / ... after the lift — the pre-pass's builtin table still types the
+    # binding `MojoList *`, but the emitted value is a lazy
+    # `_Enumerate_... *` / `_TakeIterator_... *` struct). `len` must answer
+    # the element count WITHOUT consuming, and the wrapper's in-TU
+    # `bounds()` is exactly the non-consuming length: it returns a
+    # 2-element tuple list [lower, upper] and `upper` is the number of
+    # elements left — enumerate delegates to its inner list's bounds
+    # (upper = remaining length), take's rewritten body answers
+    # min(count, remaining), drop's max(0, len - n) (all measured in the
+    # ladder C, where `bounds(e)` reads back as a boxed tuple list and the
+    # consumer takes `mojo_list_get_int(tup, 1)`). The module-GLOBAL read-
+    # back arrives boxed (int64_t) with the wrapper pointer carried in
+    # `_actual_types` by _note_global_store_types, so resolve the actual
+    # type first. Without this the call fell to the struct branch below,
+    # found no `_len` field / `__len__` method, and silently answered 0 —
+    # and with the stale `MojoList *` local type it was worse:
+    # `mojo_list_len` on the struct header printed pointer bits
+    # (measured: test_gimple_runner's gimple_enumerate_value_printed).
+    _wct = None
+    if isinstance(at, str) and at.endswith(' *') \
+            and at[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+        _wct = at
+    else:
+        _wact = gen._get_actual_type(at, av)
+        if isinstance(_wact, str) and _wact.endswith(' *') \
+                and _wact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+            _wct = _wact
+            av = gen._new_val(_wact, f'({_wact}){av}')
+    if _wct is not None and _struct_defines_method(gen, _wct[:-2], 'bounds'):
+        _csn = _wct[:-2]
+        _bsym = gen._struct_method_csym(_csn, 'bounds', '')
+        _tup64 = gen._new_val('int64_t', f'{_bsym} ({av})')
+        # The chokepoint (R3 guard: test_no_new_container_casts.py counts
+        # ad-hoc container-kind casts outside emit_resolve.py), not a
+        # hand-written (MojoList *) — same emitted cast, counted cast.
+        _tupl = gen._coerce_to_type('int64_t', 'MojoList *', _tup64)
+        _i1 = gen._new_val('int64_t', '(int64_t)1')
+        return 'int64_t', gen._new_val(
+            'int64_t', f'mojo_list_get_int ({_tupl}, {_i1})')
     _LEN_FNS = {
         # A wrapped string's OWN len is bytes (the concat/char_at family
         # reads it as bytes), but len() counts CODE POINTS — so the builtin
@@ -4519,6 +4762,28 @@ def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _kind = 'tuple' if (isinstance(node.func, gimple_ctypes.IdentExpr)
                         and node.func.name == 'tuple'
                         and not gen._locally_binds_name('tuple')) else 'list'
+    # A BOUND in-TU iterator-factory wrapper local (`z = enumerate(x)` /
+    # `z = take(x, n)` after the lift): the comprehension route below has
+    # no arm for the in-TU struct pointer and would emit an empty list —
+    # a regression against the baseline, whose materialized pair list
+    # `list(z)`-ed fine. Consume it with the same materializer print()
+    # uses. The module-global read-back arrives boxed — resolve the
+    # actual type first (mirrors _lower_builtin_len's identical handling).
+    if _kind == 'list' and len(node.args) == 1:
+        _lat, _lav = gen.lower_expr(node.args[0])
+        _wct = None
+        if isinstance(_lat, str) and _lat.endswith(' *') \
+                and _lat[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+            _wct = _lat
+        else:
+            _lact = gen._get_actual_type(_lat, _lav)
+            if isinstance(_lact, str) and _lact.endswith(' *') \
+                    and _lact[:-2] in getattr(gen, '_intu_prereg_structs', ()):
+                _wct = _lact
+                _lav = gen._new_val(_lact, f'({_lact}){_lav}')
+        if _wct is not None and _struct_defines_method(
+                gen, _wct[:-2], '__next__'):
+            return 'MojoList *', gen._materialize_in_tu_wrapper(_wct[:-2], _lav)
     return gen._lower_ctor_from_iterable(_kind, node)
 
 

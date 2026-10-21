@@ -117,41 +117,14 @@ _NEXT_ON_STRUCT = (
     "iterator; see "
     "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
 
-_FACTORY_DATA_PATH = (
-    "UPDATE 2026-10-20 (continued): the dependent-return factory mechanism "
-    "was BUILT and is measured to work at the call-site level — the wrapper/"
-    "inner construction, the moved/borrowed overload pick, the nested-"
-    "factory recursion all lower to real C (session log: c_test_{peek,"
-    "enumerate,take,drop}.c). But the IN-TU materialized iterator BODIES "
-    "have no lowerable data path, so codegen now REFUSES to file the record "
-    "for a List container (elab_intu._seed_one_factory) rather than emit "
-    "gate-green C that is wrong at the value level (a false green): "
-    "measured in the generated C, `int64_t_unsafe_offset` (called by the "
-    "in-TU `_ListIter*___next__` element path) is a DECLARATION-ONLY stub — "
-    "no definition exists anywhere in the repo; `int64_t.unsafe_take_"
-    "pointee()` is 0-stubbed (no dereference); the formal in-TU `List_1_T_"
-    "3_Int {type_id, _storage, _len}` does not match the runtime object "
-    "`MojoList {data, len, cap, inl}` (the body's `_list->_len` reads "
-    "offset 16 = the runtime's `cap`; `unsafe_ptr` reads offset 8 = the "
-    "runtime's `len` reinterpreted as a pointer); `List[Int]()` lowers to "
-    "the in-TU shell allocator + a `__init__` whose storage allocation is "
-    "0-stubbed; subscript reads emit `List_1_T_3_Int___getitem__(...)`, "
-    "another declaration-only varargs stub. The same measurement caught a "
-    "REGRESSION the mechanism caused in TUs that seed the BUILTIN `iter`/"
-    "`enumerate`: the in-TU List materialization hijacked the container "
-    "representation (test/collections/test_list.mojo's subscript store "
-    "raised; test/random/test_random.mojo) — the refusal restores the "
-    "baseline (every TU keeps the runtime MojoList representation). The "
-    "call site therefore keeps the baseline `next(<int64 box>)` refusal "
-    "(the failure this entry declares). Next step (documented): synthesize "
-    "the in-TU iterator protocol (`__init__`/`__iter__`/`__next__`/`bounds` "
-    "of `_ListIter`/`_ListIterOwned`) in runtime-list terms — mojo_list_len/"
-    "mojo_list_get_* over a MojoList*-typed `_list` field — with the "
-    "spliced wrapper bodies delegating to it, or implement the in-TU List "
-    "storage; verify with the gcc -c + nm + ld + run ladder (2026-10-03 "
-    "pattern). See "
-    "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md, "
-    "\"2026-10-20 (continued)\".")
+# 2026-10-21 — the `_FACTORY_DATA_PATH` constant (the dependent-return
+# factory mechanism's measured REFUSAL for List containers) is removed
+# with the refusal it described: the lift landed (in-TU iterator
+# protocol in runtime-MojoList terms — see the comment block in
+# EXPECTED_FAILURES and bugs/CODEGEN_next_on_a_user_defined_iterator_
+# struct_is_unlowered.md, "2026-10-20 (further)"). test_peek/
+# test_enumerate/test_take/test_drop left this dict; test_cycle keeps a
+# narrowed entry for its 2 user-defined-IterableOwned sites.
 
 EXPECTED_FAILURES = {
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
@@ -305,37 +278,52 @@ EXPECTED_FAILURES = {
     'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
     'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_enumerate.mojo': (
-        "BUILTIN `enumerate` (no import line — the home falls back to "
-        "std.iter via _BUILTIN_FACTORY_HOME) call site resolves and "
-        "constructs the wrapper at the call site (measured); " + _FACTORY_DATA_PATH),
     'test/iter/test_map.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_peek.mojo': (
-        "`peekable(l)` (imported) call site resolves and constructs the "
-        "wrapper + owned inner at the call site (measured); " + _FACTORY_DATA_PATH),
     'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
+    # 2026-10-21 — REMOVED from this dict, with the value ladder (real
+    # gcc -c + nm + link + run with value-checking asserts, never the
+    # syntax gate) rather than the syntax check:
+    #   test/iter/test_peek.mojo         6/6 PASS (6 inner/wrapper symbols
+    #                                     asserted defined in the module's
+    #                                     own object)
+    #   test/iter/test_enumerate.mojo    6/6 PASS (incl. test_enumerate_
+    #                                     bounds — the bare `iter(list)`
+    #                                     form; 9 symbols asserted)
+    #   test/itertools/test_take.mojo    13/13 PASS
+    #   test/itertools/test_drop.mojo    14/14 PASS (incl. the function-
+    #                                     level `from std.itertools import
+    #                                     take` composition test)
+    # The lift: elab_intu no longer refuses List-container factories —
+    # the in-TU iterator protocol materializes in RUNTIME-MojoList terms
+    # (mojo_list_len/mojo_list_get_* over a `MojoList *` `_list` field),
+    # with the spliced wrapper bodies rewritten to lowerable expressions
+    # (elab_intu._rewrite_inner_bodies). Verification + every measured
+    # hole closed on the way (peek() static-view, unsafe_take consume,
+    # bare-iter factory, assert_raises setjmp frame, setjmp raise-
+    # exhaustion for-loops, wrapper bounds slot semantics, .copy()
+    # protocol copies, comptime-assert no-op, function-level import
+    # factory homes): bugs/CODEGEN_next_on_a_user_defined_iterator_
+    # struct_is_unlowered.md, "2026-10-20 (further)".
     'test/itertools/test_cycle.mojo': (
-        "16 of 18 `cycle(...)` call sites resolve and construct the wrapper "
-        "at the call site (measured, including the 2-element `Bool` literal "
-        "form); 2 (`cycle(_owned3(1, 2, 3))`, `cycle(_owned1(42))`) ADDITIONALLY "
-        "fail because they pass a user-defined `IterableOwned` struct, whose "
-        "local comptime-parametrized materialization is non-mangled (a single "
-        "`_CopyableOwned {__mojo_type_id, int64_t size, MojoList * _data}` "
-        "layout, `Array[Int, Self.size]` lowered to `MojoList *`) and whose "
-        "local-fn return boxes to int64_t — the local-generic-elaboration "
-        "gap (R2 sibling), a second blocker on top of the data path; "
-        + _FACTORY_DATA_PATH),
-    'test/itertools/test_drop.mojo': (
-        "`drop(...)` (imported) call site resolves and constructs the "
-        "wrapper + inner at the call site (measured, including the nested "
-        "`take`/`drop` factory forms); " + _FACTORY_DATA_PATH),
+        "15 of 17 `cycle(...)` call sites now compile, LINK and run with "
+        "real values (Int/String/Bool lists, `List[Int]()`, `range(...)`, "
+        "the copyable/iterator-protocol/for-loop/composition forms — "
+        "ladder PASS 15/15 on a copy of the file without the 2 user-owned "
+        "tests, 2026-10-21). The 2 remaining sites (`cycle(_owned3(1, 2, "
+        "3))` line 283, `cycle(_owned1(42))` line 302) pass USER-DEFINED "
+        "`IterableOwned` structs whose local comptime-parametrized "
+        "materialization is non-mangled (a single `_CopyableOwned "
+        "{__mojo_type_id, int64_t size, MojoList * _data}` layout, "
+        "`Array[Int, Self.size]` lowered to `MojoList *`) and whose local-"
+        "fn return boxes to int64_t — the local-generic-elaboration gap "
+        "(R2 sibling). Measured surface: the boxed `it` local then hits "
+        "next()'s hard refusal — `cannot compile module: next(...) on "
+        "next(IdentExpr) (receiver typed int64_t) has no lowering` — not "
+        "a stub. See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_"
+        "is_unlowered.md, \"2026-10-20 (further)\"."),
     'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_take.mojo': (
-        "`take(...)` (imported) call site resolves and constructs the "
-        "wrapper + inner at the call site (measured, including the nested "
-        "`take(take(nums, 4), 2)` form); " + _FACTORY_DATA_PATH),
     'test/itertools/test_take_while.mojo': _NEXT_ON_STRUCT,
     'test/python/test_python_object.mojo': _NEXT_ON_STRUCT,
     # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
