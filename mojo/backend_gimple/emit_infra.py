@@ -5992,10 +5992,7 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
     _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
-    # Code-point count, not strlen: a string is a UTF-8 buffer, and Python's
-    # len counts code points (mojo_str_codepoint_len's doc comment). The
-    # BYTES arm above deliberately stays mojo_bytes_len: len(b) is bytes.
-    gen._emit(f'  {_res} = mojo_str_codepoint_len ({_sp2});')
+    gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
     _lp2 = gen._coerce_to_type('int64_t', 'MojoList *', _it64)

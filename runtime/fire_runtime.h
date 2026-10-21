@@ -918,7 +918,6 @@ char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
-int64_t mojo_str_codepoint_len(char *s);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
