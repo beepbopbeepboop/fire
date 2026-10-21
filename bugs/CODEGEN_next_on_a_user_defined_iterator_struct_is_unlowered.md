@@ -1245,3 +1245,159 @@ hiding: the census only counts files that COMPILE, and these 22 do not, so the
 two populations are disjoint. `FormatStruct` (15), `alloc` (10) and
 `ThinAllocation` (8) remain the census's largest names and are untouched by
 this work; see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+
+## 2026-10-20 (continued): the call-site mechanism was built and measured,
+then refused itself — a false green averted, a regression caught, a net-zero
+session with the next project scoped
+
+### What was built, and that it works at the call site (measured)
+
+The dependent-return iterator-factory mechanism landed in three places:
+`mojo/middle/iter_factory.py` (new — pure analysis: container resolution
+incl. `List[T]()` ctor calls and `BoolLiteral` elements, call keys),
+`elab_intu._seed_factories` / `_seed_one_factory` (finds every factory call
+site, evaluates it, files the record and enqueues the wrapper), and
+`emit_calls._lower_factory_call` (container -> inner ctor -> wrapper ctor;
+`count=`/`start=` kwargs; nested factories by recursion). Four support fixes
+came with it: the owned ctor taking any pointer ctype while the borrowed
+path stays `MojoList *`-only; the `struct_field_types` PRE-REGISTRATION of
+every materialized struct's mangled name before the statement loop (the
+wrapper `__init__` param annotation otherwise erases to `int64_t` in the
+pre-statement signature passes); and the suffixed `func_param_types` mirror
+in the module_gen refresh pass.
+
+The call-site half is measured WORKING in the generated C for all five target
+shapes (session log `c_test_{peek,enumerate,take,drop}.c`, `c_userstruct.c`):
+wrapper/inner construction, the moved/borrowed overload pick
+(`peekable(l^)` -> `_ListIterOwned[Int]`, `peekable(l)` -> `_ListIter[Int]`),
+and the nested-factory recursion (`take(take(nums, 4), 2)`) all lower to real
+mangled symbols with real definitions. `test_cycle` resolves 16/18 sites;
+the 2 remaining (`cycle(_owned3(1, 2, 3))`, `cycle(_owned1(42))`) pass a
+user-defined `IterableOwned` struct — a SECOND blocker (local
+comptime-parametrized materialization is non-mangled; local-fn returns box to
+`int64_t`; the R2 local-generic-elaboration sibling).
+
+### Why it refused: the in-TU data path is unlowerable (measured)
+
+The four "green" Stage A files were FALSE GREENS. The gate
+(`gcc -fgimple -fsyntax-only`) cannot see any of this, and nothing else
+links the `test/` tree; the generated C says it all:
+
+- `int64_t_unsafe_offset` — called by the in-TU `_ListIter*___next__`
+  element path — is a DECLARATION-ONLY stub; no definition exists anywhere
+  in the repo.
+- `int64_t.unsafe_take_pointee()` is 0-stubbed (no dereference).
+- LAYOUT MISMATCH: the formal in-TU `List_1_T_3_Int {__mojo_type_id,
+  _storage, _len}` vs the runtime object `MojoList {data, len, cap, inl}` —
+  the body's `_list->_len` reads offset 16 (the runtime's `cap`), and
+  `unsafe_ptr` reads offset 8 (the runtime's `len` reinterpreted as a
+  pointer).
+- `List[Int]()` lowers to the in-TU shell allocator plus an in-TU
+  `__init__` whose storage allocation is 0-stubbed (`_storage = 0`).
+- Subscript reads emit `List_1_T_3_Int___getitem__(...)` — another
+  declaration-only varargs stub.
+
+The mechanism now REFUSES to fire for List containers:
+`elab_intu._seed_one_factory` files no record when `cont['kind'] ==
+'list'`, with the measured evidence as the comment at that site (do not
+remove without re-measuring). Call sites keep the baseline
+`next(<int64 box>)` refusal, so the five files stay DECLARED red in
+`EXPECTED_FAILURES` (shared `_FACTORY_DATA_PATH` reason constant) — and no
+in-TU `List_1_T_3_Int` exists anywhere, which is what kills the regression
+below.
+
+### The regression the same measurement caught, and its fix
+
+With the mechanism live, TUs that seed the BUILTIN `iter`/`enumerate`
+HIJACKED the container representation to the in-TU List shell:
+`test/collections/test_list.mojo`'s subscript store raised at codegen, and
+`test/random/test_random.mojo` likewise — the sweep went 594/16 with 2
+UNEXPECTED failures. The refusal removes every in-TU List: both files' C is
+again the runtime-`MojoList` representation with 0 `List_1_T_3_Int`
+references, real `mojo_list_set_int`/`mojo_list_get_*` calls, and both
+re-gate exit 0 in the final code state (session log
+`c_test_list_fixed.c` / `c_test_random_fixed.c`; re-verified byte-identical
+after every later code change).
+
+### Full-tree A/B: the true baseline, and what actually changed
+
+Method correction (measured): the 05:02 `c_hashes_baseline.tsv` was a
+MID-SESSION snapshot (mid-edit working tree), not the before-state. The true
+before-state is clean master, taken via a git worktree at c947025a.
+Cross-process determinism was verified first (a `c_hash_all` rerun is
+byte-identical; per-file hashes are identical across fresh processes).
+
+**Cross-module contamination is real and measured**: compiling multiple
+files in one process — or via the 12-worker pool with its file-dependent
+worker assignment — changes the generated C; module-level state persists
+across files. A sequential multi-file loop of 7 files produced a 7-file
+diff; the same 7 files in fresh processes showed 4 of them byte-identical
+between the trees. The only trustworthy per-file shape is a fresh process
+per file; the pool shape is reproducible (same run, rerun byte-identical)
+and is what the sweep uses, so pool-vs-pool A/B remains valid for
+file-set-level conclusions — just not for byte-level per-file claims.
+(Also cost an hour: `dict.setdefault` and C-level dict ops bypass
+`__setitem__` overrides on dict subclasses — a tracer that only wraps
+`__setitem__` misses them; the `_Empty` trace went blind exactly there.)
+
+The TRUE pool A/B (all 610 files, clean master vs working tree, pre-fix)
+changed exactly 3 files — `test/iter/test_empty.mojo`,
+`test/iter/test_once.mojo`, `test/itertools/test_repeat.mojo` — with zero
+C<->ERROR transitions. Fresh-process scrutiny of those 3 (and of the 4
+earlier-contaminated files, all byte-identical) showed the 3 differ in
+exactly ONE thing: the in-TU iterator stub struct loses its `int64_t copy`
+field (emitting `int _dummy` instead) and the whole reflection dispatch
+(`_known[] = {1680525625}` -> `{0}`; the getattr/fieldnames/repr shims
+disappear).
+
+**Root cause (measured with temporary prints, since removed):** elab_intu's
+pre-registration lands in `gen_module_impl`'s
+`_selfhost_hardcoded_struct_names` snapshot (module_gen.py:4746 — taken
+after `elab_intu.run()` at :3411, before the statement loop), and that set
+EXCLUDES its members from the read-field pass (module_gen.py:5903) and the
+local-annotation pass (module_gen.py:6023). The `copy` field is what the
+read-field pass mints from `self.copy()` in `__iter__(ref self)`
+(std/iter/__init__.mojo:301, base lookup through the `ImplicitlyCopyable`
+protocol). One node, owner, 4 methods — verified single-node; the skip fired
+at the hardcoded-name guard, not a double-registration.
+
+**Fix (measured, in place):** pre-registration records the names it ADDS in
+`gen._intu_prereg_structs`; the 4746 snapshot excludes that set. The early
+name resolution the pre-statement signature passes need stays; the
+read-field/local-annotation passes behave exactly as on clean master.
+Post-fix, in order: fresh-process A/B on the 3 files byte-identical (hashes
+equal to clean master's); full-tree POOL A/B 0 diff lines across all 610
+files; sweep 592/18 EXIT 0 (the exact baseline set, 18 expected, 0
+unexpected — `sweep_after_fix.log`); the 3 files' C directly re-gated
+(`gcc-mp-15 -fgimple -fsyntax-only -I runtime -D__MOJO_STDLIB_MODE__`,
+exit 0). The full-tree generated C is now byte-identical to clean master in
+both run shapes.
+
+**Note on the sibling doc.** `CODEGEN_imported_generic_never_elaborated_
+calls_nothing_defines.md`'s "Landed 2026-10-20" 4-file A/B table was
+measured against the mid-session 05:02 snapshot; against the true
+clean-master baseline those 4 files are byte-identical in both run shapes.
+See that doc's "2026-10-20 (continued)" correction.
+
+### What this session moved, honestly
+
+**Zero files out of `EXPECTED_FAILURES`** — baseline 592/18 in, 592/18 out,
+the identical 18. What it left: a working, measured call-site mechanism,
+dormant behind an honest refusal whose comment IS the measurement; the
+regression caught, fixed and re-verified; the full-tree C byte-identical to
+clean master in both run shapes; and the A/B methodology corrected (true
+baseline via worktree, fresh-process per-file scrutiny, contamination
+named). That is a zero-movement session that averted a 4-file false green
+and a 2-file regression — both of which the old process would have shipped
+as green.
+
+### To lift the refusal (the next project, scoped)
+
+Synthesize the in-TU iterator protocol in RUNTIME-LIST terms:
+`__init__`/`__iter__`/`__next__`/`bounds` of `_ListIter`/`_ListIterOwned`
+as `mojo_list_len`/`mojo_list_get_*` over a `MojoList *`-typed `_list`
+field, with the spliced wrapper bodies delegating to it — or implement the
+in-TU List storage end-to-end (allocator + subscript). Then verify with the
+`gcc -c` + `nm` + `ld` + run ladder (the 2026-10-03 pattern): the module's
+own object must DEFINE the instantiation and its `__next__`, and a real
+link must leave no undefined symbol. Never the syntax-only gate.

@@ -38,6 +38,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
+import mojo.middle.iter_factory as iter_factory
 import gimple_codegen
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_methods as gmp
@@ -591,6 +592,86 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
     return 'void', '0'
 
 
+def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[str, str]:
+    """Reconstruct a dependent-return iterator factory call from the record
+    the elab side (`elab_intu._seed_factories`) filed: exactly what the
+    factory BODY would have produced — `iter(container)`, then the wrapper
+    constructor. `rec` is a pure function of this call's (name, argument
+    signatures), so the same record the elab side computed is recomputed here
+    by `iter_factory.factory_call_key` without shared state.
+
+    For a List container this is the container's own `__iter__`:
+      borrowed  -> `_ListIter(0, l.unsafe_ptr(), l._len)`
+                   (== `_ListIter(0, l.data, l.len)` at this representation)
+      owned     -> `_ListIterOwned(l, 0)`  (the `return {self^, 0}` shape)
+    For a NESTED factory the container is the inner factory's wrapper pointer
+    (its `comptime IteratorType[...] = Self`), so there is no `_ListIter`
+    construction — the pointer IS the inner. The wrapper is then built with
+    the inner positionally and the factory's trailing parameter (`count` /
+    `start`) as the wrapper `__init__`'s keyword."""
+    cont_t, cont_v = gen.lower_expr(node.args[0])
+    cont_t = gen._get_actual_type(cont_t, cont_v)
+    if rec['kind'] == 'factory':
+        inner_v, inner_t = cont_v, cont_t
+    else:
+        _is_ptr = cont_t is not None and cont_t.endswith(' *')
+        if rec['moved']:
+            # Owned iterator: `List.__iter__(var self)` returns `{self^, 0}`
+            # — the fieldwise `_ListIterOwned(list, 0)`. The constructor's
+            # first C parameter is a pointer, so ANY container pointer ctype
+            # works — a list local is `MojoList *` in some TUs and the
+            # in-TU-materialized `List_1_T_3_Int *` in others (the same
+            # `List[Int]` value, two representations; both are what the
+            # in-TU `List[T]` constructor hands back, and the constructor
+            # body stores the pointer in the by-value `container` field
+            # either way). A non-pointer (a box) is a container this
+            # reconstruction cannot express: fall through to the old path
+            # (honest refusal there) rather than emitting a store of a box
+            # into a pointer field.
+            if not _is_ptr:
+                return None
+            _zero = gimple_ctypes.IntLiteral(value=0)
+            _it, inner_v = gen._lower_struct_constructor(
+                rec['inner_mangled'], [node.args[0], _zero])
+        else:
+            # Borrowed iterator: `List.__iter__(ref self)` returns
+            # `_ListIter(0, self.unsafe_ptr(), self._len)`; `unsafe_ptr()` is
+            # the `data` slot and `_len` the `len` slot of the MojoList —
+            # the PUBLIC representation only. The in-TU `List_N_T...` layout
+            # has no `data` slot, so a borrowed container that is not a
+            # MojoList falls through (returns None) to the old path instead
+            # of guessing at field names.
+            if cont_t != 'MojoList *':
+                return None
+            _elem = gen._elem_types.get(cont_v) or rec['elem_ctype']
+            _data = gen._new_val(f'{_elem} *', f'{cont_v}->data')
+            _ln = gen._new_val('int64_t', f'{cont_v}->len')
+            _idx = gimple_ctypes.IntLiteral(value=0)
+            _it, inner_v = gen._lower_struct_constructor(
+                rec['inner_mangled'],
+                [_idx, gimple_ctypes.IdentExpr(name=_data),
+                 gimple_ctypes.IdentExpr(name=_ln)])
+        inner_t = f"{rec['inner_mangled']} *"
+    # The wrapper's `__init__` takes the inner positionally and the factory's
+    # trailing parameter as a keyword (`_TakeIterator(<it>, count=count)`).
+    # The keyword is spelled at the factory call either as the trailing
+    # positional (`take(nums, 3)`) or as a keyword (`enumerate(l, start=1)`);
+    # search the keywords first, then the trailing positional.
+    _kwargs = []
+    _wk = rec.get('wrapper_kwarg')
+    if _wk:
+        for _kn, _kv in (getattr(node, 'kwargs', None) or []):
+            if _kn == _wk:
+                _kwargs.append((_kn, _kv))
+                break
+        if not _kwargs and len(node.args) > 1:
+            _kwargs.append((_wk, node.args[1]))
+    _wt, wv = gen._lower_struct_constructor(
+        rec['wrapper_mangled'], [gimple_ctypes.IdentExpr(name=inner_v)],
+        kwargs=_kwargs)
+    return _wt, wv
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _dev = _lower_device_launch(gen, node)
     if _dev is not None:
@@ -847,6 +928,29 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     mlir_call = gen._maybe_lower_mlir_op(node)
     if mlir_call is not None:
         return mlir_call
+    # Dependent-return iterator factory (`peekable(l)`, `enumerate(l)`,
+    # `take(l, 3)`, ...): the RETURN type depends on the container argument's
+    # static type, which the `.o` route erases to a boxed int64_t (so
+    # `next(<local>)` below would refuse). `elab_intu._seed_factories`
+    # evaluated the dependency, spliced the wrapper struct in-TU, and filed a
+    # record per call site — this branch reconstructs the factory body from
+    # it. It must precede the `_imported_generic_structs` /
+    # `_imported_overloads` / `_imported_generics` arms: those would
+    # re-elaborate the factory on the `.o` route and hand back the erased
+    # type. A miss (no record — the call site was refused, e.g. a parameter
+    # container) falls through to those arms unchanged.
+    if isinstance(node.func, gimple_ctypes.IdentExpr):
+        _fk = iter_factory.factory_call_key(node.func.name, node)
+        _frec = getattr(gen, '_intu_factory_records', {}).get(_fk)
+        if _frec is not None:
+            _fr = _lower_factory_call(gen, node, _frec)
+            if _fr is not None:
+                return _fr
+            # A record exists but the container's C shape is not the one this
+            # reconstruction expresses (a borrowed container that is not a
+            # MojoList, an owned container that boxed to a non-pointer). Fall
+            # through to the arms below — the call site behaves exactly as it
+            # did before this module existed (honest refusal), no partial C.
     if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generic_structs) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generic_structs):

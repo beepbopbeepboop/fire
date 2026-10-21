@@ -4743,7 +4743,21 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[_ca_m] = 'int64_t'
                 _gg_ft1.setdefault(_ca_n, 'int64_t')
 
-    self._selfhost_hardcoded_struct_names = frozenset(self.struct_field_types.keys())
+    # `_intu_prereg_structs`: the in-TU mangled names elab_intu.run() registered
+    # (empty field map) BEFORE this snapshot was taken, so the pre-statement
+    # signature passes can resolve them. They are NOT selfhost-hardcoded
+    # structs — their field tables are still filled by this module's own
+    # statement loop — and including them here made the read-field pass
+    # (line ~5903) and the local-annotation pass (line ~6023) skip the in-TU
+    # iterator structs entirely. Measured 2026-10-20 on test_empty/test_once/
+    # test_repeat: the `int64_t copy` field and the reflection dispatch
+    # (`_known[]` type-tag table, getattr/fieldnames/repr shims) were dropped
+    # from the generated C, and the C stopped matching the clean master's
+    # byte-for-byte. Excluding the pre-registered names keeps the snapshot at
+    # exactly what it was before that pass existed.
+    self._selfhost_hardcoded_struct_names = frozenset(
+        _k for _k in self.struct_field_types
+        if _k not in getattr(self, '_intu_prereg_structs', ()))
 
     all_struct_defs = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
@@ -7823,6 +7837,26 @@ def gen_module_impl(self, stmts):
             _new_ct = self._signature_ctypes(m.params, m, s.name)
             if _new_ct != _old_ct:
                 self._mangled_signature_ctypes[_sigkey] = _new_ct
+            # The per-overload slot the DEFINITION's param loop prefers
+            # (`_gen_struct_method`'s `func_param_types[f"{method_full_name}
+            # {overload_id}"]` read) otherwise exists ONLY as the definition's
+            # own end-of-emission write-back — so at emission time the read
+            # misses and falls back to the BARE key, which for an overloaded
+            # method holds whichever overload the loop below wrote LAST
+            # (last-overload-wins), not the one being emitted. For a wrapper
+            # whose own `__init__` is overloaded (`_TakeIterator(inner,
+            # count)` + the `copy: Self` ctor) the emitted overload then
+            # borrows the sibling's param list and the `inner` param lands
+            # at the sibling's int64_t while the call site passes the inner
+            # struct pointer — the "makes integer from pointer without a
+            # cast" the pre-registration above was written to stop. Write
+            # the refined per-overload signature here, where inference is
+            # final, for the structs THIS compile materialized in-TU
+            # (gen._intu_structs — the elab factory closure and the generic
+            # seed); every other struct keeps the bare-key fallback exactly
+            # as it always did.
+            if s.name in getattr(self, '_intu_structs', {}):
+                self.func_param_types[_sigkey] = _new_ct
 
     for s in all_functions:
         if _is_foreign_main(s):

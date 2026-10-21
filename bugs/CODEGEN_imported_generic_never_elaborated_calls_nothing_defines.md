@@ -997,4 +997,29 @@ hashed, baseline vs current; exactly 4 differ, zero status transitions):**
 | `std/runtime/_asyncrt.mojo` | `TaskGroup`/`_AsyncContext` typedef positions move within the preamble; `TaskGroup.chain: _Chain` (a struct value) resolves `_Chain *` | improvement / position-only; compiles |
 
 The A/B also established codegen determinism for these files (two
-consecutive runs byte-identical), so the 4 are the complete change set.
+fresh-process runs of the same file in the same tree produce byte-identical
+C — session log: `c_hashes_rerun.tsv`).
+
+**Correction to the A/B above (measured, 2026-10-20 continued session):** that
+comparison ran against the 05:02 `c_hashes_baseline.tsv`, which was a
+MID-SESSION snapshot of the working tree (mid-edit state), not the
+before-state. The true before-state is clean master (c947025a), measured via
+a git worktree. Against that true baseline — in BOTH run shapes (the
+12-worker pool over all 610 files, which is the shape the sweep uses, and
+the fresh-process single-file compilation, which is the trustworthy per-file
+shape): `std/ffi/__init__.mojo`, `std/random/_rng.mojo`,
+`std/runtime/_asyncrt.mojo` and `test/os/test_stat.mojo` are **byte-identical**
+between the working tree and clean master. The resolutions the table
+describes (`_DLHandle *`, `_PhiloxWrapper *`, the Float64 dtype correction)
+therefore also exist in clean master's C — identical bytes — and come from
+earlier commits, not from this session's uncommitted work. Read the table as
+a delta between two mid-session states of the working tree; it is kept as
+history, not as a session-vs-master delta. Cross-module contamination
+(contributing to the original over-count) is real and measured: compiling
+multiple files in one process, or via the 12-worker pool, changes the
+generated C — module-level state persists across files — so only a
+fresh-process single-file comparison is trustworthy per file. The session's
+ONE true full-tree C delta against clean master was the 3 iterator test
+files, and it is since fixed to zero; see
+`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`,
+"2026-10-20 (continued)".
