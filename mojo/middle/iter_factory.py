@@ -76,6 +76,18 @@ _RE_TYPEOF_ITER = re.compile(r'^(\w+)\[\s*type_of\(\s*iter\((\w+)\)\s*\)\s*\]$')
 # (the inner IS the return value, so it is materialized as its own root).
 _RE_BARE_ITER_OWNED = re.compile(r'^type_of\(\s*(\w+)\s*\)\s*\.\s*IteratorOwnedType$')
 _RE_BARE_ITER_BORROWED = re.compile(r'^(\w+)\s*\.\s*IteratorType\s*\[[^\]]*\]$')
+# The DIRECT-STRUCT factory (measured 2026-10-21: `def count(start: Int = 0,
+# step: Int = 1) -> _CountIterator:` in std/itertools/itertools.mojo): the
+# return names a CONCRETE struct — a single identifier, no brackets, no dot,
+# no type argument. `kind: 'direct'` is seeded ONLY for a call with no
+# POSITIONAL args (elab_intu._seed_direct_factory — the `if not args:`
+# branch), which includes the measured kwarg form `count(start=10, step=2)`;
+# on the positional-arg path a 'direct' candidate is inert —
+# _factory_return_for's owned/borrowed pick can never select it, so a
+# `def f(x) -> ConcreteStruct` is handled exactly as before this arm
+# existed. The emit side (emit_calls._lower_factory_call, kind 'direct')
+# maps positionals, kwargs, then the factory's own parameter defaults.
+_RE_BARE_STRUCT = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)$')
 
 
 def parse_return(ann) -> dict | None:
@@ -99,6 +111,9 @@ def parse_return(ann) -> dict | None:
     m = _RE_BARE_ITER_BORROWED.match(s)
     if m:
         return {'wrapper': None, 'kind': 'borrowed', 'x': m.group(1)}
+    m = _RE_BARE_STRUCT.match(s)
+    if m:
+        return {'wrapper': m.group(1), 'kind': 'direct', 'x': None}
     return None
 
 

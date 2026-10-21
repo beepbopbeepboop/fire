@@ -660,7 +660,18 @@ def _factory_returns(fsrc, path, base):
                 if pr is not None:
                     out.append({'pr': pr,
                                 'params': [p[0] for p in
-                                           (getattr(s, 'params', None) or [])]})
+                                           (getattr(s, 'params', None) or [])],
+                                # The factory's own parameter DEFAULTS, as the
+                                # parsed literal nodes (measured 2026-10-21:
+                                # count -> {'start': IntLiteral(0),
+                                # 'step': IntLiteral(1)}). The direct-struct
+                                # subpath fills a call's missing parameters
+                                # with these — the factory body does exactly
+                                # `return {start, step}` with the defaults in
+                                # place, so this is a copy of what the body
+                                # would construct, not a guess.
+                                'defaults': dict(getattr(s, 'param_defaults',
+                                                         None) or {})})
         _FACTORY_RETURN_CACHE[key] = out
     return _FACTORY_RETURN_CACHE[key]
 
@@ -728,8 +739,6 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
         work.refuse(f'{base}(...): nested factory depth exceeds 4')
         return None
     args = getattr(node, 'args', None) or []
-    if len(args) < 1:
-        return None
     home = _factory_home(gen, import_map, base)
     if not home:
         return None
@@ -739,6 +748,16 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
         return None
     if not _factory_returns(fsrc, home, base):
         return None   # imported, but not a dependent-return factory
+    if not args:
+        # A ZERO-ARGUMENT call is a factory only through the direct-struct-
+        # return subpath (measured 2026-10-21: test_count's `var it =
+        # count()` — the return is a concrete struct, there is no container
+        # argument to resolve, and the old `len(args) < 1` early-return here
+        # seeded nothing, so `it` stayed int64_t and `next(it)` refused).
+        # Anything that is not a direct-struct factory returns None from
+        # there — exactly the pre-subpath behavior.
+        return _seed_direct_factory(gen, work, mm, base, node, fsrc, home,
+                                    queue, records)
     # `factory_names` is an over-approximation (every imported generic); the
     # nested recursion re-validates each one, so a non-factory nested call
     # simply refuses the outer. It exists so `resolve_container` can tell a
@@ -868,6 +887,95 @@ def _seed_one_factory(gen, work, mm, base, node, locs, import_map, queue,
             work.enqueue(('struct', inner_base, tuple(inner['args'])), 0, queue)
     else:
         work.enqueue(('struct', wrapper, (inner_mention,)), 0, queue)
+    return rec
+
+
+def _seed_direct_factory(gen, work, mm, base, node, fsrc, home, queue, records):
+    """The zero-argument / direct-struct-return factory subpath
+    (measured 2026-10-21: `count()` -> `_CountIterator` in std/itertools/
+    itertools.mojo). The return annotation names a CONCRETE (non-generic)
+    struct that IS the return value — no container, no inner: the factory
+    body is `return {start, step}`, a fieldwise construction of the wrapper
+    from the factory's own parameters (with their defaults in place).
+
+    Deliberately narrow; every check is measured, not guessed:
+      * exactly ONE 'direct' overload of `base` in the home module (two or
+        more -> ambiguous, refuse; none -> this call is not a factory and
+        returns None, the pre-subpath behavior);
+      * the wrapper is declared `struct <name>(...):` in the home source —
+        a `[` would make it generic, which is out of scope (its
+        instantiating TU materializes the mangled copy through the
+        existing path, and the generic head is what
+        `monomorphize_source`'s substitution engine requires);
+      * the wrapper's FIELD names, in declaration order, equal the
+        factory's PARAMETER names, in order (count: start,step ==
+        start,step) — that is precisely what makes the call's positional
+        args map 1:1 onto the synthesized fieldwise `__init__`, with the
+        factory's own parameter defaults (captured in the record as the
+        parsed literals) filling the gaps.
+    """
+    import elaborate
+    cands = [c for c in _factory_returns(fsrc, home, base)
+             if c['pr'].get('kind') == 'direct']
+    if len(cands) > 1:
+        work.refuse(f'{base}(): multiple direct-struct overloads — '
+                    'no unambiguous choice')
+        return None
+    if not cands:
+        return None
+    pr = cands[0]
+    wrapper = pr['pr']['wrapper']
+    if re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc):
+        work.refuse(f'{base}(): wrapper {wrapper!r} is generic in its home '
+                    'module — the direct subpath handles concrete structs '
+                    'only')
+        return None
+    if not re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\(', fsrc):
+        work.refuse(f'{base}(): return {wrapper!r} is not a concrete struct '
+                    'in its home module')
+        return None
+    tmpl = elaborate.extract_struct_source(fsrc, wrapper)
+    if tmpl is None:
+        work.refuse(f'{base}(): no struct block for {wrapper!r} in its '
+                    'home module')
+        return None
+    _sd = None
+    for _s in Parser(py_tokenize(tmpl)).parse_module():
+        if isinstance(_s, StructDef) and getattr(_s, 'name', None) == wrapper:
+            _sd = _s
+            break
+    if _sd is None:
+        work.refuse(f'{base}(): {wrapper!r} did not parse back as a struct '
+                    f'in its home module')
+        return None
+    flds = [getattr(f, 'name', None)
+            for f in (getattr(_sd, 'fields', None) or [])]
+    pnames = pr['params']
+    if flds != pnames:
+        work.refuse(f'{base}(): wrapper field order {flds} != factory '
+                    f'parameter order {pnames} — no unambiguous '
+                    'constructor mapping')
+        return None
+    rec = {'name': base, 'wrapper': wrapper, 'wrapper_param': None,
+           'wrapper_mangled': mm.mangle(wrapper, {}),
+           'inner_mangled': None, 'inner_mention': None,
+           'kind': 'direct', 'elem': None, 'elem_ctype': 'int64_t',
+           'moved': False, 'wrapper_kwarg': None,
+           'param_names': pnames, 'param_defaults': pr['defaults']}
+    records[iter_factory.factory_call_key(base, node)] = rec
+    # Register directly rather than via `_register_named`: that helper is
+    # scoped to GENERIC template heads — its regex `[\[:]` matches
+    # `struct NAME[` (a type-parameter block) and `struct NAME:` (a bare
+    # concrete) but not `struct NAME(...)` (a concrete struct WITH bases),
+    # which is exactly the shape this subpath handles (proven above by the
+    # `struct <name>(` check). Same write, minus the regex, on a name this
+    # function has already verified. The struct_field_types guard mirrors
+    # `_register_named`'s own: a TU-local struct of the same name is
+    # registered by the ordinary path, and splicing the home copy on top of
+    # it would duplicate the StructDef.
+    if wrapper not in gen.struct_field_types:
+        gen._imported_generic_structs.setdefault(wrapper, home)
+    work.enqueue(('struct', wrapper, ()), 0, queue)
     return rec
 
 
@@ -1125,15 +1233,31 @@ def _materialize(work, key):
     if not tmpl:
         work.refuse(f'no {kind} template for {base!r}')
         return None
-    targs = elaborate.bind_type_args(tmpl, list(args))
-    if targs is None:
-        work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
-        return None
-    try:
-        mangled, concrete = mm.monomorphize_source(tmpl, targs)
-    except Exception as e:
-        work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
-        return None
+    if kind == 'struct' and not elaborate.type_param_names(tmpl):
+        # A CONCRETE (non-generic) struct — the direct-struct factory
+        # subpath (`count()` -> `_CountIterator`, measured 2026-10-21):
+        # there is no bracket block to bind, and
+        # `monomorphize_source`'s head match (its substitution engine)
+        # requires one — it refused the concrete template with ValueError
+        # "no generic `fn`/`struct name[...]` found" (measured). So the
+        # template IS the concrete source and the mangled name is the
+        # plain name (`mangle`'s own zero-arg contract: returned
+        # unchanged). Gated on `kind == 'struct'` on purpose: the fn roots
+        # are all generic (the `_imported_generics` registry only holds
+        # imported generic functions), and a concrete fn, should one ever
+        # queue, keeps its pre-subpath honest refusal.
+        mangled, concrete = base, tmpl
+        targs = {}
+    else:
+        targs = elaborate.bind_type_args(tmpl, list(args))
+        if targs is None:
+            work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
+            return None
+        try:
+            mangled, concrete = mm.monomorphize_source(tmpl, targs)
+        except Exception as e:
+            work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
+            return None
     if kind == 'struct' and base in _IN_TU_ITER_BODIES:
         concrete = _rewrite_inner_bodies(work, base, concrete)
         if concrete is None:

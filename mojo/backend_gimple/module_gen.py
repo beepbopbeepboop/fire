@@ -1520,6 +1520,19 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
                 for i, (pname, ptype) in enumerate(m.params):
                     if pname.startswith('**'):
                         continue  # skip **kwargs
+                    if pname.startswith('*'):
+                        # *args slot: the packing convention (see
+                        # _signature_ctypes) — the caller passes the packed
+                        # MojoList. This fallback was DEAD until 2026-10-21:
+                        # a definition-site method whose body REFUSES the
+                        # lowering (gen_module_impl's transactional fallback —
+                        # a type-param-typed field erases, the instantiating
+                        # TU emits the mangled copy) never writes the
+                        # per-overload func_param_types entry, so the prototype
+                        # lands here with the bare pre-pass shape, and this
+                        # branch must stand on its own.
+                        param_ctypes.append('MojoList *')
+                        continue
                     if pname == 'self':
                         ct = f"{sd.name} *"
                     elif ptype is None and hasattr(self, '_inferred_param_types'):
@@ -1530,6 +1543,26 @@ def _emit_struct_method_prototypes(self, parts, struct_defs) -> None:
                     else:
                         ct = self._resolve_type(ptype)
                     param_ctypes.append(ct)
+            # A `...` in a DECLARATION must be the LAST parameter; a packed
+            # varargs slot that has typed trailing params (`*args` + a named
+            # parameter, e.g. `_format_entry(self, writer, *args, auto_idx)`)
+            # is spelled `MojoList *` on the definition side (the param loop's
+            # own ctype for `*`). The per-overload entry can arrive with the
+            # bare `...` when it was seeded from the pre-pass's BARE key
+            # (whose `_signature_ctypes` default sentinel is `...`) instead of
+            # from the definition's end-of-emission write-back — which is now
+            # the NORMAL case for any method whose body did not emit (measured
+            # 2026-10-21: a generic-struct method whose body refuses the
+            # lowering takes the transactional fallback and never writes the
+            # per-overload entry, so the mirror made `_format_entry`'s
+            # prototype `(_FormatCurlyEntry *, int64_t, ..., int64_t)` — a
+            # typed param after `...` — and gcc refused format.mojo:432 /
+            # logger.mojo:406 / test_list:647).
+            if '...' in param_ctypes:
+                _ell = param_ctypes.index('...')
+                if _ell < len(param_ctypes) - 1:
+                    param_ctypes = ['MojoList *' if c == '...' else c
+                                    for c in param_ctypes]
             ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
             parts.append(f"{ret} {mangled_name} ({ptypes});")
             # Record the method arm for `_mojo_getattr_{sd.name}`. FIRST
@@ -11958,8 +11991,68 @@ def gen_module_impl(self, stmts):
                 if _imh_src:
                     self._line_src_file = (self._module_source_paths.get(_imh_src)
                                            or self._current_filename)
-                func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
-                func_parts.append('')
+                # TRANSACTIONAL body emission (2026-10-21, measured): a
+                # definition-site method body of a struct with unbound type
+                # parameters may be UNLOWERABLE — a field typed by a type
+                # parameter erases to a plain scalar in this TU, so a
+                # `next(self._inner)` in it hits the emit_calls hard refusal
+                # (measured: std/itertools `_Product2___next__` and
+                # std/collections/string `BytesIter___next__` refused the WHOLE
+                # module before this; the instantiating TU emits the same
+                # methods under the mangled name with real field types, so the
+                # bare body is what cannot exist). The FIRST cut of the fix
+                # skipped the bodies of EVERY struct with type parameters —
+                # and that was a regression, measured against the de890235 A/B:
+                # 1,768 definitions dropped, 133 of them referenced from other
+                # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
+                # but its bodies were lowerable and were genuinely CALLED from
+                # _unicode/_utf8/test_span — undefined symbols at link). So:
+                # attempt every body exactly as master did, and fall back to
+                # prototype-ONLY for the individual methods that REFUSE — the
+                # codegen's own honest `cannot compile module:` RuntimeError
+                # is the boundary. Rollback is the emit_loops regex-fallback
+                # transactional pattern: func_parts from the mark, the scope
+                # stack down to its pre-call depth (the method's own frame is
+                # popped with it), body_lines/decls (cleared at the method's
+                # own `_reset_func`, so they hold nothing but this method's
+                # partial output), the annotation-seeded container maps (the
+                # only shared dicts `_gen_struct_method` setdefault-seeds per
+                # LOCAL name — a rejected method's partial seeds must not
+                # reach the next method), and the line-source override.
+                # Anything that is not a codegen refusal propagates, exactly
+                # as master would have.
+                _parts_mark = len(func_parts)
+                _scope_depth = len(self._import_scope_stack)
+                _elem_snap = dict(self._elem_types)
+                _nested_snap = dict(self._nested_elem_types)
+                _dval_snap = dict(self._dict_val_types)
+                _prev_tp = getattr(self, '_current_struct_type_params', None)
+                self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
+                try:
+                    func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
+                    func_parts.append('')
+                except RuntimeError as _me_err:
+                    if not str(_me_err).startswith('cannot compile module'):
+                        raise
+                    del func_parts[_parts_mark:]
+                    while len(self._import_scope_stack) > _scope_depth:
+                        self._import_scope_stack.pop()
+                    self.body_lines.clear()
+                    self.decls.clear()
+                    self._lambda_parts = []
+                    self._elem_types.clear(); self._elem_types.update(_elem_snap)
+                    self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
+                    self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
+                    self._line_src_file = _prev_line_src
+                    self._pop_import_scope()
+                    func_parts.append(
+                        f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
+                        f"body not lowerable in this TU — {_me_err} — prototype "
+                        f"only; the instantiating TU emits the mangled copy */")
+                    func_parts.append('')
+                    continue
+                finally:
+                    self._current_struct_type_params = _prev_tp
                 self._line_src_file = _prev_line_src
                 self._pop_import_scope()
                 if self._lambda_parts:

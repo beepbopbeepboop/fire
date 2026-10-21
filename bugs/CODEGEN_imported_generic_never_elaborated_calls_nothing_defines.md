@@ -1051,24 +1051,26 @@ a silent `extern`.
 
 ### Where the population stands now (measured sweep, 2026-10-21, final code)
 
-Sweep **596 PASSED / 14 FAILED — 14 expected, 0 unexpected, EXIT 0**
-(baseline of this campaign: 592/18). The 14 declared-red entries, 3 distinct
+Sweep **599 PASSED / 11 FAILED — 11 expected, 0 unexpected, EXIT 0**
+(baseline of this campaign: 592/18; after lift-4: 596/14). The 11 declared-red entries, 3 distinct
 reasons:
 
 | reason | files |
 |---|---|
-| `_NEXT_ON_STRUCT` — the dependent-return imported-iterator family (the reason text's "UPDATE 2026-10-20" records the materialization half closed by the nested monomorphization fix; what remains is the CALL itself: overload selection (pass-mode + conformance), dependent-return resolution, and call-site container-iterator construction — see the R1 doc) | `std/collections/string/iterators.mojo`, `std/itertools/itertools.mojo`, `test/collections/string/test_iterators.mojo`, `test/collections/test_set.mojo`, `test/iter/test_chain.mojo`, `test/iter/test_map.mojo`, `test/iter/test_zip.mojo`, `test/itertools/test_count.mojo`, `test/itertools/test_drop_while.mojo`, `test/itertools/test_product.mojo`, `test/itertools/test_take_while.mojo`, `test/python/test_python_object.mojo` |
+| `_NEXT_ON_STRUCT` — the dependent-return imported-iterator family (the reason text's "UPDATE 2026-10-20" records the materialization half closed by the nested monomorphization fix; what remains is the CALL itself: overload selection (pass-mode + conformance), dependent-return resolution, and call-site container-iterator construction — see the R1 doc) | `test/collections/string/test_iterators.mojo`, `test/collections/test_set.mojo`, `test/iter/test_chain.mojo`, `test/iter/test_map.mojo`, `test/iter/test_zip.mojo`, `test/itertools/test_drop_while.mojo`, `test/itertools/test_product.mojo`, `test/itertools/test_take_while.mojo`, `test/python/test_python_object.mojo` |
 | `test_cycle` narrowed — 15/17 sites work with real values; the 2 user-owned `IterableOwned` sites are the local-generic-elaboration gap (R2 sibling), same failure surface on clean master | `test/itertools/test_cycle.mojo` |
 | `getsize` — the 2 remaining defects of the "Landed 2026-10-20" section above (cross-stdlib `stat` + the out-param result model) | `test/os/path/test_getsize.mojo` |
 
 Of the four List-container members of the first population
 (`test_peek`/`test_enumerate`/`test_take`/`test_drop`), the lift removed all
 four from the dict with value-ladder evidence (the REMOVED-2026-10-21 comment
-in `compile_stdlib.py` carries the per-file counts). The 12 that remain
-exercise the shapes the lift did not take on — multi-container factories
-(`chain`, `zip`, `product`), `peekable`'s overload-ambiguous call site,
-`map`/`count`/`drop_while`/`take_while` and the string-iterator family — and
-their reason strings say exactly which half is missing, per file.
+in `compile_stdlib.py` carries the per-file counts). Later the same day the
+2 home modules and `test_count` lifted (the "## 2026-10-21" section below),
+leaving the 9 that remain exercise the shapes the lift did not take on —
+multi-container factories (`chain`, `zip`, `product`), `peekable`'s
+overload-ambiguous call site, `map`/`drop_while`/`take_while` and the
+string-iterator family — and their reason strings say exactly which half is
+missing, per file.
 
 ### Acceptance (unchanged, still unmet)
 
@@ -1076,3 +1078,64 @@ The census must reach **0 sites** and the declared `EXPECTED_FAILURES` must
 empty. The measured remainder is the 14 above; none of them is a stub or a
 silent green — every one of the 14 fails a real `gcc -c`/link with a named
 reason, which is the state this dict exists to declare.
+
+## 2026-10-21: one live false green of this class is resolved; declared-red
+is 11
+
+### std/iter's `next_12_IteratorType_5_Int64` — resolved
+
+While measuring the definition-site generic-method fix (R1 doc,
+"2026-10-21"), clean master's `std/iter/__init__.mojo` C was found to carry
+4 calls to a mangled `next_12_IteratorType_5_Int64` with 1 extern
+declaration and **0 definitions anywhere** — a live member of this doc's
+"imported generic, never elaborated, calls nothing that defines" class,
+green on the `-fsyntax-only` gate and invisible to everything else (nothing
+links the `test/`/`std/` tree in this pipeline). The final fix (R1 doc,
+item 1) resolves it with two cooperating pieces: a FALSE-GREEN GUARD in
+`emit_resolve._elaborate_generic_call`'s inferred branch refuses the
+inference when the argument is a `self`-field whose annotation names an
+unbound type parameter of the enclosing struct (the erased
+`Self.InnerIteratorType` field erases to `int64_t`, so inference binds the
+callee's `Iterator`-bounded parameter to that scalar — a placeholder no
+monomorphization can define) AND the callee's own template treats that
+parameter as a container (`<param>.Element` / `.IteratorType` /
+`.IteratorOwnedType` access — `next[IteratorType: Iterator] ->
+IteratorType.Element` matches); the refusal then lands the method as
+prototype-only through the same per-method TRANSACTIONAL FALLBACK in
+module_gen that lifts the two home modules — the prototype and the
+`_mojo_getattr` arm remain. Measured before/after in the generated C: all 4
+calls gone (the 4 methods — `_Enumerate.__next__`, `_MapIterator.__next__`,
+`_PeekableIterator.__next__`, `_PeekableIterator.peek` — are prototype-only
+with diagnostic comments), and the removed-definition A/B check on the
+final tree reports 0 undefined-and-referenced symbols.
+
+### test_getsize — still blocked (the two 2026-10-20 defects, unchanged)
+
+Fresh measurement (2026-10-21, fresh process): the monomorphized TU
+`getsize_8_PathLike_6_String` still fails real `gcc -c` —
+`error: implicit declaration of function 'stat'` (the spliced source's line
+16): the CROSS-STDLIB `stat[PathLike: stdPathLike]` (std/os/fstat.mojo) is
+not transitively elaborated with `PathLike=String`, and a prototype alone
+would not fix the result model either (`int64_t` reinterpreted as `void *`
+with a dynamic `st_size` getattr, versus the real `int stat(const char *,
+struct stat *)` out-param filling a caller-owned struct). Same surface as
+2026-10-20.
+
+### test_cycle — the 2 user-owned sites unchanged
+
+`test_cycle_owned` still refuses with the receiver typed `int64_t`
+(measured 2026-10-21): the user-defined `IterableOwned` struct's local
+comptime-parametrized materialization is non-mangled and its local-fn
+return boxes — the local-generic-elaboration gap, same surface as clean
+master. 15/17 `cycle(...)` sites work with real values (R1 doc).
+
+### Where the declared red stands
+
+**11** (was 14): the 2 home modules + `test_count` lifted with the evidence
+in the R1 doc's "2026-10-21" section; the other 8 each carry a per-file
+measured reason (emitting function, measured receiver type, root-cause
+shape — the shape table lives in the R1 doc). This doc's own census
+(`tools/elab_fail_census.py` decline counts) is a different measurement: it
+counts the elaborator's INSTANTIATION declines, and the two lifts act on
+the call-site side — the census numbers are what they were at the end
+of the 2026-10-20 session (not re-run in this one).

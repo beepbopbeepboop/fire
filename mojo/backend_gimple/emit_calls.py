@@ -749,6 +749,34 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
     construction — the pointer IS the inner. The wrapper is then built with
     the inner positionally and the factory's trailing parameter (`count` /
     `start`) as the wrapper `__init__`'s keyword."""
+    if rec['kind'] == 'direct':
+        # `count()` / `count(start=10, step=20)`: the wrapper IS the return
+        # value — a concrete struct constructed from the factory's own
+        # parameters, in order (the seed gate proved field order == factory
+        # parameter order), with a missing parameter filled from the
+        # factory's own parameter default (captured from the home source in
+        # the record — a copy of what the factory body `return {start,
+        # step}` would construct, not a guess).
+        _kwn = {}
+        for _kn, _kv in (getattr(node, 'kwargs', None) or []):
+            _kwn[_kn] = _kv
+        _args = []
+        for _i, _pn in enumerate(rec['param_names']):
+            if _i < len(node.args):
+                _args.append(node.args[_i])
+            elif _pn in _kwn:
+                _args.append(_kwn[_pn])
+            else:
+                _dflt = rec['param_defaults'].get(_pn)
+                if _dflt is None:
+                    # A parameter the call omits with no factory default:
+                    # this reconstruction cannot express the call — return
+                    # None and let the old path's honest refusal stand, no
+                    # partial C.
+                    return None
+                _args.append(_dflt)
+        _wt, wv = gen._lower_struct_constructor(rec['wrapper_mangled'], _args)
+        return _wt, wv
     cont_t, cont_v = gen.lower_expr(node.args[0])
     cont_t = gen._get_actual_type(cont_t, cont_v)
     if rec['kind'] == 'factory':
@@ -2053,9 +2081,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _rt_shape = gen._get_actual_type(*gen.lower_expr(node.args[0])) or '?'
         except Exception:
             _rt_shape = '?'
+        # The EMITTING FUNCTION is the other half of the load-bearing context:
+        # the same receiver type is a call-site bug in a test TU and a
+        # definition-site generic-method-erasure bug in the home TU, and the
+        # fix differs — "which function was being lowered" was missing from
+        # this message, so the two were indistinguishable from the sweep log.
+        _fn_ctx = ' in function `%s`' % gen.current_func_name \
+            if getattr(gen, 'current_func_name', None) else ''
         raise RuntimeError(
             f"cannot compile module: `next(...)` on {_shape} "
-            f"(receiver typed `{_rt_shape}`) has no lowering "
+            f"(receiver typed `{_rt_shape}`){_fn_ctx} has no lowering "
             f"in this codegen — every fall-through here emitted a call to a "
             f"`next` symbol that does not exist, which fails at LINK rather "
             f"than here. Supported: next(<MojoGenerator*>), "

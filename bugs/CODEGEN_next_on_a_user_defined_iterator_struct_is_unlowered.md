@@ -1638,3 +1638,222 @@ what the pinned tests assert.
   the ladders exercise the int case, which is what the baseline pinned.
 - `test_cycle`'s 2 user-owned sites remain the local-generic-elaboration
   gap (R2 sibling), unchanged in surface from clean master.
+
+## 2026-10-21: the two home modules lift, the direct-struct factory lifts,
+declared-red is 11 with per-file measured reasons
+
+### What changed
+
+1. **Definition-site generic method bodies: the transactional fallback**
+   (lifts `std/itertools/itertools.mojo` and
+   `std/collections/string/iterators.mojo` — the two HOME modules of this
+   family — out of the declared red):
+   - `fire_compiler.StructDef` gained `type_param_names` — ALL bracket-block
+     names, including the trait-bound ones (the old capture dropped those;
+     `bracket_params` is empty for exactly the generic structs, so this
+     field is the marker).
+   - The measured reason for the home failure stands: a generic struct's
+     definition-site body CANNOT always lower — a type-param-typed field
+     erases to `int64_t` in the definition TU, so `next(self._a)` in
+     `_Product2.__next__` hits the emit_calls hard refusal and the WHOLE
+     module failed; the instantiating TU is the one that must emit the
+     mangled copy with real field types.
+   - **First cut — an unconditional body skip for every type-param struct —
+     and why it was wrong** (measured against the de890235 A/B): it dropped
+     1,768 definitions, **133 of them referenced from other TUs** — a real
+     link hazard: `Span` is generic (`struct Span(Element: Movable, //,)`)
+     but its lowerable baseline bodies (`Span_count`, `Span_copy_from`,
+     `Span__binary_search_index`, `Span_fill`, `Span_swap_elements`) are
+     genuinely CALLED from `_unicode.mojo` / `_utf8.mojo` / `test_span.mojo`
+     / `test_span_address_space.mojo` — the skip would have left those
+     undefined at link. The skip also silently turned ~107 already-green
+     files into churn and broke the warn-set parity (13/244 vs 15/248).
+   - **Final design: attempt every body exactly as master did; fall back
+     per method.** In module_gen's struct-method loop the emission is
+     wrapped in try/except that catches ONLY the codegen's own honest
+     `RuntimeError` starting `cannot compile module:` — a refusal, not a
+     bug. On a refusal a transactional rollback (the emit_loops
+     regex-fallback pattern) restores: func_parts from the pre-call mark,
+     the import-scope stack down to its pre-call depth (the method's own
+     frame pops with it), `body_lines`/`decls` (cleared at the method's own
+     `_reset_func`, so they hold nothing but this method's partial output),
+     the annotation-seeded container maps (`_elem_types` /
+     `_nested_elem_types` / `_dict_val_types` — the only shared dicts
+     `_gen_struct_method` setdefault-seeds per LOCAL name), and the
+     line-source override; the method then lands as prototype-only with a
+     diagnostic comment. Anything that is NOT a codegen refusal
+     propagates, exactly as master would have. Result: every LOWERABLE
+     body emits byte-identical to master (span.mojo's after-C is
+     byte-identical to the Part 1 tree — the only residual vs-baseline diff
+     is Part 1's own, already-classified churn); exactly 6 methods in the
+     itertools home and 4 in the string-iterators home refuse — the
+     `next(self._x)` family (`_Product2`/`_Cycle`/`_TakeWhile`/`_DropWhile`/
+     `_Take`/`_Drop` `__next__`; the string home's measured set).
+   - The first cut's 3 prototype regressions (`format.mojo:432`,
+     `logger.mojo:406`, `test_list:647` — invalid
+     `(..., int64_t, ..., int64_t)` prototypes) needed a fix under BOTH
+     cuts: the prototype block mirrors the pre-pass's BARE entry for
+     methods whose body never writes the per-overload `func_param_types`
+     entry (now: the fallback's prototype-only entries; before: the
+     skipped ones). Fixed in `_emit_struct_method_prototypes`: a `...`
+     followed by typed params normalizes to `MojoList *`, and the `*args`
+     star-param else branch uses the same sentinel. After the fix: all 5
+     affected files gate rc=0 (re-verified under the final code).
+   - **False-green guard + the same fallback** (the R2 census class, the
+     live false green this session resolved): clean master's
+     `std/iter/__init__.mojo` C carried 4 calls to a mangled
+     `next_12_IteratorType_5_Int64` with 1 extern declaration and 0
+     definitions anywhere — "imported generic, never elaborated, calls
+     nothing that defines", invisible to the `-fsyntax-only` gate.
+     Mechanism: `next(self._inner)` in a still-generic body erases the
+     `Self.InnerIteratorType` field to `int64_t`, and inference then binds
+     the callee's `Iterator`-bounded type parameter to that SCALAR
+     (`next[IteratorType := Int64]`) — a monomorphization nothing that
+     compiles can define. The guard (emit_resolve's
+     `_elaborate_generic_call`, inferred branch) refuses exactly this shape
+     — the method then lands prototype-only through the same transactional
+     fallback as the homes. TWO conditions, both load-bearing (the second
+     added after a measured false positive):
+       * the argument is a `self`-field whose annotation (the
+         `_field_annotations` map) names an unbound type parameter of the
+         enclosing struct (scoped by `gen._current_struct_type_params`,
+         set/restore around the method emission — free functions,
+         closures, and the instantiating TU elaborate exactly as before);
+       * AND the callee's own template treats that type parameter as a
+         CONTAINER — a `<param>.Element` / `.IteratorType` /
+         `.IteratorOwnedType` type-member access in its signature or body
+         (`next[IteratorType: Iterator] -> IteratorType.Element` matches).
+         The erased-field condition ALONE was wrong: it broke
+         `StridedRange._unsigned_count`, whose `ceildiv(self.end -
+         self.start, self.step)` arguments are the same erased
+         `Scalar[Self.dtype]` fields, but `ceildiv[T: CeilDivable]
+         (numerator: T, denominator: T) -> T` has no type-member access —
+         `ceildiv[Int64]` is a REAL scalar monomorphization, defined by
+         other TUs (measured: bench_heap_parallel / test_math /
+         _swisstable all define `ceildiv_1_T_5_Int64`), and the Part 1 tree
+         emitted exactly this body and linked it. After the discriminator:
+         range.mojo's C is byte-identical to the Part 1 tree, and all 4
+         std/iter false-green calls are gone from the generated C (the 4
+         methods — `_Enumerate.__next__`, `_MapIterator.__next__`,
+         `_PeekableIterator.__next__`, `_PeekableIterator.peek` — are
+         prototype-only with diagnostic comments; the removed-definition
+         A/B check reports 0 undefined-and-referenced symbols).
+   - Warn-set: the first cut's deviation (13/244 — the skipped simd/
+     interval bodies no longer triggered their elaboration attempts) is
+     SUPERSEDED: under the fallback those lowerable bodies emit again, and
+     the final warn-set is **byte-identical to the baseline 15 files / 248**
+     (files AND counts, re-measured on the final code).
+
+2. **The zero-arg / direct-struct-return factory subpath** (lifts
+   `test/itertools/test_count.mojo` with ladder evidence):
+   `def count(start: Int = 0, step: Int = 1) -> _CountIterator:` returns a
+   CONCRETE struct that IS the value. The old seed gate's `len(args) < 1`
+   early-return seeded nothing, `it` stayed `int64_t`, and `next(it)`
+   (measured, in `test_count`) refused. Every piece of the subpath is
+   measured, not guessed:
+   - `iter_factory.parse_return` gained the bare-struct-name arm —
+     `{'wrapper': name, 'kind': 'direct'}`. Seeded ONLY for calls with no
+     POSITIONAL args — which includes the measured kwarg form (test_nth's
+     `count(start=10, step=2)`); on the positional-arg path
+     `_factory_return_for`'s owned/borrowed pick can never select it
+     (verified), so a positional `def f(x) -> Concrete` is handled exactly
+     as before.
+   - `elab_intu._seed_direct_factory` gates it narrow: exactly ONE
+     'direct' overload of the name; the wrapper declared `struct <name>(`
+     in the home module (a `[` is out of scope — the instantiating-TU path
+     handles generics); the wrapper's FIELD order equals the factory's
+     PARAMETER order (count: start,step == start,step) — precisely what
+     makes the call's positional args map 1:1 onto the synthesized
+     fieldwise `__init__`; the factory's own parameter DEFAULTS captured in
+     the record as parsed literal nodes (count: 0, 1) — a copy of what the
+     factory body `return {start, step}` constructs, not a guess.
+   - `_materialize` concrete-struct branch: a bracket-less template gives
+     `bind_type_args` nothing to bind (its documented None) and
+     `monomorphize_source`'s head match REQUIRES the bracket block (measured
+     ValueError: "no generic `fn`/`struct name[...]` found") — so the
+     template IS the concrete source and the mangled name is the plain name
+     (`mangle`'s zero-arg contract: returned unchanged). Gated on
+     `kind == 'struct'` so a hypothetical concrete-fn root keeps its
+     pre-subpath honest refusal.
+   - **Measured registry gap found on the way**: `_register_named`'s `[\[:]`
+     regex matches generic (`[`) and bare (`:`) heads but not concrete-
+     with-bases (`(`) — exactly `struct _CountIterator(Iterable, ...)`. Its
+     documented scope is generic templates, so it is left untouched; the
+     direct subpath performs the same registry write itself (guarded on
+     `struct_field_types`, mirroring `_register_named`'s own guard).
+   - The emit side (`emit_calls._lower_factory_call`, kind 'direct')
+     constructs the wrapper from the factory's own parameters in order —
+     call positionals, then kwargs, then the factory defaults — so
+     `count()` and `count(start=10, step=20)` are distinct
+     `factory_call_key` entries carrying exactly the values the factory
+     body would build. `next(it)` then dispatches on the in-TU
+     `_CountIterator.__next__` through the existing struct-protocol branch.
+   - Ladder: **2/2 PASS** (fresh process, real `gcc -c` + `nm` + link +
+     run): checked values 0,1 and 10,30; module-own `T _CountIterator___
+     next__` + both `__iter__` overloads in the module's own object; link
+     rc=0; the only non-runtime undefined is the documented `assert_equal`
+     stub. The spliced `__next__` body is stdlib's real arithmetic
+     (`result = self.start; self.start += self.step; return result`).
+     Re-ran 2/2 PASS on the final (fallback) code; its C is byte-identical
+     to the ladder-verified one.
+   - A/B corollary (measured against the Part 1 tree, baffbcb4): the same
+     subpath lifts `test/iter/test_nth.mojo`'s kwarg-form call —
+     `count(start=10, step=2).nth(5)` becomes in-TU `_CountIterator`
+     construction + the (inherited-trait, weak-stub) `_CountIterator_nth`
+     — where the Part 1 tree called `std_itertools___init___count_2dbb98`
+     as a bare extern with 0 definitions anywhere (its home C was never
+     generated — the `next()` refusal of this same family), a link hazard
+     the `-fsyntax-only` gate could not see.
+
+### Where the population stands now (measured sweep, 2026-10-21, final code)
+
+Sweep **599 PASSED / 11 FAILED — 11 expected, 0 unexpected, EXIT 0, no
+stale entries** (campaign baseline: 592/18; after lift-4: 596/14). Warn set
+is BYTE-IDENTICAL to the baseline 15 files / 248 (files AND counts,
+re-measured on the final code — the first cut's 13/244 deviation is
+superseded by the fallback, above). The 11 declared-red entries
+each now carry a per-file measured reason (emitting function, measured
+receiver type, the shape the current machinery cannot lower); the shared
+`_NEXT_ON_STRUCT` constant was removed with its last user. By root-cause
+shape:
+
+| shape | files (emitting function, measured receiver) |
+|---|---|
+| method-call dependent return (`s.bytes()` on a local `StringSlice`) | `test_iterators` (`test_bytes_iter_empty`, `int64_t`) |
+| factory container is a SET LITERAL (`enumerate({4, 5, 6})`) | `test_set` (`test_iter`, `MojoList *`) |
+| variadic multi-iterable factory + `out res` parameter | `test_chain` (`test_chain_ref`, `int64_t`), `test_zip` (`test_zip2`, `void *`) |
+| two-container dependent return (`_Product2[iterA, iterB]`) | `test_product` (`test_product2`, `int64_t`) |
+| thin-FUNCTION type argument (a function value: `map[add_one]`, `take_while[less_than_5]`, `drop_while[pred]`) | `test_map` (`test_map`), `test_take_while` (`test_take_while_basic`), `test_drop_while` (`test_drop_while_basic`) — all `int64_t` |
+| `for` over an imported struct (`PythonObject.__iter__ -> _PyIter`; the protocol cursor binds to `MojoList *`) | `test_python_object` (`test_iter`) |
+| user-defined `IterableOwned` locals (R2 sibling, local-generic-elaboration gap) | `test_cycle` (`test_cycle_owned`; 15/17 sites work with real values) |
+| cross-stdlib `stat` + the out-param result model (R2 doc) | `test_getsize` (gcc -c: implicit declaration of `stat`) |
+
+### Full-tree A/B vs de890235 (fresh-process, 610 files, final code)
+
+State transition: **592 C / 18 ERROR -> 599 C / 11 ERROR** — E->C **7**
+(the 2 homes + `test_count` lifted this session, plus lift-4's 4:
+`test_enumerate`/`test_peek`/`test_drop`/`test_take`); **C->E 0**; C->C
+changed **113** — byte-identical as a SET to the Part 1 A/B's churn set
+(113 files), of which 111 are byte-identical to the Part 1 tree's after-
+state; only 2 differ, both improvements: `std/iter/__init__.mojo` (the 4
+false-green bodies are prototype-only — the only Part 2 C content change
+beyond Part 1) and `test/iter/test_nth.mojo` (the undefined
+`count_2dbb98` extern is now in-TU `_CountIterator`, above); C->C same
+**479**; ERROR-both **11** — the declared red, differing only in the new
+`in function \`<name>\`` diagnostic (getsize's failure is identical). The
+removed-definition cross-reference on the 113 changed files reports **0
+undefined-and-referenced symbols** — the 3 definitions that ARE removed
+(`_MapIterator.__next__`, `_Enumerate.__next__`,
+`_PeekableIterator.__next__` — the false-green bodies; the 4th,
+`_PeekableIterator.peek`, returns a pointer and is outside the checker's
+def-regex, but its only references are same-file static dispatch arms) are
+unreferenced. The first cut's 152-file C->C set (107 of it churn) and its
+133 Class-A link hazards (the `Span_*` family) are both artifacts of the
+unconditional skip and are gone under the fallback.
+
+### Acceptance (unchanged, still unmet)
+
+The census must reach 0 sites and the declared `EXPECTED_FAILURES` must
+empty. The measured remainder is the 11 above; none of them is a stub or a
+silent green — every one fails a real `gcc -c`/codegen with a named, per-
+file reason, which is the state this dict exists to declare.

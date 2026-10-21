@@ -84,38 +84,14 @@ def discover_roots(base: Path) -> list:
     return preferred + rest
 
 
-_NEXT_ON_STRUCT = (
-    "`next(<user-defined iterator struct>)` has no lowering, and the "
-    "receiver's type is not inferred. `var it = peekable(list)` types `it` "
-    "as `int64_t`, not `_PeekableIterator *`, because `peekable` is never "
-    "ELABORATED: it is a generic, so `reflect.export_exclusions` "
-    "deliberately keeps it out of `std.iter`'s export table (the elaborator "
-    "is supposed to instantiate it on demand), and the on-demand path "
-    "declines — the two `peekable` overloads differ only by a trait bound "
-    "(`Some[Iterable]` vs `Some[IterableOwned]`), which "
-    "`Elaborator.elaborate_overload_call` cannot match against a scalar "
-    "parameter type, and the chosen overload's return type "
-    "(`_PeekableIterator[type_of(iterable).IteratorOwnedType]`) is "
-    "dependent on the argument. Until 2026-10-01 this file PASSED here "
-    "while its C carried `extern int64_t peekable (...)` with no definition "
-    "anywhere, plus a call to a `next` symbol nothing defines — this check "
-    "is `gcc -fgimple -fsyntax-only`, which cannot see that, and nothing "
-    "else links the `test/` tree. `next(<struct>)` DOES lower whenever the "
-    "receiver's type IS resololvable, and `Self.<type-param>` substitution "
-    "inside a monomorphized generic struct is fixed. UPDATE 2026-10-20: the "
-    "materialization half of the remaining gap is closed — a NESTED generic-"
-    "struct type argument (`_PeekableIterator[_ListIter[...]]`) now "
-    "monomorphizes: `monomorphize.instantiate(nested_defs=, renames=)` "
-    "splices the nested struct's own monomorphized definition into the "
-    "isolated TU and renames the mention to its mangled name, so the by-"
-    "value field keeps its real layout and the wrapper's own `next(self._"
-    "inner)` lowers (measured: the TU builds with the nested `__next__`/"
-    "`__iter__`/`bounds` + the wrapper's methods; before, the isolated TU "
-    "typed the field `int64_t` and codegen refused). What remains is the "
-    "CALL itself: overload selection (pass-mode + conformance), dependent-"
-    "return resolution, and the call-site construction of the container's "
-    "iterator; see "
-    "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
+# The `_NEXT_ON_STRUCT` shared reason constant (added 2026-10-01 for the 21
+# false-green `next(<struct>)` files) was removed 2026-10-21 with the last of
+# its users: by then a growing set of the 21 had left this dict with ladder
+# evidence, and the remaining 11 each now carry their own per-file measured
+# reason (emitting function, measured receiver type, the shape the current
+# machinery cannot lower) — which the one-size description no longer said.
+# The class's history lives in
+# bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
 
 # 2026-10-21 — the `_FACTORY_DATA_PATH` constant (the dependent-return
 # factory mechanism's measured REFUSAL for List containers) is removed
@@ -273,14 +249,152 @@ EXPECTED_FAILURES = {
     #     unset, so `len(span)` was whatever the fresh allocation happened to
     #     hold and `span[i]` read the list's own header. Both silent, both
     #     exit 0.
-    'std/collections/string/iterators.mojo': _NEXT_ON_STRUCT,
-    'std/itertools/itertools.mojo': _NEXT_ON_STRUCT,
-    'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
-    'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_map.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
+    # 2026-10-21 (further) — REMOVED from this dict:
+    #   std/itertools/itertools.mojo and std/collections/string/iterators.mojo
+    #   — the two HOME modules: their own GENERIC definition-site methods
+    #   (e.g. `_Product2.__next__`) were emitted dead, unlowerable (a type-
+    #   param-typed field erases to int64_t in the DEFINITION TU, so
+    #   `next(self._a)` there hit the emit_calls hard refusal and the WHOLE
+    #   module failed; the instantiating TU is the one that emits the
+    #   mangled copy with real field types). Fix (final design, after the
+    #   first cut — an UNCONDITIONAL body skip for type-param structs —
+    #   measured a real A/B regression: 1,768 definitions dropped, 133 of
+    #   them referenced from other TUs, e.g. `Span_count`/`Span_copy_from` —
+    #   `Span` is generic but its bodies were lowerable and genuinely
+    #   called, undefined at link): module_gen now attempts EVERY body
+    #   exactly as master did and catches only the codegen's own honest
+    #   `cannot compile module:` RuntimeError — a per-method TRANSACTIONAL
+    #   fallback (rollback: func_parts from the mark, the import-scope
+    #   stack down to its pre-call depth, body_lines/decls, the annotation-
+    #   seeded container maps, the line-source override) that drops exactly
+    #   the refusing method to prototype-only with a diagnostic comment;
+    #   every lowerable body emits byte-identical to master (the 6 refusing
+    #   methods here are the `next(self._x)` family: _Product2/_Cycle/
+    #   _TakeWhile/_DropWhile/_Take/_Drop `__next__`). fire_compiler still
+    #   records `StructDef.type_param_names` (ALL bracket-block names,
+    #   including trait-bound ones — the old capture dropped them); the loop
+    #   uses it only to scope the false-green guard below.
+    #   The same fallback + a FALSE-GREEN GUARD in
+    #   emit_resolve._elaborate_generic_call resolves the sibling measured in
+    #   clean master: std/iter/__init__.mojo's C carried 4 calls to the
+    #   never-defined mangled `next_12_IteratorType_5_Int64` (1 declaration,
+    #   0 definitions anywhere) — an erased `Self.InnerIteratorType` field
+    #   argument inferred as a scalar placeholder for a container-bounded
+    #   callee. The guard refuses (refusal -> fallback -> prototype-only)
+    #   only when BOTH are measured: the argument is a `self`-field whose
+    #   annotation names an unbound type parameter of the enclosing struct,
+    #   AND the callee's own template treats that parameter as a container
+    #   (`<param>.Element/.IteratorType/.IteratorOwnedType` access — the
+    #   discriminator, added because the erased-field condition alone broke
+    #   `StridedRange._unsigned_count`: its `ceildiv(self.end - self.start,
+    #   self.step)` args are the same erased `Scalar[Self.dtype]` fields,
+    #   but `ceildiv[T: CeilDivable](a: T, b: T) -> T` has no type-member
+    #   access, so `ceildiv[Int64]` is a REAL monomorphization, defined by
+    #   other TUs, and master's body linked). Result: all 4 std/iter calls
+    #   gone from the generated C (the 4 methods are prototype-only); the
+    #   removed-definition A/B check reports 0 undefined-and-referenced
+    #   symbols.
+    #   The invalid `..., int64_t` prototype regression the first cut hit
+    #   (format/logger/test_list) is still fixed by normalizing the pre-
+    #   pass's bare `...` packing sentinel to `MojoList *` when typed
+    #   params follow (`_emit_struct_method_prototypes`), and the `*`
+    #   star-param else branch to the same sentinel (it fires for the
+    #   fallback's prototype-only entries, which no longer write per-
+    #   overload `func_param_types`). Measured: all affected files gate
+    #   rc=0; the CONCRETE `_CountIterator` methods (Int fields) still emit
+    #   with their real start/step arithmetic.
+    #   test/itertools/test_count.mojo — LADDER PASS 2/2 (checked values
+    #   0,1 and 10,30; nm: module-own `_CountIterator___next__` + both
+    #   `__iter__` overloads T in the module's own object; link rc=0; the
+    #   only non-runtime undefined is the documented assert_equal stub).
+    #   The lift: the zero-positional-arg / direct-struct-return factory
+    #   subpath — `def count(start: Int = 0, step: Int = 1) ->
+    #   _CountIterator:` returns a CONCRETE struct that IS the value.
+    #   iter_factory.parse_return gained the bare-struct-name arm (kind
+    #   'direct' — seeded only for calls with NO POSITIONAL args, which
+    #   includes the measured kwarg form `count(start=10, step=2)`; on the
+    #   positional-arg path `_factory_return_for`'s owned/borrowed pick
+    #   can never select it, so it is inert there);
+    #   elab_intu._seed_direct_factory gates it narrow (exactly ONE direct
+    #   overload; wrapper declared `struct <name>(` in the home — a `[` is
+    #   out of scope; wrapper FIELD order == factory PARAMETER order: count:
+    #   start,step == start,step) and materializes it in-TU at its PLAIN name
+    #   (no bracket block: `monomorphize_source`'s head match requires one —
+    #   measured ValueError — so the template IS the concrete source and
+    #   `mangle`'s zero-arg contract returns the name unchanged; the registry
+    #   write bypasses `_register_named` deliberately, whose `[\[:]` regex
+    #   matches generic/bare heads but not concrete-with-bases); the emit
+    #   side (emit_calls._lower_factory_call, kind 'direct') constructs the
+    #   wrapper from the factory's own parameters in order — call
+    #   positionals/kwargs first, then the factory's own parameter DEFAULTS
+    #   (0,1 — captured in the record as parsed literals), so `count()` and
+    #   `count(start=10, step=20)` are distinct factory_call_key entries
+    #   carrying exactly the values the factory body `return {start, step}`
+    #   would build. `next(it)` then dispatches on the in-TU
+    #   `_CountIterator.__next__` via the existing struct-protocol branch.
+    #   A/B corollary (measured against the Part 1 tree, baffbcb4): the same
+    #   subpath lifts test/iter/test_nth.mojo's kwarg-form call —
+    #   `count(start=10, step=2).nth(5)` becomes in-TU `_CountIterator`
+    #   construction + the (inherited-trait, weak-stub) `_CountIterator_nth`
+    #   — where the Part 1 tree called `std_itertools___init___count_2dbb98`
+    #   as a bare extern with 0 definitions anywhere (its home C was never
+    #   generated, the `next()` refusal of this same family) — a link
+    #   hazard the -fsyntax-only gate could not see.
+    'test/collections/string/test_iterators.mojo': (
+        "2026-10-21 measured: `test_bytes_iter_empty` — `var bytes = s.bytes()` "
+        "on a local `StringSlice`: the iterator arrives from a METHOD call, "
+        "and the dependent-return factory subpath (elab_intu._seed_factories) "
+        "seeds FREE-function factory calls only — a method-call dependent "
+        "return (`StringSlice.bytes() -> BytesIter[...]`) erases to a boxed "
+        "`int64_t` on the .o route, so `next(bytes)` (measured receiver "
+        "`int64_t`, hard refusal, in function `test_bytes_iter_empty`) has "
+        "nothing to dispatch on. Seeding the method-call shape needs the "
+        "dependent return resolved through the receiver's static type — the "
+        "same machinery applied to a MemberExpr callee. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/collections/test_set.mojo': (
+        "2026-10-21 measured: `test_iter` — `var it = enumerate(my_set)` where "
+        "`my_set` is the set LITERAL `{4, 5, 6}` (this codegen's set literals "
+        "are `MojoList *`; measured `next(it)` receiver `MojoList *`, in "
+        "function `test_iter`): the factory seed's container gate "
+        "(iter_factory.resolve_container) accepts a statically resolvable "
+        "local List / range / nested factory — a set literal is none of "
+        "those, so the call seeds no record, `it` keeps its container-derived "
+        "type, and `next(it)` hits the hard refusal (not a stub). The for-"
+        "loop half of the same function (`for e in Set[Int]():` / `for e in "
+        "{1, 2, 3}:`) already lowers; only the enumerate(set-literal) factory "
+        "shape is missing. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/iter/test_chain.mojo': (
+        "2026-10-21 measured: `test_chain_ref` — `chain(l1, l2)`: the factory "
+        "is VARIADIC (`*iterables: *Ts`) and returns the iterator through an "
+        "`out` PARAMETER (`out res: _ChainedIterator[...]`), not through the "
+        "return value — the factory seed models exactly one container argument "
+        "and a dependent RETURN type, and a variadic multi-iterable + "
+        "out-parameter shape has no representation in that record (stage B of "
+        "the factory subpath). Measured: `next(it)` hard refusal, receiver "
+        "`int64_t` (the `out res` never constructed), in function "
+        "`test_chain_ref`. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/iter/test_map.mojo': (
+        "2026-10-21 measured: `test_map` — `map[add_one](l)`: the wrapper's "
+        "type argument is a FUNCTION VALUE (`_MapIterator[function]`, `function: "
+        "def(var Element) thin -> ResultType` — a thin-function type parameter). "
+        "This codegen has no value representation for a thin function, so the "
+        "instantiation cannot be formed and `it` erases to `int64_t` (measured "
+        "receiver, hard refusal, in function `test_map`). Landing map needs the "
+        "function-value type argument first — the same gap take_while/"
+        "drop_while carry (`predicate: def(Element) thin -> Bool`). See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/iter/test_zip.mojo': (
+        "2026-10-21 measured: `test_zip2` — `zip(l, l2)`: VARIADIC multi-"
+        "iterable factory with the iterator returned through an `out` PARAMETER "
+        "(`out res: _ZipIterator[...]`) — the same stage-B shape as "
+        "test_chain/test_product (the factory seed models one container argument "
+        "and a dependent RETURN type). Measured: `next(it)` hard refusal, "
+        "receiver `void *` (the erased dependent return of the `out` shape), in "
+        "function `test_zip2`. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     # 2026-10-21 — REMOVED from this dict, with the value ladder (real
     # gcc -c + nm + link + run with value-checking asserts, never the
     # syntax gate) rather than the syntax check:
@@ -322,10 +436,44 @@ EXPECTED_FAILURES = {
         "next(IdentExpr) (receiver typed int64_t) has no lowering` — not "
         "a stub. See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_"
         "is_unlowered.md, \"2026-10-20 (further)\"."),
-    'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_take_while.mojo': _NEXT_ON_STRUCT,
-    'test/python/test_python_object.mojo': _NEXT_ON_STRUCT,
+    'test/itertools/test_drop_while.mojo': (
+        "2026-10-21 measured: `test_drop_while_basic` — `drop_while[pred]"
+        "(nums)`: the wrapper's `predicate` type argument is a thin FUNCTION "
+        "value (`_DropWhileIterator[InnerIteratorType=..., predicate=predicate]`, "
+        "`predicate: def(Element) thin -> Bool`) — no function-value "
+        "representation in this codegen, so the instantiation cannot be formed "
+        "and `it` erases to `int64_t` (measured receiver, hard refusal, in "
+        "function `test_drop_while_basic`). See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/itertools/test_product.mojo': (
+        "2026-10-21 measured: `test_product2` — `product(l1, l2)`: the return "
+        "type depends on TWO containers (`_Product2[IterableTypeA.IteratorType"
+        "[origin_of(iterable_a)], IterableTypeB.IteratorType[origin_of(iterable"
+        "_b)]]`) — the factory seed resolves a SINGLE container argument "
+        "(args[0]) and models one inner iterator in the wrapper; a two-"
+        "iterable dependent return is not representable in the current record "
+        "shape. Measured: `next(it)` hard refusal, receiver `int64_t`, in "
+        "function `test_product2`. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/itertools/test_take_while.mojo': (
+        "2026-10-21 measured: `test_take_while_basic` — `take_while[less_than_5]"
+        "(nums)`: same thin-FUNCTION-value type argument as test_map (`"
+        "_TakeWhileIterator[InnerIteratorType=..., predicate=predicate]`, "
+        "`predicate: def(Element) thin -> Bool`) — no function-value "
+        "representation, `it` erases to `int64_t` (measured receiver, hard "
+        "refusal, in function `test_take_while_basic`). See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    'test/python/test_python_object.mojo': (
+        "2026-10-21 measured: `test_iter` — `for fruit in list_obj` where "
+        "`list_obj: PythonObject`: the loop takes the user-struct `__iter__` "
+        "protocol path (PythonObject.__iter__ -> _PyIter, std/python/"
+        "python_object.mojo:425), and the cursor the protocol binds is typed "
+        "`MojoList *` (measured) — `next(<MojoList *>)` is a raw container "
+        "pointer, not a `_ListIter` local or a struct iterator, so it hits the "
+        "hard refusal (in function `test_iter`). Landing it needs the imported "
+        "struct's `__iter__` return lowered into a cursor next() can dispatch "
+        "on. See "
+        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
     # `explicit-failed` half of the census, not the `next(...)` half above.
     # `std/os/path/path.mojo`'s `getsize` is a bracket template, and once the
