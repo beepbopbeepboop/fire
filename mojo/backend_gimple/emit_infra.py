@@ -4780,7 +4780,7 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
     return ctype, t
 
 
-def _compr_range_loop(gen, node, gen0, res, res_type):
+def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     # `_compr_bind_target` (not a bare `_declare_var(..., force=...)`): the
     # bind/restore PAIR is what makes the shadow last exactly as long as the
     # comprehension. Every arm that only passed `force=` left the shadowed C
@@ -4939,7 +4939,7 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_cursor_loop(gen, node, gen0, res, res_type, rec):
+def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     """`[... for x in it]` where `it` is a resumable iterator local.
 
     Every other comprehension arm walked `mojo_list_len`/`mojo_list_get_*` from
@@ -4993,7 +4993,7 @@ def _compr_cursor_loop(gen, node, gen0, res, res_type, rec):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     # `it_val` arrives from `_lower_comprehension` where it is reassigned
     # (the `_get_actual_type` cast block) — whole-function type
     # unification there can widen it back to int64_t even though it holds
@@ -5271,7 +5271,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     """`list(<supported generator call>())` / any other comprehension
     consuming one — mirrors _compr_list_loop's/_gen_for_generator_iter's
     resume()/value() convention (see _gen_for_generator_iter's
@@ -5386,7 +5386,7 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     # what CPython's GC does too.
 
 
-def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = _compr_bind_target(gen, _as_str(gen0.target), 'char *')
     iter_t = gen._new_temp('MojoDictIter *')
@@ -5570,7 +5570,7 @@ def _compr_restore_target(gen, name, saved):
         gen._actual_types.pop(_n, None)
 
 
-def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_set_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop
     # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
     # its elements as `char *` — reading them back with mojo_set_iter_val_int

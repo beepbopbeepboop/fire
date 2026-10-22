@@ -1398,7 +1398,16 @@ def _gen_stmt_AssignStmt(gen, node):
             # name, and a tuple built from it records a str kind (whose null
             # word reprs as None) instead of an int kind (which reprs the same
             # word as `0`).
-            if (_as_str(getattr(node, 'type_ann', None)) in ('str', 'String')
+            #
+            # `str | None` / `Optional[str]` say the same thing and are the
+            # spelling a None-initialised accumulator naturally carries
+            # (`acc_val: str | None = None` in the `%`-format and f-string
+            # lowerings, whose slot the pre-pass otherwise joined to the
+            # int64_t box and the compiled compiler then formatted as a
+            # decimal address into `mojo_str_cat (<addr>, ...)`).
+            _ann_s = _as_str(getattr(node, 'type_ann', None))
+            if ((_ann_s in ('str', 'String')
+                    or (_ann_s and gimple_ctypes._mojo_type(_ann_s) == 'char *'))
                     and (isinstance(node.value, gimple_ctypes.NoneLiteral)
                          or (isinstance(node.value, gimple_ctypes.IdentExpr)
                              and node.value.name == 'None'))):

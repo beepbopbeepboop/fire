@@ -5301,18 +5301,18 @@ class GimpleGen:
         return ginf._elaborate_overload_call(self, node)
     def _maybe_lower_mlir_op(self, node: CallExpr):
         return ginf._maybe_lower_mlir_op(self, node)
-    def _compr_range_loop(self, node, gen0, res, res_type):
+    def _compr_range_loop(self, node, gen0, res: str, res_type: str):
         return ginf._compr_range_loop(self, node, gen0, res, res_type)
-    def _compr_list_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_list_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return ginf._compr_list_loop(self, node, gen0, res, res_type, it_val)
 
-    def _compr_cursor_loop(self, node, gen0, res, res_type, rec):
+    def _compr_cursor_loop(self, node, gen0, res: str, res_type: str, rec):
         return ginf._compr_cursor_loop(self, node, gen0, res, res_type, rec)
-    def _compr_generator_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_generator_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return ginf._compr_generator_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_dict_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_dict_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return ginf._compr_dict_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_set_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_set_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
@@ -5485,11 +5485,12 @@ class GimpleGen:
         return grsl._is_none_literal(el)
     def _literal_elements_include_none(self, elements: list) -> bool:
         return grsl._literal_elements_include_none(self, elements)
-    def _compr_enumerate_loop(self, node, gen0, res, res_type, it_val, start_val):
+    def _compr_enumerate_loop(self, node, gen0, res: str, res_type: str, it_val: str,
+                              start_val: str | None):
         return grsl._compr_enumerate_loop(self, node, gen0, res, res_type, it_val, start_val)
-    def _compr_str_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_str_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return grsl._compr_str_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_cstr_loop(self, node, gen0, res, res_type, it_val):
+    def _compr_cstr_loop(self, node, gen0, res: str, res_type: str, it_val: str):
         return grsl._compr_cstr_loop(self, node, gen0, res, res_type, it_val)
     def _gen_compr_append(self, node: Comprehension, gen0, res: str, res_type: str, bb_skip: str):
         return grsl._gen_compr_append(self, node, gen0, res, res_type, bb_skip)

@@ -3326,7 +3326,8 @@ def _literal_elements_include_none(gen, elements: list) -> bool:
     return False
 
 
-def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
+def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
+                          start_val: str | None):
     """`[... for i, x in enumerate(seq[, start]):]` (and dict/set
     equivalents) — walks `it_val` (the already-lowered underlying
     list) by index, assigning the (optionally `start`-offset) 0-based
@@ -3461,7 +3462,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
         ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
-def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
     len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
@@ -3485,7 +3486,7 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     """`[... for c in s]`/`(... for c in s)` where `s` is a plain
     `char *` (this codegen's usual representation for an ordinary
     Python str local — MojoStr* is a separate, less common wrapped-

@@ -349,7 +349,7 @@ def _lower_StringLiteral(gen, node):
 
     # For f-strings with expressions: build a concatenation of all parts
     # Lower each expression part and concatenate via mojo_str_cat
-    acc_val = None
+    acc_val: str | None = None
     for kind, text, _spec, _conv in parts:
         if kind == 'lit':
             if not text:
@@ -4681,7 +4681,7 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             return 'MojoBytes *', _lit_bytes(fmt_bytes)
 
     arg_i = 0
-    acc_val = None
+    acc_val: str | None = None
     # Plain 4-way unpack, NOT `part[0]`/`part[1]` — `parts` is a
     # freshly-built `list[tuple]` (each entry appended via `parts.append((...))`
     # by the shared parser), and subscripting a value obtained by single-var
@@ -4875,7 +4875,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
         return 'char *', gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(fmt_text)))
 
     arg_i = 0
-    acc_val = None
+    acc_val: str | None = None
     # Plain 4-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` --
     # `_as_str(part[1])` alone was NOT sufficient: `part` here comes from
     # single-var for-loop iteration over a freshly-built `list[tuple]`,
