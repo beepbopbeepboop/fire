@@ -1673,10 +1673,46 @@ def _sgfs_resolve_ann(gen, _ann: str) -> str:
     compiled program with at least one local variable, once the unrelated
     `_ensure_bool_cond` fix (see its own docstring) stopped an earlier
     crash from masking this one."""
-    _cls = getattr(gimple_ctypes, _ann, None)
-    if isinstance(_cls, type):
+    if _ann in _parser_node_class_names():
         return f"{_ann} *"
     return gen._resolve_type(_ann)
+
+
+# `{class name}` of every class `mojo.middle.types` (`gimple_ctypes`) binds --
+# the ones it imports from `fire_compiler` and the ones it defines -- read from
+# the PARSED sources rather than from the live module (`getattr(gimple_ctypes,
+# name)` + `isinstance(.., type)`): a module attribute looked up by a run-time
+# string is something the self-hosted compiler cannot do, so there every
+# `node: CallExpr` parameter of a GimpleGen delegate came out `int64_t` while
+# the reference typed it `CallExpr *`. The parsed answer is the same in both,
+# and it is cached for the process like every other source scan here.
+_PARSER_NODE_CLASSES: dict = {}
+
+
+def _parser_node_class_names() -> dict:
+    """`{name: True}` for the classes `gimple_ctypes` binds."""
+    _hit = _PARSER_NODE_CLASSES.get('names')
+    if _hit is not None:
+        return _hit
+    import gimple_codegen
+    _sd = gimple_codegen._SELFHOST_DIR
+    _fc_classes: dict = {}
+    for _st in _selfhost_parsed_source(gimple_ctypes.os.path.join(_sd, 'fire_compiler.py')):
+        if isinstance(_st, StructDef):
+            _fc_classes[_as_str(_st.name)] = True
+    _names: dict = {}
+    _types_src = gimple_ctypes.os.path.join(_sd, 'mojo', 'middle', 'types.py')
+    for _st in _selfhost_parsed_source(_types_src):
+        if isinstance(_st, StructDef):
+            _names[_as_str(_st.name)] = True
+        elif (isinstance(_st, FromImportStmt)
+                and _as_str(getattr(_st, 'module', '')) == 'fire_compiler'):
+            for _entry in (getattr(_st, 'name_alias_strs', None) or []):
+                _nm = _as_str(gimple_ctypes._fi_name(_entry))
+                if _nm in _fc_classes:
+                    _names[_nm] = True
+    _PARSER_NODE_CLASSES['names'] = _names
+    return _names
 
 # --- dependency _ris_base (from gimple_gen_funcs.py) ---
 def _ris_base(ann) -> str:

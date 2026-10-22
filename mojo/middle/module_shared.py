@@ -222,10 +222,16 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
             _n, _v = _s.target.name, _s.value
             if _n in _out or _dispatch_only(_n) is not None:
                 continue
-            if isinstance(_v, IntLiteral):
-                _out[_n] = (_mod, 'int', 'int64_t')
-            elif isinstance(_v, BoolLiteral):
-                _out[_n] = (_mod, '_Bool', '_Bool')
+            # An int or bool literal is the `int` field `_gscan_declare_global`
+            # declares for it (`int NAME;`, semantic and C-decl both `int`).
+            # This said `int64_t` for the C-decl (and `_Bool` for a bool), so
+            # the pre-seed DID disagree with the scan it promises to agree
+            # with: whichever of the two ran on a given instance decided the
+            # assignment's destination type, and the reference (pre-seeded)
+            # wrote `_t = 8LL` through an int64_t temp into the `int` field
+            # where the self-hosted compiler wrote `_t = 8`.
+            if isinstance(_v, IntLiteral) or isinstance(_v, BoolLiteral):
+                _out[_n] = (_mod, 'int', 'int')
             elif isinstance(_v, StringLiteral):
                 _out[_n] = (_mod, 'char *', 'char *')
             elif isinstance(_v, (SetExpr,)) or (
@@ -281,6 +287,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                           else _tgt.name if isinstance(_tgt, IdentExpr) else None)
                 if _fname is None:
                     continue
+                _fname = _as_str(_fname)
                 _inner = _ann[_ann.index('[') + 1:_ann.rindex(']')]
                 _parts = [p.strip() for p in _inner.split(',')]
                 if len(_parts) == 2:
@@ -293,7 +300,18 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                     # pre-existing behavior, not a regression, and seeding it
                     # here would widen this pre-pass's blast radius.
                     if _vt == 'char *':
-                        _out.setdefault(_s.name, {}).setdefault(_fname, _vt)
+                        # A named, typed inner dict rather than a chained
+                        # `_out.setdefault(...).setdefault(...)`: the chain's
+                        # intermediate has no static type in the self-hosted
+                        # compiler, so its second call never reached a dict
+                        # and the compiled compiler seeded NOTHING -- every
+                        # `gen._elem_types.get(..)` there read the int view.
+                        _sname = _as_str(_s.name)
+                        if _sname not in _out:
+                            _out[_sname] = {}
+                        _fd: dict = _out[_sname]
+                        if _fname not in _fd:
+                            _fd[_fname] = _vt
     return _out
 
 def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:

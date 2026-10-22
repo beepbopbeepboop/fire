@@ -7565,10 +7565,13 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
      * from the word's C type (`int64_t` IS int), so `isinstance(node, (str,
      * int))` was True for every AST node held in an untyped parameter and
      * the self-hosted compiler's generic AST walks pruned every child. The
-     * NULL word is None and 0 alike; it answers int (CPython's 0), and a
-     * caller that means None tests `is None` first. */
+     * NULL word is None and 0 alike, and it answers NOT int: a word whose
+     * kind nothing recorded is an absent optional (`return_type=None`, a
+     * missing `getattr`) far more often than a literal 0, which a typed slot
+     * would have answered statically -- and `isinstance(None, int)` being
+     * True sent the compiled compiler down an int arm CPython never takes. */
     if (type_id == 2) {
-        if (obj == 0) return 1;
+        if (obj == 0) return 0;
         if (mojo_is_registered_list(obj) || mojo_is_registered_dict(obj)
             || mojo_is_registered_set(obj) || mojo_is_registered_bytes(obj))
             return 0;

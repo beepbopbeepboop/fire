@@ -554,10 +554,17 @@ def _seed_selfhost_module_globals(self):
     """Populate the shared `_global_to_module` / `_global_var_types` /
     `_global_c_decl_types` from `_selfhost_module_scalar_globals` — see that
     helper's docstring."""
-    for _n, (_mod, _sem, _cdecl) in _selfhost_module_scalar_globals(_SELFHOST_DIR).items():
-        self._global_to_module.setdefault(_n, _mod)
-        self._global_var_types.setdefault(_n, _sem)
-        self._global_c_decl_types.setdefault(_n, _cdecl)
+    # Indexed reads through `_as_str`, not a nested `for _n, (_mod, _sem,
+    # _cdecl) in ....items()` unpack: the self-hosted path boxes every slot of
+    # a tuple read out of a dict, so the seeded keys and types came out as
+    # words the plain-str tables never matched.
+    _seed = _selfhost_module_scalar_globals(_SELFHOST_DIR)
+    for _n0 in _seed:
+        _n = _as_str(_n0)
+        _row = _as_list(_seed[_n0])
+        self._global_to_module.setdefault(_n, _as_str(_row[0]))
+        self._global_var_types.setdefault(_n, _as_str(_row[1]))
+        self._global_c_decl_types.setdefault(_n, _as_str(_row[2]))
 
 
 
@@ -566,19 +573,31 @@ def _seed_selfhost_struct_dict_field_types(self):
     """Seed `_field_dict_val_types` from `_selfhost_struct_dict_field_val_types`
     so a sibling compiler struct's annotated `dict[str, str]` field keeps its
     value type through a per-module `fire.py build` compile."""
-    for _sn, _fields in _selfhost_struct_dict_field_val_types(_SELFHOST_DIR).items():
-        _dst = self._field_dict_val_types.setdefault(_sn, {})
-        for _fn, _vt in _fields.items():
-            _dst.setdefault(_fn, _vt)
+    # Key loops with `_as_str`/`_as_dict` views, not `.items()` unpacks (see
+    # `_seed_selfhost_module_globals`): the boxed key never matched a
+    # plain-str struct name, so no field kept its value type.
+    _tbl = _selfhost_struct_dict_field_val_types(_SELFHOST_DIR)
+    for _sn0 in _tbl:
+        _sn = _as_str(_sn0)
+        _fields = _as_dict(_tbl[_sn0])
+        if _sn not in self._field_dict_val_types:
+            self._field_dict_val_types[_sn] = {}
+        _dst = _as_dict(self._field_dict_val_types[_sn])
+        for _fn0 in _fields:
+            _fn = _as_str(_fn0)
+            if _fn not in _dst:
+                _dst[_fn] = _as_str(_fields[_fn0])
 
 
 
 
 def _seed_selfhost_return_elem_types(self):
     """Seed `_return_elem_types` from `_selfhost_homogeneous_tuple_ret_funcs`."""
-    for _k, _e in _selfhost_homogeneous_tuple_ret_funcs(self, _SELFHOST_DIR).items():
+    _tbl = _selfhost_homogeneous_tuple_ret_funcs(self, _SELFHOST_DIR)
+    for _k0 in _tbl:
+        _k = _as_str(_k0)
         if self._return_elem_types.get(_k) is None:
-            self._return_elem_types[_k] = _e
+            self._return_elem_types[_k] = _as_str(_tbl[_k0])
 
 
 def _param_slot_kinds(params) -> dict:
