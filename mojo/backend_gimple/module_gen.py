@@ -4580,6 +4580,17 @@ def gen_module_impl(self, stmts):
     self.struct_field_types['GlobalStmt'] = {
         'names': 'MojoList *',
     }
+    # `NonlocalStmt` / `DottedLiteral` were missing from this table, so every
+    # `isinstance(x, NonlocalStmt)` in the compiled compiler lowered to the
+    # always-false `mojo_isinstance_p(x, 0)` -- a `nonlocal` declaration fell
+    # out of `gen_stmt`'s chain as `/* TODO: NonlocalStmt */` and the closure
+    # read its captured cell by value.
+    self.struct_field_types['NonlocalStmt'] = {
+        'names': 'MojoList *',
+    }
+    self.struct_field_types['DottedLiteral'] = {
+        'path': 'char *',
+    }
     self.struct_field_types['DelStmt'] = {
         'targets': 'MojoList *',
     }

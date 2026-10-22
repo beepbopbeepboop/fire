@@ -3358,7 +3358,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
                  'list': '5', 'dict': '6', 'set': '7', 'tuple': '8',
-                 'bytes': '9', 'bytearray': '9'}
+                 'bytes': '9', 'bytearray': '9', 'frozenset': '7'}
     type_id = _TYPE_IDS.get(type_name, '0')
     # Scalar isinstance by STATIC type. The runtime mojo_isinstance stub
     # always returns 0 (false), so e.g. `isinstance(node.name, str)` was
@@ -3854,7 +3854,9 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
         gen._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
     else:
         gen._emit(f'  {t} = {stub_val};  /* {fname_raw}() stubbed */')
-    return 'int', t
+    # `_Bool`, the type `_quick_type` already answers for both: as `int` the
+    # value printed `1`/`0` where CPython prints `True`/`False`.
+    return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
 
 def _lower_builtin_dir(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -6681,10 +6683,15 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
             and not getattr(node, 'kwargs', None)
             and expected_params
             and len(arg_pairs) == _nargs
-            and _nargs <= len(expected_params)
-            and not any('...' in p or p in ('MojoList *', 'MojoDict *')
-                        for p in expected_params)):
+            and _nargs <= len(expected_params)):
         return arg_pairs
+    # An explicit loop, not `any(<generator>)`: the compiled compiler has no
+    # generators, the `any` answered False there, and a `*parts` forward to a
+    # varargs callee was expanded into a slot typed `...`.
+    for _ep in expected_params:
+        _eps = _as_str(_ep)
+        if '...' in _eps or _eps == 'MojoList *' or _eps == 'MojoDict *':
+            return arg_pairs
     for _ea in node.args[:_nargs - 1]:
         if isinstance(_ea, gimple_ctypes.UnaryOp) and (_ea.op == '*' or _ea.op == '**'):
             return arg_pairs

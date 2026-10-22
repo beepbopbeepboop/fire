@@ -2314,7 +2314,21 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         fixed_pairs = arg_pairs[:n_fixed]
         varargs = arg_pairs[n_fixed:]
         lst = gen._new_val('MojoList *', "mojo_list_new ()")
-        for atype, aval in varargs:
+        # A `*xs` argument contributes its ELEMENTS to the pack, not itself:
+        # `_hash(*parts)` forwarding a `*parts` parameter used to hand the
+        # callee a one-element list holding the caller's list.
+        _nodes_ok = arg_nodes is not None and len(arg_nodes) == len(arg_pairs)
+        for _vi in range(len(varargs)):
+            atype = _as_str(varargs[_vi][0])
+            aval = _as_str(varargs[_vi][1])
+            _vn = arg_nodes[n_fixed + _vi] if _nodes_ok else None
+            if (isinstance(_vn, gimple_ctypes.UnaryOp) and _vn.op == '*'
+                    and (atype == 'MojoList *' or atype == 'int64_t')):
+                _src = aval
+                if atype == 'int64_t':
+                    _src = _as_str(gen._materialize_as_list('int64_t', aval))
+                gen._emit(f"  mojo_list_extend ({lst}, {_src});")
+                continue
             aval = gen._coerce_to_type(atype, 'int64_t', aval)
             gen._emit(f"  mojo_list_append_int ({lst}, {aval});")
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
