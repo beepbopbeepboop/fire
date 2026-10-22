@@ -2064,6 +2064,18 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
         acc.append(vn)
 
 
+def _list_slot_read_expr(ptr, i, slot_elem) -> tuple[str, str]:
+    """`(ctype, C expression)` reading slot `i` of the list at `ptr` with the
+    accessor `slot_elem` calls for. Module-level, not a closure nested in
+    `_gen_for_list` beside its one caller: it captures nothing, and as a
+    sibling of the closure that calls it the compiled compiler grouped the
+    two into a shared env where the reference compiler did not."""
+    suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
+    if suf_i == 'str':
+        return 'char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})"
+    return 'int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})"
+
+
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                    share_var_with_sibling_arm: bool = False):
     # Handle tuple unpacking: for (a, b) in list_of_tuples — and the 1-tuple
@@ -2228,12 +2240,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # shared with the declarations there).
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
 
-        def _emit_slot_read(ptr, i, slot_elem):
-            suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
-            if suf_i == 'str':
-                return 'char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})"
-            return 'int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})"
-
         def _emit_target_assign(ptr, vn, i, slot_elem):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
             which may itself be a parenthesized nested tuple target
@@ -2242,7 +2248,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             the realistic real-world shape; deeper nesting recurses
             identically)."""
             if vn.startswith('(') and vn.endswith(')'):
-                rt, rv = _emit_slot_read(ptr, i, 'int64_t')
+                rt, rv = _list_slot_read_expr(ptr, i, 'int64_t')
                 nested_raw = gen._new_val(rt, rv)
                 nested_ptr = gen._coerce_to_type(rt, 'MojoList *', nested_raw)
                 nested_names = gen._split_top_level_comma(vn[1:-1].strip())

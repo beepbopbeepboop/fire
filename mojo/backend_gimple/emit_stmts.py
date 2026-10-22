@@ -3342,6 +3342,19 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             pass  # complex multi-assign target: no-op
 
 
+def _range_neg_one():
+    """`-1` as `UnaryOp('-', IntLiteral(1))`, NOT `IntLiteral(-1)`:
+    `_gen_for_range` special-cases the UnaryOp form for a negative step, and a
+    bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
+    expression before '-' token")."""
+    return gimple_ctypes.UnaryOp('-', gimple_ctypes.IntLiteral(1))
+
+
+def _range_minus_one(e):
+    """`e - 1`, for `reversed(range(...))`'s rewritten bounds."""
+    return gimple_ctypes.BinaryOp('-', e, gimple_ctypes.IntLiteral(1))
+
+
 def _gen_stmt_ForStmt(gen, node):
     # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
     # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
@@ -3378,22 +3391,19 @@ def _gen_stmt_ForStmt(gen, node):
             and isinstance(_riter.args[0].func, gimple_ctypes.IdentExpr)
             and _riter.args[0].func.name == 'range'):
         _rng = _riter.args[0]
-        _IL = gimple_ctypes.IntLiteral
-        _BO = gimple_ctypes.BinaryOp
-        # `-1` as UnaryOp('-', IntLiteral(1)), NOT IntLiteral(-1): _gen_for_range
-        # explicitly special-cases the UnaryOp form for a negative step, and a
-        # bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
-        # expression before '-' token" / "non-trivial conversion in integer_cst").
-        _neg1 = lambda: gimple_ctypes.UnaryOp('-', _IL(1))
-        _minus1 = lambda e: _BO('-', e, _IL(1))
+        # Module-level builders, not `_IL = gimple_ctypes.IntLiteral` aliases
+        # called from lambdas: a CLASS bound to a local is a value the
+        # compiled path does not model (`_IL` lowered to 0, so the lambdas
+        # called address 0), and whether such a lambda captured the alias at
+        # all differed between the reference and the compiled compiler.
         _ra = _rng.args
         _new_args = None
         if len(_ra) == 1:
-            _new_args = [_minus1(_ra[0]), _neg1(), _neg1()]
+            _new_args = [_range_minus_one(_ra[0]), _range_neg_one(), _range_neg_one()]
         elif len(_ra) == 2:
-            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+            _new_args = [_range_minus_one(_ra[1]), _range_minus_one(_ra[0]), _range_neg_one()]
         elif len(_ra) == 3 and isinstance(_ra[2], gimple_ctypes.IntLiteral) and _ra[2].value == 1:
-            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
+            _new_args = [_range_minus_one(_ra[1]), _range_minus_one(_ra[0]), _range_neg_one()]
         if _new_args is not None:
             _desc = gimple_ctypes.ForStmt(
                 node.target,
