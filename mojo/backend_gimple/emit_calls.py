@@ -5339,8 +5339,8 @@ def _ast_child_nodes(value, out: list) -> None:
     out.append(value)
 
 
-def _ast_walk(body):
-    """Yield every AST node under `body`. A local, structural walk: the
+def _ast_walk(body) -> list:
+    """Every AST node under `body`, as a list. A local, structural walk: the
     lambda-capture check below only needs IdentExpr/AssignStmt/ForStmt/
     VarDecl/NamedExpr shapes, and reuses this file's existing node imports
     rather than the middle-tier walkers (whose results are self-hosted-boxed
@@ -5378,9 +5378,22 @@ def _ast_walk(body):
     """
     # A lambda's `body` is a single EXPRESSION, not a statement list, so
     # normalize before walking.
+    #
+    # A LIST of the nodes, not a generator: this file is in the self-host
+    # closure, where a generator's frame is not something the compiled
+    # compiler drives (the self-host subset has no generators), and the walk
+    # came back EMPTY there -- every lambda the stage2 binary lifted captured
+    # nothing, so `lambda: compile_to_gimple(mojo_src, ...)` read its
+    # captures as 0. Same nodes, same order as the generator gave.
+    out: list = []
     if body is None:
-        return
-    stack = list(body) if isinstance(body, list) else [body]
+        return out
+    stack: list = []
+    if isinstance(body, list):
+        for _b in body:
+            stack.append(_b)
+    else:
+        stack.append(body)
     while stack:
         n = stack.pop()
         if isinstance(n, (list, tuple)):
@@ -5391,19 +5404,22 @@ def _ast_walk(body):
             # on the field list. Flattening where the item is popped is also
             # what `_used_idents_node` does with a list-or-tuple node, and it
             # nests for free.
-            stack.extend(x for x in n
-                         if hasattr(x, '__class__')
-                         and not isinstance(x, (str, bytes, int, float)))
+            for x in n:
+                if x is not None and not isinstance(x, (str, bytes, int, float)):
+                    stack.append(x)
             continue
-        yield n
+        out.append(n)
         for _attr in _AST_CHILD_FIELDS:
             _v = getattr(n, _attr, None)
             if _v is None:
                 continue
             if isinstance(_v, (list, tuple)):
-                stack.extend(x for x in _v if hasattr(x, '__class__') and not isinstance(x, (str, bytes, int, float)))
-            elif hasattr(_v, '__class__') and not isinstance(_v, (str, bytes, int, float)):
+                for x in _v:
+                    if x is not None and not isinstance(x, (str, bytes, int, float)):
+                        stack.append(x)
+            elif not isinstance(_v, (str, bytes, int, float)):
                 stack.append(_v)
+    return out
 
 # Every child-node field on the parser's AST dataclasses (`fire_compiler.py`),
 # as one table. `_ast_walk`'s attribute list was hand-grown and had drifted
@@ -6656,29 +6672,51 @@ def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
     Shared by `_lower_named_call` (value-consuming call sites) and
     _gen_stmt_ExprStmt's statement-level twin (bare, value-discarding
     calls — which never reach _lower_named_call at all)."""
-    if not (len(node.args) == 1
-            and isinstance(node.args[0], gimple_ctypes.UnaryOp)
-            and node.args[0].op == '*'
+    # The spread may also be the LAST of several positional arguments
+    # (`_coerce_to_bytes(gen, *arg_pairs[0])`): the arguments before it fill
+    # the leading slots one-for-one, and the spread's elements fill the rest.
+    # A spread whose arity `lower_call_args` could not see (a subscript of a
+    # list of tuples) used to pass through as ONE pair -- the tuple itself in
+    # the second slot and nothing in the third -- so the compiled compiler's
+    # bytes-method lowering coerced `(MojoBytes *)` of an empty value.
+    _nargs = len(node.args)
+    if not (_nargs >= 1
+            and isinstance(node.args[_nargs - 1], gimple_ctypes.UnaryOp)
+            and node.args[_nargs - 1].op == '*'
             and not getattr(node, 'kwargs', None)
             and expected_params
+            and len(arg_pairs) == _nargs
+            and _nargs <= len(expected_params)
             and not any('...' in p or p in ('MojoList *', 'MojoDict *')
                         for p in expected_params)):
         return arg_pairs
-    if not (arg_pairs and arg_pairs[0][0] == 'MojoList *'):
+    for _ea in node.args[:_nargs - 1]:
+        if isinstance(_ea, gimple_ctypes.UnaryOp) and (_ea.op == '*' or _ea.op == '**'):
+            return arg_pairs
+    _lead = _nargs - 1
+    _sp_t = _as_str(arg_pairs[_lead][0]) if arg_pairs else ''
+    if _sp_t != 'MojoList *' and _sp_t != 'int64_t':
         return arg_pairs
-    # `_as_str`: `arg_pairs[0][1]` (the spread list's C-expr) and each
-    # `expected_params` element re-box to int64_t when read out of a tuple /
-    # `enumerate` pair on the self-hosted path — the emitted
-    # `mojo_list_get_int (<list>, i)` list handle and the `(<ptype>)<raw>`
-    # cast type then came out as decimal heap addresses, different every run.
-    _lst_v = _as_str(arg_pairs[0][1])
+    # `_as_str`: the spread list's C-expr and each `expected_params` element
+    # re-box to int64_t when read out of a tuple / `enumerate` pair on the
+    # self-hosted path — the emitted `mojo_list_get_int (<list>, i)` list
+    # handle and the `(<ptype>)<raw>` cast type then came out as decimal heap
+    # addresses, different every run.
+    _lst_v = _as_str(arg_pairs[_lead][1])
+    if _sp_t == 'int64_t':
+        # A word of unknown kind (a tuple read out of a list of tuples):
+        # `_materialize_as_list` asks the runtime what the word is, the same
+        # view a `for` over it gets.
+        _lst_v = _as_str(gen._materialize_as_list('int64_t', _lst_v))
     _dflts = gen._func_param_defaults.get(fname) or \
         gen._func_param_defaults.get(fname_raw) or []
     _first_dflt = len(expected_params) - len(_dflts)
     _expanded: list = []
-    for _pos in range(len(expected_params)):
+    for _lp in range(_lead):
+        _expanded.append(arg_pairs[_lp])
+    for _pos in range(_lead, len(expected_params)):
         _ptype = _as_str(expected_params[_pos])
-        _idx64 = gen._new_val('int64_t', f"(int64_t){_pos}")
+        _idx64 = gen._new_val('int64_t', f"(int64_t){_pos - _lead}")
         _len64 = gen._call_expr('int64_t', 'mojo_list_len',
                                  [('MojoList *', _lst_v)])
         _inrange = gen._new_val('_Bool', f"{_idx64} < {_len64}")

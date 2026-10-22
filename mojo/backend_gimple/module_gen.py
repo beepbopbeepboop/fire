@@ -152,19 +152,28 @@ def _gmi_literal_ctype(node):
     return None
 
 
-def _gmi_iter_calls(stmts, _seen=None):
-    """Every CallExpr in the tree, via a generic walk over node attributes."""
+def _gmi_iter_calls(stmts, _seen=None) -> list:
+    """Every CallExpr in the tree, via a generic walk over node attributes,
+    as a LIST in walk order.
+
+    A list and not a generator: this module is in the self-host closure, and
+    the compiled compiler does not drive a generator's frame (the self-host
+    subset has none), so the walk came back EMPTY there -- no caller's
+    evidence ever reached `_gmi_apply_call_site_param_evidence`, and every
+    unannotated parameter the reference typed from its call sites stayed
+    `int64_t` in the stage2 binary."""
+    out: list = []
     if _seen is None:
         _seen = set()
     for st in (stmts or []):
-        stack = [st]
+        stack: list = [st]
         while stack:
             node = stack.pop()
             if node is None or id(node) in _seen:
                 continue
             _seen.add(id(node))
             if isinstance(node, gimple_ctypes.CallExpr):
-                yield node
+                out.append(node)
             for attr in ('body', 'args', 'value', 'func', 'iterable',
                          'obj', 'left', 'right', 'operand', 'target', 'elt',
                          'key', 'results', 'statements', 'expr'):
@@ -172,9 +181,11 @@ def _gmi_iter_calls(stmts, _seen=None):
                 if sub is None:
                     continue
                 if isinstance(sub, (list, tuple)):
-                    stack.extend(sub)
+                    for _x in sub:
+                        stack.append(_x)
                 else:
                     stack.append(sub)
+    return out
 
 
 def _gmi_apply_call_site_param_evidence(gen, stmts):
