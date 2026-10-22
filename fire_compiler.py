@@ -707,7 +707,12 @@ class FunctionDef:
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
-    yield_bearing_node_ids: object = None  # frozenset of id() of every statement/expression
+    # `repr=False`: its members are `id()`s -- addresses, different on every
+    # run and meaningless in the compiled compiler -- so a `.ast` dump that
+    # printed them could never equal another run's, let alone the self-hosted
+    # binary's. The compiled repr skips it too (module_gen's
+    # `_REPR_HIDDEN_FIELDS`).
+    yield_bearing_node_ids: object = field(default=None, repr=False)  # frozenset of id() of every statement/expression
         # node in this function's own body (same nested-scope exclusion as is_generator)
         # whose subtree contains a YieldExpr/YieldFromExpr. None for non-generator functions.
         # Lets a later milestone's generator-execution pass cheaply ask "does this specific

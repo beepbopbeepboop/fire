@@ -1251,6 +1251,12 @@ REPR_CLUSTER_DECLS = (
 # first line. `_emit_reflection_dispatch` builds the block as ONE append, so one
 # prefix test withdraws it as a unit rather than six text edits that could leave
 # half a function behind.
+# Fields the struct's dataclass declares `field(..., repr=False)`, which the
+# compiled `repr` must leave out exactly as CPython's does. Only the self-host
+# struct tables (`struct_field_types` below) name fields this way, so this is
+# their mirror: `FunctionDef.yield_bearing_node_ids` is a frozenset of `id()`s.
+_REPR_HIDDEN_FIELDS = {'FunctionDef': ('yield_bearing_node_ids',)}
+
 REPR_CLUSTER_DEFS_HEAD = 'static char * _mojo_dispatch_repr (void *obj) {'
 
 
@@ -1786,8 +1792,11 @@ def _emit_reflection_dispatch(self, parts):
         # when `cond` holds", which is what a NON-NULLABLE container field needs
         # (its helper returns a literal for a null pointer, and the dump must not
         # free that).
+        _hidden = _REPR_HIDDEN_FIELDS.get(sn, ())
         for fname, ftype in fields.items():
             if fname == '__mojo_type_id':
+                continue
+            if fname in _hidden:
                 continue
             safe_f = _safe_field(fname)
             fref = f'obj->{safe_f}'
