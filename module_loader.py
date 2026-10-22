@@ -176,9 +176,15 @@ def _ml_container_global(line: str) -> list[str]:
     j += 1
     while j < n and _ml_is_space(line[j]):
         j += 1
+    out: list[str] = []
     if j < n and (line[j] == '{' or line[j] == '['):
-        return [line[:k], ann, line[j:j + 1]]
-    return []
+        # Built by appends into a `list[str]`, not returned as a 3-element
+        # display: per-slot types inferred off the display disagreed with
+        # the annotation's element type between the two compilers.
+        out.append(line[:k])
+        out.append(ann)
+        out.append(line[j:j + 1])
+    return out
 
 
 def _ml_from_imports(content: str) -> list[str]:

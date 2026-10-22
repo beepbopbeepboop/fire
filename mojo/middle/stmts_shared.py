@@ -36,7 +36,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 # `from mojo.middle.stmts_shared import _with_item_alias_name` keeps working).
 from mojo.middle.boundnames import _with_item_alias_name
 
-def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
+def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     """`list[T]` / `List[T]` / `set[T]` / `Set[T]` / `tuple[T, ...]`
     annotation → the container's ELEMENT C type (`T`), else None.
 
@@ -75,9 +75,15 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     """
     if ctype not in ('MojoList *', 'MojoSet *'):
         return None
-    if not isinstance(ann, str) or '[' not in ann or ann.startswith('['):
+    # A typed `str` view before any string operation: `ann` arrives
+    # unannotated (a str, None or an AST node), and on a bare word the
+    # compiled compiler's `'[' not in ann` / `.split` are not string ops.
+    if not isinstance(ann, str):
         return None
-    _inner = ann.split('[', 1)[1].rstrip(']').strip()
+    _ann: str = _as_str(ann)
+    if '[' not in _ann or _ann.startswith('['):
+        return None
+    _inner = _ann.split('[', 1)[1].rstrip(']').strip()
     if not _inner:
         return None
     _parts = gimple_ctypes._split_top_level_commas(_inner)
