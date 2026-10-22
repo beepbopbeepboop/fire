@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **696** | `fire_runtime.h` 593, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **281** | every parameter and the return value is one 64-bit word |
+| entry points across **11** headers | **697** | `fire_runtime.h` 594, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **282** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **415** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **281 of 696 (40.2%)** is the reachable-surface ceiling. The previous
+So **282 of 697 (40.2%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -195,7 +195,7 @@ list on a formal path is a frame blob whose first word IS its count".
 **That constant is gone**, and its docstring says why in the present tense: "a
 hand-kept list of prefixes is a list that rots". The diagnosis is now made per
 type by `_box_why` from `runtime_abi()`'s own `boxes` field, so it covers all
-696 entry points rather than the 40-odd names one prefix happened to cover.
+697 entry points rather than the 40-odd names one prefix happened to cover.
 `is_gimple_runtime_builtin` still answers "is this name the gimple runtime's",
 but the question that now gates a call is `gimple_runtime_callable`, and it asks
 the two questions phase 2 named: is every type crossing the boundary one word,
@@ -524,19 +524,19 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 281 | 281 |
-| …of which the runtime dylib actually **exports** | 225 | 225 |
-| …reachable with no heap handle the formal path cannot obtain | **185** | **185** |
+| word-shaped entry points (`runtime_abi`) | 282 | 282 |
+| …of which the runtime dylib actually **exports** | 226 | 226 |
+| …reachable with no heap handle the formal path cannot obtain | **186** | **186** |
 
-So the honest statement of the surface is **185 word-shaped calls are callable
+So the honest statement of the surface is **186 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 281) of §2.2. The two gaps between 281 and 185
+was written, and not the 219 (now 282) of §2.2. The two gaps between 282 and 186
 are both deliberate and both named:
 
-- **40 of the 225** the library exports take a `void *` parameter the
+- **40 of the 226** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 281** the dylib does not export at all, because
+- **56 of the 282** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
@@ -546,13 +546,13 @@ are both deliberate and both named:
 
 The two architectures agree exactly, which is the property phase 2 was for.
 
-**The nineteen this table gained since it was first published are named, not
+**The twenty this table gained since it was first published are named, not
 counted**, because a count that moves is a row nobody can check and an export
 nobody reaches is a promise the runtime makes and the link line does not keep.
-All nineteen are declared in `runtime/fire_runtime.h`, defined in
+All twenty are declared in `runtime/fire_runtime.h`, defined in
 `runtime/fire_runtime.c`, word-shaped, and **none of them takes a `void *`** —
 so each one landed in all three rows at once, which is why the deltas are the
-same 19 and not three different numbers:
+same 20 and not three different numbers:
 
 | entry point | signature | landed |
 |---|---|---|
@@ -576,13 +576,14 @@ same 19 and not three different numbers:
 | `mojo_str_endswith_word` | `int mojo_str_endswith_word(char *s, int64_t p)` | ″ |
 | `mojo_box_word` | `int64_t mojo_box_word(int64_t v)` | ″ |
 | `mojo_truthy_word` | `int mojo_truthy_word(int64_t w)` | ″ |
+| `int_samefile` | `int int_samefile(char *a, char *b)` | ″ |
 
 **The `40` and `56` gaps did not move, and that is a fact rather than a
-coincidence**: the nineteen added no `void *` parameter, so none of them joined
-the heap-handle set, and all nineteen are in `fire_runtime.c`, which the dylib
+coincidence**: the twenty added no `void *` parameter, so none of them joined
+the heap-handle set, and all twenty are in `fire_runtime.c`, which the dylib
 links on every path — so the *unexported* remainder stayed at 56 of a larger
-total. A reader who checks the arithmetic (`281 − 225 = 56`,
-`225 − 185 = 40`) is checking the two claims this table makes about WHY the
+total. A reader who checks the arithmetic (`282 − 226 = 56`,
+`226 − 186 = 40`) is checking the two claims this table makes about WHY the
 surface stops where it does, not just the numbers.
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
@@ -1241,7 +1242,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **281 of 696** entry points are word-in/word-out
+yet for any actual export. **282 of 697** entry points are word-in/word-out
 (§2.2) and **184** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the

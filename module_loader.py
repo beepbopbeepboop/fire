@@ -147,7 +147,7 @@ def _ml_ann_char(c) -> bool:
     return c.isalnum() or c == '_' or c == '.' or c == '[' or c == ']' or c == ',' or c == ' '
 
 
-def _ml_container_global(line: str) -> list:
+def _ml_container_global(line: str) -> list[str]:
     """`[name, annotation, opener]` for a column-0 `NAME[: ANN] = {` or `= [`
     line, else `[]` -- what `^NAME\\s*(?::\\s*ANN)?\\s*=\\s*([\\{\\[])` matched,
     ANN being `[A-Za-z_][\\w.\\[\\], ]*` (returned stripped)."""
@@ -158,7 +158,7 @@ def _ml_container_global(line: str) -> list:
     j = k
     while j < n and _ml_is_space(line[j]):
         j += 1
-    ann = ''
+    ann: str = ''
     if j < n and line[j] == ':':
         j += 1
         while j < n and _ml_is_space(line[j]):
@@ -181,7 +181,7 @@ def _ml_container_global(line: str) -> list:
     return []
 
 
-def _ml_from_imports(content: str) -> list:
+def _ml_from_imports(content: str) -> list[str]:
     """`[module, names_blob, module, names_blob, ...]` for every column-0
     `from MOD import (a, b)` (the blob is what the parentheses hold, which may
     span lines), followed by every column-0 `from MOD import a, b` (the rest of
@@ -228,7 +228,7 @@ def _ml_from_imports(content: str) -> list:
     return out_paren + out_plain
 
 
-def _ml_idents(text: str) -> list:
+def _ml_idents(text: str) -> list[str]:
     """Every `[A-Za-z_][A-Za-z0-9_]*` in `text`, in order."""
     out: list = []
     n = len(text)
@@ -948,9 +948,9 @@ class ModuleLoader:
                     _cm = _ml_container_global(_ls)
                     if not _cm or _cm[0] in exports:
                         continue
-                    _nm = _cm[0]
-                    _ann = _cm[1]
-                    _open = _cm[2]
+                    _nm = _ml_as_str(_cm[0])
+                    _ann = _ml_as_str(_cm[1])
+                    _open = _ml_as_str(_cm[2])
                     _annb = _ann.split('[', 1)[0].strip().lower()
                     if _annb in ('dict', 'mapping'):
                         _crt = 'MojoDict *'
@@ -988,8 +988,8 @@ class ModuleLoader:
                 # sibling's own home accessor.
                 _reexp = _ml_from_imports(content)
                 for _rxi in range(0, len(_reexp) - 1, 2):
-                    _srcmod = _reexp[_rxi]
-                    _names_blob = _reexp[_rxi + 1]
+                    _srcmod = _ml_as_str(_reexp[_rxi])
+                    _names_blob = _ml_as_str(_reexp[_rxi + 1])
                     _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
                     if not os.path.isfile(_sib) or _sib == path:
                         continue

@@ -2129,6 +2129,7 @@ char *int64_t_basename(char *path);    /* basename() from os.path */
 char *int64_t_splitext(char *path);    /* splitext() from os.path */
 char *int64_t_expanduser(char *path);  /* expanduser() from os.path */
 char *int64_t_realpath(char *path);    /* Path.resolve()-style realpath (strict=False) */
+int int_samefile(char *a, char *b);    /* os.path.samefile: same st_dev/st_ino; raises when a path cannot be stat'ed */
 int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 /* str.replace() — macro to suppress implicit int/pointer conversion warnings */
 #define char_replace(s, old, new) _char_replace_impl((int64_t)(s), (int64_t)(old), (int64_t)(new))

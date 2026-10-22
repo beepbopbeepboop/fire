@@ -10696,6 +10696,19 @@ char *int64_t_realpath(char *path) {
     return strdup(path);
 }
 
+/* os.path.samefile(a, b): the two paths name the same file -- same device
+ * and inode, which is Python's own definition (it stats both). A path that
+ * cannot be stat'ed raises FileNotFoundError, as CPython's does. Without a
+ * lowering the call was stubbed to 0, so the self-hosted compiler never
+ * recognised its own source directory and skipped every python-sibling
+ * export it scans only there (the generated_dispatch tables). */
+int int_samefile(char *a, char *b) {
+    struct stat sa, sb;
+    if (!a || stat(a, &sa) != 0) mojo_raise_file_not_found(a);
+    if (!b || stat(b, &sb) != 0) mojo_raise_file_not_found(b);
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
 /* os.path.splitext(path) -> (root, ext). Codegen (see the os.path.splitext
  * call site in gimple_codegen.py) treats this function's return value as
  * the root and builds a [root, ""] list around it — but this returned

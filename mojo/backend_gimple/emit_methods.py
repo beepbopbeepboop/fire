@@ -2304,6 +2304,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 for a in node.args[1:]: gen.lower_expr(a)
                 return arg_type, arg_val
+            elif outer_member == 'samefile' and len(node.args) == 2:
+                # os.path.samefile(a, b) -- stats both (int_samefile). It had
+                # no case here and fell to the scalar stub, `0`, so the
+                # self-hosted compiler never recognised its own source
+                # directory (module_loader's python-sibling gate).
+                _sa_t, _sa_v = gen.lower_expr(node.args[0])
+                _sb_t, _sb_v = gen.lower_expr(node.args[1])
+                t = gen._call_expr('int', 'int_samefile',
+                                   [(_sa_t, _sa_v), (_sb_t, _sb_v)])
+                return '_Bool', gen._new_val('_Bool', f'{t} != 0')
             elif outer_member == 'realpath' and len(node.args) == 1:
                 # os.path.realpath(p) — real runtime support via POSIX
                 # realpath(3) (int64_t_realpath, already used by the

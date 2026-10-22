@@ -282,11 +282,13 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
         # the third field here (the set of names each sibling calls) then
         # can't be iterated (`mojo_unsupported_iter` at the sibling-merge
         # loop, silently zeroing out the shared-env grouping under
-        # MOJO_NO_SHIM=1). `_sib_calls_flat` maps sibling name -> its called
-        # names joined on NUL, so the merge pass re-`split`s a fresh local
-        # list-of-str that iterates cleanly.
+        # MOJO_NO_SHIM=1). `_sib_calls` maps sibling name -> the sorted names
+        # it calls, a typed `list[str]` the merge pass iterates directly. (It
+        # used to be a NUL-joined string re-`split` there: the compiled
+        # compiler's C string ended at the first NUL, and the split's fresh
+        # list was freed with the strings the adjacency lists had kept.)
         _sibling_names: list = []
-        _sib_calls_flat: dict = {}   # inner.name -> "\x00"-joined called names
+        _sib_calls: dict[str, list[str]] = {}
         for stmt in _gmi_all_stmts_nonfunc(body):
             if not isinstance(stmt, FunctionDef):
                 continue
@@ -464,8 +466,17 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 # counts as "named", so the transitive fixup below will not
                 # re-add it under a different convention.
                 _cap_convs.setdefault(_cn, _cc)
-            _called_names = {nd.func.name for nd in _walk_ast(inner_body)
-                              if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
+            # An explicit loop into a list of `_as_str` views: the set
+            # comprehension over an untyped walk handed the join below boxed
+            # words, and the sibling call graph came out empty in the
+            # compiled compiler.
+            _called_list: list[str] = []
+            for nd in _walk_ast(inner_body):
+                if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr):
+                    _cnm0 = _as_str(nd.func.name)
+                    if _cnm0 not in _called_list:
+                        _called_list.append(_cnm0)
+            _called_names = set(_called_list)
             _transitive_mut: set = set()
             for _called in _called_names:
                 _t_api = ctx._nested_async_api.get(f"{outer_name}::{_called}")
@@ -496,10 +507,12 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 ci.mut_names = frozenset(set(ci.mut_names) | _explicit_mut)
             if outer_name not in ctx._all_closures:
                 ctx._all_closures[outer_name] = {}
-            ctx._all_closures[outer_name][inner.name] = ci
+            # Keyed by the `_as_str` view: the call-group merge below looks
+            # members up by `_as_str` names, and a key stored from the raw
+            # (boxed) field missed there in the compiled compiler.
+            ctx._all_closures[outer_name][_as_str(inner.name)] = ci
             _sibling_names.append(_as_str(inner.name))
-            _sib_calls_flat[_as_str(inner.name)] = '\x00'.join(
-                sorted(_as_str(_cnm) for _cnm in _called_names))
+            _sib_calls[_as_str(inner.name)] = sorted(_called_list)
             if inner.return_type is not None:
                 ctx.func_return_types[lifted] = ctx._resolve_type(inner.return_type)
             else:
@@ -533,10 +546,10 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             _adj: dict[str, list] = {}
             for _n in _names_here:
                 _adj[_as_str(_n)] = []
-            for _nk, _cf in _sib_calls_flat.items():
+            for _nk in _sib_calls:
                 _n = _as_str(_nk)
-                _cf = _as_str(_cf)
-                for _m0 in _cf.split('\x00'):
+                _calls: list[str] = _sib_calls[_n]
+                for _m0 in _calls:
                     _m = _as_str(_m0)
                     if _m and _m in _names_here and _m != _n:
                         if _m not in _adj[_n]:

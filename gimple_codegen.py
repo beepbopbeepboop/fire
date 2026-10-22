@@ -676,7 +676,10 @@ def _selfhost_syms():
 # check-selfhost's own compile of this file's `_AMBIGUOUS_FUNC_HOME =
 # object()` tried to lower it as a call to an undefined C symbol `_object`,
 # per this project's "self-host every codegen-affecting change" gate).
-_AMBIGUOUS_FUNC_HOME = '\x00__SB1_AMBIGUOUS_FUNC_HOME__\x00'
+# `\x1f`-delimited, never NUL: the compiled compiler's literal for a
+# NUL-led string is the EMPTY string, which then compared equal to every
+# unset qualifier.
+_AMBIGUOUS_FUNC_HOME = '\x1f__SB1_AMBIGUOUS_FUNC_HOME__\x1f'
 
 # Matches a literal `sys.path.insert(<int>, "<string>")` / `(..., '...')` call
 # in Mojo source text. This compiler never executes anything, so a runtime
@@ -3377,6 +3380,7 @@ class GimpleGen:
         'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
         'int64_t_expanduser':    ('char *',    ['char *']),  # os.path.expanduser(path)
         'int64_t_realpath':      ('char *',    ['char *']),  # os.path.realpath(path)
+        'int_samefile':          ('int',       ['char *', 'char *']),  # os.path.samefile(a, b)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
         'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)

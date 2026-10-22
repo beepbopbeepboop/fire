@@ -30,6 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _as_vardecl_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
+    method_receiver_kind,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -8051,6 +8052,14 @@ def gen_module_impl(self, stmts):
                             continue  # skip **kwargs
                         if pname == 'self':
                             param_ctypes.append(f"{s.name} *")
+                        elif i == 0 and method_receiver_kind(m) == 'cls':
+                            # A @classmethod's receiver is the opaque int64_t
+                            # class slot, never a value any call site's
+                            # evidence describes: the compiled compiler typed
+                            # `TypeLattice.join_all`'s `cls` `char *` (the
+                            # first argument of a `cls.join(a, b)` call landed
+                            # on it), the reference left it int64_t.
+                            param_ctypes.append('int64_t')
                         else:
                             # Usage/call-site inference for struct methods is
                             # stored under the QUALIFIED "Struct_method" key,
@@ -13046,8 +13055,8 @@ def gen_module_impl(self, stmts):
         # already in that list.
         _seed = set()
         for _e in self._module_globals[current_mod_name]:
-            _seed.add(_as_str(_e[0]) + '\x00' + _as_str(_e[1])
-                      + '\x00' + _as_str(_e[2]))
+            _seed.add(_as_str(_e[0]) + '\x1f' + _as_str(_e[1])
+                      + '\x1f' + _as_str(_e[2]))
         self._module_global_names[current_mod_name] = _seed
     # The dispatch-table names this module declares ONLY because a
     # `from <owner> import NAME` of one reached the FromImportStmt branch
@@ -13741,8 +13750,8 @@ def gen_module_impl(self, stmts):
             # "'LayoutSolver_STACK' undeclared" behind). Same policy as
             # before, working comparison.
             _mg_seen = self._module_global_names[current_mod_name]
-            _mg_key = (_gname_s + '\x00' + _as_str(c_type)
-                       + '\x00' + _as_str(g_mtype))
+            _mg_key = (_gname_s + '\x1f' + _as_str(c_type)
+                       + '\x1f' + _as_str(g_mtype))
             if _mg_key not in _mg_seen:
                 _mg_seen.add(_mg_key)
                 # `_gname_s` (the `_as_str`'d name), NOT the raw `gname` from
