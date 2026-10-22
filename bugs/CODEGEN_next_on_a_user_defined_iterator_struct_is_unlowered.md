@@ -2104,3 +2104,107 @@ empty. The measured remainder is the 7 above plus the floor-green `test_set`
 (ladder-red on A-F); none of them is a stub or a silent green — every one
 fails a real `gcc -c`/codegen/link with a named, per-file reason, which is
 the state this dict exists to declare.
+
+## 2026-10-22 (further, part 4): the out-res factory subpath lifts
+chain/zip, the pyobj-list arm lifts test_python_object — declared-red
+8 -> 5, sweep 602/8 -> 605/5
+
+### The 3 lifts (each with its measured mechanism)
+
+1. `test/iter/test_chain.mojo` and `test/iter/test_zip.mojo` — the part-4
+   **variadic + out-parameter factory seed subpath** (the out-res seed):
+   `chain`/`zip` are `*iterables: *Ts, out res:
+   _ChainedIterator[*inners]` / `_ZipIterator[*inners]` — the subpath binds
+   the N container arguments to N inner iterators and threads the dependent
+   `out res` return through the wrapper's borrowed overload
+   (iter_factory's `variadic_meta` carries the seed-only element knowledge).
+   Before: `next(it)` hard refusal, receiver `int64_t` (chain, in
+   `test_chain_ref`) / `void *` (zip, in `test_zip2`) — the `out res` never
+   constructed. After: both modules compile; the value ladders were re-run
+   this session with parity to 2026-10-21 — chain PASS 4/4; zip 11/12
+   (`test_zip_bounds` FAIL-REAL, words 0 / 4294967298 — a real runtime value
+   assert, not a gate regression).
+2. `test/python/test_python_object.mojo` — the part-4 **pyobj-list seed arm**
+   (emit_calls): a `PythonObject.__iter__()` call as the loop's container
+   argument lowers through the RECEIVER's box, which IS the MojoList *
+   pointer (measured: the runtime method dispatch unboxes it the same way);
+   the borrowed inner construction then runs on the public representation
+   exactly as for a list local. Before: `next(<MojoList *>)` — a raw
+   container pointer, hard refusal in `test_iter`.
+
+### The 3 shape-mismatch fixes (this session; the pre-shape-fix part-4
+sweep was 602/8 with exactly these 3 unexpected)
+
+1. `std/collections/string/_parsing_numbers/parsing_floats.mojo` and
+   `std/benchmark/_progress.mojo` — **Shape-B materialization**
+   (emit_resolve `_sce_simple_emit`): a `MojoTuple_*`-typed local or field
+   assigned from a list value materializes by FIELD READS through the
+   runtime getters (`mojo_list_get_int`/`double`/`str` by field ctype) into
+   same-type temps plus plain stores (the -fgimple component-ref rule
+   forbids storing a cast result through `.`/`->`). `_progress` additionally
+   needed the **real-list default** (calls_shared `_default_expr_to_pair`):
+   a `(80, 24)` default for a `MojoTuple_`-annotated param now builds the
+   real runtime list (measured: the struct then reads 80/24 through the
+   materialization) instead of the zero word the materialization would have
+   read from a NULL list.
+2. `std/simd.mojo` — the **`Self`-parameter registration** fix: a
+   `Self`-annotated param (`def eq(self, rhs: Self)`) erased to the p3
+   int64_t word in the `func_param_types` registration while the definition
+   emits `SIMD *`; `_emit_call` saw ptype==atype and skipped the cast, and
+   gcc flagged the raw word arg against the real `SIMD *` prototype (3
+   sites in `__divmod__`: `denominator.eq(0)` / `.lt(0)`). Fixed in all
+   THREE registration sites that must agree (funcs_shared `_signature_
+   ctypes`, module_gen's earlier struct-method loop, module_gen's LATER
+   struct-method loop — the last ran last and was the stale overwriter;
+   its value feeds `_struct_method_csym`'s bare->qualified setdefault
+   mirror, which every pre-definition call site reads through `_emit_
+   call`). Measured gcc-mp-15 -fgimple quirk: a word arg to a struct-
+   pointer param is diagnosed ONLY in a pointer-returning function — p3's
+   int64-returning divmod hid the identical shape, so the explicit
+   `(SIMD *)` cast is p3's value made explicit, not a behaviour change.
+   An interim aggressive word->pointer upgrade in `_emit_call` was
+   REVERTED: it caused 2 regressions (`std/collections/string/string.mojo`
+   and `std/python/_cpython.mojo`, "makes integer from pointer" —
+   `mangled_sig` is not always the correct answer when the definition's
+   real param type is a word); the registration-side fix is the root fix,
+   and both regression files re-verify 0-error on fresh uncached
+   generation.
+
+### Where the population stands now (measured, final code, 2026-10-22)
+
+Sweep **605 PASSED / 5 FAILED — 5 expected, 0 unexpected, 0 stale** (was
+602/8 at the part-3 close with all 8 expected; the pre-shape-fix part-4
+sweep was 602/8 + 3 stale = the 3 lifts above). Warn set: 19 files / 294
+warnings — BYTE-IDENTICAL between the pre-fix part-4 sweep and this
+sweep (the session's fixes are warning-neutral); it moved from the
+part-3 baseline 15/248 with the part-4 changeset itself (before this
+session): +4 files (std/utils/coord 1, test/ffi/test_unsafe_union 15,
+test/utils/test_coord 7, test/utils/test_variant 19) and
+test/builtin/test_device_passable 7 -> 11. A/B fresh-process 610 vs the
+part-3 baseline: 605 C / 5 E, C->E 0, E->C 3 (the lifts above), C->C 123
+(the whole part-4 changeset), removed-symbol hazard 0; vs the pre-fix
+part-4 snapshot: C->C 39, of which 5 are byte-identical to the true
+pre-fix C (that snapshot's own stale cache entries for the 5 typedef
+files) and the other 34 are the Self-registration overload-suffix /
+extern-prototype / call-cast churn plus the materialization — no new
+function classes. no-new-casts 17 -> 19 (2 deliberate measured unboxes,
+ledger entries in `test_no_new_container_casts.py`).
+
+The 5 declared-red entries (the part-3 table minus the 3 lifts; the
+product row remeasured this session — the refusal relocated):
+
+| shape | files (emitting function, measured receiver) |
+|---|---|
+| method-call dependent return (`s.bytes()` on a local `StringSlice`) | `test_iterators` (`test_bytes_iter_empty`, `int64_t`) |
+| thin-FUNCTION type argument — one cross-module test remains | `test_map` (`test_map_function_can_take_owned_value`, `int64_t` — the CopyCounter container gate refusal; the scratch ladder 2/2 stands) |
+| local-fn-call container returning a user-defined `IterableOwned` (R2 sibling) | `test_cycle` (`test_cycle_owned`; 15/17 sites work with real values) |
+| two-container product — the OWNED local-fn-call arguments (R2 sibling) | `test_product` (`test_product2_owned`, `int64_t` — the non-owned `test_product2`/`_param`/`_unequal`/`_copies` now lower) |
+| cross-stdlib `stat` + the out-param result model (R2 doc) | `test_getsize` (gcc -c: implicit declaration of `stat`) |
+
+### Acceptance (unchanged, still unmet)
+
+The census must reach 0 sites and the declared `EXPECTED_FAILURES` must
+empty. The measured remainder is the 5 above plus the floor-green
+`test_set` (ladder-red on A-F); none of them is a stub or a silent green
+— every one fails a real `gcc -c`/codegen/link with a named, per-file
+reason, which is the state this dict exists to declare.

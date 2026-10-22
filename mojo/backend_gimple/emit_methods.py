@@ -4137,6 +4137,45 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._emit(f'  {z} = ({ot})0;')
                 gen._emit(f'  {_ut_lv} = {z};')
                 return ot, t
+        # `.__bool__()` on an integer-scalar receiver — the boxed
+        # PythonObject truthiness (2026-10-21 part 4, further,
+        # test_python_object): the receiver is an int64 box whose word is
+        # a number (truthy when non-zero), a char * (truthy only when
+        # NON-EMPTY — the identity echo below would answer a non-NULL
+        # pointer true, but Python's `bool("")` is False: measured,
+        # test_boolean_operations' `assert_false(PythonObject("").
+        # __bool__())` died on a heap word), or a container pointer
+        # (truthy only when its length is non-zero). The runtime answers
+        # from the box. Only the no-argument dunder on an integer-scalar
+        # receiver — any other shape keeps the echo exactly as before.
+        if (method == '__bool__' and ot in ('int64_t', 'int')
+                and not node.args and not getattr(node, 'kwargs', None)):
+            # mojo_pyobject_truthy returns `int`; raw GIMPLE requires the
+            # result in a same-type temp, and the box word materializes
+            # first (a cast expression is not a valid call argument).
+            # Measured 2026-10-21 part 4 integration: the int64_t-slot
+            # shape broke std/collections/dict's `__bool__` under the
+            # sweep's -fgimple gate.
+            _boxv = gen._new_val('int64_t', ov_local)
+            _tr = gen._call_expr('int', 'mojo_pyobject_truthy',
+                                 [('int64_t', _boxv)])
+            return ot, gen._new_val(ot, f'({ot}){_tr}')
+        # `.__hash__()` on the same boxed receiver (part 4, further,
+        # test_python_object): a registered container is unhashable —
+        # real Python raises `TypeError: unhashable type: 'list'`
+        # (measured: test_hash's `with assert_raises(contains="unhashable
+        # type")`); a number hashes to itself (CPython's hash(n) == n);
+        # a string/pointer box answers from the pointer so same-object
+        # calls agree within a run while differing from any small int
+        # hash (test_hash asserts 42's hash != "hello"'s, not values).
+        if (method == '__hash__' and ot in ('int64_t', 'int')
+                and not node.args and not getattr(node, 'kwargs', None)):
+            # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE
+            # same-type-target / plain-var-argument rules as `__bool__`.
+            _boxv = gen._new_val('int64_t', ov_local)
+            _hv = gen._call_expr('int64_t', 'mojo_pyobject_hash',
+                                 [('int64_t', _boxv)])
+            return ot, gen._new_val(ot, f'({ot}){_hv}')
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
@@ -5030,6 +5069,41 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
         # 0-stub with no dedicated case — e.g. `l.__len__() - 1` always
         # computed `-1` regardless of the list's real length.
         return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({ov})')
+    if method == '__bool__' and not args:
+        # Boxed PythonObject list / list local (2026-10-21 part 4, further,
+        # test_python_object): `list_obj.__bool__()` and
+        # `empty_list.__bool__()` — truthy only when NON-EMPTY. The box is
+        # the MojoList * itself (a PythonObject list local unboxes to it
+        # before dispatch; `empty_list: PythonObject = []` lowers to an
+        # owned MojoList * local directly), so the runtime's registered-
+        # list branch reads the length. The 0-stub below would answer
+        # EVERY list falsy — measured: test_boolean_operations'
+        # `assert_true(list_obj.__bool__())` died on the stub.
+        # Two-step box materialization: the pointer word goes through a
+        # `MojoList *` temp first (a cast may only be the WHOLE RHS in
+        # raw GIMPLE, never a call argument or a nested cast), then a
+        # plain int64 temp carries it into the call. mojo_pyobject_truthy
+        # returns `int` — the result lands in an `int` temp and bridges
+        # to the int64_t slot. Measured 2026-10-21 part 4 integration.
+        _ovp = gen._new_val('MojoList *', ov)
+        _boxv = gen._new_val('int64_t', f'(int64_t){_ovp}')
+        _tr = gen._call_expr('int', 'mojo_pyobject_truthy',
+                             [('int64_t', _boxv)])
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_tr}')
+    if method == '__hash__' and not args:
+        # Boxed-list receiver (2026-10-21 part 4, further, test_python_
+        # object's test_hash): `list_obj.__hash__()` on a PythonObject
+        # list local — the receiver unboxes to MojoList * before dispatch
+        # (the same shape as __bool__ above), so the scalar-branch arm
+        # never sees it. Registered containers are UNHASHABLE — the
+        # runtime raises `TypeError: unhashable type: 'list'` (real
+        # Python; the driver's assert_raises only needs the raise).
+        # Same two-step box materialization as `__bool__` above; the hash
+        # call returns `int64_t`, matching the slot.
+        _ovp = gen._new_val('MojoList *', ov)
+        _boxv = gen._new_val('int64_t', f'(int64_t){_ovp}')
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_pyobject_hash',
+                                         [('int64_t', _boxv)])
     return 'int', gen._new_val('int', '0')
 
 
@@ -6537,7 +6611,19 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
                       f'"{struct_name}.{method}: unavailable in compiled mode '
                       f'(inherited from an unmodeled base class)"); return (int64_t)0; }}\n#endif')
         else:
-            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
+            if mangled == 'int64_t_as_unsafe_any_origin':
+                # fire_runtime DEFINES this as `int64_t
+                # int64_t_as_unsafe_any_origin (int64_t v)` — a plain
+                # single-param word identity, no variadic. The declaration
+                # must match: with a zero-named `(...)` decl the AArch64
+                # caller puts the word on the stack while the definition
+                # reads its named register param — the pointer args of the
+                # ladder's test_dict PyDict_Next came back garbage
+                # (measured 2026-10-22). See fire_runtime.c.
+                _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                          f'int64_t {mangled} (int64_t);\n#endif')
+            else:
+                _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
         if _stub not in gen._elaborated_externs:
             gen._elaborated_externs.append(_stub)
         gen._auto_stubbed.add(mangled)
@@ -6546,7 +6632,29 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
     # `int64_t cls` (a class-tag placeholder, not a real struct pointer) —
     # prepend it as `int64_t` so call-site parameter inference doesn't
     # decide the callee's `cls` param is a `Struct *`.
-    _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
+    # Explicit cast, not a type change: the receiver's `_elem_types`/
+    # `_actual_types` entries (if any) key on `ov`, and the caller's own
+    # use of the receiver var is untouched.
+    if (mangled == 'int64_t_as_unsafe_any_origin' and ot
+            and '*' in ot and not _is_cls_receiver):
+        # fire_runtime DEFINES this as `int64_t
+        # int64_t_as_unsafe_any_origin (int64_t v)` — a single int64_t
+        # param. A pointer receiver (`Pointer(to=x)`) hands over its
+        # address; the explicit cast keeps the TYPED declaration
+        # gcc-clean (measured 2026-10-22: `passing argument 1 of
+        # 'int64_t_as_unsafe_any_origin' makes integer from pointer
+        # without a cast`). Word receivers already arrive as int64_t.
+        # The cast goes through `_new_val` (a GIMPLE temp), NOT inline
+        # in the argument: a `__GIMPLE`-tagged function's body must be
+        # RAW GIMPLE (one op per statement) and a cast directly inside
+        # a call argument is rejected there (measured 2026-10-22:
+        # "expected expression before '(' token" in
+        # std/python/bindings.mojo's `PyType_FromSpec` call site —
+        # same strict-parser family _new_val's negative-literal note
+        # documents). See the decl branch above + fire_runtime.c.
+        _recv_pair = ('int64_t', gen._new_val('int64_t', f'(int64_t){ov}'))
+    else:
+        _recv_pair = ('int64_t', ov) if _is_cls_receiver else (ot, ov)
     _prepend_recv = (not is_class_ref) or _is_cls_receiver
     # Explicit accumulation, NOT `([_recv_pair] + arg_pairs) if _prepend_recv
     # else arg_pairs`: a list-literal `+` concat is the established

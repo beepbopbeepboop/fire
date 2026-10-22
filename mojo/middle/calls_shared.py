@@ -368,6 +368,20 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
+        # part 4 (measured 2026-10-22, _progress's `_get_terminal_size()`):
+        # a tuple-literal default padded into a call whose param is a
+        # synthesized by-value `MojoTuple_*` struct must be the REAL tuple,
+        # not the historical null/zero pair. That param's coercion is the
+        # list->struct materialization in `_sce_simple_emit`, which reads the
+        # list's slots — a NULL list (the old `('int64_t', '0')` padded word)
+        # would read from address 0 and the `(MojoList *)((int64_t)0)` cast it
+        # required was itself invalid GIMPLE. Lower the literal to its runtime
+        # list (the identical representation a `return (80, 24)` uses) and let
+        # the coercion materialize the struct. Gated on the struct param so the
+        # change cannot disturb the other (already-working) padding sites.
+        _pc = _as_cstr(param_ctype) if param_ctype is not None else ''
+        if _pc.startswith('MojoTuple_'):
+            return gen.lower_expr(_dflt)
         return _null_default_pair(param_ctype, int_ctype='int64_t')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('True',):
         return ('int', '1')
@@ -746,3 +760,51 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _none = gen._intern_string('None')
         return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
+
+
+def _py_box_expr(gen, node):
+    """Does this expression STATICALLY produce a PythonObject box word?
+
+    Returns (is_box, holds_double_bits) for the box-binform dispatch
+    (2026-10-21 part 4, further, test_python_object): a binary op is
+    routed to the runtime's boxed-word class checks only when at least
+    one operand is provably a box, so ordinary int64 arithmetic in every
+    other file keeps its exact lowering. The shapes:
+
+    - `PythonObject(...)` — the constructor itself; the DOUBLE-BITS flag
+      is set when its argument is a float literal (`PythonObject(0.123)`
+      stores the IEEE pattern, not a value).
+    - an IdentExpr local recorded in `gen._pybox_vars` — the recording
+      sites (emit_stmts) are the `var x = PythonObject(...)` declaration
+      and every assignment whose value is itself a box expression, so
+      `c = a / b; c / 2` stays tracked (a truediv result is always double
+      bits and lands in `gen._pybox_double_vars` too).
+    - a BinaryOp/UnaryOp whose operand is a box — box arithmetic and
+      unary ops produce boxes (`-a` on a box is a box).
+    """
+    if node is None:
+        return False, False
+    tn = type(node).__name__
+    if tn == 'CallExpr':
+        f = getattr(node, 'func', None)
+        args = getattr(node, 'args', None) or ()
+        if (type(f).__name__ == 'IdentExpr' and f.name == 'PythonObject'
+                and len(args) == 1):
+            a = args[0]
+            dbl = (type(a).__name__ == 'FloatLiteral'
+                   or (type(a).__name__ == 'IntLiteral'
+                       and isinstance(getattr(a, 'value', None), float)))
+            return True, dbl
+    if tn == 'IdentExpr':
+        if node.name in getattr(gen, '_pybox_vars', ()):
+            return True, node.name in getattr(gen, '_pybox_double_vars', ())
+        return False, False
+    if tn == 'BinaryOp':
+        lb, ld = _py_box_expr(gen, getattr(node, 'left', None))
+        rb, rd = _py_box_expr(gen, getattr(node, 'right', None))
+        if lb or rb:
+            return True, (getattr(node, 'op', None) == '/') or ld or rd
+        return False, False
+    if tn == 'UnaryOp':
+        return _py_box_expr(gen, getattr(node, 'operand', None))
+    return False, False

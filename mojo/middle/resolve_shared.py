@@ -31,6 +31,7 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
+    _body_builds_struct_tuple,
 )
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
@@ -1959,7 +1960,44 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
             if better_ret != 'int64_t':
+                if (isinstance(better_ret, str)
+                        and better_ret.startswith('MojoTuple_')
+                        and not _body_builds_struct_tuple(
+                                getattr(s, 'body', None))):
+                    # The SAME body-sensitive decision every other
+                    # `Tuple[...]` return site makes (see
+                    # register_imported_symbol / module_gen's
+                    # all-functions loop / _elab_signature): a body that
+                    # builds the tuple as a RUNTIME (list-backed) tuple
+                    # literal returns `MojoList *`. Without this this
+                    # refinement overwrites _elab_signature's guarded
+                    # `MojoList *` back into the struct (measured 2026-10-21
+                    # part 4 integration: test_location's
+                    # `get_call_locs_inlined_twice` forwards
+                    # `get_call_locs_inlined[depth]()`, its local stayed
+                    # `MojoList *`, and the call-site assignment became
+                    # `cannot convert to a pointer type`).
+                    better_ret = 'MojoList *'
                 info['ret'] = better_ret
+                if isinstance(better_ret, str) and better_ret.startswith(
+                        'MojoTuple_'):
+                    # Part 4 (measured 2026-10-21 integration): the
+                    # by-value struct for a `Tuple[...]` return must exist in
+                    # EVERY translation unit that references it, not only the
+                    # instantiating one — the caller's extern and call-site
+                    # temps are by-value, so its TU needs the typedef or gcc
+                    # rejects the unit with `unknown type name 'MojoTuple_...'`
+                    # (test_builtin/test_tuple's `_default_construct[T:
+                    # Tuple[Int, String]]` and test_location's
+                    # `get_call_locs_inlined_twice` both left their struct
+                    # name in the CALLER's TU with no registration).
+                    # `_ensure_tuple_struct` is idempotent and `ret_ann` is
+                    # the very annotation `better_ret` was resolved from, so
+                    # the registered layout and the name agree by
+                    # construction; the typedef emission pass (module_gen's
+                    # `struct_field_types` loop) runs AFTER the bodies, so a
+                    # registration made here is seen by it.
+                    gen._ensure_tuple_struct(ret_ann)
             break
 
 def _is_none_literal(el) -> bool:

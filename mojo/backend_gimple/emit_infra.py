@@ -533,6 +533,16 @@ def _reset_func(gen, body: list = None, params: list = None,
         if _gek_s not in _reset_locally_bound:
             gen._elem_types[_gek_s] = _as_str(gen._global_elem_types[_gek])
     gen._nested_elem_types: dict[str, str] = {}
+    # locals whose PythonObject box holds a double LITERAL's bits (part 4,
+    # further, test_python_object): `var py_float = PythonObject(0.123...)`
+    # — recorded in _gen_stmt_VarDecl, read by the `Float64(py=<local>)`
+    # ctor arm, which must BITCAST the word rather than convert its value.
+    gen._pybox_double_vars = set()
+    # every local whose value statically produces a PythonObject box (the
+    # broader set above; see _py_box_expr in calls_shared) — the box-binform
+    # dispatch gate (emit_exprs) and the truediv double-bits fallback both
+    # read it.
+    gen._pybox_vars = set()
     # Per-function, keyed by C temp/value NAMES (`_t40`, ...) which repeat
     # across functions — so a stale entry (e.g. `_dict_items_val_elems
     # ['_t40'] = 'int'` from a `sorted(d.items())` in an earlier function)
@@ -1056,6 +1066,24 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
                     ret = _pin[0]
                     ptypes = list(_pin[1])
                     sig = f"{ret} {name} ({', '.join(ptypes)})"
+            if isinstance(ret, str) and ret.startswith('MojoTuple_'):
+                # Part 4 (measured 2026-10-21 integration, `split`'s
+                # `-> Tuple[String, String]`): the export text scan resolves a
+                # `Tuple[...]` RETURN annotation to the synthesized by-value
+                # struct, but the defining unit made the body-sensitive
+                # decision (a body that builds the tuple as a RUNTIME
+                # list-backed literal returns `MojoList *`) and published
+                # that answer for its own definition — it must win, or this
+                # `_MOJO_STUB_` extern disagrees with the definition's own
+                # prototype. A defining unit that never compiled in this
+                # closure publishes nothing; `MojoList *` is the only shape a
+                # runtime tuple literal has, so it is the honest fallback.
+                _home_ret = gen._func_return_type_for_call(name, None)
+                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                    ret = _home_ret if _home_ret else 'MojoList *'
+                    _tail = sig.split(None, 1)
+                    if len(_tail) == 2:
+                        sig = ret + ' ' + _tail[1]
             gen.func_return_types[sym] = ret
             gen.func_param_types[sym] = ptypes
             gen.imported_symbols[sym] = {
@@ -1846,7 +1874,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             param_types = mangled_sig
         if param_types is None:
             param_types = mangled_sig or []
-
 
     # If function takes *args, pack variadic args into a MojoList*
     # '...' = free function varargs (pack all args)
@@ -3855,7 +3882,14 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     sets on the pair list it builds (`_elem_types` = 'MojoList *' +
     `_nested_elem_types` = ['int64_t', elem]) — that is what routes the
     print to the pair-aware `mojo_repr_list_pairs` (measured baseline C:
-    `mojo_repr_list_pairs (z)` for the old materialized pair list). The
+    `mojo_repr_list_pairs (z)` for the old materialized pair list). A
+    wrapper whose `__next__` answers a BY-VALUE `MojoTuple_...` struct
+    (the part-4 struct-tuple zip — measured 2026-10-22, gimplerunner
+    `print(zip([0, 1], [2, 3]))`: the spliced zip body's `var res:
+    Self.Element` is a real pass-by-value struct) gets each element
+    materialized as a runtime marked pair list instead (the same
+    representation `mojo_zip` builds), because a by-value struct cannot
+    be the argument of the word append. The
     materialization CONSUMES the iterator — that is the print contract
     (and `len()` deliberately does NOT route through here; it reads the
     non-consuming `bounds()` upper instead, see _lower_builtin_len).
@@ -3876,19 +3910,67 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
     gen._emit(f'  if ({fnz}) goto {bb_exc}; else goto {bb_body};')
     gen._emit_label(bb_body)
     nxsym = gen._struct_method_csym(csn, '__next__', '')
-    e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
-    gen._void_call('mojo_list_append_int', [('MojoList *', out), ('int64_t', e64)])
+    _ret = gen.func_return_types.get(nxsym, 'int64_t')
+    _pair_by_value = False
+    if isinstance(_ret, str) and _ret.startswith('MojoTuple_'):
+        # A BY-VALUE tuple element (measured 2026-10-22, gimplerunner
+        # `print(zip([0, 1], [2, 3]))`): the part-4 struct-tuple `__next__`
+        # — the spliced zip body's `var res: Self.Element` — answers the real
+        # pass-by-value `MojoTuple_...` struct, not a word. The word append
+        # above cannot take it (gcc: `incompatible types ... from
+        # 'MojoTuple_...'`). Each element is materialized as a RUNTIME pair
+        # list in `mojo_zip`'s own idiom — fresh list, the raw element words,
+        # the tuple mark — so the generic repr's pair walker recognizes it
+        # (the same marked-pair representation the old `mojo_zip` lowering
+        # printed through). The pair's element words come from the tuple
+        # struct's registered fields, in declaration order.
+        tup = gen._new_val(_ret, f'{nxsym} ({w})')
+        _flds = list((gen.struct_field_types.get(_ret) or {}).keys())
+        _pair_by_value = False
+        if _flds:
+            _pair_by_value = True
+            _pair = gen._new_temp('MojoList *')
+            gen._emit(f'  {_pair} = mojo_list_new ();')
+            for _f in _flds:
+                gen._void_call('mojo_list_append_int', [
+                    ('MojoList *', _pair),
+                    ('int64_t', f'(int64_t){tup}.{_f}')])
+            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _pair)])
+            gen._void_call('mojo_list_append_int', [
+                ('MojoList *', out), ('int64_t', f'(int64_t)(intptr_t){_pair}')])
+        else:
+            e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
+            gen._void_call('mojo_list_append_int', [
+                ('MojoList *', out), ('int64_t', e64)])
+    else:
+        e64 = gen._new_val('int64_t', f'{nxsym} ({w})')
+        gen._void_call('mojo_list_append_int', [('MojoList *', out), ('int64_t', e64)])
     gen._emit(f'  goto {bb_body};')
+    bb_reraise = gen._new_bb()
     gen._emit_label(bb_exc)
     gen._void_call('mojo_exc_pop', [])
     tag = gen._new_val('int64_t', 'mojo_exc_type_get ()')
-    iss = gen._new_val('_Bool', f'{tag} == (int64_t){gen._exc_type_id("StopIteration")}')
-    gen._emit(f'  if ({iss}) goto {bb_after};')
+    # The StopIteration id goes through `_new_val` so it lands in an
+    # `int64_t` temp with the explicit cast: a cast literal directly in
+    # the comparison is not a valid raw-GIMPLE operand (measured
+    # 2026-10-21 part 4 integration), and the single-branch if-goto form
+    # is rejected outright ("expected else statement").
+    iss = gen._new_val(
+        '_Bool', f'{tag} == {gen._new_val("int64_t", str(gen._exc_type_id("StopIteration")))}')
+    gen._emit(f'  if ({iss}) goto {bb_after}; else goto {bb_reraise};')
+    gen._emit_label(bb_reraise)
     gen._void_call('mojo_raise', [])
     gen._emit_label(bb_after)
     if csn.startswith('_Enumerate'):
         gen._elem_types[out] = 'MojoList *'
         gen._nested_elem_types[out] = ['int64_t', 'int64_t']
+    elif _pair_by_value:
+        # The by-value-tuple element is a runtime pair list (above): the
+        # same pair tracking the `_Enumerate` branch sets, with the pair's
+        # own per-slot element types from the tuple struct's field map.
+        gen._elem_types[out] = 'MojoList *'
+        gen._nested_elem_types[out] = list(
+            (gen.struct_field_types.get(_ret) or {}).values())
     else:
         gen._elem_types[out] = 'int64_t'
     return out

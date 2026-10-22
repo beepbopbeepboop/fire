@@ -799,6 +799,10 @@ void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
+/* Extended (with-step) list slice: `lst[a:b:c]` — see the C file for the
+ * step==0 convention; step-less slices keep mojo_list_slice. */
+MojoList*mojo_list_slice_step(MojoList *l, int has_start, int64_t start,
+                              int has_stop, int64_t stop, int64_t step);
 void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
 void     mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl);
 void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
@@ -897,6 +901,16 @@ MojoList *mojo_str_rpartition(char *s, char *sep);
 char *mojo_c_getenv(char *name);
 
 int mojo_truthy_cstr(char *s);
+int mojo_pyobject_truthy(int64_t box);
+int mojo_pyobject_is_container(int64_t box);
+int64_t mojo_pyobject_hash(int64_t box);
+char *mojo_pyobject_str(int64_t box);
+double mojo_pyobject_box_as_double(int64_t box);
+int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl);
+int64_t mojo_pyobject_truediv(int64_t a, int64_t b, int a_dbl, int b_dbl);
+int64_t mojo_pyobject_floordiv(int64_t a, int64_t b, int a_dbl, int b_dbl);
+int64_t mojo_pyobject_pow(int64_t a, int64_t b, int a_dbl);
+int mojo_pyobject_cmp(char op, int64_t a, int64_t b);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 int64_t mojo_str_codepoint_len(char *s);

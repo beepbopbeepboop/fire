@@ -268,6 +268,11 @@ class _Work:
         self.depth: dict = {}     # mangled name -> its closure depth
         self.extra: list = []     # top-level statements to append to `stmts`
         self.notes: list = []     # every refusal, in order
+        # (wrapper base, positional-args tuple) -> the VARIADIC splice
+        # metadata the out-res seed computed (element_map / self_element —
+        # `monomorphize_source`'s part-4 parameters): the queue key is the
+        # only identity that survives between the seed and `_materialize`.
+        self.variadic_meta: dict = {}
 
     def enqueue(self, key, depth, queue):
         if key not in self.alias:
@@ -575,6 +580,13 @@ _BUILTIN_FACTORY_HOME = {
     # (the positional `_MapIterator[function]` shape), exactly like
     # enumerate/iter below.
     'map': 'std.iter',
+    # `chain`/`zip` joined 2026-10-21 (further, part 4): test/iter/
+    # test_zip.mojo calls `zip(l, l2)` with NO import line (test_chain.mojo
+    # DOES import chain — same builtin, either spelling), and the measured
+    # implementation is std/iter's OUT-PARAMETER overloads (the out-res
+    # subpath), so the no-import resolution lands exactly where the
+    # import-line one does.
+    'chain': 'std.iter', 'zip': 'std.iter',
     'enumerate': 'std.iter', 'iter': 'std.iter',
 }
 
@@ -666,6 +678,14 @@ def _factory_returns(fsrc, path, base):
         for s in stmts:
             if isinstance(s, FunctionDef) and getattr(s, 'name', None) == base:
                 pr = iter_factory.parse_return(getattr(s, 'return_type', None))
+                if pr is None:
+                    # The OUT-PARAMETER spelling (measured 2026-10-21,
+                    # part 4: chain/zip — no return annotation; the
+                    # dependent wrapper is the trailing `out` parameter's
+                    # annotation, whose `out` marker the parser drops).
+                    pr = iter_factory.parse_out_res(
+                        getattr(s, 'params', None) or [],
+                        getattr(s, 'return_type', None))
                 if pr is not None:
                     out.append({'pr': pr,
                                 'params': [p[0] for p in
@@ -705,6 +725,23 @@ def _factory_return_for(fsrc, path, base, moved):
         if ov['pr']['kind'] is None:
             return ov
     return None
+
+
+def _factory_return_out_for(fsrc, path, base, moved):
+    """The OUT-PARAMETER overload whose pass mode matches (part 4: the
+    chain/zip pair — the borrowed overload's `out res` annotation threads
+    `_iterable_to_iterator`, the owned one `_iterable_owned_to_iterator`;
+    `parse_out_res` read the kind off that marker). Same two-stage shape as
+    `_factory_return_for`: the mode match first, then any out-res overload
+    (a kind-less out-res spelling would still bind the inners from the
+    call arguments' own moved flags)."""
+    want = 'owned' if moved else 'borrowed'
+    overloads = [ov for ov in _factory_returns(fsrc, path, base)
+                 if ov['pr'].get('out_param')]
+    for ov in overloads:
+        if ov['pr']['kind'] == want:
+            return ov
+    return overloads[0] if overloads else None
 
 
 def _collect_locals(node, out):
@@ -763,9 +800,35 @@ def _wrapper_type_params(fsrc: str, wrapper: str) -> list | None:
         return None
     out = []
     for part in iter_factory._top_level_split(fsrc[m.end():close]):
-        pm = re.match(r'(\w+)\s*:', part.strip())
+        # `\*?` keeps a variadic parameter's star (`*Ts: Iterator` — the
+        # chain/zip out-res wrappers, measured 2026-10-21 part 4); the
+        # pre-part-4 forms are all bare names, so this is a no-op for them.
+        pm = re.match(r'(\*?\w+)\s*:', part.strip())
         if pm:
             out.append(pm.group(1))
+    return out or None
+
+
+def _wrapper_header_params(fsrc: str, wrapper: str) -> list | None:
+    """The wrapper struct's bracket-header parameters as (name, annotation)
+    pairs in declaration order, or None when the header is unreadable. The
+    name keeps its variadic star (`*Ts`); the annotation is single-spaced.
+    The out-res seed (part 4) reads this to tell the INNER-variadic
+    parameter (`*Ts: Iterator`) from a VALUE parameter (zip's
+    `origin: Origin`, which the factory's dependent annotation threads but
+    the wrapper body never reads — measured: the spliced body references
+    no `origin`, so it binds to its own annotation's first word)."""
+    m = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc)
+    if not m:
+        return None
+    close = iter_factory._matching_bracket(fsrc, m.end() - 1)
+    if close is None:
+        return None
+    out = []
+    for part in iter_factory._top_level_split(fsrc[m.end():close]):
+        pm = re.match(r'(\*?\w+)\s*:\s*(.*)$', part.strip(), re.S)
+        if pm:
+            out.append((pm.group(1), ' '.join(pm.group(2).split())))
     return out or None
 
 
@@ -812,6 +875,36 @@ def _wrapper_param_roles(fsrc: str, wrapper: str) -> tuple | None:
         else:
             derived.append(pm.group(1))
     return inner, fns, derived
+
+
+def _wrapper_iter_params(fsrc: str, wrapper: str) -> list | None:
+    """The wrapper header's Iterator-annotated type parameters, in
+    DECLARATION order (measured 2026-10-21, part 4: product's
+    `_Product2[IteratorTypeA: Iterator, IteratorTypeB: Copyable &
+    Iterator]` — BOTH are inner slots, one per container argument).
+    `_wrapper_param_roles` classifies the `Copyable & Iterator` one as
+    derived because its annotation does not START with `Iterator` — the
+    right answer for the single-inner subpath (the caller refuses it),
+    but the multi subpath needs the FULL ordered list. Function-value
+    parameters (`def(...)`) are skipped; None when the header block is
+    unreadable."""
+    m = re.search(r'struct\s+' + re.escape(wrapper) + r'\s*\[', fsrc)
+    if not m:
+        return None
+    close = iter_factory._matching_bracket(fsrc, m.end() - 1)
+    if close is None:
+        return None
+    out = []
+    for part in iter_factory._top_level_split(fsrc[m.end():close]):
+        pm = re.match(r'(\w+)\s*:\s*(.*)$', part.strip(), re.S)
+        if not pm:
+            continue
+        ann = ' '.join(pm.group(2).split())
+        if re.match(r'def\b', ann):
+            continue
+        if 'Iterator' in ann:
+            out.append(pm.group(1))
+    return out
 
 
 def _find_fn_def(name, scope, stmts):
@@ -970,6 +1063,27 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         # there — exactly the pre-subpath behavior.
         return _seed_direct_factory(gen, work, mm, base, node, fsrc, home,
                                     queue, records)
+    # The OUT-PARAMETER factory (part 4: chain/zip — no return annotation;
+    # every overload is the `out res: Wrapper[...]` spelling): a separate
+    # subpath (N container arguments -> N inners, a variadic `*Ts`
+    # binding). Gated on ALL overloads being out-res so a factory that
+    # mixes the two spellings (unmeasured) keeps the return-value path.
+    if all(o['pr'].get('out_param')
+           for o in _factory_returns(fsrc, home, base)):
+        return _seed_out_res_factory(gen, work, mm, base, node, scope, stmts,
+                                     import_map, queue, records, fsrc, home,
+                                     depth)
+    # The MULTI-CONTAINER dependent-return factory (part 4: `product(a, b)`
+    # — `-> _Product2[<inner mention of arg0>, <inner mention of arg1>]`):
+    # EVERY argument is a container, which the single-first-argument flow
+    # below cannot see. Gated on an arity-matching multi overload so the
+    # single-argument factories (take/drop/cycle/enumerate/map/...) keep
+    # the return-value path untouched.
+    if any(o['pr'].get('multi') and len(o['params']) == len(args)
+           for o in _factory_returns(fsrc, home, base)):
+        return _seed_multi_factory(gen, work, mm, base, node, scope, stmts,
+                                   import_map, queue, records, fsrc, home,
+                                   depth)
     # `factory_names` is an over-approximation (every imported generic); the
     # nested recursion re-validates each one, so a non-factory nested call
     # simply refuses the outer. It exists so `resolve_container` can tell a
@@ -1116,7 +1230,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         # `__iter__` returns Self, so the sub-factory's wrapper IS the inner
         # and the recursion below has already enqueued it.
         pass
-    if cont['kind'] in ('list', 'set'):
+    if cont['kind'] in ('list', 'set', 'pyobj-list'):
         # A set container (measured 2026-10-21 (further): `enumerate(my_set)`
         # on `var my_set = {4, 5, 6}`) rides the list path end to end: the
         # emit side feeds `mojo_set_to_list(<set>)` — the runtime's
@@ -1124,8 +1238,14 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         # for-loop iterator walks (emit_loops' set branch) — into the
         # identical list reconstruction. So the INNER and the WRAPPER are
         # derived from the LIST source, not the set's own hash-bucket
-        # iterator, whose body has no lowerable in-TU form.
-        _ctname = 'List' if cont['kind'] == 'set' else cont['tname']
+        # iterator, whose body has no lowerable in-TU form. A pyobj-list
+        # container (part 4, further: `enumerate(list_obj.__iter__())` — a
+        # PythonObject local's own `__iter__()` call) is the same borrowed
+        # list cursor derived from the LIST source: the emit side lowers
+        # the receiver box and unboxes it to the MojoList * the cursor
+        # walks.
+        _ctname = 'List' if cont['kind'] in ('set', 'pyobj-list') \
+            else cont['tname']
         chome, csrc = _container_home(gen, _ctname)
         if not csrc:
             work.refuse(
@@ -1185,7 +1305,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         # container's own wrapper, which is the inner. A set container
         # materializes its inner the same way as a list (the seed branch
         # above derived it from the LIST source).
-        if cont['kind'] in ('list', 'set'):
+        if cont['kind'] in ('list', 'set', 'pyobj-list'):
             work.enqueue(('struct', inner_base, tuple(inner['args'])), 0, queue)
     else:
         if fn_param is None and derived_param is None:
@@ -1215,6 +1335,415 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
                 return None
             work.enqueue(('struct', wrapper,
                           tuple(_warg_map[p] for p in _wparams)), 0, queue)
+    return rec
+
+
+def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
+                        queue, records, fsrc, home, depth):
+    """The MULTI-CONTAINER dependent-return factory subpath (measured
+    2026-10-21, part 4: `product(a, b[, c[, d]])` — `-> _ProductN[
+    <per-argument inner mentions>]`; see parse_return's multi arm for the
+    annotation shape). Every CALL ARGUMENT is a container, resolved
+    independently; the per-argument inner is derived exactly the way the
+    single-container return-value subpath derives its inner from args[0],
+    and the WRAPPER is materialized once with the per-argument inner
+    MENTIONS as its type arguments in the wrapper's declared parameter
+    order (which is the call's argument order — the annotation's mention
+    i names argument i's inner). The per-argument inners are NOT
+    enqueued here: the wrapper's spliced source mentions each inner type
+    in a field annotation, and `_collect_inner`'s mention walk enqueues
+    them when the wrapper materializes — exactly the way the single-inner
+    path relies on it (it enqueues only the wrapper too).
+
+    A mixed pass mode (one argument moved, another not) is refused: the
+    measured overloads are homogeneous (`ref ...` / `var ...` on ALL
+    parameters) and the wrapper's type arguments are all IteratorType or
+    all IteratorOwnedType — a heterogeneous inner tuple is unmeasured.
+    """
+    if depth > 4:
+        work.refuse(f'{base}(...): nested factory depth exceeds 4')
+        return None
+    locs = scope[2] if scope is not None else None
+    args = getattr(node, 'args', None) or []
+    factory_names = set(getattr(gen, '_imported_generics', {}))
+    conts = []
+    for i, a in enumerate(args):
+        c = iter_factory.resolve_container(a, factory_names, locs)
+        if c is None:
+            work.refuse(
+                f'{base}(...): argument {i} is not a statically resolvable '
+                'local List / range / set / nested factory')
+            return None
+        conts.append(c)
+    if len({c['moved'] for c in conts}) > 1:
+        work.refuse(f'{base}(...): the call mixes moved and borrowed '
+                    'container arguments — the measured multi-container '
+                    'overloads are homogeneous in pass mode')
+        return None
+    moved = conts[0]['moved']
+    want = 'owned' if moved else 'borrowed'
+    ov = None
+    for o in _factory_returns(fsrc, home, base):
+        if (o['pr'].get('multi') and len(o['params']) == len(args)
+                and o['pr']['kind'] == want):
+            ov = o
+            break
+    if ov is None:
+        work.refuse(f'{base}(...): no {want}-container overload with a '
+                    'multi-container dependent return of this arity')
+        return None
+    pr = ov['pr']
+    wrapper = pr['wrapper']
+    iter_params = _wrapper_iter_params(fsrc, wrapper)
+    if iter_params is None:
+        work.refuse(f'{base}(...): wrapper {wrapper!r} type-parameter '
+                    'header unreadable in its home module')
+        return None
+    if len(iter_params) != len(args):
+        work.refuse(
+            f'{base}(...): wrapper {wrapper!r} has {len(iter_params)} '
+            f'Iterator-annotated type parameters but the call passes '
+            f'{len(args)} containers')
+        return None
+    _all = _wrapper_type_params(fsrc, wrapper)
+    if _all is None or set(_all) != set(iter_params):
+        work.refuse(
+            f'{base}(...): wrapper {wrapper!r} has non-Iterator type '
+            f'parameters {sorted(set(_all or []) - set(iter_params))} '
+            'beyond the multi-container subpath\'s per-argument inners')
+        return None
+    mentions = []
+    inner_mangleds = []
+    for i, c in enumerate(conts):
+        if c['kind'] in ('list', 'set'):
+            _ctname = 'List' if c['kind'] == 'set' else c['tname']
+            chome, csrc = _container_home(gen, _ctname)
+            if not csrc:
+                work.refuse(
+                    f'{base}(...): no module declares container '
+                    f'{c["tname"]!r}')
+                return None
+            _kind = 'owned' if c['moved'] else 'borrowed'
+            rhs = iter_factory.iter_type_rhs(csrc, _ctname, _kind)
+            if rhs is None:
+                work.refuse(f'{base}(...): {c["tname"]}.'
+                            f'Iterator{"Owned" if _kind == "owned" else ""}Type '
+                            'member not found')
+                return None
+            inner_base = rhs.split('[', 1)[0].strip()
+            inner = iter_factory.expand_inner(csrc, inner_base, rhs,
+                                              c['elem'], bool(c['moved']))
+            if inner is None:
+                work.refuse(
+                    f'{base}(...): {inner_base} type arguments do not bind '
+                    f'for {c["tname"]}')
+                return None
+            inner_mention = inner_base + '[' + ', '.join(inner['args']) + ']'
+            inner_mangled = mm.mangle(
+                inner_base, dict(zip(inner['names'], inner['args'])))
+            _register_named(gen, chome, [inner_base])
+        elif c['kind'] == 'factory':
+            sub = _seed_one_factory(gen, work, mm, c['name'], c['node'],
+                                    scope, stmts, import_map, queue, records,
+                                    depth + 1)
+            if sub is None:
+                return None
+            inner_mention = sub['wrapper_mangled']
+            inner_mangled = sub['wrapper_mangled']
+        else:
+            work.refuse(
+                f'{base}(...): argument {i} container kind '
+                f'{c["kind"]!r} has no multi-container lowering')
+            return None
+        mentions.append(inner_mention)
+        inner_mangleds.append(inner_mangled)
+    wrapper_mangled = mm.mangle(
+        wrapper, dict(zip(iter_params, mentions)))
+    _register_named(gen, home, [wrapper])
+    # The seed-only splice knowledge (part 4, product): the wrapper's own
+    # `Self.Element` — the product element IS the tuple of the per-argument
+    # element mentions, in argument order. The wrapper's `comptime Element`
+    # alias spans lines (`Tuple[\n ... \n]`), so monomorphize's single-line
+    # member-splice gate leaves every `Self.Element` use unspliced (the same
+    # gap the out-res seed closes for zip — see its `self_element`); without
+    # the override the spliced `__next__` annotation stays `Self.Element`,
+    # `_resolve_type` erases it to int64_t, and the list-backed tuple return
+    # (a `MojoList *` of the slot values) is statically mistyped.
+    _elems = [c.get('elem') or 'Int' for c in conts]
+    work.variadic_meta[(wrapper, tuple(mentions))] = {
+        'element_map': {m: e for m, e in zip(mentions, _elems)},
+        'self_element': 'Tuple[' + ', '.join(_elems) + ']'}
+    rec = {'name': base, 'wrapper': wrapper, 'wrapper_param': None,
+           'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
+           'inner_mention': None, 'kind': conts[0]['kind'],
+           'elem': conts[0].get('elem'),
+           'elem_ctype': iter_factory._MOJO_ELEM_C.get(conts[0].get('elem'),
+                                                       'int64_t'),
+           'moved': moved, 'wrapper_kwarg': None,
+           'multi_args': [{'kind': c['kind'], 'inner_mangled': im,
+                           'elem_ctype': iter_factory._MOJO_ELEM_C.get(
+                               c.get('elem'), 'int64_t'),
+                           'moved': bool(c['moved'])}
+                          for c, im in zip(conts, inner_mangleds)]}
+    records[iter_factory.factory_call_key(base, node)] = rec
+    work.enqueue(('struct', wrapper, tuple(mentions)), 0, queue)
+    return rec
+
+
+def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts, import_map,
+                          queue, records, fsrc, home, depth=0):
+    """The OUT-PARAMETER dependent-return factory subpath (measured
+    2026-10-21, part 4: `chain(l1, l2)` / `zip(l, l2)` — `def chain[*Ts:
+    Iterable](*iterables: *Ts, out res: _ChainedIterator[*inners])`; the
+    factory BODY is never executed — `_lower_factory_call`'s out-res branch
+    reconstructs it from the call arguments: allocate the wrapper, write
+    `res._idx = 0` (chain only), then one inner per container argument into
+    the wrapper's tuple field (`res._iterators[i]` / `res._values[i]`).
+
+    One wrapper instantiation per call (the same record the return-value
+    subpath files), with the inners as a VARIADIC binding: the wrapper's
+    `*Ts` type parameter consumes EVERY container argument, and
+    `monomorphize._sub_variadic` splices the measured forms (`Tuple[*Self.
+    Ts]`, `Self.Ts[0].Element`, the comptime-for unroll). `work.
+    variadic_meta` carries the seed-only knowledge (each inner's ELEMENT
+    mention, and the wrapper's own Element — zip's `Self.Element` needs the
+    explicit override because its definition spans lines) to
+    `_materialize`, the only place the concrete source is rebuilt."""
+    args = getattr(node, 'args', None) or []
+    if not args:
+        return None   # zero-arg out-res: no measured lifting shape
+    locs = scope[2] if scope is not None else None
+    factory_names = set(getattr(gen, '_imported_generics', {}))
+    # The module's OWN top-level structs: the user-iterator constructor
+    # argument (`zip(TestIter(2, {2}), ...)` — part 4) resolves against
+    # these and against nothing else, so a runtime-name collision in
+    # `struct_field_types` cannot claim the shape.
+    struct_names = {s.name for s in stmts if type(s).__name__ == 'StructDef'}
+    conts = []
+    for i, a in enumerate(args):
+        c = iter_factory.resolve_container(a, factory_names, locs,
+                                           struct_names)
+        if c is None:
+            work.refuse(
+                f'{base}(...): argument {i} is not a statically resolvable '
+                'local List / set / nested factory / iterator struct')
+            return None
+        if c['kind'] not in ('list', 'set', 'factory', 'struct'):
+            work.refuse(
+                f'{base}(...): {c["kind"]}-container argument — the out-res '
+                'reconstruction builds List/Set/nested-factory/struct inners '
+                'only')
+            return None
+        conts.append(c)
+    # The CALL's pass mode: ANY moved argument (an rvalue a ref parameter
+    # cannot bind) selects the owned overload — every list/set argument's
+    # inner is then the owned one. A fully-borrowable call takes the
+    # borrowed one. A bare local answers moved=True (the container
+    # resolver's by-value convention — the owned inner holds the container
+    # pointer and serves both spellings at this representation), so the
+    # measured files' calls land owned; the nested-wrapper argument's
+    # pointer is the inner in BOTH modes, so a mixed argument list
+    # (wrapper local + bare list locals) simply takes the owned inners.
+    moved = any(c['moved'] for c in conts)
+    pr = _factory_return_out_for(fsrc, home, base, moved)
+    if pr is None:
+        work.refuse(f'{base}(...): no out-parameter overload with a '
+                    'dependent wrapper')
+        return None
+    wrapper = pr['pr']['wrapper']
+    hp = _wrapper_header_params(fsrc, wrapper)
+    if hp is None:
+        work.refuse(f'{base}(...): wrapper {wrapper!r} type-parameter '
+                    'header unreadable in its home module')
+        return None
+    varparams = [p for p in hp if p[0].startswith('*')]
+    if len(varparams) != 1:
+        work.refuse(
+            f'{base}(...): wrapper {wrapper!r} has {len(varparams)} '
+            'variadic type parameters; the out-res subpath binds exactly one')
+        return None
+    varparam, varann = varparams[0]
+    if varann.split()[0] != 'Iterator':
+        work.refuse(
+            f'{base}(...): wrapper {wrapper!r}'
+            f' variadic parameter {varparam!r} is not `Iterator`-annotated')
+        return None
+    # One inner per container argument, exactly the return-value subpath's
+    # derivation (list/set: the container's own iterator-type member;
+    # factory: the nested factory's wrapper — the recursion below files it).
+    inners = []   # (mention, mangled, elem_mention, inner_base, inner_args)
+    for c in conts:
+        if c['kind'] in ('list', 'set'):
+            _ctname = 'List' if c['kind'] == 'set' else c['tname']
+            chome, csrc = _container_home(gen, _ctname)
+            if not csrc:
+                work.refuse(
+                    f'{base}(...): no module declares container '
+                    f'{_ctname!r}')
+                return None
+            kind = 'owned' if moved else 'borrowed'
+            rhs = iter_factory.iter_type_rhs(csrc, _ctname, kind)
+            if rhs is None:
+                work.refuse(f'{base}(...): {_ctname}.Iterator'
+                            f'{"Owned" if kind == "owned" else ""}Type '
+                            'member not found')
+                return None
+            inner_base = rhs.split('[', 1)[0].strip()
+            inner = iter_factory.expand_inner(csrc, inner_base, rhs, c['elem'],
+                                              bool(moved))
+            if inner is None:
+                work.refuse(f'{base}(...): {inner_base} type arguments do '
+                            f'not bind for {_ctname}')
+                return None
+            inners.append((inner_base + '[' + ', '.join(inner['args']) + ']',
+                           mm.mangle(inner_base,
+                                     dict(zip(inner['names'], inner['args']))),
+                           c['elem'], inner_base, tuple(inner['args'])))
+            _register_named(gen, chome, [inner_base])
+        elif c['kind'] == 'struct':
+            # A USER-DEFINED iterator struct (measured 2026-10-21 part 4:
+            # test_zip_bounds's `zip(TestIter(2, {2}), TestIter(2, {2}))`):
+            # the struct ITSELF is the inner (its `comptime
+            # IteratorType[...] = Self`), the constructor rvalue lowers to
+            # the `<Struct> *` the wrapper's `_values[i]` holds, and
+            # `__next__`/`bounds` dispatch on the struct's own in-TU
+            # methods (the module-qualified csyms the next()/method-call
+            # paths compose). Its element is the struct's `comptime
+            # Element` — the wrapper's Element derivation needs a plain
+            # scalar name. `inner_base`/`inner_args` are None: an in-TU
+            # struct is emitted as part of THIS module (a top-level
+            # statement), so there is no separate root to enqueue.
+            _sd = next((s for s in stmts
+                        if type(s).__name__ == 'StructDef'
+                        and s.name == c['sname']), None)
+            if _sd is None:
+                work.refuse(
+                    f'{base}(...): struct {c["sname"]!r} is not a top-level '
+                    'struct of this module')
+                return None
+            _ea = getattr(_sd, 'comptime_aliases', {}).get('Element')
+            _selem = getattr(_ea, 'name', None)
+            if not (isinstance(_selem, str)
+                    and re.match(r'^\w+$', _selem or '')):
+                work.refuse(
+                    f'{base}(...): struct {c["sname"]!r} has no plain-scalar '
+                    f'`comptime Element = <name>` (got {_selem!r}) — the '
+                    'out-res Element derivation needs one')
+                return None
+            inners.append((c['sname'], c['sname'], _selem, None, None))
+        else:   # nested factory: its wrapper is the inner (its own
+                # `comptime IteratorType[...] = Self`); the recursion below
+                # files the nested record and enqueues its wrapper root.
+            sub = _seed_one_factory(gen, work, mm, c['name'], c['node'],
+                                    scope, stmts, import_map, queue, records,
+                                    depth + 1)
+            if sub is None:
+                return None
+            _selem = sub.get('elem')
+            if not (isinstance(_selem, str)
+                    and re.match(r'^\w+$', _selem or '')):
+                work.refuse(
+                    f'{base}(...): nested factory {c["name"]}\'s element is '
+                    f'{_selem!r} — the out-res Element derivation needs a '
+                    'plain scalar element (a nested tuple-element factory '
+                    'is unmeasured)')
+                return None
+            inners.append((sub['wrapper_mangled'], sub['wrapper_mangled'],
+                           _selem, None, None))
+    # The wrapper's type arguments in DECLARATION order (bind_type_args
+    # zips them positionally; the variadic parameter consumes every inner).
+    _targs = {}
+    for pname, pann in hp:
+        if pname.startswith('*'):
+            _targs[pname] = [i[0] for i in inners]
+        else:
+            # A VALUE parameter (zip's `origin: Origin`): the wrapper body
+            # never reads it (measured — the spliced body references no
+            # `origin`; it is threaded into the where-clause, which the
+            # struct emitter drops), so its annotation's first word is a
+            # sufficient, honest binding token.
+            _w = pann.split()[0]
+            if not re.match(r'^\w+$', _w):
+                work.refuse(
+                    f'{base}(...): wrapper {wrapper!r} value parameter '
+                    f'{pname!r} annotation {pann!r} is not a plain type')
+                return None
+            _targs[pname] = _w
+    wrapper_mangled = mm.mangle(wrapper, _targs)
+    _register_named(gen, home, [wrapper])
+    # The seed-only splice knowledge (part 4): each inner's ELEMENT mention
+    # (`_sub_variadic`'s `<inner>.Element` -> element pass) and the wrapper's
+    # own Element — chain's is the FIRST inner's element
+    # (`Self.Element = Self.Ts[0].Element`); zip's is the tuple of them
+    # (the explicit `self_element` override — zip's `Element` definition
+    # spans lines, and the single-line member capture would splice a
+    # dangling `Tuple[` into every `Self.Element` use).
+    _elems = [i[2] for i in inners]
+    _self_elem = ('Tuple[' + ', '.join(_elems) + ']'
+                  if wrapper.lower().startswith('_zip') else _elems[0])
+    _pos = []
+    for pname, _pann in hp:
+        if pname.startswith('*'):
+            _pos.extend(_targs[pname])
+        else:
+            _pos.append(_targs[pname])
+    work.variadic_meta[(wrapper, tuple(_pos))] = {
+        'element_map': {i[0]: i[2] for i in inners},
+        'self_element': _self_elem}
+    # The wrapper's FIELD the factory body fills, and its cursor field
+    # (`res._idx = 0` — chain has one, zip's body writes only `_values`):
+    # both read from the wrapper TEMPLATE (not the whole home module —
+    # the module holds dozens of `var ...: Int` fields), so a renamed
+    # stdlib field is a refusal, not a guess.
+    import elaborate
+    _wsrc = elaborate.extract_struct_source(fsrc, wrapper) or ''
+    _m = re.search(r'comptime (\w+) = Tuple\[\*Self\.\w+\]', _wsrc)
+    _tuple_field = None
+    if _m:
+        _mf = re.search(r'var (\w+): Self\.' + re.escape(_m.group(1)) + r'\b',
+                        _wsrc)
+        _tuple_field = _mf.group(1) if _mf else None
+    _idx_fields = re.findall(r'^\s*var (\w+): Int[ \t]*(?:$|#)',
+                             _wsrc, re.M)
+    _idx_field = _idx_fields[0] if len(_idx_fields) == 1 else None
+    if _tuple_field is None:
+        work.refuse(
+            f'{base}(...): wrapper {wrapper!r} has no `var <f>: '
+            'Self.<Tuple-of-inners member>` field — the out-res '
+            'reconstruction cannot name the field it fills')
+        return None
+    rec = {'name': base, 'wrapper': wrapper,
+           'wrapper_mangled': wrapper_mangled, 'kind': 'out-res',
+           'moved': bool(moved),
+           'out_param': pr['pr']['out_param'],
+           # The wrapper's own Element (a NESTED out-res factory's record
+           # answers the OUTER factory's Element derivation — chain's
+           # Element is the FIRST inner's element; zip's Element is a
+           # TUPLE, which the outer's scalar-element gate must refuse, so
+           # None, not a wrong first element).
+           'elem': (None if wrapper.lower().startswith('_zip')
+                    else _elems[0]),
+           'tuple_field': _tuple_field,
+           'idx_field': _idx_field,
+           'args': [
+               {'kind': c['kind'],
+                'inner_mangled': i[1],
+                'elem_ctype': (iter_factory._MOJO_ELEM_C.get(
+                    c.get('elem'), 'int64_t')
+                    if c['kind'] in ('list', 'set') else None)}
+               for c, i in zip(conts, inners)]}
+    records[iter_factory.factory_call_key(base, node)] = rec
+    work.enqueue(('struct', wrapper, tuple(_pos)), 0, queue)
+    # Every inner must exist with a lowered `__next__` (the wrapper body
+    # calls `next()` on each of them): list/set inners are enqueued as
+    # their own roots exactly as the bare-`iter` branch does; nested-
+    # factory inners are already roots through the recursion above.
+    _seen_in = set()
+    for c, i in zip(conts, inners):
+        if c['kind'] in ('list', 'set') and i[3] is not None \
+                and i[1] not in _seen_in:
+            _seen_in.add(i[1])
+            work.enqueue(('struct', i[3], i[4]), 0, queue)
     return rec
 
 
@@ -1581,8 +2110,25 @@ def _materialize(work, key):
         if targs is None:
             work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
             return None
+        # A VARIADIC binding (part 4: the chain/zip out-res wrapper's `*Ts`
+        # consumes every inner) takes `monomorphize_source`'s dedicated
+        # pass; its seed-only splice knowledge (each inner's element
+        # mention, the wrapper's own Element) rides in work.variadic_meta,
+        # keyed by (wrapper, positional-args) — the same key the seed used
+        # to enqueue this instantiation.
+        _vmeta = None
+        if any(isinstance(v, (list, tuple)) for v in targs.values()):
+            _vmeta = work.variadic_meta.get((base, tuple(args)))
+            if _vmeta is None:
+                work.refuse(
+                    f'{base}[{", ".join(args)}]: variadic instantiation '
+                    'with no seed-filed splice metadata')
+                return None
         try:
-            mangled, concrete = mm.monomorphize_source(tmpl, targs)
+            mangled, concrete = mm.monomorphize_source(
+                tmpl, targs,
+                element_map=(_vmeta or {}).get('element_map'),
+                self_element=(_vmeta or {}).get('self_element'))
         except Exception as e:
             work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
             return None

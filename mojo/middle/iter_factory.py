@@ -134,6 +134,43 @@ def parse_return(ann) -> dict | None:
         kind = 'borrowed' if m.group(4) == 'IteratorType' else 'owned'
         return {'wrapper': m.group(1), 'kind': kind,
                 'x': m.group(2) or m.group(3)}
+    # The MULTI-CONTAINER dependent return (measured 2026-10-21, part 4:
+    # `product` — the borrowed overloads spell `-> _Product2[
+    # IterableTypeA.IteratorType[origin_of(iterable_a)],
+    # IterableTypeB.IteratorType[origin_of(iterable_b)]]` and the owned
+    # ones `-> _Product2[type_of(iterable_a).IteratorOwnedType,
+    # type_of(iterable_b).IteratorOwnedType]`): one iterator-type MENTION
+    # per container parameter, and mention i corresponds POSITIONALLY to
+    # argument i — the wrapper's type arguments are the per-argument
+    # INNER types. Both mention spellings are accepted (the borrowed
+    # `<TypeVar>.IteratorType[origin_of(<p>)]` and the owned
+    # `type_of(<p>).IteratorOwnedType`); the kind is the single marker
+    # present in the block, and a mixed block is refused. `x` is None —
+    # the per-argument resolution (not a single container) feeds the
+    # inner, the way the seed's multi subpath reads `rec['multi_args']`.
+    _mm = _RE_KW_STRUCT.match(s)
+    if _mm:
+        _mparts = _top_level_split(_mm.group(2))
+        if len(_mparts) >= 2:
+            _multi = []
+            for _p in _mparts:
+                _qm = re.match(
+                    r'^(?:type_of\(\s*(\w+)\s*\)\s*\.\s*|(\w+)\s*\.\s*)'
+                    r'(IteratorType|IteratorOwnedType)'
+                    r'(?:\s*\[\s*origin_of\(\s*(\w+)\s*\)\s*\])?\s*$',
+                    _p.strip())
+                if _qm:
+                    _multi.append((_qm.group(3),
+                                   _qm.group(1) or _qm.group(4)))
+            if len(_multi) == len(_mparts):
+                _mkinds = {k for k, _ in _multi}
+                if len(_mkinds) == 1:
+                    return {'wrapper': _mm.group(1),
+                            'kind': ('borrowed'
+                                     if _mkinds == {'IteratorType'}
+                                     else 'owned'),
+                            'x': None,
+                            'multi': _multi}
     m = _RE_TYPEOF_ITER.match(s)
     if m:
         return {'wrapper': m.group(1), 'kind': 'borrowed', 'x': m.group(2)}
@@ -180,6 +217,37 @@ def parse_return(ann) -> dict | None:
     if m:
         return {'wrapper': m.group(1), 'kind': 'direct', 'x': None}
     return None
+
+
+def parse_out_res(params, return_type) -> dict | None:
+    """The OUT-PARAMETER dependent-return factory (measured 2026-10-21,
+    part 4: `chain` / `zip` — `def chain[*Ts: Iterable](*iterables: *Ts,
+    out res: _ChainedIterator[*_iterable_to_iterator[...]])`, return_type
+    None, the dependent wrapper named in the trailing `out` parameter's
+    annotation; the parser drops the `out` marker, so the parameter arrives
+    as a plain `('res', ann)` pair).
+
+    The KIND comes from the annotation's inner-kind marker, the same
+    overload-pair distinction `parse_return` reads off `IteratorType` /
+    `IteratorOwnedType`: the borrowed overload threads
+    `_iterable_to_iterator`, the owned one `_iterable_owned_to_iterator`
+    (zip's owned overload additionally names `MutUntrackedOrigin` in the
+    origin slot). Returns {'wrapper', 'kind', 'x': None, 'out_param'} or
+    None for any spelling this subpath has not measured."""
+    if return_type:
+        return None   # a dependent RETURN annotation is the other subpath
+    if not params:
+        return None
+    pname, pann = params[-1]
+    if not isinstance(pann, str):
+        return None
+    m = re.match(r'^\s*(_\w+)\s*\[', pann)
+    if not m:
+        return None
+    s = ' '.join(pann.split())
+    kind = 'owned' if '_iterable_owned_to_iterator' in s else 'borrowed'
+    return {'wrapper': m.group(1), 'kind': kind, 'x': None,
+            'out_param': pname}
 
 
 # ── the container's iterator-type members, read from its source ────────────
@@ -452,7 +520,21 @@ def arg_signature(node) -> tuple:
         return ('c', fn, tuple(arg_signature(a) for a in args),
                 tuple(k[0] for k in kws))
     if t == 'ListExpr':
-        return ('lit',)
+        # Element-aware (part 4): the flat `('lit',)` collapsed
+        # `List([0, 1, 2])` and `List(["0", "1", "2"])` into ONE record
+        # key, so the chain/zip out-res subpath's per-call records
+        # collided and the last-seeded spelling (String) retyped every
+        # Int call site in the file — `var cl = chain(List([0, 1, 2]),
+        # ...)` declared a String wrapper and gcc refused the
+        # incompatible-pointer assignment. Two calls with the same
+        # element VALUES still share a record (same mangled
+        # instantiation — the record is a pure function of the call
+        # site); different values get their own.
+        return ('lit', tuple(arg_signature(e) for e in
+                             (getattr(node, 'elements', None) or ())))
+    if t == 'SetExpr':
+        return ('set', tuple(arg_signature(e) for e in
+                             (getattr(node, 'elements', None) or ())))
     if t == 'SubscriptExpr':
         return ('sub', name, arg_signature(getattr(node, 'index', None)))
     if t == 'TupleExpr':
@@ -525,6 +607,16 @@ def list_literal_elem(elements) -> str | None:
                 kinds.add('Float64')
             else:
                 return None
+        elif t == 'CallExpr' and type(getattr(e, 'func', None)).__name__ \
+                == 'IdentExpr' and getattr(getattr(e, 'func', None),
+                                           'name', None) == 'String':
+            # A `String(...)` constructor element (measured 2026-10-21
+            # part 4: test_zip's `var long = [String("aaa"),
+            # String("bbb"), ...]`): the constructor answers `String`
+            # regardless of its argument, and the emitter appends such an
+            # element through `mojo_list_append_str` — the list IS a
+            # String list.
+            kinds.add('String')
         else:
             return None
     if 'String' in kinds:
@@ -538,7 +630,7 @@ def list_literal_elem(elements) -> str | None:
     return None
 
 
-def resolve_container(node, factory_names, locals_map) -> dict | None:
+def resolve_container(node, factory_names, locals_map, struct_names=None) -> dict | None:
     """What a factory's FIRST argument statically IS, or None (refuse).
 
     Returns one of:
@@ -557,7 +649,16 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
       {'kind': 'factory', 'name': <factory>, 'node': <call>, 'moved': bool}
           a NESTED factory call — its wrapper is itself the container
           (every std/iter wrapper's `comptime IteratorType[...] = Self`), so
-          the caller evaluates the nested call itself."""
+          the caller evaluates the nested call itself.
+      {'kind': 'struct', 'sname': <struct>, 'moved': bool}
+          a USER-DEFINED iterator struct constructor rvalue (measured
+          2026-10-21 part 4: test_zip_bounds's `zip(TestIter(2, {2}),
+          TestIter(2, {2}))`) — the struct ITSELF is the inner iterator
+          (its `comptime IteratorType[...] = Self`), so the constructor's
+          `<Struct> *` result is the wrapper's `_values[i]`. `struct_names`
+          must be supplied for this kind (the caller's module-local struct
+          names); with it absent the shape answers None, exactly as before
+          part 4 added it."""
     moved = False
     if type(node).__name__ == 'UnaryOp' and getattr(node, 'op', '') == '^':
         moved = True
@@ -656,9 +757,68 @@ def resolve_container(node, factory_names, locals_map) -> dict | None:
         if fn == 'range':
             return {'kind': 'list', 'tname': 'List', 'elem': 'Int',
                     'moved': moved}
+        if fn in ('List', 'Set'):
+            # `List([1, 2, 3])` — the NO-typ-arg constructor spelling
+            # (measured 2026-10-21 part 4: test_chain_owned's
+            # `chain(List([1, 2, 3]), List([1, 2, 3]))`): the element is
+            # the literal argument's, same promotion rules as the local
+            # ListExpr case above. A direct argument is an rvalue — the
+            # owned overload (`moved=True` regardless of the call's
+            # spelling).
+            _cargs = getattr(node, 'args', None) or ()
+            if len(_cargs) != 1:
+                return None
+            _lit = _cargs[0]
+            if type(_lit).__name__ not in ('ListExpr', 'SetExpr'):
+                return None
+            elem = list_literal_elem(getattr(_lit, 'elements', None) or ())
+            if elem is None:
+                return None
+            return {'kind': 'set' if fn == 'Set' else 'list',
+                    'tname': fn, 'elem': elem, 'moved': True}
         if fn in (factory_names or ()):
             return {'kind': 'factory', 'name': fn, 'node': node,
                     'moved': moved}
+        if fn in (struct_names or ()):
+            # A USER-DEFINED iterator struct constructor rvalue (measured
+            # 2026-10-21 part 4: test_zip_bounds's `zip(TestIter(2, {2}),
+            # TestIter(2, {2}))`): the struct itself is the inner iterator
+            # (its `comptime IteratorType[...] = Self`), so the constructor's
+            # `<Struct> *` result is exactly the wrapper's `_values[i]`.
+            # `struct_names` gates this (the caller's own module-local
+            # struct names) so a runtime-name collision cannot claim the
+            # shape; without it the answer is None, as before part 4.
+            return {'kind': 'struct', 'sname': fn, 'moved': True}
+        if (type(f).__name__ == 'MemberExpr'
+                and getattr(f, 'member', None) == '__iter__'
+                and not (getattr(node, 'args', None) or ())):
+            # A PythonObject local's own `__iter__()` call (measured 2026-10-
+            # 21 part 4, further: test_python_object's `enumerate(list_obj.
+            # __iter__())` on `var list_obj: PythonObject = ["apple", ...]`):
+            # the box IS the runtime list pointer (the method dispatch
+            # unboxes it with `(MojoList *)(int64_t)<box>` — measured in the
+            # probe C), so the call is the borrowed-list cursor over that
+            # list, and the element comes from the local's list-literal
+            # initializer. Any shape without that annotation + literal pair
+            # has no statically knowable element: None, the honest refusal
+            # stands.
+            _obj = getattr(f, 'obj', None)
+            if type(_obj).__name__ != 'IdentExpr':
+                return None
+            d = (locals_map or {}).get(_obj.name)
+            if d is None:
+                return None
+            _ann = getattr(d, 'type_ann', None)
+            if not (isinstance(_ann, str) and _ann.strip() == 'PythonObject'):
+                return None
+            _v = getattr(d, 'value', None)
+            if type(_v).__name__ != 'ListExpr':
+                return None
+            elem = list_literal_elem(getattr(_v, 'elements', None) or ())
+            if elem is None:
+                return None
+            return {'kind': 'pyobj-list', 'tname': 'List', 'elem': elem,
+                    'moved': False}
         return None
     if t == 'ListExpr':
         elem = list_literal_elem(getattr(node, 'elements', None) or ())

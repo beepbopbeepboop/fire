@@ -72,7 +72,7 @@ import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
-from mojo.middle.types import _unpack_target_leaf_names
+from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -86,7 +86,7 @@ from mojo.middle.module_shared import *  # noqa: F401,F403
 # reading it from there would close the cycle
 # `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
 # name would be unavailable at the moment the import ran.
-from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype
+from mojo.middle.types import _COMPILE_TIME_CALL_MODULES, dispatch_table_global_ctype, _body_builds_struct_tuple
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -1638,6 +1638,22 @@ def _emit_reflection_dispatch(self, parts):
                     f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
+            elif ftype in self.struct_field_types:
+                # A BY-VALUE struct field (part 4: the chain/zip
+                # out-parameter wrapper's `_iterators`/`_values`
+                # tuple-of-inners — the synthesized `MojoTuple_*`): an
+                # aggregate is not an int64_t word (gcc: `aggregate value
+                # used where an integer was expected`), so the dispatch
+                # hands out a POINTER TO the field's storage — whose first
+                # word is the struct's `__mojo_type_id` tag, exactly the
+                # shape the runtime tag readers expect of a struct
+                # pointer — and setattr copies the struct back by value.
+                get_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)&obj->{safe_f};')
+                set_lines.append(
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; return; }}')
+                asdict_lines.append(
+                    f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)&obj->{safe_f});')
             else:
                 get_lines.append(
                     f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
@@ -1823,6 +1839,20 @@ def _emit_reflection_dispatch(self, parts):
                     val_expr = (f'({fref} ? strdup(_mojo_dispatch_repr((void *){fref}))'
                                 f' : _mojo_repr_none())')
                     owned = 'T'
+            elif ftype in self.struct_field_types:
+                # A BY-VALUE struct field (part 4: the chain/zip wrapper's
+                # `_iterators`/`_values` tuple-of-inners): an aggregate is
+                # not an int64_t word, so the old fallback below would have
+                # cast it one (gcc: `aggregate value used where an integer
+                # was expected`). Hand the field's ADDRESS to the tag
+                # dispatch the way a pointer field does — the struct's
+                # `__mojo_type_id` tag is its first word, so the dispatch
+                # resolves the field's own dumper. A by-value field is
+                # never NULL, so no `_mojo_repr_none` branch; the `strdup`
+                # keeps the dispatch's shared-buffer answers releasable,
+                # the same ownership story as the pointer branch above.
+                val_expr = (f'strdup(_mojo_dispatch_repr((void *)&{fref}))')
+                owned = 'T'
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
                 owned = 'T'
@@ -5610,6 +5640,15 @@ def gen_module_impl(self, stmts):
                                 _fann_s = _non_none_s[0]
                         if ft == 'int64_t' and _fann_s and _fann_s != _as_str(field.type_ann).strip():
                             ft = _mojo_type(_fann_s)
+                        if isinstance(ft, str) and ft.startswith('MojoTuple_'):
+                            # `var _iterators: Tuple[...]` — the chain/zip
+                            # out-parameter wrapper's tuple-of-inners field
+                            # (part 4): register the synthesized tuple
+                            # struct HERE so the dependency-ordered typedef
+                            # pass emits it BEFORE this struct's own
+                            # typedef (the wrapper references it by name in
+                            # its field declaration).
+                            self._ensure_tuple_struct(_as_str(field.type_ann))
                         if (_fann_s and _fann_s[0].isupper() and '[' not in _fann_s
                                 and '.' not in _fann_s and '*' not in _fann_s
                                 and _fann_s not in self._IMPORTED_STRUCT_SKIP_BASENAMES
@@ -6477,7 +6516,25 @@ def gen_module_impl(self, stmts):
         if _is_foreign_main(s):
             continue
         if isinstance(s, FunctionDef) and s.return_type is not None:
-            self.func_return_types[s.name] = self._resolve_type(s.return_type)
+            _fn_ret_ct = self._resolve_type(s.return_type)
+            if isinstance(_fn_ret_ct, str) and _fn_ret_ct.startswith(
+                    'MojoTuple_'):
+                # The SAME body-sensitive decision the struct-method loop
+                # below makes (see there for the full reasoning): part 4's
+                # `_mojo_type` Tuple branch resolves a `-> Tuple[...]`
+                # return to the synthesized by-value struct, but a plain
+                # fn whose body builds the tuple as a RUNTIME (list-backed)
+                # literal — `split`'s `return String(head), String(tail)` —
+                # must keep the `MojoList *` return or the definition casts
+                # a list pointer into the struct and the typedef is never
+                # emitted (`unknown type name 'MojoTuple_...'`, measured
+                # 2026-10-21 part 4 integration: test_split/test_modf/
+                # test_location/test_tempfile's monomorphized instances).
+                if _body_builds_struct_tuple(getattr(s, 'body', None)):
+                    self._ensure_tuple_struct(s.return_type)
+                else:
+                    _fn_ret_ct = 'MojoList *'
+            self.func_return_types[s.name] = _fn_ret_ct
             _ggf_dup._record_home_def_return_type(
                 self, s, s.name, self.func_return_types[s.name])
         _s_pts = None
@@ -6698,7 +6755,24 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
                 if m.return_type is not None:
-                    self.func_return_types[mangled] = self._resolve_type(m.return_type)
+                    _ret_ct = self._resolve_type(m.return_type)
+                    if isinstance(_ret_ct, str) and _ret_ct.startswith(
+                            'MojoTuple_'):
+                        # A `Tuple[...]` return resolves to the synthesized
+                        # by-value struct — UNLESS the body builds the tuple
+                        # as a runtime (list-backed) tuple literal, in which
+                        # case the value is a `MojoList *` and the struct
+                        # return cast is invalid C: keep the list-backed
+                        # return (see `_body_builds_struct_tuple`). The
+                        # struct-tuple case registers HERE, at signature
+                        # time: the typedef emission pass runs before the
+                        # bodies, so a registration that waited for the
+                        # body's own `var res: ...` local would be too late.
+                        if _body_builds_struct_tuple(getattr(m, 'body', None)):
+                            self._ensure_tuple_struct(m.return_type)
+                        else:
+                            _ret_ct = 'MojoList *'
+                    self.func_return_types[mangled] = _ret_ct
                 if hasattr(m, 'decorators') and 'staticmethod' in (m.decorators or []):
                     self._static_methods.add(mangled)
                 if ((hasattr(m, 'decorators') and 'classmethod' in (m.decorators or []))
@@ -6708,6 +6782,25 @@ def gen_module_impl(self, stmts):
                     ctypes = []
                     for i, (pn, pt) in enumerate(m.params):
                         if i == 0 and pn == 'self':
+                            ctypes.append(f"{s.name} *")
+                        elif (isinstance(pt, str) and pt.strip() in ('Self', 'self')):
+                            # part 4 (measured 2026-10-22, std/simd.mojo): a
+                            # `Self`-annotated param (`def eq(self, rhs: Self)`)
+                            # is another instance of this struct — a pointer to
+                            # it. `_param_ctype` below has no struct context, so
+                            # it erases `Self` to the p3-era int64_t word; that
+                            # stale word then lands in func_param_types and the
+                            # module-qualified mirror (emit_funcs's
+                            # _effective_param_types tier-3 read), so _emit_call
+                            # skips the cast and gcc flags the raw word arg
+                            # against the real `SIMD *` prototype. Resolve it to
+                            # the struct pointer HERE, where `s.name` is known —
+                            # the same answer _signature_ctypes's Self branch
+                            # gives the Pass 2b-bis table. No
+                            # struct_field_types guard: this pass runs before
+                            # the struct is registered there (measured: a
+                            # guarded branch no-ops at registration time and
+                            # leaves this slot stale).
                             ctypes.append(f"{s.name} *")
                         else:
                             ctypes.append(self._param_ctype(pn, pt, m))
@@ -7106,6 +7199,7 @@ def gen_module_impl(self, stmts):
                     'min_arity': min_arity,
                     'max_arity': max_arity,
                     'ret_type': _ret_type,
+                    'ret_ann': m.return_type,
                     'has_varargs': _star_idx >= 0,
                     'pre_star_count': _star_idx if _star_idx >= 0 else None,
                 })
@@ -7129,12 +7223,41 @@ def gen_module_impl(self, stmts):
             if param_ctypes is None:
                 continue
             ret_type = None
+            _ret_ann = None
             for _cand in self._struct_method_signatures.get(_sms_key(s.name, m.name), []):
                 if _cand.get('overload_id') == _oid:
                     ret_type = _cand.get('ret_type')
+                    _ret_ann = _cand.get('ret_ann')
                     break
             if ret_type is None:
                 ret_type = self.func_return_types.get(f"{s.name}_{m.name}", 'void' if m.name == '__init__' else 'int64_t')
+            if isinstance(ret_type, str) and ret_type.startswith('MojoTuple_'):
+                # The stateless annotation re-resolution answers the
+                # synthesized by-value struct, but the DEFINING unit made
+                # the body-sensitive decision (a body that builds the tuple
+                # as a RUNTIME list-backed literal answers `MojoList *`)
+                # and published that answer — it must win, or this
+                # prototype disagrees with the definition's own prototype
+                # and with every call-site temp. Measured 2026-10-21 part 4
+                # integration: std/collections/list calling std/builtin/
+                # slice's `indices -> Tuple[Int, Int, Int]` — the
+                # definition and the callsite both carry `MojoList *`, the
+                # prototype alone said `MojoTuple_0c847752ae34` →
+                # `invalid conversion in gimple call`.
+                _home_ret = self._func_return_type_for_call(bare_mangled, None)
+                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                    ret_type = _home_ret if _home_ret else 'MojoList *'
+            if (isinstance(ret_type, str)
+                    and ret_type.startswith('MojoTuple_')
+                    and isinstance(_ret_ann, str)
+                    and _ret_ann.strip().split('[', 1)[0].strip()
+                    in ('Tuple', 'tuple')):
+                # By-value struct return this TU's prototype really uses:
+                # register the synthesized struct so the typedef emission
+                # further down carries it (a prototype naming a struct with
+                # no typedef is an `unknown type name` — measured 2026-10-21
+                # part 4 integration on the same `indices` shape).
+                self._ensure_tuple_struct(_ret_ann)
             if any('...' in p for p in param_ctypes):
                 params_str = '...'
             else:
@@ -7916,6 +8039,23 @@ def gen_module_impl(self, stmts):
                         if pname.startswith('**'):
                             continue  # skip **kwargs
                         if pname == 'self':
+                            param_ctypes.append(f"{s.name} *")
+                        elif isinstance(ptype, str) and ptype.strip() in ('Self', 'self'):
+                            # part 4 (measured 2026-10-22, std/simd.mojo): a
+                            # `Self`-annotated param is another instance of
+                            # this struct — a pointer, like the `self` param
+                            # above. This loop runs AFTER the earlier
+                            # registration (the 6808 loop) and overwrites its
+                            # slot, so it needs the same Self handling;
+                            # without it the bare key flips back to the
+                            # p3-era int64_t word erasure, and
+                            # _struct_method_csym's bare->qualified setdefault
+                            # mirror then poisons the module-qualified key
+                            # every pre-definition call site reads through
+                            # _emit_call (measured: simd's __divmod__ calls
+                            # `denominator.eq(0)` before the eq definition is
+                            # emitted, so it saw the stale word and skipped
+                            # the cast).
                             param_ctypes.append(f"{s.name} *")
                         else:
                             # Usage/call-site inference for struct methods is
@@ -12642,6 +12782,48 @@ def gen_module_impl(self, stmts):
     if self._current_filename:
         parts.append(f'#line 1 "{self._current_filename}"')
 
+    # part 4 integration safety net (measured 2026-10-22): a `MojoTuple_*`
+    # name reaches the C through paths that compute it via `_mojo_type` /
+    # `_tuple_cname` but never call `_ensure_tuple_struct`, so its struct is
+    # never registered and the dependency-ordered typedef emission below
+    # skips it — gcc then fails the TU with `unknown type name 'MojoTuple_
+    # ...'` / `expected specifier-qualifier-list`. The measured sites: a
+    # by-value struct METHOD PARAM (std/builtin/tuple `concat`'s `other`),
+    # a TRAIT-VTABLE function-pointer FIELD return (std/iter `bounds`,
+    # std/math `__divmod__`), an in-TU MONOMORPHIZED-EXTERN return
+    # (test/builtin/test_rebind `MyMemStruct_4_size_1_4_sizes`), and a
+    # COMPTIME-FN return (test/atomic). Register any name that is referenced
+    # in the already-generated C (func_parts is complete at this point; the
+    # function C is appended to parts later, at `parts.extend(func_parts)`)
+    # but not yet in struct_field_types. The name->element-text map is
+    # recorded by types._tuple_cname on every call, so `Tuple[{inner}]`
+    # reconstructs the exact annotation that produced the name and
+    # `_ensure_tuple_struct` re-derives the identical name (same extraction:
+    # `ann.split('[', 1)[1].rstrip(']').strip()`). Runs BEFORE
+    # `max_iterations` is computed so the newly-registered structs are
+    # counted in the dependency-ordered emission bound.
+    if self.emit_struct_defs and hasattr(self, 'struct_field_types'):
+        # Scan the three sources that carry `MojoTuple_*` references at this
+        # point: `parts` (so far), `func_parts` (complete — the function/vtable
+        # C is appended to parts later), and `self._elaborated_externs` (the
+        # in-TU mono-method extern decls, consumed further down at
+        # `parts.extend` AFTER this typedef loop — so their return types are
+        # not yet in parts; measured 2026-10-22: test/builtin/test_rebind's
+        # `MyMemStruct_4_size_1_4_sizes -> MojoTuple_e6ba54bc8385`).
+        _ref_names = set()
+        for _seg in (parts, func_parts, getattr(self, '_elaborated_externs', [])):
+            for _ln in _seg:
+                if 'MojoTuple_' in _ln:
+                    for _mm in re.finditer(r'MojoTuple_[0-9a-f]+', _ln):
+                        _ref_names.add(_mm.group(0))
+        for _nm in sorted(_ref_names):
+            if _nm in self.struct_field_types:
+                continue
+            _inner = _TUPLE_ANN_BY_NAME.get(_nm)
+            if _inner is None:
+                continue
+            self._ensure_tuple_struct(f"Tuple[{_inner}]")
+
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
@@ -14230,10 +14412,65 @@ def gen_module_impl(self, stmts):
                         else:
                             _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
+                if signature.startswith('MojoTuple_'):
+                    # Part 4 (measured 2026-10-21 integration, `split`'s
+                    # `-> Tuple[String, String]`): the scanned/resolved
+                    # `Tuple[...]` RETURN annotation answers the synthesized
+                    # by-value struct, but the defining unit made the
+                    # body-sensitive decision (a body that builds the tuple as
+                    # a RUNTIME list-backed literal returns `MojoList *`) and
+                    # published that answer for its own definition — it must
+                    # win, or this extern disagrees with the definition's own
+                    # prototype. A defining unit that never compiled in this
+                    # closure publishes nothing; `MojoList *` is the only
+                    # shape a runtime tuple literal has, so it is the honest
+                    # fallback.
+                    _home_ret = self._func_return_type_for_call(
+                        _as_str(orig_name), None)
+                    if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                        _tail = signature.split(None, 1)
+                        _sub = _home_ret if _home_ret else 'MojoList *'
+                        if len(_tail) == 2:
+                            signature = _sub + ' ' + _tail[1]
+                        else:
+                            signature = _sub
+                if (signature.startswith('MojoTuple_')
+                        and '[' in _as_str(sym_info.get('return_type', ''))
+                        and _as_str(sym_info.get('return_type', ''))
+                        .strip().split('[', 1)[0].strip() in ('Tuple', 'tuple')):
+                    # By-value struct return this TU will use: register its
+                    # typedef (see the struct-method-extern site above —
+                    # measured 2026-10-21 part 4 integration).
+                    self._ensure_tuple_struct(_as_str(sym_info.get('return_type')))
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
-            ret_type = _as_str(sym_info.get('return_type', 'int64_t'))
-            ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
+            _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))
+            ret_type = self._resolve_type(_raw_ret) if _raw_ret != 'unknown' else 'int'
+            if isinstance(ret_type, str) and ret_type.startswith('MojoTuple_'):
+                # The stateless re-resolution of a `Tuple[...]` RETURN
+                # annotation answers the synthesized by-value struct, but the
+                # defining unit made the body-sensitive decision (a body that
+                # builds the tuple as a RUNTIME list-backed literal returns
+                # `MojoList *`) and published its answer for its own
+                # definition — that answer must win, or this extern and every
+                # call-site temp disagree with the definition's prototype
+                # (measured 2026-10-21 part 4 integration on `split`'s
+                # `-> Tuple[String, String]`). A defining unit that never
+                # compiled in this closure publishes nothing; `MojoList *` is
+                # the only shape a runtime tuple literal has, so it is the
+                # honest fallback.
+                _home_ret = self._func_return_type_for_call(
+                    _as_str(sym_info.get('original_name', _sn)), None)
+                if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                    ret_type = _home_ret if _home_ret else 'MojoList *'
+            if (isinstance(ret_type, str) and ret_type.startswith('MojoTuple_')
+                    and '[' in _raw_ret
+                    and _raw_ret.strip().split('[', 1)[0].strip()
+                    in ('Tuple', 'tuple')):
+                # By-value struct return this TU will use: register its
+                # typedef (see the struct-method-extern site above —
+                # measured 2026-10-21 part 4 integration).
+                self._ensure_tuple_struct(_raw_ret)
             if self.do_imports or self.link_imports:
                 if safe in self._emitted_unresolved_stub_syms:
                     continue
@@ -14243,10 +14480,41 @@ def gen_module_impl(self, stmts):
                 else:
                     _stub_body = f'{{ mojo_print ((char *)"{_sn}: unavailable in compiled mode"); return ({ret_type})0; }}'
                 _unresolved_guard = _stub_guard_name(safe)
-                parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
-                              f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
+                if safe == 'PythonObject':
+                    # Named-dummy signature = fire_runtime's definition, so
+                    # the call sites generated from THIS declaration pass
+                    # dummy + box per the standard ABI (see the decl branch
+                    # below). The weak body only matters when fire_runtime
+                    # is not linked (no strong definition to win).
+                    _stub_body = (f'{{ mojo_print ((char *)"{_sn}: unavailable '
+                                  f'in compiled mode"); return ({ret_type})0; }}')
+                    parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
+                                  f"__attribute__((weak)) int64_t PythonObject (int64_t, ...) {_stub_body}  /* stub from {module} */\n#endif")
+                else:
+                    parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
+                                  f"__attribute__((weak)) {ret_type} {safe} (...) {_stub_body}  /* stub from {module} */\n#endif")
             else:
-                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                if safe == 'PythonObject':
+                    # The declaration must match fire_runtime's DEFINITION
+                    # `int64_t PythonObject (int64_t _first, ...)`: with a
+                    # zero-named `(...)` decl the AArch64 caller spills BOTH
+                    # varargs (the spelled `0` dummy + the box) to the stack
+                    # while the definition reads its named param from the
+                    # register and its vararg from a different stack offset
+                    # — the box came back non-deterministic garbage
+                    # (measured 2026-10-22: the ladder's
+                    # test_conversion_to_simd box read 0x200000000 /
+                    # 0x0000000000 across builds instead of
+                    # 0x3fbf9add37bea984). With the named dummy in the decl
+                    # the caller passes dummy + box per the standard ABI
+                    # (x0/x1), which the definition's va_arg then answers.
+                    # See emit_calls' PythonObject arm + fire_runtime.c.
+                    parts.append(
+                        "#ifndef PythonObject\n"
+                        "extern int64_t PythonObject (int64_t, ...);  /* from std.python: named dummy = fire_runtime's definition */\n"
+                        "#endif")
+                else:
+                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
     if self.imported_symbols:
         parts.append('')

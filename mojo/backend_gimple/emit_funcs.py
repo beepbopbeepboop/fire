@@ -61,6 +61,7 @@ from mojo.middle.funcs_shared import (
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
+from mojo.middle.types import _body_builds_struct_tuple
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # The body that OWNS this nested `def`'s environment — read ONCE, here,
@@ -518,6 +519,15 @@ def _gen_stmt_FromImportStmt(gen, node):
                 }
             ret = _fi_info.get('c_return_type', 'int64_t')
             if symbol_name not in gen.func_return_types:
+                if isinstance(ret, str) and ret.startswith('MojoTuple_'):
+                    # Same part 4 decision as `register_imported_symbol`
+                    # (see there): the scanned `Tuple[...]` return annotation
+                    # answers the synthesized struct; the runtime-literal
+                    # shape is `MojoList *`.
+                    _home_ret = gen._func_return_type_for_call(
+                        symbol_name, None)
+                    if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                        ret = _home_ret if _home_ret else 'MojoList *'
                 gen.func_return_types[symbol_name] = ret
             if _fi_qual:
                 # Same mode-dependent qualifier rule as the top-level
@@ -2701,6 +2711,20 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:
         ret_type = gen._resolve_type(node.return_type)
+        # The SAME body-sensitive decision the struct-method definition
+        # pass makes below (`_gen_struct_method`): a `-> Tuple[...]` return
+        # whose body builds the tuple as a RUNTIME (list-backed) tuple
+        # literal returns `MojoList *`, not the synthesized by-value
+        # struct — without this this definition pass overwrites the
+        # signature pass's `MojoList *` back into func_return_types, the
+        # prototype declares a struct return, and the typedef is never
+        # emitted (`unknown type name 'MojoTuple_...'`; measured 2026-10-21
+        # part 4 integration on `split`'s `-> Tuple[String, String]`).
+        if (isinstance(ret_type, str)
+                and ret_type.startswith('MojoTuple_')
+                and not _body_builds_struct_tuple(
+                        getattr(node, 'body', None))):
+            ret_type = 'MojoList *'
     else:
         # Seed any local holding a closure VALUE (`var f = inner`) so
         # `return f` infers the closure's real MojoBoundMethod*/void*
@@ -3925,6 +3949,23 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = f"{struct_name} *"
         else:
             ret_type = gen._resolve_type(node.return_type)
+            # Part 4: a `Tuple[...]` return needs the SAME body-sensitive
+            # decision the signature pass made — the `bounds()` family
+            # builds its tuple as a runtime (list-backed) tuple literal
+            # (value a `MojoList *`; returning the synthesized struct
+            # would cast a list pointer — invalid C), and only a body
+            # that declares a `var <x>: Tuple[...]` local (zip's
+            # `__next__`) hands the struct back by value. Without this,
+            # this definition pass would overwrite the signature pass's
+            # `MojoList *` back into `func_return_types` with the raw
+            # `_resolve_type` answer, and the prototype (which reads
+            # that table) would declare a struct return whose typedef
+            # is no longer emitted (`unknown type name 'MojoTuple_...'`).
+            if (isinstance(ret_type, str)
+                    and ret_type.startswith('MojoTuple_')
+                    and not _body_builds_struct_tuple(
+                            getattr(node, 'body', None))):
+                ret_type = 'MojoList *'
     else:
         # Seed inferred LOCAL var types so `return <local>` where the
         # local holds a pointer value (e.g. a bytes accumulator built

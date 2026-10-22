@@ -777,9 +777,179 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
                 _args.append(_dflt)
         _wt, wv = gen._lower_struct_constructor(rec['wrapper_mangled'], _args)
         return _wt, wv
-    cont_t, cont_v = gen.lower_expr(node.args[0])
-    cont_t = gen._get_actual_type(cont_t, cont_v)
-    _cont_arg = node.args[0]
+    if rec['kind'] == 'out-res':
+        # Part 4: reconstruct the factory body from the call arguments —
+        # allocate the wrapper (no `__init__`: the constructor call below
+        # is the allocation only), write the cursor field (chain's
+        # `res._idx = 0`; zip's body has no cursor), then one inner per
+        # container argument into the wrapper's tuple field
+        # (`res._iterators[i]` / `res._values[i]` — the synthesized tuple
+        # struct's `_N` fields, constant index: the spliced body is
+        # unrolled the same way, so call site and body cannot drift).
+        # Every fall-through returns None and the old path's honest
+        # refusal stands — no partial C.
+        _wt, wv = gen._lower_struct_constructor(rec['wrapper_mangled'], [])
+        _tf = rec.get('tuple_field')
+        if _tf is None:
+            return None
+        if rec.get('idx_field'):
+            gen._emit(f'  {wv}->{rec["idx_field"]} = 0;')
+        _arginfo = rec.get('args') or []
+        for _i, _ainf in enumerate(_arginfo):
+            if _i >= len(node.args):
+                return None
+            _arg_node = node.args[_i]
+            # The bare-spelling constructor rvalue (measured 2026-10-21
+            # part 4: the owned `chain(List([1, 2, 3]), ...)`): the
+            # generic constructor arm requires the `List[T]` subscript
+            # spelling, so the bare `List(<literal>)` erases to int64_t
+            # on the ordinary path — but the LITERAL is the container, so
+            # lower it directly, exactly the way `var l = [1, 2, 3]` is
+            # lowered (`_lower_list_literal` / `_lower_set_literal`).
+            _f_node = getattr(_arg_node, 'func', None)
+            if (isinstance(_f_node, gimple_ctypes.IdentExpr)
+                    and _f_node.name in ('List', 'Set')
+                    and _ainf['kind'] in ('list', 'set')):
+                _a_list = getattr(_arg_node, 'args', None) or ()
+                if len(_a_list) == 1 and isinstance(
+                        _a_list[0], (gimple_ctypes.ListExpr,
+                                     gimple_ctypes.SetExpr)):
+                    _arg_node = _a_list[0]
+            _cont_t, _cont_v = gen.lower_expr(_arg_node)
+            _cont_t = gen._get_actual_type(_cont_t, _cont_v)
+            _cont_arg = _arg_node
+            if _ainf['kind'] == 'set':
+                # the same insertion-order materialization the return-
+                # value subpath feeds (`mojo_set_to_list`)
+                if _cont_t != 'MojoSet *':
+                    return None
+                _set_list = gen._call_expr('MojoList *', 'mojo_set_to_list',
+                                           [('MojoSet *', _cont_v)])
+                _cont_arg = gimple_ctypes.IdentExpr(name=_set_list)
+                _cont_t = 'MojoList *'
+            if _ainf['kind'] == 'factory':
+                # a NESTED factory argument: its wrapper pointer IS the
+                # inner (the wrapper's own `__iter__` returns Self)
+                _inner_v, _inner_t = _cont_v, _cont_t
+            elif _ainf['kind'] == 'struct':
+                # a USER-DEFINED iterator struct (part 4:
+                # test_zip_bounds's `zip(TestIter(2, {2}), ...)`): the
+                # constructor rvalue lowers to the struct pointer the
+                # wrapper's `_values[i]` holds; `__next__`/`bounds`
+                # dispatch on the struct's own in-TU methods.
+                if not (_cont_t is not None and _cont_t.endswith(' *')):
+                    return None
+                _inner_v, _inner_t = _cont_v, _cont_t
+            elif rec['moved']:
+                # owned inner: `_ListIterOwned(<container ptr>, 0)`
+                if not (_cont_t is not None and _cont_t.endswith(' *')):
+                    return None
+                _zero = gimple_ctypes.IntLiteral(value=0)
+                _it, _inner_v = gen._lower_struct_constructor(
+                    _ainf['inner_mangled'], [_cont_arg, _zero])
+                _inner_t = f"{_ainf['inner_mangled']} *"
+            else:
+                # borrowed inner: `_ListIter(0, l.unsafe_ptr(), l._len)` —
+                # the public MojoList representation only
+                if _cont_t != 'MojoList *':
+                    return None
+                _elem = gen._elem_types.get(_cont_v) or _ainf['elem_ctype']
+                _data = gen._new_val(f'{_elem} *',
+                                     f'({_elem} *){_cont_v}->data')
+                _ln = gen._new_val('int64_t', f'{_cont_v}->len')
+                _idx0 = gimple_ctypes.IntLiteral(value=0)
+                _it, _inner_v = gen._lower_struct_constructor(
+                    _ainf['inner_mangled'],
+                    [_idx0, gimple_ctypes.IdentExpr(name=_data),
+                     gimple_ctypes.IdentExpr(name=_ln)])
+                _inner_t = f"{_ainf['inner_mangled']} *"
+            gen._emit(f'  {wv}->{_tf}._{_i} = {_inner_v};')
+        return _wt, wv
+    if rec.get('multi_args'):
+        # The MULTI-CONTAINER dependent return (part 4: product) — the
+        # factory body is reconstructed per argument: each container
+        # argument gets its OWN inner exactly the way the single-container
+        # path builds its one (`iter(<arg>)`), and the wrapper's fieldwise
+        # `__init__` takes the per-argument inners POSITIONALLY, in the
+        # call's argument order — `product(a, b)` is `_Product2(iter(a),
+        # iter(b))`. The wrapper's `__init__` does the real move/copy work
+        # (`self._inner_a = inner_a^`, `self._inner_b = inner_b.copy()`,
+        # ...), so no field writes are needed at the call site.
+        _inners = []
+        for _i, _ainf in enumerate(rec['multi_args']):
+            if _i >= len(node.args):
+                return None
+            _arg_node = node.args[_i]
+            # The bare-spelling constructor rvalue (the owned `product(
+            # List([1, 2]), ...)` shape — the same correction the out-res
+            # branch applies: lower the LITERAL, not the erased call).
+            _f_node = getattr(_arg_node, 'func', None)
+            if (isinstance(_f_node, gimple_ctypes.IdentExpr)
+                    and _f_node.name in ('List', 'Set')
+                    and _ainf['kind'] in ('list', 'set')):
+                _a_list = getattr(_arg_node, 'args', None) or ()
+                if len(_a_list) == 1 and isinstance(
+                        _a_list[0], (gimple_ctypes.ListExpr,
+                                     gimple_ctypes.SetExpr)):
+                    _arg_node = _a_list[0]
+            _cont_t, _cont_v = gen.lower_expr(_arg_node)
+            _cont_t = gen._get_actual_type(_cont_t, _cont_v)
+            _cont_arg = _arg_node
+            if _ainf['kind'] == 'set':
+                if _cont_t != 'MojoSet *':
+                    return None
+                _set_list = gen._call_expr('MojoList *', 'mojo_set_to_list',
+                                           [('MojoSet *', _cont_v)])
+                _cont_arg = gimple_ctypes.IdentExpr(name=_set_list)
+            if _ainf['kind'] == 'factory':
+                # a NESTED factory argument: its wrapper pointer IS the inner
+                _inner_v = _cont_v
+            elif _ainf['moved']:
+                if not (_cont_t is not None and _cont_t.endswith(' *')):
+                    return None
+                _zero = gimple_ctypes.IntLiteral(value=0)
+                _it, _inner_v = gen._lower_struct_constructor(
+                    _ainf['inner_mangled'], [_cont_arg, _zero])
+            else:
+                if _cont_t != 'MojoList *':
+                    return None
+                _elem = gen._elem_types.get(_cont_v) or _ainf['elem_ctype']
+                _data = gen._new_val(f'{_elem} *',
+                                     f'({_elem} *){_cont_v}->data')
+                _ln = gen._new_val('int64_t', f'{_cont_v}->len')
+                _idx0 = gimple_ctypes.IntLiteral(value=0)
+                _it, _inner_v = gen._lower_struct_constructor(
+                    _ainf['inner_mangled'],
+                    [_idx0, gimple_ctypes.IdentExpr(name=_data),
+                     gimple_ctypes.IdentExpr(name=_ln)])
+            _inners.append(gimple_ctypes.IdentExpr(name=_inner_v))
+        _wt, wv = gen._lower_struct_constructor(
+            rec['wrapper_mangled'], _inners)
+        return _wt, wv
+    if rec['kind'] == 'pyobj-list':
+        # `enumerate(list_obj.__iter__())` (2026-10-21 part 4, further,
+        # test_python_object): the argument is the PythonObject local's own
+        # `__iter__()` call; the seed resolved it as a borrowed-list cursor
+        # over the runtime list the box wraps. Lower the RECEIVER (the box)
+        # and unbox it — the list box is the MojoList * pointer itself
+        # (measured: the method dispatch unboxes with
+        # `(MojoList *)(int64_t)<box>`) — and the borrowed inner
+        # construction below then runs on the public MojoList
+        # representation exactly as for a list local.
+        _f = getattr(node.args[0], 'func', None)
+        _recv = getattr(_f, 'obj', None)
+        if type(_recv).__name__ != 'IdentExpr':
+            return None
+        _box_t, _box_v = gen.lower_expr(_recv)
+        if _box_t != 'int64_t':
+            return None
+        cont_v = gen._new_val('MojoList *', f'(MojoList *){_box_v}')
+        cont_t = 'MojoList *'
+        _cont_arg = _recv
+    else:
+        cont_t, cont_v = gen.lower_expr(node.args[0])
+        cont_t = gen._get_actual_type(cont_t, cont_v)
+        _cont_arg = node.args[0]
     if rec['kind'] == 'set':
         # A set container is a list container via the runtime's insertion-
         # order materialization (`mojo_set_to_list` — the same order the
@@ -1811,6 +1981,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not gen._locally_binds_name('String')
             and not gen._locally_binds_name('str')):
         fname_raw = 'str'
+    # `String(py=<box>)` — the PythonObject -> String conversion (2026-10-
+    # 21 part 4, further, test_python_object): the value arrives ONLY
+    # through the `py=` kwarg (no positional arg), so the positional
+    # `String(x)` rename above never fires here. The runtime answers the
+    # box by class: a registered list reprs through its per-slot kinds
+    # (`[1, 2, 3, "food"]` -> `[1, 2, 3, 'food']` — measured: test_setitem),
+    # a string pointer is its content, a number its decimal, 0 -> None.
+    if (fname_raw == 'String' and not node.args
+            and not gen._locally_binds_name('String')
+            and _py_kwarg(node) is not None):
+        _bt, _bv = gen.lower_expr(_py_kwarg(node))
+        _b64 = gen._to_int64(_bt, _bv)
+        _b64v = gen._new_val('int64_t', _b64)
+        return 'char *', gen._call_expr('char *', 'mojo_pyobject_str',
+                                        [('int64_t', _b64v)])
     if fname_raw.startswith('mojo_python_'):
         gen._python_api_needed = True
     # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
@@ -2061,6 +2246,40 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _next_is_builtin = (not gen._locally_binds_name('next')
                         and fname_raw not in gen.imported_symbols)
     if fname_raw == 'next' and len(node.args) >= 1 and _next_is_builtin:
+        # `next(self._inner)` — the BY-VALUE struct-FIELD receiver (part 4:
+        # product's spliced `_Product2.__next__` does `next(self._inner_a)`
+        # on its `var _inner_a: Self.IteratorTypeA` field). The pointer path
+        # below cannot see it (its ctype carries no `*`), and the ordinary
+        # MemberExpr lowering would COPY the field into a temp — calling
+        # `__next__` on that copy would advance a throwaway, never the
+        # field. So the receiver is emitted as the lvalue itself
+        # (`&(obj->field)`), which the `mut self` `__next__` mutates in
+        # place. Only an IDENT obj is accepted: lowering a non-ident obj
+        # (a call) twice would double-emit the call, and no measured shape
+        # has one — it falls through to the refusal below, which names the
+        # shape. The field must be an in-TU struct type known to
+        # struct_field_types; otherwise this is not the field-receiver shape
+        # and the ordinary path decides (and refuses).
+        _arg0 = node.args[0]
+        if (isinstance(_arg0, gimple_ctypes.MemberExpr)
+                and isinstance(getattr(_arg0, 'obj', None),
+                               gimple_ctypes.IdentExpr)):
+            _obj_t, _obj_v = gen.lower_expr(_arg0.obj)
+            _obj_t = gen._get_actual_type(_obj_t, _obj_v)
+            if _obj_t is not None and _obj_t.endswith(' *'):
+                _osn = gimple_exprtypes._struct_name_of(_obj_t)
+                _ofields = gen.struct_field_types.get(_osn, {})
+                _ftype = _ofields.get(_arg0.member)
+                if _ftype in gen.struct_field_types:
+                    _fld = gimple_ctypes._safe_field(_arg0.member)
+                    _nfn = gen._struct_method_csym(_ftype, '__next__', '')
+                    if _nfn in gen.func_return_types:
+                        _nvct = gen.func_return_types[_nfn]
+                        if _nvct == 'void':
+                            _nvct = 'int64_t'
+                        _lval = f'{_obj_v}->{_fld}'
+                        return _nvct, gen._call_expr(
+                            _nvct, _nfn, [(f'{_ftype} *', f'&{_lval}')])
         _recv_t, _recv_v = gen.lower_expr(node.args[0])
         _recv_t = gen._get_actual_type(_recv_t, _recv_v)
         _rbase = _struct_ptr_name(gen, _recv_t)
@@ -3105,11 +3324,22 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _wct is not None and _struct_defines_method(gen, _wct[:-2], 'bounds'):
         _csn = _wct[:-2]
         _bsym = gen._struct_method_csym(_csn, 'bounds', '')
-        _tup64 = gen._new_val('int64_t', f'{_bsym} ({av})')
-        # The chokepoint (R3 guard: test_no_new_container_casts.py counts
-        # ad-hoc container-kind casts outside emit_resolve.py), not a
-        # hand-written (MojoList *) — same emitted cast, counted cast.
-        _tupl = gen._coerce_to_type('int64_t', 'MojoList *', _tup64)
+        # The in-TU `bounds()`'s return is representation-dependent: the
+        # spliced `_Enumerate` one answers the 2-element [lower, upper]
+        # tuple list UNBOXED (`MojoList *` — measured 2026-10-22,
+        # gimplerunner `print(len(enumerate([7, 8])))`: the old boxed-word
+        # temp was gcc's `makes integer from pointer without a cast`), the
+        # older ladder spellings boxed it. Type the temp on the registered
+        # return, and take the unboxed pointer without a cast.
+        _bret = gen.func_return_types.get(_bsym, 'int64_t')
+        if _bret == 'MojoList *':
+            _tupl = gen._new_val('MojoList *', f'{_bsym} ({av})')
+        else:
+            _tup64 = gen._new_val('int64_t', f'{_bsym} ({av})')
+            # The chokepoint (R3 guard: test_no_new_container_casts.py counts
+            # ad-hoc container-kind casts outside emit_resolve.py), not a
+            # hand-written (MojoList *) — same emitted cast, counted cast.
+            _tupl = gen._coerce_to_type('int64_t', 'MojoList *', _tup64)
         _i1 = gen._new_val('int64_t', '(int64_t)1')
         return 'int64_t', gen._new_val(
             'int64_t', f'mojo_list_get_int ({_tupl}, {_i1})')
@@ -4922,6 +5152,45 @@ def _lower_imported_struct_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExp
     return 'int64_t', t
 
 
+def _py_kwarg(node):
+    """The `py=` kwarg's value node, or None (part 4, further,
+    test_python_object): the PythonObject-conversion keyword the stdlib's
+    `String`/`Float64`/`Int8`/... constructors take to convert a boxed
+    value (`String(py=ll)`, `Float64(py=py_float)`)."""
+    for _k in (getattr(node, 'kwargs', None) or []):
+        try:
+            _kn, _kv = _k[0], _k[1]
+        except (TypeError, IndexError):
+            continue
+        if gimple_ctypes._as_str(_kn) == 'py':
+            return _kv
+    return None
+
+
+def _py_box_is_double_bits(gen, expr, box64):
+    """Does the box expression statically hold a double literal's BITS?
+
+    `PythonObject(0.123456789121212)` inline, or a local recorded by
+    `_gen_stmt_VarDecl` (`var py_float = PythonObject(0.123...)`). Such a
+    word needs a BITCAST (mojo_pyobject_box_as_double) — a numeric
+    conversion would read the IEEE pattern as a huge value. The `box64`
+    arg is the lowered word (unused here, kept for the call site's
+    clarity); the decision is purely on the expression's shape."""
+    if type(expr).__name__ == 'CallExpr':
+        _f = getattr(expr, 'func', None)
+        _args = getattr(expr, 'args', None) or ()
+        if (type(_f).__name__ == 'IdentExpr' and _f.name == 'PythonObject'
+                and len(_args) == 1):
+            _pa = _args[0]
+            if (type(_pa).__name__ == 'FloatLiteral'
+                    or (type(_pa).__name__ == 'IntLiteral'
+                        and isinstance(getattr(_pa, 'value', None), float))):
+                return True
+    if type(expr).__name__ == 'IdentExpr':
+        return expr.name in getattr(gen, '_pybox_double_vars', ())
+    return False
+
+
 def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     t = gen._new_temp(ctype)
     if node.args:
@@ -4957,7 +5226,110 @@ def _lower_scalar_ctor(gen, fname_raw: str, ctype: str, node: gimple_ctypes.Call
         else:
             gen._emit(f'  {t} = ({ctype}){gen._ensure_local(at, av)};')
     else:
-        gen._emit(f'  {t} = ({ctype})0;')
+        # `Float64(py=<box>)` / `Int8(py=<box>)` / ... (2026-10-21 part 4,
+        # further, test_python_object): the PythonObject-conversion kwarg —
+        # convert the box word to the target ctype. A double-literal box
+        # BITCASTS (its word is the IEEE pattern); a numeric word value-
+        # converts (the `Int8(py=256)` -> 0 wrap is C's own); a string /
+        # container box is a TypeError — real Python raises there
+        # (measured: `with assert_raises(contains="must be real number,
+        # not str"): _ = Float64(py=py_str)`).
+        _pyv = _py_kwarg(node)
+        if _pyv is not None:
+            _bt, _bv = gen.lower_expr(_pyv)
+            # Materialize the box word into a plain `int64_t` temp: raw
+            # GIMPLE rejects a cast expression in a call-argument slot and
+            # a cast applied to a call as the RHS of `=` (measured
+            # 2026-10-21 part 4 integration).
+            _b64 = gen._to_int64(_bt, _bv)
+            _b64v = gen._new_val('int64_t', _b64)
+            if ctype in ('float', 'double', '__fp16'):
+                if _py_box_is_double_bits(gen, _pyv, _b64):
+                    # The double bits land in their own `double` temp — a
+                    # cast may not be applied to a call expression in raw
+                    # GIMPLE ("invalid operand in unary operation") — then
+                    # take the target width.
+                    _bd = gen._new_val(
+                        'double', f'mojo_pyobject_box_as_double ({_b64v})')
+                    if ctype == 'double':
+                        gen._emit(f'  {t} = {_bd};')
+                    else:
+                        gen._emit(f'  {t} = ({ctype}){_bd};')
+                else:
+                    # Runtime class check: a container or a pointer-range
+                    # word (a char * string box) is not a real number.
+                    # Double-bit words OUTSIDE the pointer range are not
+                    # distinguishable from huge values here — the measured
+                    # double boxes are all static (the bitcast arm above);
+                    # a dynamic word that big is converted as a value.
+                    _bb_bad = gen._new_bb(); _bb_good = gen._new_bb()
+                    _bb_c2 = gen._new_bb(); _bb_c3 = gen._new_bb()
+                    # -fgimple's raw-GIMPLE parser (see `_bool_and`'s
+                    # docstring): an int-returning call must land in an
+                    # `int` temp, comparison operands must be same-TYPE
+                    # temps (no cast literals), `&&` is not a GIMPLE
+                    # operator, and a parenthesized/cast constant must be
+                    # precomputed. Measured 2026-10-21 part 4 integration:
+                    # this arm broke the py-conversion paths under the
+                    # sweep's -fgimple gate.
+                    _pc1 = gen._new_val(
+                        'int', f'mojo_pyobject_is_container ({_b64v})')
+                    gen._emit(
+                        f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                    gen._emit_label(_bb_c2)
+                    _z32 = gen._new_val('int64_t', '1LL << 32')
+                    _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
+                    gen._emit(
+                        f'  if ({_pc2}) goto {_bb_c3}; else goto {_bb_good};')
+                    gen._emit_label(_bb_c3)
+                    _z48 = gen._new_val('int64_t', '1LL << 48')
+                    _pc3 = gen._new_val('_Bool', f'{_b64v} < {_z48}')
+                    gen._emit(
+                        f'  if ({_pc3}) goto {_bb_bad}; else goto {_bb_good};')
+                    gen._emit_label(_bb_bad)
+                    gen._emit_call('void', '', 'mojo_raise_type_error',
+                                   [('char *', gen._intern_string(
+                                       gimple_ctypes._c_escape(
+                                           "must be real number, not str")))])
+                    gen._emit(f'  {t} = ({ctype})0;')
+                    gen._emit_label(_bb_good)
+                    if ctype == 'double':
+                        gen._emit(f'  {t} = (double){_b64v};')
+                    else:
+                        # int64 -> double -> float: the nested-cast RHS
+                        # `(float)(double)x` is itself rejected in raw
+                        # GIMPLE, so the double step gets its own temp.
+                        _dv = gen._new_val('double', f'(double){_b64v}')
+                        gen._emit(f'  {t} = ({ctype}){_dv};')
+            else:
+                _bb_bad = gen._new_bb(); _bb_good = gen._new_bb()
+                _bb_c2 = gen._new_bb()
+                # -fgimple's raw-GIMPLE parser (see `_bool_and`'s
+                # docstring): an int-returning call must land in an `int`
+                # temp, comparison operands must be same-TYPE temps (no
+                # cast literals), and the constant must be precomputed.
+                # Measured 2026-10-21 part 4 integration: this arm broke
+                # the py-conversion paths under the sweep's -fgimple gate.
+                _pc1 = gen._new_val(
+                    'int', f'mojo_pyobject_is_container ({_b64v})')
+                gen._emit(
+                    f'  if ({_pc1}) goto {_bb_bad}; else goto {_bb_c2};')
+                gen._emit_label(_bb_c2)
+                _z32 = gen._new_val('int64_t', '1LL << 32')
+                _pc2 = gen._new_val('_Bool', f'{_b64v} >= {_z32}')
+                gen._emit(
+                    f'  if ({_pc2}) goto {_bb_bad}; else goto {_bb_good};')
+                gen._emit_label(_bb_bad)
+                gen._emit_call('void', '', 'mojo_raise_type_error',
+                               [('char *', gen._intern_string(
+                                   gimple_ctypes._c_escape(
+                                       "int() argument must be a real "
+                                       "number, not 'str'")))])
+                gen._emit(f'  {t} = ({ctype})0;')
+                gen._emit_label(_bb_good)
+                gen._emit(f'  {t} = ({ctype}){_b64v};')
+        else:
+            gen._emit(f'  {t} = ({ctype})0;')
     return ctype, t
 
 
@@ -7013,6 +7385,55 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         return 'int64_t', gen._new_val('int64_t', '0')
 
     arg_pairs = [gen.lower_expr(a) for a in node.args]
+    # `PythonObject(<int literal>)` (2026-10-21 part 4, further,
+    # test_python_object): the constructor's C extern is VARIADIC
+    # (`int64_t PythonObject (int64_t, ...)` — a named dummy before the
+    # box; see fire_runtime.c — the codegen cannot see the
+    # stdlib's parameter types), so a plain int literal argument is
+    # stored 32-bit with an UNSPECIFIED upper half in the varargs slot —
+    # the runtime's identity box (fire_runtime's `PythonObject`) would
+    # then read a garbage word (measured: a clean stack answers zero, a
+    # dirty one 0xFFFF???? — the assert driver's b32-tolerance exists for
+    # exactly this). Widen the integer literal to `(int64_t)` at the only
+    # call site that names the phantom constructor. Every argument must
+    # arrive in the GP/stack VARG area: integer literals widen to
+    # `(int64_t)` (a 32-bit literal leaves an unspecified upper half), and
+    # DOUBLE arguments go through `mojo_double_to_bits` (fire_runtime.h) —
+    # a double VARG sits in the FP register/stack area while the runtime's
+    # `va_arg(v, long long)` box read is a GP-area read, so reading a plain
+    # double VARG as a word is UNDEFINED (measured 2026-10-22: with the
+    # named dummy the ladder's `PythonObject(0.123456789121212)` box came
+    # back a GP-register residue 0x200000000 instead of
+    # 0x3fbf9add37bea984, while the same file's earlier single-VARG
+    # spelling answered the bits — allocation luck, not an ABI guarantee).
+    # A non-variadic helper call carries the double per the ABI with no
+    # ambiguity, and its int64 result travels as a normal GP word. Every
+    # non-literal, non-float argument arrives as a 64-bit word already.
+    if fname_raw == 'PythonObject':
+        _wid = []
+        for _i, (_at, _av) in enumerate(arg_pairs):
+            _a = node.args[_i] if _i < len(node.args) else None
+            if (isinstance(_a, gimple_ctypes.IntLiteral)
+                    and not isinstance(_a.value, float)):
+                # Materialize the widening in a GIMPLE temp, NOT inline:
+                # a cast directly inside a call argument is rejected in a
+                # `__GIMPLE`-tagged function's raw-GIMPLE body (measured
+                # 2026-10-22: "expected expression before '(' token" —
+                # the same strict-parser family that broke the inline
+                # `int64_t_as_unsafe_any_origin` cast in
+                # std/python/bindings.mojo's PyType_FromSpec site). The
+                # temp form (`_tN = (int64_t)42;`) is valid raw GIMPLE
+                # in both tagged and untagged functions.
+                _av = gen._new_val('int64_t', f'(int64_t){_av}')
+            elif _at in ('double', 'float'):
+                _av = f'mojo_double_to_bits(({_av}))'
+            _wid.append((_at, _av))
+        # The runtime definition is `PythonObject(int64_t _first, ...)`:
+        # ISO C requires a named parameter before `...` and the x86_64
+        # driver (Apple clang) fails the zero-named spelling the arm64
+        # driver (Homebrew GCC-15) accepts, so the box travels as the
+        # VARG behind a named dummy (see fire_runtime.c); spell it here.
+        arg_pairs = [('int64_t', '0')] + _wid
     kwargs    = getattr(node, 'kwargs', []) or []
     # `_as_str(kname)`: the dict-comprehension's tuple-unpack reads
     # `kwargs[i][0]` (the kwarg NAME, a str) via `mojo_list_get_int`, so
@@ -8219,6 +8640,29 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if _getitem_r is not None:
         return _getitem_r
 
+    # Constant-integer subscript on a synthesized `Tuple[...]` value —
+    # part 4: the chain/zip out-parameter wrapper's `_iterators` /
+    # `_values` tuple-of-inners fields, and the VALUE TUPLE zip's
+    # `__next__` hands back (`elem[0]` / `elem[1]` in the tests). The C
+    # representation is a by-value struct with one field per element
+    # (`_tuple_cname` / `_ensure_tuple_struct`), so this is a MEMBER
+    # ACCESS with the element ctype straight off the registered field
+    # table. A non-constant or out-of-range index falls through to the
+    # old path (honest refusal / array-arithmetic, as before).
+    if (isinstance(ot, str) and ot.startswith('MojoTuple_')
+            and isinstance(node.index, gimple_ctypes.IntLiteral)):
+        _tf = gen.struct_field_types.get(ot, {})
+        _ef = f'_{int(node.index.value)}'
+        if _ef in _tf:
+            # Materialize the member read into a gimple REGISTER: a
+            # member expression is a valid assignment RHS but NOT a
+            # call argument, a call receiver, or a unary operand (gcc
+            # -fgimple: `invalid argument to gimple call` on
+            # `_ListIterOwned_..._bounds (_t7._0)` — measured part 4,
+            # the wrapper `bounds()` methods'
+            # `self._iterators[i].bounds()` receiver).
+            return _tf[_ef], gen._new_val(_tf[_ef], f'{ov}.{_ef}')
+
     # `d[k]` on a builtin-`dict` subclass with no `__getitem__` override:
     # read from the backing MojoDict. On a miss, if the class defines
     # `__missing__`, `d[k]` is `type(d).__missing__(d, k)` (Counter uses
@@ -8780,14 +9224,33 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'MojoMemoryView *', t
 
     if ot == 'MojoList *':
-        # A list slice has no step in this runtime (mojo_list_slice takes
-        # only start/stop), but the SPELLING `l[a:b:0]` still has to be
-        # refused: CPython raises ValueError, and dropping the step
-        # silently answered the plain slice `l[a:b]`. The bytes branch
-        # above carries the identical check and the identical reasoning.
+        # A list slice has no step in the STEP-LESS runtime function
+        # (mojo_list_slice takes only start/stop), but the SPELLING
+        # `l[a:b:c]` must keep its step: CPython walks the strided range,
+        # and dropping it silently answered the plain slice (measured
+        # 2026-10-21 part 4, further, test_python_object's
+        # test_advanced_slicing: `data[-1::-2]` is [9, 7, 5, 3, 1], the
+        # dropped-step path answered [9]). With a spelled step the call
+        # goes to mojo_list_slice_step instead — same index math as
+        # `lst[a:b:c] = ...` (mojo_list_assign_step's helpers). The
+        # zero-step refusal below is unchanged: CPython raises ValueError,
+        # and the bytes branch above carries the identical check. The
+        # has_* flags tell the runtime which bounds were omitted —
+        # _lower_slice_bounds's defaults (0 start / STOP_OMITTED stop) are
+        # ignored when the flag is 0.
         if getattr(node, 'step', None) is not None:
             _kt, kv = gen.lower_expr(node.step)
-            _stepzero = gen._new_val('_Bool', f'({gen._to_int64(_kt, kv)} == 0)')
+            step_v = gen._to_int64(_kt, kv)
+            # raw-GIMPLE hygiene (see `_bool_and`'s docstring): the
+            # zero-check comparison goes into a `_Bool` temp with same-TYPE
+            # plain-var operands — a parenthesized comparison as the whole
+            # RHS is rejected in a `__GIMPLE` function (this site currently
+            # fires only in non-__GIMPLE test fns, but the same slice in a
+            # raises: fn would hit it). Measured 2026-10-21 part 4
+            # integration.
+            _stepv = gen._new_val('int64_t', step_v)
+            _z0 = gen._new_val('int64_t', '0')
+            _stepzero = gen._new_val('_Bool', f'{_stepv} == {_z0}')
             _lb = gen._new_bb(); _lo = gen._new_bb()
             gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
             gen._emit_label(_lb)
@@ -8795,7 +9258,20 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
                            [('char *', gen._intern_string('slice step cannot be zero'))])
             gen._emit(f'  goto {_lo};')
             gen._emit_label(_lo)
-        t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
+            _hs = '0' if node.start is None else '1'
+            _he = '0' if node.stop is None else '1'
+            # Materialize the bounds: a cast expression (what `_to_int64`
+            # returns for a narrower word) is not a valid raw-GIMPLE call
+            # argument.
+            _ovv = gen._new_val('MojoList *', ov)
+            _sv = gen._new_val('int64_t', start_v)
+            _ev = (gen._new_val('int64_t', stop_v)
+                   if node.stop is not None else '0')
+            t = gen._new_val('MojoList *',
+                             f"mojo_list_slice_step ({_ovv}, {_hs}, {_sv}, "
+                             f"{_he}, {_ev}, {_stepv})")
+        else:
+            t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
         # propagate elem type
         if ov in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[ov]

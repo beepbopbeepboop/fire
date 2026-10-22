@@ -116,7 +116,28 @@ def _resolve_type(gen, ann: str | None) -> str:
         elem_ann = gen._c_kw_struct_renames.get(ann[1:].strip(), ann[1:].strip())
         if elem_ann in gen.struct_field_types and elem_ann not in gimple_ctypes._TYPE_MAP:
             return f"{elem_ann} *"
-    return gimple_ctypes._mojo_type(ann)
+    _ct = gimple_ctypes._mojo_type(ann)
+    # A Python-mode module (a `.py` file — the self-hosted compiler's own
+    # source) carries RUNTIME tuples: a `tuple[...]` value is a
+    # mark_as_tuple'd container, never the synthesized by-value struct the
+    # stdlib's `Tuple[...]` mechanism builds (part 4 — that mechanism needs
+    # a `var x: Tuple[...]` struct construction, which `.py` has no spelling
+    # for). Erasing the annotation to the struct is what broke the selfhost
+    # TU (measured 2026-10-22: elaborate.py's
+    # `_find_block_end(lines: list[str], depths: tuple[int, ...], ...)`:
+    # the param erased to `MojoTuple_419c82de427b` — no typedef in the TU,
+    # `len(depths)` stubbed to 0, and the callsite coerced the real
+    # `MojoList *` tuple to the struct — three gcc rejections from one
+    # annotation). The container spelling is exactly what every use wants:
+    # `len()` -> mojo_list_len, `t[i]` -> mojo_list_get, unpack reads the
+    # list-backed tuple (see `_body_builds_struct_tuple`'s note on the
+    # bounds() family building RUNTIME tuples).
+    if (_ct.startswith('MojoTuple_') and not _ct.endswith('*')
+            and isinstance(ann, str)
+            and ann.strip().split('[', 1)[0].strip() in ('Tuple', 'tuple')
+            and (getattr(gen, '_current_filename', '') or '').endswith('.py')):
+        return 'MojoList *'
+    return _ct
 
 
 def _definitely_bytes_expr(e, bytes_vars: set, fn_ret_types: dict) -> bool:

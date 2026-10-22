@@ -2130,6 +2130,45 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
+    # part 4 (measured 2026-10-22): a RUNTIME (list-backed) tuple stored into
+    # a synthesized by-value `MojoTuple_*` struct. A direct `(MojoTuple_...)
+    # <ptr/word>` cast is invalid C ("conversion to non-scalar type requested"
+    # / "non-register as LHS of unary operation"). Real: parsing_floats's
+    # `w_and_q = _get_w_and_q(...)` (local LHS) and _progress's
+    # `self._term_dims = _get_terminal_size()` (field LHS, routed here through
+    # `_safe_coerce_emit`'s needs_temp struct temp). Materialize each element
+    # from the list slots instead — the same per-element list reads the
+    # subscript/unpack paths use — one same-type temp per element (a call
+    # result lands in a same-type temp; a cross-type store is cast explicitly;
+    # a cast never stores through a component ref).
+    if (d.startswith('MojoTuple_') and d in gen.struct_field_types
+            and s != d
+            and (s.endswith(' *') or s in gimple_ctypes._SCALAR_INT_TYPES)):
+        _tf = gen.struct_field_types[d]
+        if s == 'MojoList *':
+            _lp = v
+        else:
+            _lv = gen._ensure_local(s, v)
+            _lp = gen._new_val('MojoList *', f'(MojoList *){_lv}')
+        for _fn in sorted(_tf, key=lambda _f: int(_f[1:])):
+            _i = int(_fn[1:])
+            _fc = _tf[_fn]
+            _idx = gen._new_val('int64_t', f'(int64_t){_i}')
+            if _fc in ('double', 'float'):
+                _rv = gen._new_val('double', f'mojo_list_get_double ({_lp}, {_idx})')
+                if _fc == 'float':
+                    _rv = gen._new_val('float', f'(float){_rv}')
+            elif _fc == 'char *':
+                _rv = gen._new_val('char *', f'mojo_list_get_str ({_lp}, {_idx})')
+            elif _fc.endswith(' *'):
+                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
+                _rv = gen._new_val(_fc, f'({_fc}){_rv}')
+            else:
+                _rv = gen._new_val('int64_t', f'mojo_list_get_int ({_lp}, {_idx})')
+                if _fc != 'int64_t':
+                    _rv = gen._new_val(_fc, f'({_fc}){_rv}')
+            gen._emit(f'  {dest}.{_fn} = {_rv};')
+        return
     if True:
         literal = v.lstrip('-').isdigit()
         if literal and s in gimple_ctypes._SCALAR_INT_TYPES and d in gimple_ctypes._SCALAR_INT_TYPES:

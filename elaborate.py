@@ -18,6 +18,7 @@ import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas)
 from gimple_codegen import _mojo_type
+from mojo.middle.types import _body_builds_struct_tuple
 
 
 class ConformanceError(Exception):
@@ -397,16 +398,34 @@ def bind_type_args(template_src: str, type_args):
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
     only a trailing parameter can be omitted without changing the meaning of the
-    ones before it."""
+    ones before it.
+
+    A TRAILING variadic parameter (`*Ts` — measured 2026-10-21, part 4:
+    `_ChainedIterator[*Ts: Iterator]`, the `chain`/`zip` out-parameter
+    factories' wrappers) consumes EVERY remaining supplied argument as a
+    list — `len(supplied) > len(params)` is the variadic case, not an
+    overflow to truncate (the pre-variadic truncation would have silently
+    dropped all inners but the first)."""
     params = type_param_names(template_src)
     if not params:
         return None
     supplied = list(type_args or ())
-    if len(supplied) > len(params):
-        supplied = supplied[:len(params)]
+    if not any(p.startswith('*') for p in params):
+        if len(supplied) > len(params):
+            supplied = supplied[:len(params)]
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     targs = {}
     for i, p in enumerate(params):
+        if p.startswith('*'):
+            # Variadic: all remaining supplied args bind to this ONE
+            # parameter, as a list. It must be trailing (Mojo's variadic
+            # position), and it needs at least one argument (an empty
+            # `chain()` has no measured lifting shape — the seed's
+            # container gate already requires >= 1 argument).
+            if len(supplied) <= i:
+                return None
+            targs[p] = list(supplied[i:])
+            break
         if i < len(supplied):
             targs[p] = supplied[i]
             continue
@@ -882,6 +901,19 @@ def _elab_signature(concrete_src: str, name: str):
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
             ret = _mojo_type(s.return_type) if s.return_type else 'void'
+            if (isinstance(ret, str) and ret.startswith('MojoTuple_')
+                    and not _body_builds_struct_tuple(
+                            getattr(s, 'body', None))):
+                # The SAME body-sensitive decision the defining unit's own
+                # resolution makes (module_gen's all-functions loop and
+                # emit_funcs' free-function path): a `-> Tuple[...]` return
+                # whose body builds the tuple as a RUNTIME (list-backed)
+                # tuple literal returns `MojoList *`, not the synthesized
+                # by-value struct — without this the CALLER's extern and
+                # call-site temps disagree with the instance TU's own
+                # `MojoList *` prototype (measured 2026-10-21 part 4
+                # integration on `split`'s `-> Tuple[String, String]`).
+                ret = 'MojoList *'
             return ret, [_mojo_type(t) for _, t in s.params]
     return 'int64_t', []
 

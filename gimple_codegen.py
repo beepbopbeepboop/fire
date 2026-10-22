@@ -394,7 +394,7 @@ from mojo.middle.types import (
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
-    dispatch_table_global_ctype,
+    dispatch_table_global_ctype, _tuple_cname,
 )
 from mojo.middle.solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
@@ -5137,6 +5137,65 @@ class GimpleGen:
         return ginf._char_to_cstr(self, typ, val, transient, word_ok)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
+    def _ensure_tuple_struct(self, ann) -> str:
+        """Register the SYNTHESIZED by-value struct for a `Tuple[...]`
+        annotation (one field `_0`..`_N-1` per element — `_tuple_cname`'s
+        docstring has the measured origin, part 4: the chain/zip
+        out-parameter wrappers) in struct_field_types, and return its C
+        name. Idempotent: the element ctys are a pure function of the
+        annotation, so the struct-field pass, the local-var pass and the
+        method-return pass — every site that hands a `Tuple[...]` to
+        `_mojo_type` — register the identical struct.
+
+        An element mention naming a REGISTERED struct (an in-TU
+        materialized wrapper/inner, or an imported struct) is a POINTER
+        element: those structs are constructed through
+        `_lower_struct_constructor`, which always hands back a `NAME *`
+        (heap allocation or the reserved frame slot) — the tuple's slot
+        must hold that pointer, not a value copy. Everything else
+        resolves through `_mojo_type` (the scalar ctys the value tuples
+        carry — zip's element is a `Tuple[Int, String]` of words).
+
+        A non-`Tuple[...]` annotation returns its plain `_mojo_type`
+        ctype unchanged — the hook sites call this unconditionally and
+        branch on the `MojoTuple_` prefix."""
+        if not isinstance(ann, str) or not ann.strip():
+            return 'int64_t'
+        _base = ann.strip().split('[', 1)[0].strip()
+        if _base not in ('Tuple', 'tuple'):
+            return _mojo_type(ann)
+        # Python-mode gate (measured 2026-10-22, selfhost build): a `.py`
+        # module's `tuple[...]` annotation is a RUNTIME container, not the
+        # synthesized by-value struct — registering the struct here would
+        # feed the same `unknown type name 'MojoTuple_...'` failure that
+        # `_resolve_type`'s sibling gate refuses (see its note).
+        if (getattr(self, '_current_filename', '') or '').endswith('.py'):
+            return 'MojoList *'
+        name = _tuple_cname(ann.split('[', 1)[1].rstrip(']').strip())
+        if name in self.struct_field_types:
+            return name
+        fields = {}
+        for i, _e in enumerate(_split_top_level_commas(
+                ann.split('[', 1)[1].rstrip(']').strip())):
+            _e = ' '.join(_e.split())
+            if (_e in self.struct_field_types
+                    or _e in getattr(self, '_intu_structs', {})
+                    or _e in getattr(self, '_imported_generic_structs', {})):
+                fields[f'_{i}'] = f'{_e} *'
+            else:
+                _ect = _mojo_type(_e)
+                if isinstance(_ect, str) and _ect.startswith('MojoTuple_'):
+                    # A nested VALUE tuple: register the inner struct too,
+                    # or the outer typedef references an unknown type and
+                    # the whole TU fails gcc with `unknown type name`
+                    # (measured 2026-10-21 part 4 integration:
+                    # test_builtin/test_tuple's `Tuple[Int, Tuple[String,
+                    # Float32]]` emitted the outer typedef whose `_1` field
+                    # names the never-registered inner struct).
+                    self._ensure_tuple_struct(_e)
+                fields[f'_{i}'] = _ect
+        self.struct_field_types[name] = fields
+        return name
     def _infer_param_types(self, func: FunctionDef,
                            owner_struct: str | None = None) -> dict[str, str]:
         return ginf._infer_param_types(self, func, owner_struct)

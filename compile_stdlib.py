@@ -392,17 +392,6 @@ EXPECTED_FAILURES = {
      # genuine improvement kept in the codegen. Full measurement record:
      # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
      # "2026-10-21 (further)".
-     'test/iter/test_chain.mojo': (
-        "2026-10-21 measured: `test_chain_ref` — `chain(l1, l2)`: the factory "
-        "is VARIADIC (`*iterables: *Ts`) and returns the iterator through an "
-        "`out` PARAMETER (`out res: _ChainedIterator[...]`), not through the "
-        "return value — the factory seed models exactly one container argument "
-        "and a dependent RETURN type, and a variadic multi-iterable + "
-        "out-parameter shape has no representation in that record (stage B of "
-        "the factory subpath). Measured: `next(it)` hard refusal, receiver "
-        "`int64_t` (the `out res` never constructed), in function "
-        "`test_chain_ref`. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/iter/test_map.mojo': (
         "2026-10-21 (further) measured — the Part 2 blocker (thin-FUNCTION "
         "value type argument) is CLOSED: map now seeds its positional "
@@ -430,15 +419,24 @@ EXPECTED_FAILURES = {
         "argument is not a statically resolvable local List / range / "
         "nested factory`). See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/iter/test_zip.mojo': (
-        "2026-10-21 measured: `test_zip2` — `zip(l, l2)`: VARIADIC multi-"
-        "iterable factory with the iterator returned through an `out` PARAMETER "
-        "(`out res: _ZipIterator[...]`) — the same stage-B shape as "
-        "test_chain/test_product (the factory seed models one container argument "
-        "and a dependent RETURN type). Measured: `next(it)` hard refusal, "
-        "receiver `void *` (the erased dependent return of the `out` shape), in "
-        "function `test_zip2`. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    # 2026-10-22 (part 4) — REMOVED from this dict: all three now pass the
+    # syntax gate (the pre-shape-fix part-4 sweep reported each as STALE;
+    # the final sweep is 605 PASSED / 5 FAILED, 0 unexpected, 0 stale).
+    # The lifts are part-4 seed mechanisms, not the typedef safety net
+    # (their part-3 blockers were codegen `next()` hard refusals —
+    # measured receivers `int64_t`/`void *`/`MojoList *` — not gcc errors);
+    # the value ladders were re-run this session with parity to 2026-10-21:
+    #   test/iter/test_chain.mojo — the part-4 variadic + out-parameter
+    #     factory seed subpath (out-res seed: `*iterables: *Ts, out res:
+    #     _ChainedIterator[*inners]`); ladder re-measured PASS 4/4.
+    #   test/iter/test_zip.mojo — the same out-res subpath for
+    #     `_ZipIterator[*inners]`; ladder re-measured 11/12 (test_zip_
+    #     bounds FAIL-REAL parity — a real runtime value assert, not a
+    #     gate regression).
+    #   test/python/test_python_object.mojo — the part-4 pyobj-list seed
+    #     arm (a `PythonObject.__iter__()` call as the loop's container
+    #     argument; the box unboxed to the MojoList * it is, measured).
+    #
     # 2026-10-21 — REMOVED from this dict, with the value ladder (real
     # gcc -c + nm + link + run with value-checking asserts, never the
     # syntax gate) rather than the syntax check:
@@ -511,25 +509,23 @@ EXPECTED_FAILURES = {
         "iterator (`next-on-a-user-defined-iterator-struct` family). See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     'test/itertools/test_product.mojo': (
-        "2026-10-21 measured: `test_product2` — `product(l1, l2)`: the return "
-        "type depends on TWO containers (`_Product2[IterableTypeA.IteratorType"
-        "[origin_of(iterable_a)], IterableTypeB.IteratorType[origin_of(iterable"
-        "_b)]]`) — the factory seed resolves a SINGLE container argument "
-        "(args[0]) and models one inner iterator in the wrapper; a two-"
-        "iterable dependent return is not representable in the current record "
-        "shape. Measured: `next(it)` hard refusal, receiver `int64_t`, in "
-        "function `test_product2`. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/python/test_python_object.mojo': (
-        "2026-10-21 measured: `test_iter` — `for fruit in list_obj` where "
-        "`list_obj: PythonObject`: the loop takes the user-struct `__iter__` "
-        "protocol path (PythonObject.__iter__ -> _PyIter, std/python/"
-        "python_object.mojo:425), and the cursor the protocol binds is typed "
-        "`MojoList *` (measured) — `next(<MojoList *>)` is a raw container "
-        "pointer, not a `_ListIter` local or a struct iterator, so it hits the "
-        "hard refusal (in function `test_iter`). Landing it needs the imported "
-        "struct's `__iter__` return lowered into a cursor next() can dispatch "
-        "on. See "
+        "2026-10-22 (part 4) remeasured — the part-4 two-container factory "
+        "seed lifts the NON-OWNED shapes: `test_product2` / `_param` / "
+        "`_unequal` / `_copies` (products of two List locals) now lower — the "
+        "module compiles through them. The refusal relocated to "
+        "`test_product2_owned`: `product(_owned3(1, 2, 3), _owned2(10, 20))` — "
+        "the container arguments are LOCAL FUNCTION CALLS returning owned "
+        "values (the same R2 local-generic-elaboration + owned family as "
+        "test_cycle's user-owned sites); the seed cannot file records for "
+        "them, the boxed `it` stays `int64_t`, and `next(it)` hits the hard "
+        "refusal (measured 2026-10-22: receiver `int64_t`, in function "
+        "`test_product2_owned`). 2026-10-21 measured (history): `test_product2` "
+        "— `product(l1, l2)`: the return type depends on TWO containers "
+        "(`_Product2[IterableTypeA.IteratorType[origin_of(iterable_a)], "
+        "IterableTypeB.IteratorType[origin_of(iterable_b)]]`) — the factory "
+        "seed resolved a SINGLE container argument (args[0]) and modeled one "
+        "inner iterator in the wrapper; a two-iterable dependent return was "
+        "not representable in that record shape. See "
         "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
     # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
     # `explicit-failed` half of the census, not the `next(...)` half above.

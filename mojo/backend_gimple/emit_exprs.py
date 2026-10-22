@@ -55,6 +55,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+from mojo.middle.calls_shared import _py_box_expr
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -3333,6 +3334,19 @@ def _scalar_typename(gen, ctype: str) -> str:
     return 'int'
 
 
+# Plain scalar word types the box-binform dispatch may see as an operand
+# type (2026-10-21 part 4, further, test_python_object): a PythonObject box
+# lowers to int64_t and its literal operands to the usual integer types.
+# DOUBLEs and pointers are deliberately excluded: a box op with one of
+# those on the C-type side is a shape the file never produces, and the
+# gate must not steal an existing lowering for it.
+_PYBOX_SCALARS = frozenset({
+    'int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
+    'unsigned int', 'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t',
+    '_Bool',
+})
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3355,6 +3369,53 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
     if gen._bytes_subclass_of(rt):
         rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+    # Binary op on a boxed PythonObject word (2026-10-21 part 4, further,
+    # test_python_object): a `PythonObject(...)` local is an int64 box — a
+    # number, a char *, or a container pointer — and raw C arithmetic on
+    # those words is wrong in general: true division of ints must answer
+    # DOUBLE BITS (measured: `a / b` on 34 and 10 asserted against 3.4 but
+    # computed 3), `list_box * 2` is list repetition (raw C did pointer
+    # arithmetic and `String(py=...)` printed garbage), `1 + "two"` must
+    # RAISE TypeError (measured: test_unsupported_operands). The runtime
+    # answers from the word's runtime class. Gate: at least one operand
+    # statically produces a box AND both operands lower to plain scalar
+    # words — any other shape keeps the exact lowering below, so no other
+    # file's C moves. `//` and `**` are dispatched before this tail
+    # (_lower_floordiv/_lower_pow carry the same gate).
+    if op in ('+', '-', '*', '/', '%', '<', '<=', '>', '>=', '==', '!='):
+        _lb, _ld = _py_box_expr(gen, left_node)
+        _rb, _rd = _py_box_expr(gen, right_node)
+        if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+            # Materialize the operand words into plain `int64_t` temps: a
+            # cast expression (what `_to_int64` returns for a narrower
+            # word) is not a valid raw-GIMPLE call argument.
+            _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+            _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+            _flags = [('int', '1' if _ld else '0'),
+                      ('int', '1' if _rd else '0')]
+            if op == '/':
+                t = gen._call_expr('int64_t', 'mojo_pyobject_truediv',
+                                   [('int64_t', _lv64),
+                                    ('int64_t', _rv64)] + _flags)
+                return 'int64_t', t
+            if op in ('<', '<=', '>', '>=', '==', '!='):
+                _code = {'<': '<', '<=': 'L', '>': '>', '>=': 'G',
+                         '==': 'E', '!=': 'N'}[op]
+                # mojo_pyobject_cmp returns `int`; raw GIMPLE requires the
+                # call's result in a same-type temp — bridge to the `_Bool`
+                # slot. Measured 2026-10-21 part 4 integration.
+                _tcmp = gen._call_expr('int', 'mojo_pyobject_cmp',
+                                       [('char', f"'{_code}'"),
+                                        ('int64_t', _lv64),
+                                        ('int64_t', _rv64)])
+                t = gen._new_val('_Bool', f'(int){_tcmp}')
+                return '_Bool', t
+            _oc = {'+': '+', '-': '-', '*': '*', '%': '%'}[op]
+            t = gen._call_expr('int64_t', 'mojo_pyobject_arith',
+                               [('char', f"'{_oc}'"),
+                                ('int64_t', _lv64),
+                                ('int64_t', _rv64)] + _flags)
+            return 'int64_t', t
     # An operand read out of a heterogeneous container at an index that is not
     # a compile-time constant may be a BOX (see mojo_list_get_boxed), and
     # arithmetic on the box's ADDRESS is a silent wrong value — the float's
@@ -4789,6 +4850,24 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # Boxed-PythonObject floor division (2026-10-21 part 4, further,
+    # test_python_object): `a // b` on box locals answers through the
+    # runtime's word-class checks (int result, zero-division RAISE, double
+    # bits when a double is involved) instead of raw C `/`. Gate: at least
+    # one operand statically produces a box and both lower to scalar words
+    # — the same gate as _lower_binary_tail's; `//` is dispatched here
+    # before that tail, so it needs its own copy.
+    _lb, _ld = _py_box_expr(gen, node.left)
+    _rb, _rd = _py_box_expr(gen, node.right)
+    if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+        _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+        _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        t = gen._call_expr('int64_t', 'mojo_pyobject_floordiv',
+                           [('int64_t', _lv64),
+                            ('int64_t', _rv64),
+                            ('int', '1' if _ld else '0'),
+                            ('int', '1' if _rd else '0')])
+        return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
         t1 = gen._new_val(td, f"{lv} / {rv}")
@@ -4820,6 +4899,21 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
 def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # Boxed-PythonObject power (part 4, further, test_python_object): the
+    # runtime answers integer `**` exactly (34 ** 2 is 1156, a C `pow`
+    # round-trip can drift) and RAISES on str/container operands, where
+    # raw C `pow` on a pointer word would print garbage. Same gate as
+    # _lower_binary_tail's; `**` is dispatched here before that tail.
+    _lb, _ld = _py_box_expr(gen, node.left)
+    _rb, _rd = _py_box_expr(gen, node.right)
+    if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+        _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+        _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        t = gen._call_expr('int64_t', 'mojo_pyobject_pow',
+                           [('int64_t', _lv64),
+                            ('int64_t', _rv64),
+                            ('int', '1' if _ld else '0')])
+        return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
         t = gen._new_val(td, f"pow ({lv}, {rv})")

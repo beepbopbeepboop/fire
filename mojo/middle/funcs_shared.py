@@ -14,6 +14,7 @@ import ast_rewriter
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
+from mojo.middle.types import _body_builds_struct_tuple  # noqa: F401
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 # NO module-level `import gimple_codegen` here, and that is the layering rule
@@ -198,6 +199,30 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # List/Dict/Set/Span's own real implementation — `other`
             # needs the real struct pointer so `other->_len` etc. resolve
             # against the actual fields, not the runtime's builtin ones.
+            out.append(f"{_as_str(self_struct)} *")
+        elif (self_struct and isinstance(pt, str)
+                and pt.strip() in ('Self', 'self')):
+            # part 4 (measured 2026-10-22, std/simd.mojo): a param annotated
+            # `Self` (e.g. `def eq(self, rhs: Self)`) is another instance of
+            # the struct being compiled — a pointer to it, exactly like the
+            # bracketed-generic branch above. `Self` has no stateless ctype:
+            # the p3-era word erasure handed it to _mojo_type, which answered
+            # int64_t, so the REGISTERED param type was int64_t while the
+            # definition emits `SIMD *` — _emit_call then saw ptype==atype and
+            # skipped the cast, and gcc flagged the raw word arg against the
+            # real `SIMD *` prototype (measured: __divmod__'s
+            # `denominator.eq(0)` / `.lt(0)` — the p4 `MojoList *`-returning
+            # divmod is the function context in which gcc-mp-15 diagnoses the
+            # int->pointer arg; p3's int64-returning divmod hid the identical
+            # shape, so the explicit cast below is p3's value made explicit).
+            # NO struct_field_types guard (measured 2026-10-22, second round):
+            # the early signature-registration passes run BEFORE the struct
+            # enters struct_field_types, so a guarded branch silently no-ops
+            # at registration time and only the LATE refresh sees the struct
+            # — that left the bare func_param_types slot stale (int64_t) while
+            # the refreshed Pass 2b-bis table carried `SIMD *`. The `self`
+            # param branch above emits `struct *` with no guard for exactly
+            # this reason: a method of struct X implies X's type exists.
             out.append(f"{_as_str(self_struct)} *")
         else:
             # Method context: consult the method's QUALIFIED
@@ -638,6 +663,17 @@ def _resolved_export_entry(gen, module: str, name: str, info):
     _ret = _as_str(info.get('c_return_type') or 'int64_t')
     if _fn.return_type:
         _ret = gen._resolve_type(_fn.return_type)
+        if (isinstance(_ret, str) and _ret.startswith('MojoTuple_')
+                and not _body_builds_struct_tuple(
+                        getattr(_fn, 'body', None))):
+            # The same body-sensitive decision the defining unit's own
+            # resolution makes (see module_gen's all-functions loop): a
+            # `-> Tuple[...]` return built as a RUNTIME (list-backed) tuple
+            # literal is a `MojoList *`, not the synthesized by-value struct
+            # — the re-emitted extern must agree with the instance TU's
+            # prototype (measured 2026-10-21 part 4 integration on
+            # `split`'s `-> Tuple[String, String]`).
+            _ret = 'MojoList *'
     _pts = gen._signature_ctypes(_fn.params, _fn)
     _cparams = []
     for _i, _cpt in enumerate(_pts):
@@ -722,6 +758,26 @@ def register_imported_symbol(gen, name: str, info: dict,
     # stub), and master, which had no such registration, was green.
     _c_ret = _info.get('c_return_type')
     if _c_ret and not _info.get('c_return_type_is_default'):
+        if isinstance(_c_ret, str) and _c_ret.startswith('MojoTuple_'):
+            # Part 4 (measured 2026-10-21 integration, `split`'s
+            # `-> Tuple[String, String]`): the export scan's `c_return_type`
+            # resolves a `Tuple[...]` RETURN annotation to the synthesized
+            # by-value struct, but the defining unit makes the body-sensitive
+            # decision (a body that builds the tuple as a RUNTIME list-backed
+            # literal returns `MojoList *`) and its answer — when this unit
+            # publishes it — wins via the home store. This bare-slot write
+            # runs at import-registration time, before any defining unit has
+            # compiled, so the home store usually misses; `MojoList *` is the
+            # only shape a runtime tuple literal has, so it is the honest
+            # fallback. Left unguarded, this write put the struct name in the
+            # bare slot with "measured" authority, and `_func_csym`'s
+            # bare-slot fallback then copied it to the mangled key and every
+            # import-extern path emitted an `extern MojoTuple_...` for a
+            # definition whose prototype is `MojoList *` (the `test/os/path`
+            # C files' 7-file C->E regression in the part 4 A/B).
+            _home_ret = gen._func_return_type_for_call(_sk, None)
+            if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                _c_ret = _home_ret if _home_ret else 'MojoList *'
         gen.func_return_types[_sk] = _c_ret
     _c_params = _info.get('c_parameters')
     if write_param_types and _c_params is not None:
@@ -1126,6 +1182,18 @@ def _local_sibling_module_exports(gen, module: str):
                 continue
             info = dict(info)
             ret = _sgfs_resolve_ann(gen, fn.return_type)
+            if (isinstance(ret, str) and ret.startswith('MojoTuple_')
+                    and not _body_builds_struct_tuple(
+                            getattr(fn, 'body', None))):
+                # The same body-sensitive decision the defining unit's own
+                # resolution makes (see module_gen's all-functions loop): a
+                # `-> Tuple[...]` return built as a RUNTIME (list-backed)
+                # tuple literal is a `MojoList *`, not the synthesized
+                # by-value struct — the inlined module's export signature
+                # feeds the importer's extern preamble and must agree with
+                # the instance TU's prototype (measured 2026-10-21 part 4
+                # integration on `split`'s `-> Tuple[String, String]`).
+                ret = 'MojoList *'
             pts = gen._signature_ctypes(fn.params, fn, sentinel='MojoList *')
             c_params = [ct + ' ' + pn.lstrip('*')
                         for ct, (pn, pt) in zip(pts, fn.params)]

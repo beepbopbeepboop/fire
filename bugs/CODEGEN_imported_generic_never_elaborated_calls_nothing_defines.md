@@ -1210,3 +1210,41 @@ DIFFERENT population (instantiation declines); the 3 E->C lifts and the 3
 C->C deltas above act on the call-site side. The census is not re-run in
 this session (same treatment as the 2026-10-21 section above it); the
 declared-red population it complements is the 9 entries named above.
+
+## 2026-10-22 (further, part 4): remeasured — the declared-red dict is
+8 -> 5; this doc's own entries are unchanged, the product refusal
+relocated to the owned site
+
+The part-4 campaign lifts 3 of the 8 declared-red entries — all three from
+the R1 doc's census (chain/zip via the out-res factory subpath,
+test_python_object via the pyobj-list arm; see the R1 doc's
+"2026-10-22 (further, part 4)" section for the measured mechanisms and the
+full gate record: sweep 605/5, A/B C->E 0, ladders with parity). From this
+doc's perspective the measured surface is unchanged, plus one relocation:
+
+- `test/os/path/test_getsize.mojo` — still fails real `gcc -c` on the
+  monomorphized `getsize_8_PathLike_6_String` TU (implicit declaration of
+  `stat`, 3 attempts) — same surface as 2026-10-21 (further); the
+  cross-stdlib `stat[PathLike]` transitive elaboration and the out-param
+  result model are untouched by the part-4 changeset (A/B E->E, no
+  message change).
+- `test/itertools/test_cycle.mojo`'s 2 user-owned sites — still refused at
+  the seed's container gate (a local fn call returning a user-defined
+  `IterableOwned`, the local-generic-elaboration sibling); A/B E->E, no
+  message change; 15/17 sites still work with real values.
+- `test/itertools/test_product.mojo` (listed in this doc's family table for
+  the shared R2 local-fn-call family) — the refusal RELOCATED, measured
+  2026-10-22: the part-4 two-container factory seed lifts the NON-OWNED
+  shapes (`test_product2`/`_param`/`_unequal`/`_copies` — products of two
+  List locals — now lower; the module compiles through them), and the
+  remaining site is `test_product2_owned`: `product(_owned3(1, 2, 3),
+  _owned2(10, 20))` — the container arguments are LOCAL FUNCTION CALLS
+  returning owned values, the same family as the cycle sites above. The
+  seed cannot file records for them, the boxed `it` stays `int64_t`, and
+  `next(it)` hits the hard refusal (measured: receiver `int64_t`, in
+  function `test_product2_owned`).
+
+The elaborator-decline census is not re-run (same treatment as the
+2026-10-21 sections above). The declared-red population it complements is
+now the 5 entries named in the R1 doc's 2026-10-22 table (plus the
+floor-green `test_set`, out of the sweep).

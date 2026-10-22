@@ -36,6 +36,7 @@ import mlir
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_is_tuple, for_target_names, target_slots
+import mojo.middle.iter_factory as iter_factory
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1086,6 +1087,46 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
                 gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_not_list};")
                 gen._emit_label(bb_not_list)
+                # A non-zero scalar word below the pointer range is a
+                # number, never a container: real Mojo raises `TypeError:
+                # ... is not iterable` here (measured 2026-10-21 part 4,
+                # further, test_python_object's `with assert_raises(): for
+                # _ in not_iterable:` on `var not_iterable: PythonObject =
+                # 3` — the old no-op let the block complete without
+                # raising). 0 keeps the old no-op: a None/stub box
+                # iterating zero times is the legitimate shape the A5
+                # boxed-member flows rely on (an absent `pat.fields`),
+                # and pointer-range boxes are the unregistered values the
+                # registry checks above already answered "no" for.
+                bb_raise = gen._new_bb(); bb_nonnum = gen._new_bb()
+                bb_rngchk = gen._new_bb()
+                # gcc -fgimple's raw-GIMPLE parser (see `_bool_and`'s
+                # docstring): in a `__GIMPLE` function the comparison
+                # target must be a `_Bool` temp, the operands same-TYPE
+                # temps, and a cast is NOT a valid comparison operand
+                # ("expected expression before '('"); the pointer-range
+                # constant is a precomputed unparenthesized shift (a
+                # parenthesized RHS is rejected too). Measured
+                # 2026-10-21 part 4 integration: this pair broke 11
+                # population files (e.g. test_builtin/test_tuple's
+                # consume-elements loop) under the sweep's -fgimple gate.
+                _it64v = gen._new_val('int64_t', it64)
+                _z0 = gen._new_val('int64_t', '0')
+                _zero_c = gen._new_val('_Bool', f'{_it64v} == {_z0}')
+                _z32 = gen._new_val('int64_t', '1LL << 32')
+                _low_c = gen._new_val('_Bool', f'{_it64v} < {_z32}')
+                gen._emit(
+                    f"  if ({_zero_c}) goto {bb_nonnum}; else goto {bb_rngchk};")
+                gen._emit_label(bb_rngchk)
+                gen._emit(
+                    f"  if ({_low_c}) goto {bb_raise}; else goto {bb_nonnum};")
+                gen._emit_label(bb_raise)
+                gen._emit_call(
+                    'void', '', 'mojo_raise_type_error',
+                    [('char *', gen._intern_string(
+                        gimple_ctypes._c_escape("object is not iterable")))])
+                gen._emit(f"  goto {bb_nonnum};")
+                gen._emit_label(bb_nonnum)
                 gen._emit_unsupported_iter(it_type, node)
                 gen._emit(f"  goto {bb_after};")
                 # `for item in <x>.items():` — even when `x`'s type is
@@ -3133,6 +3174,22 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
 
     if node.return_type is not None:
         ret_type = gen._resolve_type(node.return_type)
+        # The SAME body-sensitive decision `gen_func` makes for a top-level
+        # definition (see there): a `-> Tuple[...]` return whose body builds
+        # the tuple as a RUNTIME (list-backed) tuple literal returns
+        # `MojoList *`, not the synthesized by-value struct. Without this, a
+        # lifted nested comptime fn like test/atomic's `comptime_fn ->
+        # Tuple[Bool, Int32, Int32]` (body `return (success, expected,
+        # atom.load())`) declares a struct return while its body emits a
+        # `MojoList *` runtime tuple, and the return lowering casts the list
+        # pointer to the struct — invalid C (`non-register as LHS of unary
+        # operation` under -fgimple; measured 2026-10-22 part 4 integration,
+        # the in-TU mono comptime-fn return of the 8-sweep-regression class).
+        if (isinstance(ret_type, str)
+                and ret_type.startswith('MojoTuple_')
+                and not gimple_ctypes._body_builds_struct_tuple(
+                        getattr(node, 'body', None))):
+            ret_type = 'MojoList *'
     else:
         ret_type = gen._infer_return_type(node.body)
     if ci.is_re_sub_callback:
@@ -3616,8 +3673,35 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     A struct that implements PYTHON's `__next__` and not Mojo's `__has_next__`
     cannot drive this loop, and the refusal is now the same loud one every
     other unsupported iterable gets rather than a silently false loop
-    condition — see the `else` below."""
+    condition — see the `else` below.
+
+    MULTI-TARGET unpack (measured 2026-10-21, part 4: product —
+    `for a, b, c, d in product(l1, l2, l3, l4):` over the wrapper pointer):
+    each iteration's element is the `__next__`'s LIST-BACKED tuple return
+    (a `MojoList *` of the slot VALUES, in the call's argument order), and
+    target i is assigned slot i. The per-slot ctypes come from the FACTORY
+    RECORD of the iterable call (`gen._intu_factory_records` keyed by
+    `factory_call_key` — the multi record's per-argument `elem_ctype`, which
+    IS the tuple's slot order), not from the return type (a list-backed
+    tuple return is a bare `MojoList *` with no slot signal). A non-factory
+    iterable with a multi target keeps the old single-var declaration: its
+    element is the whole item, exactly the pre-extension behaviour."""
     base = gimple_exprtypes._struct_name_of(struct_type)
+
+    _tnames = for_target_names(var)
+    _slot_ctypes = None
+    if for_target_is_tuple(var) and len(_tnames) > 1:
+        _iter_node = getattr(node, 'iterable', None) if node is not None else None
+        if (isinstance(_iter_node, gimple_ctypes.CallExpr)
+                and isinstance(getattr(_iter_node, 'func', None),
+                               gimple_ctypes.IdentExpr)):
+            _frec = getattr(gen, '_intu_factory_records', {}).get(
+                iter_factory.factory_call_key(
+                    _iter_node.func.name, _iter_node))
+            if (_frec is not None and _frec.get('multi_args')
+                    and len(_frec['multi_args']) == len(_tnames)):
+                _slot_ctypes = [_ainf['elem_ctype']
+                                for _ainf in _frec['multi_args']]
 
     # Determine iterator type (may be the same struct or a separate iter type).
     # Every symbol here goes through `gen._struct_method_csym`, the tree's ONE
@@ -3658,7 +3742,27 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
     next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')
-    gen._declare_var(var, elem_type, force=(var == shadow_name))
+    # A loop variable this function ALREADY bound in a sibling loop with a
+    # DIFFERENT element type (measured 2026-10-21 part 4: test_chain's
+    # nested tests — `for elem in chain(cl, l1, l2):` over Int inners and,
+    # in the same function, `for elem in chain(cs, s1, s2):` over String
+    # inners): Mojo re-infers the loop variable per loop, so this loop
+    # needs its OWN C variable. The default first-decl-wins no-op would
+    # keep the first loop's declaration, and the element assignment below
+    # would write a `char *` into an `int64_t` variable — gcc:
+    # `assignment to 'int64_t' from 'char *' makes integer from pointer
+    # without a cast`. force=True mints the fresh identifier and records
+    # the rename in `_c_names`, so every read in THIS loop's body (and
+    # after the loop — the last binding wins, as in Mojo) takes the new
+    # variable; the first loop's already-emitted code keeps its own.
+    _force = (var == shadow_name) or (
+        var in gen.var_types and gen.var_types.get(var) != elem_type)
+    if _slot_ctypes is not None:
+        for _tn, _tc in zip(_tnames, _slot_ctypes):
+            gen._declare_var(_tn, _tc, force=(_tn == shadow_name) or (
+                _tn in gen.var_types and gen.var_types.get(_tn) != _tc))
+    else:
+        gen._declare_var(var, elem_type, force=_force)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()
@@ -3736,7 +3840,39 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     if next_fn in gen.func_return_types:
         nxt = gen._new_val(elem_type, f"{next_fn} ({iter_var})")
-        gen._emit(f"  {gen._cname(var)} = {nxt};")
+        if _slot_ctypes is not None:
+            # per-slot read from the list-backed tuple return (slot i =
+            # argument i's element, the factory record's slot order). The
+            # `nxt` above is typed by the REGISTERED return type, which for
+            # the spliced product `__next__` is int64_t — its `->
+            # Self.Element` annotation is a comptime alias `_resolve_type`
+            # cannot resolve — while the body builds a list-backed `MojoList
+            # *`. The `elem[0]` subscript lowering bridges that identical
+            # gap with an explicit cast (measured in the product2 ladder C:
+            # `(MojoList *)` off the int64 word); mirror it so the slot
+            # reads compile in both type states.
+            if elem_type == 'MojoList *':
+                _listptr = nxt
+            else:
+                _listptr = gen._new_val(
+                    'MojoList *', f'(MojoList *){nxt}')
+            _slot_acc = {'char *': 'mojo_list_get_str',
+                         'int64_t': 'mojo_list_get_int',
+                         '_Bool': 'mojo_list_get_bool',
+                         'double': 'mojo_list_get_double'}
+            for _i, (_tn, _tc) in enumerate(zip(_tnames, _slot_ctypes)):
+                _acc = _slot_acc.get(_tc)
+                if _acc is None:
+                    gimple_ctypes._debug_note(
+                        'multi-target loop slot ctype unlowered', _tc)
+                    gen._emit(
+                        f"  /* multi-target loop: unsupported slot ctype "
+                        f"{_tc} for target {_tn} */")
+                    continue
+                _sv = gen._new_val(_tc, f"{_acc} ({_listptr}, {_i})")
+                gen._emit(f"  {gen._cname(_tn)} = {_sv};")
+        else:
+            gen._emit(f"  {gen._cname(var)} = {nxt};")
     else:
         gimple_ctypes._debug_note('iterator loop body has no __next__', iter_base)
         gen._emit(f"  /* TODO: no __next__ on {iter_base} */")
@@ -3781,9 +3917,18 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         # re-raising propagates there (or exits uncaught at the top).
         exc_t   = gen._new_temp('int64_t')
         is_stop = gen._new_temp('_Bool')
+        bb_reraise = gen._new_bb()
         gen._emit(f"  {exc_t} = mojo_exc_type_get ();")
-        gen._emit(f"  {is_stop} = {exc_t} == (int64_t){gen._exc_type_id('StopIteration')};")
-        gen._emit(f"  if ({is_stop}) goto {bb_after};")
+        # The StopIteration id goes through `_new_val` so it lands in an
+        # `int64_t` temp with the explicit cast: a cast literal directly
+        # in the comparison is not a valid raw-GIMPLE operand (measured
+        # 2026-10-21 part 4 integration), and the single-branch if-goto
+        # form is rejected outright ("expected else statement").
+        _sid = gen._new_val('int64_t', str(gen._exc_type_id('StopIteration')))
+        gen._emit(f"  {is_stop} = {exc_t} == {_sid};")
+        gen._emit(
+            f"  if ({is_stop}) goto {bb_after}; else goto {bb_reraise};")
+        gen._emit_label(bb_reraise)
         gen._emit("  mojo_raise ();")
     else:
         gen._emit(f"  goto {bb_cond};")
