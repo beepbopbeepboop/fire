@@ -3357,7 +3357,8 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         gen._emit(f'  {cmp_t} = {tag} == {target};')
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
-                 'list': '5', 'dict': '6', 'set': '7', 'tuple': '8'}
+                 'list': '5', 'dict': '6', 'set': '7', 'tuple': '8',
+                 'bytes': '9', 'bytearray': '9'}
     type_id = _TYPE_IDS.get(type_name, '0')
     # Scalar isinstance by STATIC type. The runtime mojo_isinstance stub
     # always returns 0 (false), so e.g. `isinstance(node.name, str)` was
@@ -3395,7 +3396,19 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     if type_name in ('bytes', 'bytearray') and gen._bytes_subclass_of(obj_type):
         return gen._new_val('_Bool', '(_Bool)1')
 
-    if type_name in _SCALAR_TYPE_MATCH:
+    # An `int64_t` that is a word of UNKNOWN kind -- an unannotated or
+    # `object` parameter, an untyped attribute read, a local bound from one --
+    # is not thereby an int: it holds AST nodes, strings and containers as
+    # often. Answering `isinstance(value, int)` True from the C type made
+    # `isinstance(value, (str, bytes, int, float))` True for every node in the
+    # self-hosted compiler's generic AST walks, which then pruned every child.
+    # The runtime answers it instead (`mojo_isinstance_p`'s int arm).
+    _ov_name = _as_str(obj_val)
+    _unknown_word = (type_name == 'int' and obj_type == 'int64_t'
+                     and (_ov_name in gen._dyn_word_vals
+                          or _ov_name in gen._dyn_word_locals
+                          or _ov_name in getattr(gen, '_cur_untyped_params', ())))
+    if type_name in _SCALAR_TYPE_MATCH and not _unknown_word:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
             # `isinstance(t, list)` where `t` may be a TUPLE. A tuple is a
             # MojoList carrying the mojo_mark_as_tuple marker (there is no
@@ -5385,40 +5398,22 @@ def _ast_walk(body) -> list:
     # came back EMPTY there -- every lambda the stage2 binary lifted captured
     # nothing, so `lambda: compile_to_gimple(mojo_src, ...)` read its
     # captures as 0. Same nodes, same order as the generator gave.
+    #
+    # And every container is opened by `_ast_child_nodes`, the one helper that
+    # knows the shapes (list, tuple, dict). This walk used to open them itself
+    # with `for x in n` over a popped node, and in the compiled compiler the
+    # stack's element type came out `char *` (its first `append` was a loop
+    # variable over the untyped `body`), so `isinstance(n, (list, tuple))`
+    # folded to False, `isinstance(x, str)` to True, no child was ever pushed,
+    # and the walk returned the root alone.
     out: list = []
-    if body is None:
-        return out
     stack: list = []
-    if isinstance(body, list):
-        for _b in body:
-            stack.append(_b)
-    else:
-        stack.append(body)
-    while stack:
-        n = stack.pop()
-        if isinstance(n, (list, tuple)):
-            # Normalise on POP, not on extend. `DictExpr.pairs` is a list of
-            # (key, value) 2-tuples, so extending pushes the tuple itself and
-            # both halves are then invisible: a captured name used as a dict
-            # VALUE (`lambda: {'k': s}`) stayed uncaptured even with `pairs`
-            # on the field list. Flattening where the item is popped is also
-            # what `_used_idents_node` does with a list-or-tuple node, and it
-            # nests for free.
-            for x in n:
-                if x is not None and not isinstance(x, (str, bytes, int, float)):
-                    stack.append(x)
-            continue
+    _ast_child_nodes(body, stack)
+    while len(stack) > 0:
+        n: object = stack.pop()
         out.append(n)
         for _attr in _AST_CHILD_FIELDS:
-            _v = getattr(n, _attr, None)
-            if _v is None:
-                continue
-            if isinstance(_v, (list, tuple)):
-                for x in _v:
-                    if x is not None and not isinstance(x, (str, bytes, int, float)):
-                        stack.append(x)
-            elif not isinstance(_v, (str, bytes, int, float)):
-                stack.append(_v)
+            _ast_child_nodes(getattr(n, _attr, None), stack)
     return out
 
 # Every child-node field on the parser's AST dataclasses (`fire_compiler.py`),
@@ -7402,6 +7397,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # NO known signature and truncated `arg_pairs` to `[:0]` — every
     # such call (`py_tokenize(src)` in mojo_main.py, ...) emitted arity-0
     # and GCC rejected it against the runtime header's real prototype.
+    # int(s, base): the string parsed IN that base. Dropping the base (what
+    # this used to do) parsed `int('1f', 16)` as decimal and answered 1 --
+    # the compiled tokenizer's `\x1f` escape decoded to `\x01`. Ahead of the
+    # arity truncation below, which would cut it to `mojo_make_int`'s one
+    # parameter.
+    if (fname_raw == 'int' and len(arg_pairs) == 2
+            and arg_pairs[0][0] in ('char *', 'int64_t')
+            and not gen._locally_binds_name('int')):
+        _ist, _isv = arg_pairs[0]
+        _ibt, _ibv = arg_pairs[1]
+        if _ist != 'char *':
+            _isv = gen._new_val('char *', f'(char *){gen._ensure_local(_ist, _isv)}')
+        if _ibt != 'int64_t':
+            _ibv = gen._new_val('int64_t', f'(int64_t){gen._ensure_local(_ibt, _ibv)}')
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int_base',
+                                         [('char *', _isv), ('int64_t', _ibv)])
     if (len(expected_params) > 0 and len(arg_pairs) > len(expected_params)
             and not any('...' in p or p == 'MojoList *'
                         for p in expected_params)):
@@ -7427,7 +7438,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             gen._emit("  exit (1);")
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
-    # int(s, base) — drop the base arg
     if fname_raw == 'int' and len(arg_pairs) > 1:
         arg_pairs = arg_pairs[:1]
 

@@ -298,6 +298,16 @@ class TypeLattice:
                        'p': 'STR', 'l': 'LIST', 'n': 'NONE'}
 
     @classmethod
+    def slot_kind_const(cls, b: str) -> str:
+        """`MOJO_KIND_<NAME>` for alphabet byte `b`, as C text. A function
+        rather than an f-string over `SLOT_KIND_CONST[b]` at each call site:
+        a class-attribute dict's VALUE is a word of unknown kind in the
+        self-hosted compiler, and the f-string printed the name's address
+        (`MOJO_KIND_4321104256`)."""
+        name: str = _as_str(cls.SLOT_KIND_CONST[b])
+        return 'MOJO_KIND_' + name
+
+    @classmethod
     def printf_fmt(cls, ctype: str) -> str:
         if ctype in ('double', 'float', '__fp16'):
             return '%g'
@@ -1782,6 +1792,20 @@ def _c_escape(s: str) -> str:
             i += 2
             continue
         if ch == '\\' and i + 1 < n and (s[i + 1] == 'x'):
+            # Python's `\xHH` is EXACTLY two digits and C's `\x` run is
+            # greedy: `'\x01b'` passed through as C `"\x01b"` is the one byte
+            # 0x1b, not 0x01 followed by `b`. So the two-digit form is
+            # re-spelled as a three-digit octal escape, which C stops after
+            # by definition.
+            if (i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF'
+                    and s[i + 3] in '0123456789abcdefABCDEF'):
+                _xv = int(s[i + 2:i + 4], 16)
+                out.append('\\')
+                out.append(str(_xv // 64))
+                out.append(str((_xv // 8) % 8))
+                out.append(str(_xv % 8))
+                i += 4
+                continue
             if i + 2 < n and s[i + 2] in '0123456789abcdefABCDEF':
                 out.append(ch)
                 out.append(s[i + 1])

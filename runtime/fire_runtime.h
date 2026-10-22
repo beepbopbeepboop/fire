@@ -1486,6 +1486,10 @@ void        mojo_module_not_compiled(char *module, char *member);
  * string pointer, or a value the caller already rendered to a string).
  * See the definition for the replacement-field subset. */
 char       *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs);
+/* `tmpl.format(*xs)`: append every element of `src` to `dst` as such a word
+ * -- an int or a string slot as itself, any other kind rendered with str()
+ * from its slot kind, which the list still knows. */
+void        mojo_format_words_extend(MojoList *dst, MojoList *src);
 char       *mojo_str_format_dict(char *fmt, MojoDict *vals,
                                     char *(*dict_str)(MojoDict *));
 /* `dict_str` is how an UNKEYED spec renders the mapping. CPython's rule is
@@ -1854,6 +1858,11 @@ void *mojo_make_dict(void);
 void *mojo_make_set(void);
 void *mojo_make_tuple(void);
 int64_t mojo_make_int(char *s);
+/* `int(s, base)`: CPython's parse of a str in an explicit base (2..36, or 0
+ * for "read the prefix like a literal") -- surrounding whitespace, one sign,
+ * single underscores between digits, and the base's own optional 0x/0o/0b
+ * prefix. Anything else raises a catchable ValueError with CPython's text. */
+int64_t mojo_make_int_base(char *s, int64_t base);
 double mojo_make_float(char *s);
 int mojo_make_bool(int val);
 double mojo_div_double(double a, double b);

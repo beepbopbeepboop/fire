@@ -7032,6 +7032,20 @@ static char *_fmt_apply_spec(char *val, const char *spec, size_t speclen, int nu
  * Replacement fields: `{}` (next positional), `{N}`, `{name}` (a keyword),
  * an optional `!r` / `!s`, an optional `:spec` (see `_fmt_apply_spec`), and
  * `{{` / `}}` escapes. A field naming nothing raises, as CPython does. */
+void mojo_format_words_extend(MojoList *dst, MojoList *src)
+{
+    if (!dst || !src) return;
+    for (int64_t i = 0; i < src->len; i++) {
+        char k = mojo_list_slot_kind(src, i);
+        if (k == 'i' || k == 'p' || k == MOJO_KIND_OBJ) {
+            mojo_list_append_int(dst, src->data[i]);
+            continue;
+        }
+        char *r = mojo_repr_boxed(mojo_list_get_boxed(src, i));
+        mojo_list_append_int(dst, (int64_t)(intptr_t)r);
+    }
+}
+
 char *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs)
 {
     if (!tmpl) return strdup("");
@@ -7453,8 +7467,10 @@ int mojo_cmp_fold(int c, int op)
 
 int mojo_isinstance(int64_t obj, int type_id) {
     /* type_id: 1 bool, 2 int, 3 float, 4 str, 5 list, 6 dict, 7 set
-     * (see _TYPE_IDS in gimple_gen_calls.py). bool/int/float are raw
-     * unboxed values with no runtime marker -- still unanswerable, stay 0.
+     * (see _TYPE_IDS in mojo/backend_gimple/emit_calls.py). bool is a raw
+     * unboxed value with no runtime marker -- still unanswerable, stays 0;
+     * int and float are answered by exclusion and by the box kind (see
+     * mojo_isinstance_p, which this now simply is).
      * list/dict CAN be answered: the runtime keeps a registry of every
      * MojoList / MojoDict it allocates (mojo_is_registered_list/_dict).
      * This is what makes `isinstance(node, list)` in the compiler's own
@@ -7494,25 +7510,27 @@ int mojo_isinstance(int64_t obj, int type_id) {
      * asked on the two C types a value can have, so they must not answer
      * differently. `type_id == 7` (`set`) is a separate container and is
      * left as it was. */
-    if (type_id == 4)  /* str: see mojo_isinstance_p's identical arm */
-        return mojo_boxed_is_str(obj);
-    if (type_id == 5)  /* list: a registered MojoList that is NOT a tuple */
-        return mojo_is_registered_list(obj)
-            && !mojo_is_tuple((MojoList *)(intptr_t)obj);
-    if (type_id == 7)
-        return mojo_is_registered_list(obj);
-    if (type_id == 6)
-        return mojo_is_registered_dict(obj);
-    if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
-        if (!mojo_is_registered_list(obj)) return 0;
-        return mojo_is_tuple((MojoList *)(intptr_t)obj);
-    }
-    return 0;
+    return mojo_isinstance_p(obj, type_id);
 }
 
 int mojo_isinstance_p(int64_t obj, int type_id) {
-    /* Full-width sibling of mojo_isinstance -- no pointer truncation; see the
-     * `type_id == 5` note above for why a tuple is not a `list`. */
+    /* The one answer for a word of unknown kind; `mojo_isinstance` is the
+     * same function under its older name. `type_id` is the codegen's
+     * `_TYPE_IDS`: 1 bool, 2 int, 3 float, 4 str, 5 list, 6 dict, 7 set,
+     * 8 tuple, 9 bytes/bytearray. See the `type_id == 5` note above for why a tuple is not a
+     * `list`. */
+    /* A BOX (a slot read out of a mixed-kind list) is asked about what it
+     * holds: a float box is a float and nothing else, a None box is nothing,
+     * and every other kind's word is the value itself. Without the unwrap
+     * `isinstance(<str slot>, str)` was False -- a box is neither a string
+     * nor a container. */
+    if (mojo_is_boxed(obj)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)obj;
+        if (bx->kind == 'd') return type_id == 3;
+        if (bx->kind == 'n') return 0;
+        obj = bx->bits;
+        if (mojo_is_boxed(obj)) return 0;   /* never nested; never loop */
+    }
     /* `str`: a boxed word is a string exactly when the runtime's provenance
      * discriminator says so (a registered literal or a live heap block; see
      * mojo_boxed_is_str). This arm did not exist, so `isinstance(x, str)` on
@@ -7520,18 +7538,43 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
      * compiler's `for_target_is_tuple(target: object)` never saw its
      * `'(path, base)'` text as a string and declared one C variable named
      * `(path, base)`. */
+    /* A `MojoBytes *` is a live heap block too, which is all
+     * mojo_boxed_is_str can see, so it is excluded by its own registry. */
     if (type_id == 4)
-        return mojo_boxed_is_str(obj);
+        return !mojo_is_registered_bytes(obj) && mojo_boxed_is_str(obj);
     if (type_id == 5)
         return mojo_is_registered_list(obj)
             && !mojo_is_tuple((MojoList *)(intptr_t)obj);
     if (type_id == 7)
-        return mojo_is_registered_list(obj);
+        return mojo_is_registered_set(obj);
     if (type_id == 6)
         return mojo_is_registered_dict(obj);
     if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
         if (!mojo_is_registered_list(obj)) return 0;
         return mojo_is_tuple((MojoList *)(intptr_t)obj);
+    }
+    /* `bytes` / `bytearray`: one representation, one registry. */
+    if (type_id == 9)
+        return mojo_is_registered_bytes(obj);
+    /* `float`: a double only ever reaches a word inside a box. */
+    if (type_id == 3)
+        return 0;   /* the float box was answered above */
+    /* `int`: a word that is none of the things a word can otherwise be --
+     * not a container, not a string, not bytes, not a struct handle, not a
+     * float box (above). The codegen used to answer this STATICALLY
+     * from the word's C type (`int64_t` IS int), so `isinstance(node, (str,
+     * int))` was True for every AST node held in an untyped parameter and
+     * the self-hosted compiler's generic AST walks pruned every child. The
+     * NULL word is None and 0 alike; it answers int (CPython's 0), and a
+     * caller that means None tests `is None` first. */
+    if (type_id == 2) {
+        if (obj == 0) return 1;
+        if (mojo_is_registered_list(obj) || mojo_is_registered_dict(obj)
+            || mojo_is_registered_set(obj) || mojo_is_registered_bytes(obj))
+            return 0;
+        if (mojo_boxed_is_str(obj)) return 0;
+        if (_mojo_is_struct_word(obj)) return 0;
+        return 1;
     }
     return 0;
 }
@@ -7756,14 +7799,23 @@ char *mojo_repr_str(char *s) {
     }
     char quote = (has_squote && !has_dquote) ? '"' : '\'';
     size_t len = strlen(s);
-    char *buf = malloc(len * 2 + 3);
+    /* 4 output bytes per input byte at most: `\xHH`. */
+    char *buf = malloc(len * 4 + 3);
     char *p = buf;
     *p++ = quote;
     for (const char *c = s; *c; c++) {
+        unsigned char uc = (unsigned char)*c;
         if (*c == quote || *c == '\\') { *p++ = '\\'; *p++ = *c; }
         else if (*c == '\n') { *p++ = '\\'; *p++ = 'n'; }
         else if (*c == '\r') { *p++ = '\\'; *p++ = 'r'; }
         else if (*c == '\t') { *p++ = '\\'; *p++ = 't'; }
+        else if (uc < 0x20 || uc == 0x7f) {
+            /* Every other ASCII control character is `\xHH` in CPython's
+             * repr, lower-case hex -- the raw byte used to be copied out,
+             * so `repr('\x1f')` was an invisible one-character body. */
+            static const char hx[] = "0123456789abcdef";
+            *p++ = '\\'; *p++ = 'x'; *p++ = hx[uc >> 4]; *p++ = hx[uc & 15];
+        }
         else *p++ = *c;
     }
     *p++ = quote;
@@ -12118,6 +12170,77 @@ int64_t mojo_make_int(char *s) {
     return (int64_t)atoll(s);
 }
 double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
+/* See the header. The digits are accumulated in uint64_t with wraparound, the
+ * same 64-bit answer `mojo_make_int`'s strtoull gives an over-long literal. */
+static int _mojo_digit_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return 99;
+}
+
+int64_t mojo_make_int_base(char *s, int64_t base)
+{
+    if (base != 0 && (base < 2 || base > 36)) {
+        mojo_raise_value_error("int() base must be >= 2 and <= 36, or 0");
+        return 0;
+    }
+    if (!s) s = "";
+    const char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'
+           || *p == '\f' || *p == '\v') p++;
+    int neg = 0;
+    if (*p == '+' || *p == '-') { neg = (*p == '-'); p++; }
+    int64_t b = base;
+    int prefixed = 0;
+    if (p[0] == '0') {
+        char x = p[1];
+        int pb = (x == 'x' || x == 'X') ? 16 : (x == 'o' || x == 'O') ? 8
+               : (x == 'b' || x == 'B') ? 2 : 0;
+        if (pb && (b == 0 || b == pb)) { b = pb; p += 2; prefixed = 1; }
+    }
+    if (b == 0) b = 10;
+    uint64_t acc = 0;
+    /* `_` only BETWEEN digits, one at a time -- or once straight after a
+     * base prefix (`0x_1f`). */
+    int ndig = 0, ok = 1, prev_us = 0;
+    int all_zero = 1;
+    for (; *p; p++) {
+        if (*p == '_') {
+            if (prev_us || (ndig == 0 && !prefixed)) { ok = 0; break; }
+            prev_us = 1;
+            continue;
+        }
+        int d = _mojo_digit_value(*p);
+        if (d >= b) break;
+        if (d != 0) all_zero = 0;
+        acc = acc * (uint64_t)b + (uint64_t)d;
+        ndig++;
+        prev_us = 0;
+    }
+    /* A decimal literal with a leading zero is only legal when every digit is
+     * zero (`int("010", 0)` is a ValueError); an explicit base 10 takes it. */
+    if (ok && base == 0 && !prefixed && ndig > 1 && s[0] && all_zero == 0) {
+        const char *q = s;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '+' || *q == '-') q++;
+        if (*q == '0') ok = 0;
+    }
+    if (ok && prev_us) ok = 0;   /* trailing underscore */
+    while (ok && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'
+                  || *p == '\f' || *p == '\v')) p++;
+    if (!ok || ndig == 0 || *p) {
+        /* mojo_raise_value_error copies the text, so a stack buffer. */
+        char msg[200];
+        snprintf(msg, sizeof msg, "invalid literal for int() with base %lld: '%s'",
+                 (long long)base, s);
+        mojo_raise_value_error(msg);
+        return 0;
+    }
+    int64_t v = (int64_t)acc;
+    return neg ? -v : v;
+}
 int mojo_make_bool(int val) { return val ? 1 : 0; }
 void *mojo_make_list(void) { return mojo_list_new(); }
 void *mojo_make_dict(void) { return mojo_dict_new(); }

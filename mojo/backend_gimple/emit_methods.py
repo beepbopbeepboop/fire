@@ -5048,7 +5048,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # is the shared element-type -> alphabet-byte mapping (the same one
             # a list literal's per-slot kinds are built from).
             _b = gimple_ctypes.TypeLattice.slot_kind_byte(_elem)
-            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_b]}'
+            _skind = gimple_ctypes.TypeLattice.slot_kind_const(_b)
         # else: nothing recorded at all, and `_elem_of`'s 'int64_t' is its
         # ABSENCE answer rather than a fact. Pass 0 — "I do not know" — and
         # let the runtime consult the per-slot kinds side table and its own
@@ -5075,7 +5075,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # appended with.
             _kb = gimple_ctypes.TypeLattice.slot_kind_byte(
                 gen._elem_of(_keys_val))
-            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_kb]}'
+            _skind = gimple_ctypes.TypeLattice.slot_kind_const(_kb)
         # The `keys` argument, materialized into a LOCAL rather than
         # written inline at the call.
         #
@@ -5339,12 +5339,31 @@ def _format_arg_word(gen, at: str, av: str) -> str:
     return gen._new_val('int64_t', f'(int64_t){_l}')
 
 
-def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs) -> tuple:
+def _lower_str_format_call(gen, tmpl: str, arg_pairs: list, kwargs,
+                           arg_nodes: list = None) -> tuple:
     """`tmpl.format(*args, **kwargs)` -> `mojo_str_format_words` (see its
-    definition: before this the call answered the template unchanged)."""
+    definition: before this the call answered the template unchanged).
+
+    A `*xs` argument contributes its ELEMENTS (`mojo_format_words_extend`),
+    not itself: `TERNARY_OPS[name].format(*args)` used to hand the list over
+    as one argument, rendered as its repr by the reference and as its
+    address by the self-hosted compiler."""
     lst = gen._new_val('MojoList *', 'mojo_list_new ()')
-    for _fa in arg_pairs:
-        _w = _format_arg_word(gen, _fa[0], _fa[1])
+    _nodes = arg_nodes or []
+    for _ai in range(len(arg_pairs)):
+        _fa = arg_pairs[_ai]
+        _fat = _as_str(_fa[0])
+        _fav = _as_str(_fa[1])
+        _an = _nodes[_ai] if _ai < len(_nodes) else None
+        if (isinstance(_an, gimple_ctypes.UnaryOp) and _an.op == '*'
+                and (_fat == 'MojoList *' or _fat == 'int64_t')):
+            _src = _fav
+            if _fat == 'int64_t':
+                _src = _as_str(gen._materialize_as_list('int64_t', _fav))
+            gen._emit_call('void', '', 'mojo_format_words_extend',
+                           [('MojoList *', lst), ('MojoList *', _src)])
+            continue
+        _w = _format_arg_word(gen, _fat, _fav)
         gen._emit(f'  mojo_list_append_int ({lst}, {_w});')
     kd = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     for _kp in (kwargs or []):
@@ -5624,7 +5643,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         return 'char *', gen._call_expr('char *', 'int64_t_realpath',
                                         [('char *', cstr_ov)])
     if method == 'format':
-        return _lower_str_format_call(gen, cstr_ov, arg_pairs, kwargs)
+        return _lower_str_format_call(gen, cstr_ov, arg_pairs, kwargs, args)
     if method == '__fspath__' and not arg_vals:
         # String.__fspath__ (stdlib string.mojo) returns the receiver
         # UNCHANGED — in this codegen's model a String IS its char* buffer,
