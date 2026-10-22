@@ -2299,11 +2299,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
-            elif outer_member == 'relpath' and len(node.args) >= 1:
-                # os.path.relpath(p) → stub: return p unchanged
-                arg_type, arg_val = gen.lower_expr(node.args[0])
-                for a in node.args[1:]: gen.lower_expr(a)
-                return arg_type, arg_val
+            elif outer_member == 'relpath' and 1 <= len(node.args) <= 2:
+                # os.path.relpath(p[, start]) -- the real posixpath answer
+                # (`int_relpath`). It was the identity, so the self-hosted
+                # compiler named its own modules by their absolute paths.
+                _rp_t, _rp_v = gen.lower_expr(node.args[0])
+                if len(node.args) == 2:
+                    _rs_t, _rs_v = gen.lower_expr(node.args[1])
+                else:
+                    _rs_t, _rs_v = 'char *', gen._new_val('char *', '(char *)0')
+                return 'char *', gen._call_expr('char *', 'int_relpath',
+                                                [(_rp_t, _rp_v), (_rs_t, _rs_v)])
             elif outer_member == 'samefile' and len(node.args) == 2:
                 # os.path.samefile(a, b) -- stats both (int_samefile). It had
                 # no case here and fell to the scalar stub, `0`, so the

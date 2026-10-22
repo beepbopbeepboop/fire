@@ -10551,6 +10551,47 @@ int64_t int_abspath(int64_t marker, int64_t path) {
     return (int64_t)result;
 }
 
+/* os.path.relpath(path, start): posixpath's answer -- both made absolute and
+ * normalized, the common leading components dropped, one `..` per remaining
+ * component of `start`, then the rest of `path`; `.` when they are equal. It
+ * used to be the identity, so the self-hosted compiler named every one of its
+ * own modules by its ABSOLUTE path (`__Users_..._fire_compiler_globals`). */
+char *int_relpath(char *path, char *start)
+{
+    if (!path || !*path) { mojo_raise_value_error("no path specified"); return NULL; }
+    char *ap = (char *)(intptr_t)int_abspath(0, (int64_t)(intptr_t)path);
+    char *as = (char *)(intptr_t)int_abspath(0, (int64_t)(intptr_t)((start && *start) ? start : "."));
+    /* Component boundaries: walk both while whole components agree. */
+    size_t i = 0, common = 0;
+    for (;;) {
+        char a = ap[i], b = as[i];
+        if ((a == '/' || a == 0) && (b == '/' || b == 0)) {
+            common = i;
+            if (a == 0 || b == 0) break;
+        } else if (a != b) break;
+        if (a == 0 || b == 0) break;
+        i++;
+    }
+    size_t ups = 0;
+    for (const char *q = as + common; *q; q++)
+        if (*q == '/' && q[1] && q[1] != '/') ups++;
+    if (as[common] == 0) ups = 0;
+    else if (common == 0 && as[0] == '/' && as[1] == 0) ups = 0;
+    const char *rest = ap + common;
+    while (*rest == '/') rest++;
+    size_t rl = strlen(rest);
+    char *out = (char *)malloc(ups * 3 + rl + 2);
+    size_t o = 0;
+    for (size_t k = 0; k < ups; k++) {
+        memcpy(out + o, "..", 2); o += 2;
+        if (k + 1 < ups || rl) out[o++] = '/';
+    }
+    memcpy(out + o, rest, rl); o += rl;
+    if (o == 0) out[o++] = '.';
+    out[o] = 0;
+    return out;
+}
+
 int64_t int_dirname(int64_t marker, int64_t path) {
     (void)marker;
     char *p = (char *)path;

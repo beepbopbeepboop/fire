@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **699** | `fire_runtime.h` 596, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **283** | every parameter and the return value is one 64-bit word |
+| entry points across **11** headers | **700** | `fire_runtime.h` 597, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **284** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **416** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **283 of 699 (40.5%)** is the reachable-surface ceiling. The previous
+So **284 of 700 (40.5%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -524,19 +524,19 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 283 | 283 |
-| …of which the runtime dylib actually **exports** | 227 | 227 |
-| …reachable with no heap handle the formal path cannot obtain | **187** | **187** |
+| word-shaped entry points (`runtime_abi`) | 284 | 284 |
+| …of which the runtime dylib actually **exports** | 228 | 228 |
+| …reachable with no heap handle the formal path cannot obtain | **188** | **188** |
 
-So the honest statement of the surface is **187 word-shaped calls are callable
+So the honest statement of the surface is **188 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 283) of §2.2. The two gaps between 283 and 187
+was written, and not the 219 (now 284) of §2.2. The two gaps between 284 and 188
 are both deliberate and both named:
 
-- **40 of the 227** the library exports take a `void *` parameter the
+- **40 of the 228** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 283** the dylib does not export at all, because
+- **56 of the 284** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
@@ -546,13 +546,13 @@ are both deliberate and both named:
 
 The two architectures agree exactly, which is the property phase 2 was for.
 
-**The twenty-one this table gained since it was first published are named, not
+**The twenty-two this table gained since it was first published are named, not
 counted**, because a count that moves is a row nobody can check and an export
 nobody reaches is a promise the runtime makes and the link line does not keep.
-All twenty-one are declared in `runtime/fire_runtime.h`, defined in
+All twenty-two are declared in `runtime/fire_runtime.h`, defined in
 `runtime/fire_runtime.c`, word-shaped, and **none of them takes a `void *`** —
 so each one landed in all three rows at once, which is why the deltas are the
-same 21 and not three different numbers:
+same 22 and not three different numbers:
 
 | entry point | signature | landed |
 |---|---|---|
@@ -578,13 +578,14 @@ same 21 and not three different numbers:
 | `mojo_truthy_word` | `int mojo_truthy_word(int64_t w)` | ″ |
 | `int_samefile` | `int int_samefile(char *a, char *b)` | ″ |
 | `mojo_make_int_base` | `int64_t mojo_make_int_base(char *s, int64_t base)` | ″ |
+| `int_relpath` | `char *int_relpath(char *path, char *start)` | ″ |
 
 **The `40` and `56` gaps did not move, and that is a fact rather than a
-coincidence**: the twenty-one added no `void *` parameter, so none of them joined
-the heap-handle set, and all twenty-one are in `fire_runtime.c`, which the dylib
+coincidence**: the twenty-two added no `void *` parameter, so none of them joined
+the heap-handle set, and all twenty-two are in `fire_runtime.c`, which the dylib
 links on every path — so the *unexported* remainder stayed at 56 of a larger
-total. A reader who checks the arithmetic (`283 − 227 = 56`,
-`227 − 187 = 40`) is checking the two claims this table makes about WHY the
+total. A reader who checks the arithmetic (`284 − 228 = 56`,
+`228 − 188 = 40`) is checking the two claims this table makes about WHY the
 surface stops where it does, not just the numbers.
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —

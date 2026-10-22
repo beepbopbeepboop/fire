@@ -2178,6 +2178,7 @@ int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
 int int_isfile(int64_t marker, int64_t path);          /* os.path.isfile */
 int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
 int64_t int_normpath(int64_t marker, int64_t path);    /* os.path.normpath */
+char *int_relpath(char *path, char *start);            /* os.path.relpath (start NULL = cwd) */
 int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
 int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */

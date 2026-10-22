@@ -4869,7 +4869,15 @@ def gen_module_impl(self, stmts):
             _cur = _gg_ft.get(_f)
             if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
                 _gg_ft[_f] = _c
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
+        # Keyed reads through `_as_*` views, not a nested `for _m, (_rc, _pcs,
+        # _dflts) in ....items()` unpack (boxed slots in the compiled
+        # compiler; see `_seed_selfhost_module_globals`).
+        for _mg0 in _gg_sigs:
+            _mangled = _as_str(_mg0)
+            _sig_row = _as_list(_gg_sigs[_mg0])
+            _rc = _as_str(_sig_row[0])
+            _pcs = _as_list(_sig_row[1])
+            _dflts = _sig_row[2]
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             self._mangled_signature_ctypes[_mangled] = list(_pcs)
@@ -4882,13 +4890,31 @@ def gen_module_impl(self, stmts):
         # StructDef reached its annotation loop — parsed from the real
         # declared field annotations (see _selfhost_gimplegen_dict_val_types).
         _gg_dvts = self._selfhost_gimplegen_dict_vts
-        for _f, (_outer_vt, _nested_vt, _raw_ann) in _gg_dvts.items():
-            if _outer_vt and _outer_vt != 'int64_t':
-                self._field_dict_val_types.setdefault('GimpleGen', {}).setdefault(_f, _outer_vt)
-            if _nested_vt and _nested_vt != 'int64_t':
-                self._field_dict_nested_val_types.setdefault('GimpleGen', {}).setdefault(_f, _nested_vt)
+        # Same keyed-read shape, and a named typed inner dict instead of a
+        # chained `.setdefault('GimpleGen', {}).setdefault(...)`, whose
+        # intermediate has no static type in the compiled compiler: there
+        # NONE of GimpleGen's dict fields got a value type
+        # (`gen.struct_field_types.values()` iterated as words).
+        if 'GimpleGen' not in self._field_dict_val_types:
+            self._field_dict_val_types['GimpleGen'] = {}
+        if 'GimpleGen' not in self._field_dict_nested_val_types:
+            self._field_dict_nested_val_types['GimpleGen'] = {}
+        _gg_dv: dict = self._field_dict_val_types['GimpleGen']
+        _gg_nv: dict = self._field_dict_nested_val_types['GimpleGen']
+        for _f0 in _gg_dvts:
+            _f = _as_str(_f0)
+            _dv_row = _as_list(_gg_dvts[_f0])
+            _outer_vt = _dv_row[0]
+            _nested_vt = _dv_row[1]
+            _raw_ann = _dv_row[2]
+            if _outer_vt and _as_str(_outer_vt) != 'int64_t':
+                if _f not in _gg_dv:
+                    _gg_dv[_f] = _as_str(_outer_vt)
+            if _nested_vt and _as_str(_nested_vt) != 'int64_t':
+                if _f not in _gg_nv:
+                    _gg_nv[_f] = _as_str(_nested_vt)
             if _raw_ann:
-                self._field_annotations.setdefault('GimpleGen.' + _f, _raw_ann)
+                self._field_annotations.setdefault('GimpleGen.' + _f, _as_str(_raw_ann))
         # The same recovery for `set[X]` / `list[X]` element types (see
         # emit_funcs._selfhost_gimplegen_elem_anns).
         _gg_eas = self._selfhost_gimplegen_elem_anns
@@ -4896,7 +4922,11 @@ def gen_module_impl(self, stmts):
             _ef = _as_str(_ea_pair[0])
             _ect = self._resolve_type(_as_str(_ea_pair[1]))
             if _ect and _ect != 'int64_t':
-                self._field_elem_types.setdefault('GimpleGen', {}).setdefault(_ef, _ect)
+                if 'GimpleGen' not in self._field_elem_types:
+                    self._field_elem_types['GimpleGen'] = {}
+                _gg_et: dict = self._field_elem_types['GimpleGen']
+                if _ef not in _gg_et:
+                    _gg_et[_ef] = _ect
 
     # The synthetic `class GimpleGen` rides `_imported_typedef_structs`, which
     # only wires method externs + typedef layout — it never reaches the
