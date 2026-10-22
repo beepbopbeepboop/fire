@@ -332,6 +332,37 @@ def _assign_target(gen, tgt, et, ev):
                     and lp not in gen._nested_elem_types):
                 gen._dyn_word_vals.add(sev)
             gen._assign_target(sub, set_et, sev)
+    elif isinstance(tgt, (gimple_ctypes.MemberExpr, gimple_ctypes.SubscriptExpr)):
+        # `obj.a, obj.b = t` / `d[k], x = t`: an attribute or item slot as an
+        # unpack target. There was no arm for either, so the slot was READ out
+        # of the tuple and then silently dropped -- the store never happened.
+        # The compiled compiler is built on exactly this shape
+        # (`gen.var_types, gen._elem_types, ... = _saved` restores the type
+        # tables after every hermetic scan in resolve_shared), so every scan
+        # left them pointing at a pooled scratch dict that the next scan
+        # reused, and type facts leaked between unrelated functions.
+        #
+        # The value is bound to a fresh local and the ordinary single-target
+        # assignment does the store, so every rule that path applies to an
+        # attribute/item write (struct field coercion, dict setters, global
+        # routing, ownership) applies here unchanged instead of being
+        # re-implemented for the unpack case.
+        # The translation-unit counter the self-shadowing loop targets use
+        # (`_shadow_seq_box`): one monotonic sequence, so a name minted here
+        # can never collide with another in the same function.
+        gen._shadow_seq_box[0] += 1
+        _tmp = f"_unpk{gen._shadow_seq_box[0]}"
+        _tt = et if et else 'int64_t'
+        gen._declare_var(_tmp, _tt)
+        gen._safe_coerce_emit(et, gen.var_types[_tmp], ev, gen._write_dest(_tmp))
+        if ev in gen._dyn_word_vals and gen.var_types[_tmp] == 'int64_t':
+            gen._dyn_word_locals.add(_tmp)
+        if ev in gen._elem_types:
+            gen._elem_types[_tmp] = gen._elem_types[ev]
+        gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
+            target=tgt,
+            value=gimple_ctypes.IdentExpr(name=_tmp, line=getattr(tgt, 'line', 0)),
+            line=getattr(tgt, 'line', 0)))
 
 def _is_except_as_member_target(gen, obj_node) -> bool:
     """True when `obj_node` (a MemberExpr's `.obj`) is a bare identifier

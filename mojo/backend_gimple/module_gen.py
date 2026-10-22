@@ -6732,8 +6732,12 @@ def gen_module_impl(self, stmts):
                     and isinstance(_fstmt.target, MemberExpr)
                     and isinstance(_fstmt.target.obj, IdentExpr)
                     and _fstmt.target.obj.name in _own_top_level_func_names):
-                fname = _fstmt.target.obj.name
-                attr = _fstmt.target.member
+                # `_as_str` on both: read off an untyped loop element, the
+                # compiled compiler formatted them as DECIMAL addresses into
+                # `_funcattr_<fname>__<attr>` (stage1-vs-stage2 divergence on
+                # jit/arm64.py's `_toolchain_id._cached`).
+                fname = _as_str(_fstmt.target.obj.name)
+                attr = _as_str(_fstmt.target.member)
                 self._func_attrs.setdefault(fname, {})
                 if attr not in self._func_attrs[fname]:
                     mangled = f"_funcattr_{fname}__{attr}"
@@ -11528,8 +11532,9 @@ def gen_module_impl(self, stmts):
                                        if _gname in _joined else _t)
         return _joined
 
-    def _phase17_scan_global_reassignments() -> dict:
-        """`{name: {pointer-shaped C type, ...}}` for every assignment any
+    def _phase17_scan_global_reassignments() -> dict[str, list[str]]:
+        """`{name: [pointer-shaped C type, ...]}` (distinct, first-seen order)
+        for every assignment any
         FUNCTION BODY in this compile makes to a name it declared `global`.
 
         The one thing the flat module-level scans above structurally cannot
@@ -11569,8 +11574,14 @@ def gen_module_impl(self, stmts):
         `FW_PREFIX[:] + ["Versions", ...]` to `MojoList *` — its BinaryOp
         row unions the operand kinds with `int64_t` neutral — so this needs
         no Phase 1.7 table change of its own, and therefore cannot change
-        what any OTHER caller of `_phase17_value_type` sees."""
-        out: dict = {}
+        what any OTHER caller of `_phase17_value_type` sees.
+
+        The kinds are a LIST with explicit de-duplication, not a set per name:
+        the compiled compiler has no element type for a set stored as a bare
+        dict's value, and its `set.pop()` on one answered an empty string, so
+        `_VERSION_CACHE = None` + `global _VERSION_CACHE; _VERSION_CACHE = ...`
+        declared a field with NO C type in the stage2 closure dump."""
+        out: dict[str, list[str]] = {}
 
         def collect(body) -> list:
             """Every statement of `body` (and of any `def` nested in it) as a
@@ -11631,9 +11642,13 @@ def gen_module_impl(self, stmts):
                     _tn = _as_str(_tgt.name)
                     if _tn not in _declared:
                         continue
-                    _qt = self._quick_type(_s.value)
+                    _qt = _as_str(self._quick_type(_s.value))
                     if _qt and _qt.endswith('*'):
-                        out.setdefault(_tn, set()).add(_qt)
+                        if _tn not in out:
+                            out[_tn] = []
+                        _known = out[_tn]
+                        if _qt not in _known:
+                            _known.append(_qt)
         return out
 
     for _scan_stmt in _phase17_stmts:
@@ -11867,9 +11882,11 @@ def gen_module_impl(self, stmts):
     # no `N =` at module scope names no binding this codegen materializes, so
     # there is nothing to reconcile.
     _mgk: set = set()
-    for _rgname, _rgkinds in _phase17_scan_global_reassignments().items():
-        _rgbase = self._global_var_types.get(_rgname, '')
-        _rgall = set(_rgkinds)
+    _rgscan = _phase17_scan_global_reassignments()
+    for _rgname0 in _rgscan:
+        _rgname = _as_str(_rgname0)
+        _rgkinds: list[str] = _rgscan[_rgname]
+        _rgbase = _as_str(self._global_var_types.get(_rgname, ''))
         if _rgname in _none_init_globals:
             # The module-level initialiser is `None`, which is the NULL value
             # of every pointer kind and therefore contributes no kind to the
@@ -11883,9 +11900,9 @@ def gen_module_impl(self, stmts):
             # `_safe_coerce_emit`'s `int -> <pointer>` arm for the runtime
             # store, and the struct initialiser's `(<c_type>)0` for the
             # static one).
-            if len(_rgall) == 1:
-                _rgsem = _rgkinds.pop()
-            elif len(_rgall) > 1:
+            if len(_rgkinds) == 1:
+                _rgsem = _as_str(_rgkinds[0])
+            elif len(_rgkinds) > 1:
                 _rgsem = 'int64_t'
             else:
                 continue
@@ -11894,8 +11911,10 @@ def gen_module_impl(self, stmts):
             self._global_c_decl_types[_rgname] = _rgsem
             _mgk.add(_rgname)
             continue
+        _rgn = len(_rgkinds)
         if _rgbase.endswith('*'):
-            _rgall.add(_rgbase)
+            if _rgbase not in _rgkinds:
+                _rgn += 1
         elif _rgbase:
             # A scalar module-level kind cannot conflict with a pointer:
             # every cross-function kind here IS pointer-shaped, so this is a
@@ -11904,9 +11923,9 @@ def gen_module_impl(self, stmts):
             # nothing downstream can represent it and it is not what the
             # box answers.
             continue
-        if len(_rgall) < 2:
+        if _rgn < 2:
             continue
-        _rgsem = (_rgkinds.pop() if len(_rgkinds) == 1 else 'int64_t')
+        _rgsem = (_as_str(_rgkinds[0]) if len(_rgkinds) == 1 else 'int64_t')
         self._global_var_types[_rgname] = _rgsem
         self._own_global_var_types[_rgname] = _rgsem
         self._global_c_decl_types[_rgname] = 'int64_t'

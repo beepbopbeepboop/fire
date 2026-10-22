@@ -1552,7 +1552,8 @@ def _gmi_scan_func_body_for_self_attr(self, fname, body):
                 and isinstance(_fstmt.target, MemberExpr)
                 and isinstance(_fstmt.target.obj, IdentExpr)
                 and _fstmt.target.obj.name == fname):
-            attr = _fstmt.target.member
+            attr = _as_str(_fstmt.target.member)
+            fname = _as_str(fname)
             self._func_attrs.setdefault(fname, {})
             if attr not in self._func_attrs[fname]:
                 mangled = f"_funcattr_{fname}__{attr}"
