@@ -906,6 +906,26 @@ def _quick_type(gen, node) -> str:
         _st = _struct_unpack_elem_ctype(gen, obj, node.index)
         if _st is not None:
             return _st
+        # A subscript of a dict DISPLAY written inline (`{'stdin': '0',
+        # ...}[name]`): the value type is the join of the literal's own
+        # values, exactly what the lowering's `mojo_dict_get_<suffix>` reads.
+        # Without it the estimator answered the int64_t box, so a function
+        # returning one was declared `int64_t` and its `char *` came back as
+        # a decimal address.
+        if (isinstance(obj, gimple_ctypes.DictExpr) and obj.pairs
+                and not isinstance(node.index, gimple_ctypes.SliceExpr)):
+            # A `**spread` pair (key `UnaryOp('**')`) contributes values the
+            # literal does not spell, so it leaves the answer unknown.
+            _dv_types = []
+            _dv_spread = False
+            for _dp in obj.pairs:
+                _dk = _dp[0]
+                if isinstance(_dk, gimple_ctypes.UnaryOp) and _dk.op == '**':
+                    _dv_spread = True
+                    break
+                _dv_types.append(gen._quick_type(_dp[1]))
+            if not _dv_spread:
+                return gimple_ctypes.TypeLattice.join_all(_dv_types)
         if isinstance(obj, gimple_ctypes.IdentExpr):
             # `s[i]` where s is a plain char* string: the element is a
             # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for

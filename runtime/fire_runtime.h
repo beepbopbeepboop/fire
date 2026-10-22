@@ -764,6 +764,10 @@ int64_t     mojo_box_int(int64_t v);
  * kept the box answered `is None` false for a None slot and handed every
  * consumer the box's address instead of the value. */
 int64_t     mojo_box_word(int64_t v);
+/* Python truthiness of a word whose kind only the runtime knows (an
+ * unannotated parameter, an untyped attribute read): an empty container or
+ * string is false, None is false, 0 is false, anything else is true. */
+int         mojo_truthy_word(int64_t w);
 char       *mojo_repr_boxed(int64_t v);
 /* `id(x)`, as the integer CPython says it is: an interned box holding the
  * word, so every classifier here reads the token as an integer rather than as

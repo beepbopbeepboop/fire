@@ -491,12 +491,14 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 592),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 593),   # --fix writes the live figure
     # 581 -> 582 -> 581: `mojo_str_codepoint_len` came in with f79e8b2f (a
     # code-point `len()` over a byte-indexed `char *`) and went out with its
     # revert, because len and s[i] disagreeing truncated every index loop over
     # non-ASCII text, the self-hosted tokenizer's included — see
     # bugs/CODEGEN_len_of_a_non_ascii_string_counts_bytes.md.
+    # 592 -> 593: `mojo_truthy_word`, Python truthiness of a word of unknown
+    # kind (an unannotated parameter): an empty container/string is false.
     # 591 -> 592: `mojo_box_word`, a possibly-boxed slot read's own word (the
     # box kept only for a float), for a box bound to a name or compared with
     # `is` -- the compiled compiler's `v = _cfd[1]` kept a None slot's box and

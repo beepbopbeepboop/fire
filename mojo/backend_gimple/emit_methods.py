@@ -4655,6 +4655,14 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                         # so `d.get(k)[i]` / `for x in d.get(k)` reads with
                         # the right accessor rather than boxing the pointer.
                         gen._elem_types[t] = _nd
+            # A value of a dict nobody recorded the value type of is a word of
+            # unknown kind (`_mark_unknown_dict_value`'s rule for `d[k]`, here
+            # for `.get`): its truth value, its str() and its == have to ask
+            # the runtime -- `not sym_info.get('c_parameters')` called an
+            # empty list true. Only the MERGED result is marked: the presence
+            # test above is on the raw word, where 0 means absent.
+            if result_type == 'int64_t' and not gen._dict_val_is_known(ov):
+                gen._dyn_word_vals.add(t)
             return result_type, t
         if val_type == 'char *':
             return 'char *', raw
@@ -4670,6 +4678,8 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                     gen._elem_types[t] = _nd
             return val_type, t
         else:
+            if not gen._dict_val_is_known(ov):
+                gen._dyn_word_vals.add(raw)
             return 'int64_t', raw
     if method == 'update' and args:
         other_type, other_val = gen.lower_expr(args[0])

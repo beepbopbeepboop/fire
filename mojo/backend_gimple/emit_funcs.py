@@ -1725,7 +1725,7 @@ def dup_def_signature_key(fn) -> tuple:
     return (tuple(key), tuple(getattr(fn, 'comptime_params', None) or ()))
 
 
-def _local_def_pts(gen, bare_name: str):
+def _local_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-019 helper: THIS compile unit's own ctypes for `bare_name`,
     resolved lazily from the module's own FunctionDef node (see gen_module's
     seeding comment for why lazily — struct-typed params need the struct
@@ -1877,7 +1877,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str):
+def _imported_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -1966,7 +1966,7 @@ def _imported_def_pts(gen, bare_name: str):
     return None
 
 
-def _effective_param_types(gen, bare_name: str):
+def _effective_param_types(gen, bare_name: str) -> list | None:
     """The parameter ctypes a reference to `bare_name` in THIS compile unit
     must honor — the single source of truth for BOTH halves of a mangled
     free-function symbol: `_overload_suffix` hashes this list, and

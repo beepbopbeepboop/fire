@@ -1793,7 +1793,9 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *') or vtype.endswith(' *'):
+            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                    or vtype.endswith(' *'))
+                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
                 gen._dict_val_types[obj_v] = vtype
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
@@ -2695,6 +2697,19 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {ip} = (int64_t){val};")
         gen._emit(f"  {zero} = (int64_t)0;")
         gen._emit(f"  {b} = {ip} != {zero};")
+        return b
+    if ctype == 'int64_t' and (
+            val in gen._dyn_word_vals or val in gen._dyn_word_locals
+            or val in getattr(gen, '_cur_untyped_params', ())):
+        # A word of unknown kind: Python truthiness depends on WHAT it is (an
+        # empty container or string is false, None is false, 0 is false), and
+        # only the runtime knows. `word != 0` called every empty `{}`/`[]`/""
+        # true -- the compiled compiler's `if _sib_qualifier and not
+        # sym_info:` never fired for an import its exports did not name, and
+        # it emitted `extern int64_t NonlocalStmt (...)` for a class.
+        n = gen._call_expr('int', 'mojo_truthy_word', [('int64_t', val)])
+        b = gen._new_temp('_Bool')
+        gen._emit(f"  {b} = {n} != 0;")
         return b
     if ctype == 'int64_t':
         zero = gen._new_temp('int64_t')

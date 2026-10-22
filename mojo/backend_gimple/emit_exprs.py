@@ -1000,7 +1000,13 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.operand)
     if node.op == 'not':
         t = gen._new_temp('_Bool')
-        if ot in gen._CONTAINER_LEN_FN or ot == 'char *':
+        # A word of unknown kind (an unannotated parameter, an untyped read)
+        # too: `_ensure_bool_cond` asks the runtime for its truth value --
+        # `w == 0` called `not {}` False.
+        if (ot in gen._CONTAINER_LEN_FN or ot == 'char *'
+                or (ot == 'int64_t' and (
+                    ov in gen._dyn_word_vals or ov in gen._dyn_word_locals
+                    or ov in getattr(gen, '_cur_untyped_params', ())))):
             # Delegate to _ensure_bool_cond for real Python truthiness
             # (container length / non-empty string), then negate.
             # GIMPLE doesn't accept `!x`; cast-and-compare instead
@@ -1605,7 +1611,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # `sys.stdin.read()` rule's job — that fires on the CALL shape
             # before this value read is ever reached; this case covers
             # bare VALUE reads of the streams themselves.
-            fd = {'stdin': '0', 'stdout': '1', 'stderr': '2'}[node.member]
+            # A plain comparison chain, not `{...}[node.member]`: the
+            # compiled compiler answered that subscript of an inline dict
+            # literal with '0', so every `sys.stderr.write(...)` it compiled
+            # wrote to fd 0.
+            _stream = _as_str(node.member)
+            fd = '0' if _stream == 'stdin' else ('1' if _stream == 'stdout' else '2')
             t = gen._new_val('int64_t', fd)
             return 'int64_t', t
 
@@ -3428,12 +3439,36 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # because the choice would otherwise have to be a runtime branch around
     # the whole operand dispatch. A wrong value traded for a wrong format is
     # the right way round; see the doc's Residue section.
+    #
+    # NOT for identity and equality, though. `is` asks about the slot's WORD,
+    # and `==`/`!=`/`in` against anything that is not a number ask about its
+    # value as whatever it is -- a string slot compared with a string, a
+    # node handle compared with a node. Reading those through a double made
+    # `b[2] is node` a floating-point comparison of two pointers and
+    # `t[0] == name` a `(char *)` of a double, which only ever worked while
+    # every value involved stayed below 2**53. Those operators take the
+    # slot's own word (`mojo_box_word`: the box kept only for a float) and
+    # mark it a word of unknown kind, which is what the equality lowering
+    # dispatches on at run time.
+    _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
     if lv in getattr(gen, '_boxed_vals', ()):
-        lv = gen._new_val('double', f"mojo_box_double ({lv})")
-        lt = 'double'
+        if op in _ident_ops and (op in ('is', 'is not')
+                                 or rt not in ('double', 'float')):
+            lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
+            lt = 'int64_t'
+            gen._dyn_word_vals.add(lv)
+        else:
+            lv = gen._new_val('double', f"mojo_box_double ({lv})")
+            lt = 'double'
     if rv in getattr(gen, '_boxed_vals', ()):
-        rv = gen._new_val('double', f"mojo_box_double ({rv})")
-        rt = 'double'
+        if op in _ident_ops and (op in ('is', 'is not')
+                                 or lt not in ('double', 'float')):
+            rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
+            rt = 'int64_t'
+            gen._dyn_word_vals.add(rv)
+        else:
+            rv = gen._new_val('double', f"mojo_box_double ({rv})")
+            rt = 'double'
 
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types

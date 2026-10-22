@@ -63,6 +63,7 @@ from ownership_check import _block_terminates
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
+    opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
     _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
@@ -143,9 +144,23 @@ def _reset_func(gen, body: list = None, params: list = None,
     # SIGSEGV'd on `mojo_list_len(l=0x1)` for `main()`'s params, which are a
     # real empty list, not None). An explicit `is not None` check never
     # participates in that unification.
+    # The UNANNOTATED ones among them: a parameter nothing declared a type
+    # for holds a word of unknown kind -- a container, a string, None or an
+    # int -- so its truth value has to be asked of the runtime
+    # (`_ensure_bool_cond`), not read as `word != 0`. An empty `{}` passed for
+    # one is a live pointer, and `not sym_info` answered False for it.
+    gen._cur_untyped_params = set()
+    # Locals whose container contents are of an unrecorded kind (see
+    # `infra_infer.opaque_container_locals`): a store into one is not
+    # evidence about its other values.
+    gen._opaque_container_locals = (opaque_container_locals(body)
+                                    if body is not None else set())
     if params is not None:
         for _p in params:
             gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
+            if (isinstance(_p, (tuple, list)) and len(_p) > 1 and _p[1] is None
+                    and not _as_str(_p[0]).startswith('*')):
+                gen._cur_untyped_params.add(_as_str(_p[0]))
     # The lambda beta-reduction's cache is keyed by body IDENTITY (see
     # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
     # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
@@ -809,6 +824,8 @@ class FuncState:
     def __init__(self):
         self.fs_cur_func_body: list = []
         self.fs_cur_func_params: set = set()
+        self.fs_cur_untyped_params: set = set()
+        self.fs_opaque_container_locals: set = set()
         self.fsbb_counter: int = 0
         self.fstemp_counter: int = 0
         self.fs_fresh_vals: set = set()
@@ -899,6 +916,8 @@ def save_func_state(gen) -> FuncState:
     st = FuncState()
     st.fs_cur_func_body = gen._cur_func_body
     st.fs_cur_func_params = gen._cur_func_params
+    st.fs_cur_untyped_params = gen._cur_untyped_params
+    st.fs_opaque_container_locals = gen._opaque_container_locals
     st.fsbb_counter = gen.bb_counter
     st.fstemp_counter = gen.temp_counter
     st.fs_fresh_vals = gen._fresh_vals
@@ -998,6 +1017,8 @@ def restore_func_state(gen, st: FuncState) -> None:
     """Put back what `save_func_state` captured."""
     gen._cur_func_body = st.fs_cur_func_body
     gen._cur_func_params = st.fs_cur_func_params
+    gen._cur_untyped_params = st.fs_cur_untyped_params
+    gen._opaque_container_locals = st.fs_opaque_container_locals
     gen.bb_counter = st.fsbb_counter
     gen.temp_counter = st.fstemp_counter
     gen._fresh_vals = st.fs_fresh_vals

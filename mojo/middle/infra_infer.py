@@ -2396,6 +2396,61 @@ def _prepass_list_elem(gen, elements) -> str | None:
         types.append(le if le is not None else gen._quick_type(e))
     return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
 
+def opaque_container_locals(body: list) -> set:
+    """The locals of `body` bound (anywhere in it, closures included) to a
+    value that is NOT a container display (`{...}`/`[...]`/`{a, b}`) or
+    `None`: a copy of an untyped dict (`dict(info or {})`), a call result, a
+    parameter, an attribute read.
+
+    Such a container's EXISTING contents are of a kind nothing recorded, so
+    one `d[k] = <str>` store into it is not evidence about its other values.
+    Both value-type recorders -- this pre-pass's `d[k] = v` arm and the
+    codegen-time store in `_gen_stmt_AssignStmt` -- used to treat it as
+    such, and a later `d.get(k2)` was then read through the `char *`
+    accessor: `funcs_shared.register_imported_symbol`'s
+    `_info = dict(info or {}); _info['original_name'] = _orig` made every
+    `_info.get('c_parameters')` a string, and the compiled compiler iterated
+    the LIST's header bytes as characters (five garbage parameter types for a
+    zero-parameter import)."""
+    out: set = set()
+
+    def walk(stmts):
+        for n in (stmts or []):
+            if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
+                _v = n.value
+                if not (isinstance(_v, (gimple_ctypes.DictExpr, gimple_ctypes.ListExpr,
+                                        gimple_ctypes.SetExpr, gimple_ctypes.NoneLiteral))
+                        or (isinstance(_v, gimple_ctypes.IdentExpr) and _v.name == 'None')):
+                    out.add(_as_str(n.target.name))
+            if isinstance(n, gimple_ctypes.IfStmt):
+                walk(n.then_body)
+                if isinstance(n.else_body, list):
+                    walk(n.else_body)
+                for _cond, _eb in (n.elifs or []):
+                    walk(_eb)
+            elif isinstance(n, gimple_ctypes.TryStmt):
+                walk(n.body)
+                for _h in (n.handlers or []):
+                    _hb = getattr(_h, 'body', None)
+                    if isinstance(_hb, list):
+                        walk(_hb)
+                if isinstance(n.else_body, list):
+                    walk(n.else_body)
+                if isinstance(n.finally_body, list):
+                    walk(n.finally_body)
+            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt,
+                                gimple_ctypes.WithStmt, gimple_ctypes.FunctionDef)):
+                _b = getattr(n, 'body', None)
+                if isinstance(_b, list):
+                    walk(_b)
+                _eb2 = getattr(n, 'else_body', None)
+                if isinstance(_eb2, list):
+                    walk(_eb2)
+
+    walk(body)
+    return out
+
+
 def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
     """Best-effort static element-type map for local containers in a body.
 
@@ -2432,6 +2487,9 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
     elem: dict[str, str] = {}
     nested: dict[str, str] = {}
     dict_val: dict[str, str] = {}
+    # See `opaque_container_locals`: a store into one of these is not
+    # evidence about the dict's other values.
+    _opaque = opaque_container_locals(body)
 
     def note_list_literal(v: str, lit: gimple_ctypes.ListExpr):
         _e = gen._infer_list_elem_type(lit.elements)
@@ -2504,7 +2562,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name
                 vt = gen._quick_type(n.value)
-                if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                if v not in _opaque and vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
                            or vt.endswith(' *')):
                     dict_val.setdefault(v, vt)
                     # `lst[i] = <float>` is a LIST store when the key is

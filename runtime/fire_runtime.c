@@ -1094,6 +1094,26 @@ int64_t mojo_box_word(int64_t v)
     return bx->bits;
 }
 
+/* Python truthiness of a word of unknown kind (see the header). Containers
+ * and strings are asked for their length, a box for its payload, None (the
+ * NULL word) is false, and any other word -- an integer or a struct handle --
+ * is true exactly when it is not 0. */
+int mojo_truthy_word(int64_t w)
+{
+    if (w == 0) return 0;
+    if (mojo_is_registered_list(w)) return mojo_list_len((MojoList *)(intptr_t)w) != 0;
+    if (mojo_is_registered_dict(w)) return mojo_dict_len((MojoDict *)(intptr_t)w) != 0;
+    if (mojo_is_registered_set(w)) return mojo_set_len((MojoSet *)(intptr_t)w) != 0;
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        if (bx->kind == 'n') return 0;
+        if (bx->kind == 'd') return mojo_double_from_bits(bx->bits) != 0.0;
+        return mojo_truthy_word(bx->bits);
+    }
+    if (mojo_boxed_is_str(w)) return *(const char *)(intptr_t)w != '\0';
+    return 1;
+}
+
 /* The repr of a possibly-boxed int64_t. A box is described by its OWN kind
  * byte (see MojoBox): 'd' the double it holds, 'p' a str, 's' bytes, 'l' a
  * nested container, 'n' None, anything else the plain integer. Not a box ->

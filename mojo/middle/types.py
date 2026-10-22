@@ -2004,6 +2004,12 @@ def _used_idents_node(node) -> set[str]:
         r = _used_idents_node(node.func)
         for a in node.args:
             r |= _used_idents_node(a)
+        # The keyword arguments' VALUES are uses too. Without them a nested
+        # def whose only read of an enclosing name was `f(k=name)` captured
+        # nothing, and every closure built from it read the slot as 0 --
+        # ast_rewriter's `_sys_stream_write(fd)` rules all wrote to fd 0.
+        for _kw in (node.kwargs or []):
+            r |= _used_idents_node(_kw[1])
         return r
     if isinstance(node, MemberExpr):
         return _used_idents_node(node.obj)
