@@ -574,6 +574,30 @@ def _seed_selfhost_module_globals(self):
 
 
 
+def _apply_gimplegen_frozen_sigs(self, _gg_sigs: dict, lock: bool) -> None:
+    """Write the frozen GimpleGen signature table (`{mangled: (ret, params,
+    defaults)}`) into this instance's signature tables -- the EARLY apply
+    (`lock`: also the mangled-signature table and the locked set) and the
+    re-assertion after the per-instance method passes. One helper for both,
+    reading by key through `_as_*` views: the two inline copies each used a
+    nested `for _m, (_rc, _pcs, _dflts) in ....items()` unpack, whose boxed
+    slots the compiled compiler never matched."""
+    for _mg0 in _gg_sigs:
+        _mangled = _as_str(_mg0)
+        _sig_row = _as_list(_gg_sigs[_mg0])
+        _rc = _as_str(_sig_row[0])
+        _pcs = _as_list(_sig_row[1])
+        _dflts = _sig_row[2]
+        self.func_param_types[_mangled] = list(_pcs)
+        self.func_return_types[_mangled] = _rc
+        if lock:
+            self._mangled_signature_ctypes[_mangled] = list(_pcs)
+        if _dflts:
+            self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
+        if lock:
+            self._selfhost_locked_param_types.add(_mangled)
+
+
 def _seed_selfhost_struct_dict_field_types(self):
     """Seed `_field_dict_val_types` from `_selfhost_struct_dict_field_val_types`
     so a sibling compiler struct's annotated `dict[str, str]` field keeps its
@@ -4869,21 +4893,7 @@ def gen_module_impl(self, stmts):
             _cur = _gg_ft.get(_f)
             if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
                 _gg_ft[_f] = _c
-        # Keyed reads through `_as_*` views, not a nested `for _m, (_rc, _pcs,
-        # _dflts) in ....items()` unpack (boxed slots in the compiled
-        # compiler; see `_seed_selfhost_module_globals`).
-        for _mg0 in _gg_sigs:
-            _mangled = _as_str(_mg0)
-            _sig_row = _as_list(_gg_sigs[_mg0])
-            _rc = _as_str(_sig_row[0])
-            _pcs = _as_list(_sig_row[1])
-            _dflts = _sig_row[2]
-            self.func_param_types[_mangled] = list(_pcs)
-            self.func_return_types[_mangled] = _rc
-            self._mangled_signature_ctypes[_mangled] = list(_pcs)
-            if _dflts:
-                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
-            self._selfhost_locked_param_types.add(_mangled)
+        _apply_gimplegen_frozen_sigs(self, _gg_sigs, True)
         # Recover the `_annotation_dict_val_type` seeding of
         # `_field_dict_val_types` / `_field_dict_nested_val_types` that
         # `_seed_struct_field_types` would have done had `class GimpleGen`'s
@@ -8247,11 +8257,7 @@ def gen_module_impl(self, stmts):
     # passes (they run between the early apply above and here and rewrite
     # `func_param_types` / `func_return_types` from local inference).
     if _gg_sigs:
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
-            self.func_param_types[_mangled] = list(_pcs)
-            self.func_return_types[_mangled] = _rc
-            if _dflts:
-                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
+        _apply_gimplegen_frozen_sigs(self, _gg_sigs, False)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
@@ -9268,7 +9274,9 @@ def gen_module_impl(self, stmts):
         _cfn = _fn_by_name.get(_callee)
         if not _cfn:
             continue
-        for _pn, (_e, _ne) in list(_pm.items()):
+        for _pn0 in list(_pm.keys()):
+            _pn = _as_str(_pn0)
+            _e = _as_str(_as_list(_pm[_pn0])[0])
             if _e != 'char *':
                 continue
             _isinst_elem = False

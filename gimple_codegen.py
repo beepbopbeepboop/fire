@@ -3381,6 +3381,7 @@ class GimpleGen:
         'int64_t_expanduser':    ('char *',    ['char *']),  # os.path.expanduser(path)
         'int64_t_realpath':      ('char *',    ['char *']),  # os.path.realpath(path)
         'int_samefile':          ('int',       ['char *', 'char *']),  # os.path.samefile(a, b)
+        'int_relpath':           ('char *',    ['char *', 'char *']),  # os.path.relpath(p, start)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
         'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)

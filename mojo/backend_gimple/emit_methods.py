@@ -2308,8 +2308,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _rs_t, _rs_v = gen.lower_expr(node.args[1])
                 else:
                     _rs_t, _rs_v = 'char *', gen._new_val('char *', '(char *)0')
+                if _rp_t != 'char *':
+                    _rp_v = gen._new_val('char *', f'(char *){gen._ensure_local(_rp_t, _rp_v)}')
+                if _rs_t != 'char *':
+                    _rs_v = gen._new_val('char *', f'(char *){gen._ensure_local(_rs_t, _rs_v)}')
                 return 'char *', gen._call_expr('char *', 'int_relpath',
-                                                [(_rp_t, _rp_v), (_rs_t, _rs_v)])
+                                                [('char *', _rp_v), ('char *', _rs_v)])
             elif outer_member == 'samefile' and len(node.args) == 2:
                 # os.path.samefile(a, b) -- stats both (int_samefile). It had
                 # no case here and fell to the scalar stub, `0`, so the
