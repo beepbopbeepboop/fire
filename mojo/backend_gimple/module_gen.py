@@ -554,11 +554,16 @@ def _seed_selfhost_module_globals(self):
     """Populate the shared `_global_to_module` / `_global_var_types` /
     `_global_c_decl_types` from `_selfhost_module_scalar_globals` — see that
     helper's docstring."""
+    # `gimple_codegen._SELFHOST_DIR`, QUALIFIED, in all three seeders: the
+    # module-level `from gimple_codegen import _SELFHOST_DIR` binding lowers to
+    # `(int64_t)0` in the compiled compiler, so every seeder there scanned the
+    # directory "0" and seeded nothing.
+    #
     # Indexed reads through `_as_str`, not a nested `for _n, (_mod, _sem,
     # _cdecl) in ....items()` unpack: the self-hosted path boxes every slot of
     # a tuple read out of a dict, so the seeded keys and types came out as
     # words the plain-str tables never matched.
-    _seed = _selfhost_module_scalar_globals(_SELFHOST_DIR)
+    _seed = _selfhost_module_scalar_globals(gimple_codegen._SELFHOST_DIR)
     for _n0 in _seed:
         _n = _as_str(_n0)
         _row = _as_list(_seed[_n0])
@@ -576,7 +581,7 @@ def _seed_selfhost_struct_dict_field_types(self):
     # Key loops with `_as_str`/`_as_dict` views, not `.items()` unpacks (see
     # `_seed_selfhost_module_globals`): the boxed key never matched a
     # plain-str struct name, so no field kept its value type.
-    _tbl = _selfhost_struct_dict_field_val_types(_SELFHOST_DIR)
+    _tbl = _selfhost_struct_dict_field_val_types(gimple_codegen._SELFHOST_DIR)
     for _sn0 in _tbl:
         _sn = _as_str(_sn0)
         _fields = _as_dict(_tbl[_sn0])
@@ -593,7 +598,7 @@ def _seed_selfhost_struct_dict_field_types(self):
 
 def _seed_selfhost_return_elem_types(self):
     """Seed `_return_elem_types` from `_selfhost_homogeneous_tuple_ret_funcs`."""
-    _tbl = _selfhost_homogeneous_tuple_ret_funcs(self, _SELFHOST_DIR)
+    _tbl = _selfhost_homogeneous_tuple_ret_funcs(self, gimple_codegen._SELFHOST_DIR)
     for _k0 in _tbl:
         _k = _as_str(_k0)
         if self._return_elem_types.get(_k) is None:
