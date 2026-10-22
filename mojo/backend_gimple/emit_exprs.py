@@ -2902,7 +2902,21 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                        or (ltype == '_Bool' and _rp and node.op == 'or'))
         if _bool_merge:
             res_type = '_Bool'
+        # A string on one side and a word of unknown kind on the other
+        # (`_cur_env and getattr(ci, 'captures', None)`): the join called the
+        # result a `char *`, and the truth test then read the LIST the word
+        # held as a C string -- its header's first byte -- which the compiled
+        # compiler found empty and took the NULL-env branch. The result is a
+        # word that may be either, so it is typed as one and its truthiness
+        # (and str()/==) ask the runtime.
+        _mixed_word = (not _bool_merge
+                       and ((ltype == 'char *' and _rq == 'int64_t')
+                            or (ltype == 'int64_t' and _rq == 'char *')))
+        if _mixed_word:
+            res_type = 'int64_t'
         result = gen._new_temp(res_type)
+        if _mixed_word:
+            gen._dyn_word_vals.add(result)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
         bb_merge = gen._new_bb()
@@ -2942,6 +2956,15 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._emit(f"  {result} = {_rb};")
         else:
             gen._safe_coerce_emit(rtype, res_type, rval, result)
+        # A word result either of whose operands is a word of unknown kind is
+        # one too: `(rv and ir) and ir != ret_type` selects the `rv` string
+        # (as a word) on its short-circuit edge, and a plain `!= 0` test of
+        # the merged word called the empty string true -- the compiled
+        # compiler then emitted a call temp for a value-discarding call.
+        if (res_type == 'int64_t' and not _mixed_word
+                and (gen._is_dyn_word(node.left, lval)
+                     or gen._is_dyn_word(node.right, rval))):
+            gen._dyn_word_vals.add(result)
         gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_merge)
         return res_type, result

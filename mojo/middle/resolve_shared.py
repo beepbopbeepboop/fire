@@ -328,6 +328,12 @@ def _quick_type(gen, node) -> str:
         if node.op in ('and', 'or'):
             lt = gen._quick_type(node.left)
             rt = gen._quick_type(node.right)
+            # A string and a word of unknown kind: the value may be either,
+            # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
+            # arm) types the result the same way, and the two must agree.
+            if ((lt == 'char *' and rt == 'int64_t')
+                    or (lt == 'int64_t' and rt == 'char *')):
+                return 'int64_t'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':
             # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a
