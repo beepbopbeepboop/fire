@@ -8900,6 +8900,22 @@ def gen_module_impl(self, stmts):
                     _so_set = _so_inner.setdefault(pnames[i], set())
                     _so_set.add(_gmi_as_str(st))
                 spt = _arg_struct_ptr_type(caller_name, a)
+                if not spt and not isinstance(a, (
+                        gimple_ctypes.IntLiteral, gimple_ctypes.BoolLiteral,
+                        gimple_ctypes.NoneLiteral, gimple_ctypes.FloatLiteral,
+                        gimple_ctypes.StringLiteral, gimple_ctypes.ListExpr,
+                        gimple_ctypes.DictExpr, gimple_ctypes.SetExpr,
+                        gimple_ctypes.TupleExpr, gimple_ctypes.Comprehension)):
+                    # An argument whose struct type nothing knows -- a boxed
+                    # field read (`_fld.target`), a list element, a word of
+                    # unknown kind -- may be ANY node, so it is a vote
+                    # against narrowing the parameter to the one struct the
+                    # other call sites name. Unrecorded, `_dvt_consider(_out,
+                    # IdentExpr(n), ..)` beside `_dvt_consider(_out,
+                    # _n.target, ..)` looked unanimous: the parameter became
+                    # `IdentExpr *`, and its `isinstance(_tgt, MemberExpr)`
+                    # arm was statically False in the compiled compiler.
+                    spt = 'int64_t'
                 if spt:
                     # Same "split the chained setdefault so the intermediate
                     # result has a static type" reason as the block above.
