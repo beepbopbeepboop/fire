@@ -28,6 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node,
+    for_target_is_tuple, for_target_names,
     _as_comptimevar_node, _as_intlit_node, _as_boollit_node,
 )
 import ast_rewriter
@@ -900,6 +901,85 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     gen.gen_stmt(s)
                 i += step
             return
+    elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
+            and isinstance(node.iterable.func, gimple_ctypes.IdentExpr)
+            and node.iterable.func.name == 'product'):
+        # PART 6 (2026-10-23, family B): `comptime for i, j in product(range(2),
+        # range(2))` — the test_product._param family (ladder idx 4/10/16).
+        # Real Mojo runs a comptime loop in the COMPILER: the 4/8/16 body
+        # executions happen at compile time, so the runtime assert sees the
+        # accumulated trip_count. Before this branch every non-`range`
+        # iterable fell through to the `if not unrolled: pass` drop below —
+        # the body never emitted, trip_count stayed 0, and the ladder's idx
+        # 4/10/16 asserted 0 against 4/8/16 (measured: `FAIL assert_equal:
+        # words 0 / 42949673xx` + abort rc=134, the same signature D2 carried
+        # for all three). Unroll the Cartesian product when EVERY argument is
+        # a const-int `range(...)` — per axis, the same three arities the
+        # range branch above evaluates — and emit the body once per
+        # combination with each target bound to its concrete value, rightmost
+        # axis varying fastest (the product order test_product4_order pins:
+        # "Rightmost iterator varies fastest"). Every body statement lowers
+        # through the ordinary runtime path; the emitted statements are the
+        # same shapes as test_product4's green RUNTIME loop body, measured in
+        # the D2-era C (tuple-literal MojoList construction,
+        # mojo_list_contains_int membership, std_testing___init___assert_true,
+        # the trip_count AugAssign) — only the loop mechanics differ.
+        #
+        # The gate stays narrow on purpose: multi-target only, and at least
+        # two iterables — a 1-iterable `product(...)` would bind each target
+        # a 1-tuple in real Mojo, a shape no measured test uses, and guessing
+        # its scalar-vs-tuple semantics here would be the speculative-green
+        # this branch exists to avoid. Any gate miss (non-range argument,
+        # non-const argument, target/argument arity mismatch) falls through
+        # to the pre-branch drop, exactly today's behaviour. The cap only
+        # ever makes the branch MORE conservative — beyond it the loop drops
+        # red with a named reason, never a false green: the Cartesian product
+        # is multiplicatively explosive in a way the single-axis range
+        # unroll is not, while the measured tests use ≤ 16 combinations.
+        _ranges = []
+        for _a in node.iterable.args:
+            if not (isinstance(_a, gimple_ctypes.CallExpr)
+                    and isinstance(_a.func, gimple_ctypes.IdentExpr)
+                    and _a.func.name == 'range'):
+                _ranges = None
+                break
+            _ivals = [gen._eval_const_int(x) for x in _a.args]
+            if len(_ivals) == 1 and _ivals[0] is not None:
+                _ranges.append((0, _ivals[0], 1))
+            elif len(_ivals) == 2 and all(v is not None for v in _ivals):
+                _ranges.append((_ivals[0], _ivals[1], 1))
+            elif len(_ivals) == 3 and all(v is not None for v in _ivals):
+                _ranges.append((_ivals[0], _ivals[1], _ivals[2]))
+            else:
+                _ranges = None
+                break
+        if (_ranges is not None and len(_ranges) >= 2
+                and for_target_is_tuple(node.target)):
+            _axes = []
+            for _s, _e, _st in _ranges:
+                _vals = []
+                _i = _s
+                while (_st > 0 and _i < _e) or (_st < 0 and _i > _e):
+                    _vals.append(_i)
+                    _i += _st
+                _axes.append(_vals)
+            _names = for_target_names(node.target)
+            if len(_names) == len(_ranges):
+                _combs = [()]
+                for _ax in _axes:
+                    _combs = [_c + (_v,) for _c in _combs for _v in _ax]
+                if len(_combs) <= 256:
+                    for _t in _names:
+                        if _t not in gen.var_types:
+                            gen._declare_var(_t, 'int64_t')
+                    for _combo in _combs:
+                        for _t, _v in zip(_names, _combo):
+                            _dst = gen.var_types.get(_t) or 'int64_t'
+                            gen._safe_coerce_emit(
+                                'int', _dst, str(_v), _t)
+                        for s in node.body:
+                            gen.gen_stmt(s)
+                    return
     if not unrolled:
         pass
 

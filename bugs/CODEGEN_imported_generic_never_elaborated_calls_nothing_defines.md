@@ -1466,3 +1466,25 @@ materialized in-TU (78 definitions, 0 removed, 0 dangling)
   measurements); the remaining reds on the product ladder are the
   comptime-FOR-parameter family (idx 4/10/16, trip_count 0 — family B),
   byte-identical to the D2 signatures.
+
+## 2026-10-23 (part 6, family B): re-measured — the two declared reds
+unchanged; the product ladder's comptime-for family is no longer a
+declared-red population (17/17)
+
+- `test/os/path/test_getsize.mojo` and `test/collections/string/
+  test_iterators.mojo`: re-measured through the 610-file A/B — their
+  ERROR signatures are BYTE-IDENTICAL to the Family-A master (fresh
+  worktree at 9cf074f8), so both `EXPECTED_FAILURES` entries stay
+  accurate without a refresh. The closure maps hold: `getsize`'s
+  `stat(...)` C-ABI path and test_iterators' `s.bytes()`
+  dependent-return factory + `StringSpan[origin]` method family remain
+  the next items.
+- The product ladder's comptime-for family (idx 4/10/16) is CLOSED:
+  family B unrolls `comptime for ... in product(range(...), ...)` at
+  codegen time (R1 doc, the mechanism), so the three tests assert on
+  the real accumulated trip counts (4/8/16, negative-control-verified)
+  and the ladder is 17/17 — no product-ladder reds remain to declare.
+  A/B: 0 status changes, exactly 1 C→C (test_product — the only file
+  with the pattern; the 14 non-param functions byte-identical after
+  per-TU `_slit_` normalization, 0 removed/added definitions), 0
+  E-message changes.

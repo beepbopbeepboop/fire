@@ -3031,3 +3031,95 @@ byte-identical to D2 from both full-sweep logs, no-new-casts 19, doc-
 truth 434 PASS / 0 FAIL, one final 53-job bucket 53/53 (log /tmp/p6_
 probe/bucket_fama.log; the peak-movement notice, if present, is the
 same environmental pair D1/D2 recorded — table untouched).
+
+## 2026-10-23 (part 6, family B): comptime-for unrolling over
+`product(range(...), ...)` — the `_param` ladder family goes green and
+the product ladder is 17/17
+
+### The measured gap this closes
+
+The last three reds on the ladder (idx 4/10/16, `test_productN_param`)
+drive a COMPTIME loop:
+
+    comptime for i, j in product(range(2), range(2)):
+        assert_true(i in (0, 1))
+        ...
+        trip_count += 1
+    assert_equal(trip_count, 4)
+
+Real Mojo runs the loop in the compiler: the 4/8/16 body executions
+happen at compile time, so the runtime assert sees the accumulated
+count. `_gen_stmt_ComptimeForStmt` (`mojo/backend_gimple/emit_funcs.py`)
+unrolled ONLY const `range(...)` iterables; every other iterable fell
+through to the trailing `if not unrolled: pass` drop — the body never
+emitted, `trip_count` stayed 0, and the three tests asserted 0 against
+4/8/16 (measured, D1 through Family A, unchanged: `FAIL assert_equal:
+words 0 / 42949673xx` + abort rc=134; the emitted function body was
+literally `trip_count = 0; assert_equal(trip_count, 4);` with the loop
+gone).
+
+### The mechanism (one branch in the existing unroller)
+
+A `product` branch beside the `range` branch in `_gen_stmt_ComptimeFor
+Stmt`, gated narrow on purpose:
+
+- the iterable is a `product(...)` call with **at least two** arguments,
+  each a const-int `range(...)` call — per axis, the same three arities
+  the range branch evaluates (`_eval_const_int`);
+- the target is a multi-target tuple whose name count matches the
+  argument count (a 1-iterable `product(...)` would bind 1-tuples in
+  real Mojo — a shape no measured test uses; guessing its semantics is
+  the speculative green this branch avoids);
+- the Cartesian product is emitted once per combination, **rightmost
+  axis varying fastest** (the product order `test_product4_order`
+  pins: "Rightmost iterator varies fastest"), each target bound to its
+  concrete value through the SAME `_safe_coerce_emit('int', dst, ...)`
+  coercion the range branch uses, and each body copy lowered through
+  the ordinary runtime path.
+- Any gate miss falls through to the pre-branch drop — exactly today's
+  behaviour, byte-identical. A defensive 256-combination cap only ever
+  makes the branch MORE conservative (beyond it the loop drops red with
+  a named reason — the Cartesian product is multiplicatively explosive
+  in a way the single-axis range unroll is not, and the measured tests
+  use ≤ 16).
+
+The body statements lower to the SAME shapes as `test_product4`'s green
+RUNTIME loop body, measured in the D2-era C: the tuple-literal MojoList
+construction, `mojo_list_contains_int` membership, `std_testing___
+init___assert_true`, the `trip_count` AugAssign. A stdlib grep confirms
+the pattern's population: the only `comptime for ... in product(range(
+...), ...)` sites are the three test_product ones; `test_simd.mojo:281`
+(`comptime for dtype, size in product(dtypes, sizes)`, non-const
+arguments) misses the gate and keeps its pre-branch drop.
+
+### Ladder evidence (17/17, anti-vacuity measured)
+
+- idx 4/10/16: rc=134 → **rc=0 PASS**. NEGATIVE CONTROL: patching the
+  final expected counts 4→5, 8→9, 16→17 in a C copy of the same build
+  gives `FAIL assert_equal: words 4 / 5`, `8 / <encoded 9>`, `16 /
+  <encoded 17>` + abort rc=134 on each — the real accumulated counts
+  are exactly 4/8/16, so the unrolled bodies genuinely executed that
+  many times, with their in-body `assert_true(i in (0, 1))` membership
+  asserts (8/24/64 of them) passing on the real bound values.
+- The other 14 tests: zero PASS→FAIL, and stronger — the 14 non-param
+  test functions are BYTE-IDENTICAL in the regenerated C after
+  normalizing the per-TU `_slit_` string-slice table, whose 4 entries
+  renumbered because the unrolled bodies' first use of the `"ii"`
+  tuple-kinds string moved from id 10007 to 10004 (first-use
+  assignment; all references renumber consistently in the one TU).
+  The only C differences are the three param function bodies
+  (241→15024, 372→43726, 373→114426 chars) plus that table.
+- Removed-symbol check on the one changed file: 0 removed, 0 added
+  definitions — the unroll adds statements to existing functions, no
+  new symbols.
+
+### Blast radius + gates
+
+A/B C-hash over all 610 files, fresh per-file process both trees (vs a
+fresh worktree at the Family-A commit 9cf074f8): 0 status changes,
+exactly 1 C→C (`test/itertools/test_product.mojo` — the only file with
+the pattern), 0 E-message changes (the two declared reds
+byte-identical). Sweep 608/2 in both trees, warn-set 19/294
+byte-identical from both full-sweep logs, no-new-casts 19, doc-truth
+434/0, one final 53-job bucket (log /tmp/p6_probe/bucket_famb.log).
+The product ladder is now 17/17 — no staged remainder on this file.
