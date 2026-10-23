@@ -1184,6 +1184,21 @@ _GIMPLE_SCALAR_CTYPES = frozenset({
 })
 
 
+def _mark_boxed_field_read(gen, struct_name, member, field_type, t) -> None:
+    """A read of a struct field the self-host tables declare BOXED
+    (`struct_boxed_fields`: `AssignStmt.type_ann`, `IfStmt.condition`, ...)
+    is a word of unknown kind -- a string as often as a node or None -- so its
+    `str()` / truth / `==` ask the runtime. Typed plain `int64_t`, `str(
+    _n.type_ann)` was `mojo_str_from_int` and printed the annotation
+    string's ADDRESS (the compiled compiler then recovered no GimpleGen dict
+    field value type from any method-body annotation)."""
+    if field_type != 'int64_t':
+        return
+    _bf = gen.struct_boxed_fields.get(_as_str(struct_name)) if struct_name else None
+    if _bf and member in _bf:
+        gen._dyn_word_vals.add(t)
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
     # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
@@ -2006,6 +2021,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             ot = _pt
         field_type = gen.struct_field_types[_pst][node.member]
         t = gen._new_val(field_type, f"{ov}->{gimple_ctypes._safe_field(node.member)}")
+        _mark_boxed_field_read(gen, _pst, node.member, field_type, t)
         # Propagate container element/value types onto the field-read temp,
         # exactly like the generic instance-field branch further below (its
         # `_field_elem_types`/`_field_dict_val_types` seeding at the
@@ -2364,6 +2380,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member in field_map:
         field_type = field_map[node.member]
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
+        _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # Propagate element/dict-val type from stored field metadata so
         # subscript/iteration later recovers the right element type instead
         # of defaulting to int64_t (see BUG-2026-044).
@@ -2584,6 +2601,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if _resolved_field is not None:
             _ptr = gen._new_val(gen._actual_types[ov], f'({gen._actual_types[ov]}){ov}')
             t = gen._new_val(_resolved_field, f'{_ptr}->{gimple_ctypes._safe_field(node.member)}')
+            _mark_boxed_field_read(gen, _actual_sn, node.member, _resolved_field, t)
             return _resolved_field, t
         # A5 part 2: boxed handle to a known AST/compiler struct — `node.member`
         # is a REAL field of at least one struct in struct_field_types (IfStmt.
