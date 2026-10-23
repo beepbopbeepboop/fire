@@ -292,10 +292,16 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # unanimity contract (Pass 1.3d in module_gen.py) and by the
     # string-only-evidence rules below, so removing the entry trades a crash
     # for nothing at all.
+    #
+    # `str` removed for the same reason as `print`: `str(x)` accepts a value
+    # of any type, and inferring a 32-bit `int` from it truncated every
+    # pointer that reached such a parameter -- `_elem_ann_consider(out, tgt,
+    # ann)`, whose only use of `ann` is `str(ann)`, received the annotation
+    # string's address cut to 32 bits, and the compiled compiler recovered no
+    # GimpleGen set/list field element type at all.
     BUILTIN_PARAM_TYPES = {
         'open': 'char *',
         'mojo_open_file': 'char *',
-        'str': 'int',
     }
 
 
