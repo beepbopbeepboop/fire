@@ -2643,3 +2643,263 @@ the `_Product3`/`_Product4` copies); (B) comptime for-param
 evaluation; the value-level Optional representation for the bounds-guard
 shape (needed only for a non-list iterator arg). `test_iterators` /
 `test_getsize` (R2 doc) are UNCHANGED by this piece.
+
+## 2026-10-23 (part 6, family D piece 2): the test_utils constructor
+subpath — copies value-green (copy_b 0→1, real values), element_copies
+non-vacuous, and the strict-refusal gate the full sweep found
+
+### Half 1: the copies family goes value-green
+
+D1 staged exactly three things: test_utils inlining (the `Observable` /
+`CopyCounter` constructors materialized in-TU, the `Pointer(to=...)`
+constructor), a CONSTRUCTOR-BASED field copy in the fieldwise loop (the
+`counter` field must run Observable's copy constructor, not a raw
+pointer copy), and the `.copy()` gate admission. All three landed:
+
+- **The D2 constructor subpath** (`mojo/backend_gimple/elab_intu.py`,
+  shared by the seed and `_rewrite_callees` so the two cannot disagree
+  about the mangled name):
+  - `elaborate.infer_struct_type_args(..., fill_defaults=True)`: the
+    fillable comptime VALUE parameter (`CopyCounter`'s `trivial_copy:
+    Bool = False` — it occurs in a comptime field, NOT an erased span, so
+    the erased-only fill `_fill_erased_params` cannot bind it) fills from
+    the template's OWN provable defaults (`_default_type_arg`). The `.o`
+    route's caller keeps the strict default — its refusal is exactly what
+    the seed takes over (widening it there would double-define what the
+    seed already owns).
+  - **The vote-rule fix** (measured): in fill_defaults mode a constructor
+    earns a VOTE only when it bound at least one parameter FROM THE CALL
+    (`_unify_bound == 0 → continue`). Unfixed, CopyCounter's copy ctor
+    (`copy: Self` — unifies nothing) default-filled T to its `= NoneType`
+    default and voted `['NoneType', 'False']` against the value ctor's
+    argument-derived `['Int64', 'False']`; the agreement rule then refused
+    the whole call as ambiguous although no ambiguity exists — a
+    constructor that inferred nothing from the argument is not an
+    inference. Strict mode never reaches the fill loop, so its votes are
+    unchanged.
+  - **The kwarg-bracket placeholder** (`_d2_kwarg_bracket`): the parser
+    encodes `Observable[CopyOrigin=Self.CopyOrigin](copies=Pointer(to=
+    copies))` with an empty-raw `IntLiteral(0)` index and the real bracket
+    content in `attrs`. A None-check discriminator is impossible
+    (measured: `_type_expr_to_ann(IntLiteral(0))` = '0' and
+    `_is_concrete_type_arg('0')` = True — `_concrete_args` reads it as
+    concrete-but-wrong). The retry in `_rewrite_callees` is the
+    placeholder's only rewrite path.
+  - seed() struct dispatch: root → `_concrete_args`, non-root →
+    `_d2_ctor_args`; `_rewrite_local_struct_anns` rewrites a local
+    StructDef's field annotation to the BARE mangled name (brackets
+    dropped; solo-instantiation bases only).
+- **Ref-scalar parameters** (`funcs_shared._param_ctype`): read-only conv
+  + bare scalar annotation + concrete scalar ctype → `ctype + ' *'`.
+  This is how the in-TU constructors take `int64_t * copies` (the
+  `Pointer(to=copies)` spelling collapses to the raw pointer; the D1-era
+  NULL padding of the moves/dels kwargs rides on the same candidate).
+  `calls_shared`'s lvalue-pair helpers pass `&<local>` for an IdentExpr
+  declared in `gen.var_types`, else lower + box.
+- **M3 `.value()` identity** (`emit_methods`, after the MojoMemoryView
+  dispatch, before `_RAW_PTR_METHODS`): a no-arg `.value()` on a `T *`
+  receiver that is not a runtime pointer and not a struct → returns the
+  pointer itself. Before: the `int64_t_value` auto-stub (the C7 in-TU
+  body bug) — the copy ctor's `*(_mojo_at_int64_t(p,0)) = ... + 1`
+  increment needs the REAL pointer, not the stubbed 0.
+- **M4 the `.copy()` gate + constructor field copy**: the gate ORs
+  `gen._intu_local_copy_structs` (populated in `run()` from the
+  `direct`-record `local_inner` — ADMISSION only, deliberately NOT
+  `_intu_prereg_structs`: adding locals to the prereg set would give them
+  snapshot-exclusion semantics they don't have). `_emit_fw_copy`'s deep
+  branch resolves the field struct's `__init__` candidates with the
+  `copy` kwarg → the field runs the copy constructor (the `counter`
+  field increments `copy_count`), else the existing fieldwise recursion.
+
+**LADDER EVIDENCE** (same driver, same runtime, 17 tests): idx 2
+(`test_product2_copies`) FAIL→PASS with REAL values — AE_TRACE proves the
+assert operands: `AE a=0 b=...502511173632` / `AE a=1 b=...502511173633`
+(low32: copy_a=0, copy_b=1 — the copy constructor ran exactly once on
+the copied side). Of the other 16 tests, fourteen are byte-identical in
+status to the D1 baseline (PASS 0,1,3,5; red 4,6,7,9,10,11,12,14,15,16
+at the same first assert); the two remaining are the element_copies
+family, and their transition is the INTENDED false-green removal
+(measured in half 2 below): idx 8/13 were vacuous PASSes on D1 (the
+for-loop iterated zero times) and are now HONEST REDS (rc=139) because
+the loop executes and the Family-A stubbed `__next__` feeds NULL
+elements. So: one red→green (the goal), two vacuous-green→honest-red
+(the documented false greens), zero other status changes. The measured
+emitted chain: the `TestCopyIterator` typedef (`counter` = mangled
+`Observable *`), the init sig `(TestCopyIterator * self, int64_t *
+copies)`, the value ctor `Observable___init___972376 (_t1, copies, 0, 0)`
+(moves/dels NULL-padded), the copy ctor = pointer field copies + non-NULL
+guard + `*(_mojo_at_int64_t(p,0)) = ... + 1` (no `int64_t_value` stub),
+the call sites `test_product_TestCopyIterator___init__ (_t5, &copy_a)`
+with post-reads through temps. gcc delta vs the D1 baseline: zero new
+error kinds.
+
+### Half 2: element_copies runs non-vacuously (E1/E2)
+
+D1 measured the false green: idx 8/13 (`test_product{3,4}_element_
+copies`) pass with the for-loop iterating ZERO times (the seed refused
+`product(l1, l2, l3)` over `var l1 = [CopyCounter(1), CopyCounter(2)]` —
+the bare-ctor list element had no inference — the call took the old
+path, the driver's Int-keyed stub returned 0, every assert skipped).
+Both halves landed:
+
+- **E1** — the `CopyCounter(1)` constructor elements in the list
+  literals materialize (the D2 subpath walks every stmt, including
+  inside a ListExpr). The emitted list construction is real: `_alloc_
+  CopyCounter_1_T_5_Int64_17_trivial_x005Fcopy_5_False()` + `___init__`
+  + `mojo_list_append_int` + the element-repr function pointer, per
+  element; `l1`/`l2`/`l3` are `MojoList *` of in-TU struct-pointer words.
+- **E2** — `product(l1, l2, l3)` over the unannotated locals resolves
+  in-TU. The factory seed's refusal was `resolve_container`'s
+  `list_literal_elem` (a bare ctor element is not a scalar literal).
+  Landed: `_bare_struct_ctor_elem` in `iter_factory` (homogeneous bare-
+  ctor list literal — every element a CallExpr whose func is the SAME
+  bare IdentExpr, all elements' mangled names agree, None-safe) plus a
+  seed-supplied `struct_ctor_mangle` callback on `resolve_container`
+  (wired at all three elab_intu call sites). The callback
+  (`_d2_elem_mangle`) runs the SAME `_d2_ctor_args` on the element node
+  the seed and `_rewrite_callees` use for the identical call site — the
+  name the factory seed derives and the name the D2 ctor subpath
+  materializes from the same `CopyCounter(1)` cannot disagree by
+  construction. The element is the MANGLED name; the in-TU
+  `_ListIterOwned[CC_m]` (nested-mention bridge, the part-5 shape) and
+  the `_Product3[LO[CC_m] × 3]` / `_Product4[LO[CC_m] × 4]` wrappers
+  materialize. Old-path `product_13_..._3_Int_...` references: 4+2
+  before, 0 after.
+- **The unpack** (the second false-green layer, measured after E1/E2):
+  the multi-target loop declared the slot targets as bare `int64_t`, so
+  `a.copy_count` fell to the runtime getattr dispatch (`AttributeError:
+  copy_count` at run time). Landed: the seed record's `multi_args`
+  entries now carry `elem`; `_gen_for_struct_iter` (emit_loops) declares
+  a slot target as `<mangled> *` when the slot's elem is a registered
+  struct (a scalar slot's elem, 'Int'/'String', never is) and reads the
+  slot as word-then-cast (`mojo_list_get_int` → `(CC *)` temp — the
+  two-step temp form -fgimple strict mode accepts, the same shape the E1
+  construction uses for the reverse direction). The emitted body is now
+  `a->copy_count` — a static field read — fed by the real in-TU
+  `__next__` call.
+- **The named remainder (why idx 8/13 are red, measured)**: the loop
+  now executes NON-VACUOUSLY (the `__next__` call is real, the unpack is
+  typed, the field read is static), but the VALUES come from the
+  Family-A comptime-type-alias stubs: the spliced `_Product3`/`_Product4`
+  bodies stub the `Self._Product2Type` / `_OuterProduct2Type` alias
+  construction (`/* int64_t._Product3Type() stubbed */`, `/* indirect
+  call via SubscriptExpr */` — the nested in-TU `_Product2` the alias
+  names), so `__next__` returns 0 → the tuple list is NULL → `a` is
+  NULL → `a->copy_count` segfaults (rc=139). The SAME mechanism as idx
+  6/9/11/14/15 (the Int-inner `_Product3`/`_Product4`, red at the same
+  first assert since D1) — the Family-A piece (comptime alias
+  evaluation + the nested in-TU `_Product2` + the `_flatten` rewrite to
+  explicit flat-tuple construction) is next in the measured order. The
+  shared in-TU materialization half landed with D2: the wrappers ARE the
+  same mangled structs the alias evaluation will drive, and this exact
+  unpack will produce real pointers and run the `copy_count` asserts
+  once `__next__` builds a real tuple list.
+
+### The full-sweep gate: four C->E regressions and the strict-refusal
+gate
+
+The first D2 full sweep (610 files, current tree) went 604/6 — FOUR
+C->E regressions against the 608/2 baseline, each the same meta-
+mechanism: D2's bare-literal subpath materialized an in-TU
+instantiation in a file where master was on the `.o` route, and the
+surfaced lowering path carries a latent bug the `.o` route masks in its
+own `gcc -c` (an elaboration failure falls through to the opaque
+`extern int64_t Base (...);` — syntax-gate green, link hazard, exactly
+the class D2 exists to remove, but from the SWEEP's view a regression):
+
+- `test/collections/test_interval.mojo` — by-value TUPLE PARAMETER
+  subscript: the in-TU `Interval[Int64]` ctor takes a by-value
+  `MojoTuple` parameter; `interval[0]` emits `_mojo_at_int64_t
+  (interval, 0)` — the by-value struct passed where a pointer is
+  expected (gcc `expected pointer as argument of unary '*'` + `invalid
+  conversion in gimple call`). Master: opaque `extern int64_t Interval
+  (...);` + bare `Interval (1, 10);` + dispatch getattr.
+- `test/collections/test_optional.mojo` — EMPTY-subscript arity: `a[]`
+  (an empty subscript parses to the placeholder `IntLiteral(0)` index)
+  passes the dummy 0 to the in-TU `Optional_1_T_5_Int64___getitem__
+  (a)` — which takes NO index (optional.mojo:467 `def __getitem__(ref
+  self)`) — gcc `too many arguments; expected 1, have 2`. Master: the
+  erased-word list path (`mojo_list_get_int` on a garbage word).
+- `test/memory/test_arc.mojo` — a HARD codegen refusal: `ArcPointer_
+  1_T_5_Int64[...] = ...` subscript store on the in-TU struct (no
+  `__setitem__`, no backing container field) — the emitter's honest
+  refusal, now reachable because the receiver is a real struct pointer.
+  Master: erased word.
+- `test/format/test_utils.mojo` — the ref-scalar lvalue against a
+  MISMATCHED binding: `Repr(42)` (a literal) materialized the in-TU
+  `Repr[Int64, MutOrigin]`; the emitter then resolved the OTHER site
+  `Repr(v)` (v: TestWritable — a non-literal the D2 subpath does not
+  infer from) to that same candidate, and the lvalue path passed `&v`
+  (`TestWritable **`) to the `int64_t *` parameter — gcc incompatible-
+  pointer. Master: opaque for both sites.
+
+**THE GATE** (elab_intu `_infer_struct_args` — the shared helper both
+the seed and `_rewrite_callees` route through, so the two cannot
+disagree): the fill_defaults inference takes over ONLY the calls the
+`.o` route's strict inference REFUSES — the zero-stub hazard boundary
+D2 exists to cross. Measured split: `CopyCounter(['int64_t'])` strict →
+None (refused — D2 fires); `Interval(['int64_t','int64_t'])` → `['Int64']`,
+`Optional(['int64_t'])` → `['Int64']`, `ArcPointer(['int64_t'])` →
+`['Int64']`, `Repr(['int64_t'])` → `['Int64','MutOrigin']` (all
+serVEd — D2 returns None silently and the call site reaches the emitter
+EXACTLY as it does on master). A strict EXCEPTION is read as "the `.o`
+route serves this no better than it does" (its caller wraps the same
+call in its own try/except) so fill_defaults is tried; fill_defaults
+keeps its own refusal note. The `.o` route's compilation failure for
+Interval (the tuple-subscript bug in its own `gcc -c`) is why master's
+call site ends at the opaque extern — the gate does not need to
+replicate that failure, only to leave the call site for the `.o` route
+to answer.
+
+With the gate: all four files `compile_one` RC 0; the full sweep is back
+to **608/2** (2 expected — test_iterators, test_getsize; 0 unexpected;
+0 stale); test_product's C is BYTE-IDENTICAL before and after the gate
+(778,151 chars — CopyCounter's strict inference refuses, so the gate
+does not touch the D2 goal); the 17-test ladder is identical to the
+pre-gate verified state. The four latent bugs the sweep surfaced (by-
+value tuple subscript, empty-subscript arity, struct subscript-store,
+ref-scalar lvalue type-check) stay UNFIXED by design here: they are the
+`.o` route's masked population, and fixing them changes the `.o` route's
+own behavior (elaboration would start SUCCEEDING where it now falls
+through) — a separate piece, not a D2 next-fix.
+
+### Gate record (2026-10-23, final code, python 3.14.8)
+
+- Sweep 608/2 in BOTH trees (current + the clean 1eea8e29 worktree):
+  2 expected (test_iterators, test_getsize), 0 unexpected, 0 stale,
+  exit 0 in both.
+- A/B C-hash (fresh per-file process, same script, both trees): 610
+  files, 0 status changes (0 C->E, 0 E->C, 0 E-message changes), 23
+  C->C, every one classified:
+  - 16 files — the M3 `.value()` identity: a `.value()` on a non-
+    runtime `T *` receiver that was the `int64_t_value` / `char*.
+    value` zero stub now returns the pointer itself (test_link,
+    test_symlink, bencher, test_optional, test_external_call,
+    testing, assert_aborts, std/ffi/__init__, std/collections/interval,
+    linked_list, test_file, _cpython, test_tempfile, python_object,
+    tempfile, types.mojo — in types.mojo that is the Observable copy-
+    ctor increment `self._copies.value()[] += 1`, the mechanism the
+    ladder's copy_b=1 rides on). `int64_t_value` references: 36 across
+    the six files that carried them, 0 after.
+  - 6 files — the M1 in-TU materialization spread: the bare-literal
+    counter/random constructor calls the strict inference refuses
+    materialize in-TU with real construction at every call site
+    (test_list/test_pointer/test_maybe_uninit/test_span — `MoveCounter`
+    / `CopyCounter[Int64, False]`; test_memory — `MoveCounter`/
+    `CopyCounter[String, False]`; test_philox — `Random[6, 10]` with
+    its step methods).
+  - test_product — the D2 core (both halves above).
+  Removed-symbol check: 0 removed DEFINITIONS across all 23 (the old-
+  path `product_13_..._3_Int...` and `int64_t_value` entries the diffs
+  drop are declarations, never definitions — no other TU could depend
+  on them), zero dangling references to any removed name, `int64_t_
+  value` fully unreferenced in the current build's six affected TUs.
+- gcc syntax gate on every changed file: exit 0 (the sweep's gcc stage
+  is the measurement; the four regression files re-verified with
+  `compile_one` individually).
+- Final 53-job bucket (`tools/suite.py -j 53 --no-cache`, 3.14.8): 53
+  passed, 0 failed, 0 skipped, 0 replayed (log /tmp/p6_probe/
+  bucket_d2.log). The `2 measured peak(s) have moved (runtimedylib,
+  sqliteruntime)` notice is byte-identical to the D1 final run — an
+  environmental memory-peak drift, not a gate result; the peak table in
+  `tools/suite.py` is left untouched, as D1 left it.

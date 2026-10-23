@@ -7212,15 +7212,24 @@ def gen_module_impl(self, stmts):
                     _all_ctypes = list(_fz_params)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
                     max_arity = len(param_ctypes)
+                # The parameter CONVENTIONS, aligned to `_rp_names` (part 6
+                # family D piece 2): the call side's ref-scalar address-of
+                # rule (calls_shared) needs the callee param's conv at ARG
+                # construction time — the FunctionDef node is not reachable
+                # from a candidate, so the conv rides the candidate.
+                _pconv = getattr(m, 'param_convs', None) or {}
                 key = _sms_key(s.name, m.name)
                 # Plain unpack loop, NOT a comprehension.
                 _rp_names = []
+                _rp_convs = []
                 for _rpn3, _rpt3 in real_params:
                     _rp_names.append(_rpn3)
+                    _rp_convs.append(_pconv.get(_rpn3.lstrip('*')))
                 self._struct_method_signatures.setdefault(key, []).append({
                     'overload_id': _oid,
                     'param_names': _rp_names,
                     'param_ctypes': param_ctypes,
+                    'param_convs': _rp_convs,
                     'min_arity': min_arity,
                     'max_arity': max_arity,
                     'ret_type': _ret_type,

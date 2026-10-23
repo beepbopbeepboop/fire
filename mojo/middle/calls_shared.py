@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, conv_is_read_only
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -601,6 +601,63 @@ def _param_ctype_at(chosen: dict, index: int):
     return None
 
 
+_REF_SCALAR_CSET = frozenset({
+    'int64_t', 'int', 'long', 'double', 'float', '_Bool',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+
+
+def _ref_scalar_param_ctype(chosen: dict, index: int):
+    """The `chosen` candidate's parameter `index` C type when it is a
+    REF-SCALAR pointer (part 6 family D piece 2, 2026-10-23) — a read-only
+    conv (read/ref/imm) whose declared type is a pointer to a concrete
+    scalar — else None. The definition side (funcs_shared._param_ctype) and
+    this check answer the same question from opposite ends, so the address-
+    of below can never fire against a parameter the signature did not
+    actually change. Defensive like `_param_ctype_at`: a candidate built
+    without `param_ctypes`/`param_convs` (self-hosted boxed reads) just
+    gets the old value-passing behavior."""
+    try:
+        _cts = chosen.get('param_ctypes') or []
+        _convs = chosen.get('param_convs') or []
+    except AttributeError:
+        return None
+    if not isinstance(_cts, (list, tuple)):
+        return None
+    if not (0 <= index < len(_cts)):
+        return None
+    ct = _cts[index]
+    if not (isinstance(ct, str) and ct.endswith(' *')):
+        return None
+    if ct[:-2] not in _REF_SCALAR_CSET:
+        return None
+    if not isinstance(_convs, (list, tuple)) or index >= len(_convs):
+        return None
+    if not conv_is_read_only(_convs[index]):
+        return None
+    return ct
+
+
+def _ref_scalar_lvalue_pair(gen, arg_node, ctype) -> tuple:
+    """Lower ONE call-site argument for a ref-scalar parameter: the ADDRESS
+    of the argument's own storage. An addressable lvalue — an identifier
+    declared in the current function (var_types is the whole declared-name
+    table, locals and params) — passes `&name`, which is the whole point:
+    the callee reads through it to the caller's variable (test_product's
+    Observable increment must reach copy_a/copy_b, measured). Any other
+    expression is lowered as a value into a fresh local and THAT local's
+    address is passed — real Mojo requires an lvalue here, and the stdlib's
+    measured call sites all pass locals, so the box is the honest fallback
+    (today's value semantics for that argument, no worse than the old
+    by-value param) rather than a guess about a temporary's lifetime."""
+    if isinstance(arg_node, IdentExpr) and gen.var_types.get(arg_node.name):
+        cname = (getattr(gen, '_c_names', None) or {}).get(arg_node.name, arg_node.name)
+        return (ctype, f'&{cname}')
+    at, av = gen.lower_expr(arg_node)
+    elem = ctype[:-2]
+    tmp = gen._new_val(elem, av)
+    return (ctype, f'&{tmp}')
+
+
 def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list | None,
                                    defaults: dict | None = None) -> list:
     """Build the C arg-value list (self excluded) for a resolved struct
@@ -664,7 +721,14 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(('MojoDict *', gen._pack_kwargs_dict(
                 {_kn: gen.lower_expr(_kv) for _kn, _kv in kw.items()})))
         return out
-    out = [gen.lower_expr(a) for a in args]
+    # PART 6 (2026-10-23, family D piece 2): a ref-scalar parameter (the
+    # caller passes the ADDRESS of its own variable — see
+    # _ref_scalar_param_ctype) takes the lvalue box instead of a value.
+    out = []
+    for _ai, _an in enumerate(args):
+        _rct = _ref_scalar_param_ctype(chosen, _ai)
+        out.append(_ref_scalar_lvalue_pair(gen, _an, _rct) if _rct is not None
+                   else gen.lower_expr(_an))
     # A `**kwargs` parameter is a concrete `MojoDict *` (see
     # _gen_struct_method's param loop), so literal keyword arguments at
     # the call site must be PACKED into a real dict. Otherwise the
@@ -690,7 +754,9 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             out.append(gen._default_expr_to_pair(
                 (defaults or {}).get(chosen['param_names'][_fill]),
                 param_ctype=_param_ctype_at(chosen, _fill)))
-        out[idx] = gen.lower_expr(kw[pname])
+        _rct = _ref_scalar_param_ctype(chosen, idx)
+        out[idx] = (_ref_scalar_lvalue_pair(gen, kw[pname], _rct) if _rct is not None
+                    else gen.lower_expr(kw[pname]))
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
         _rest = {}

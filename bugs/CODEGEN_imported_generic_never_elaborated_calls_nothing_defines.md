@@ -1383,3 +1383,50 @@ with D's LINK HAZARD removed (the copies family's remaining red is
 value-level — the staged D2: test_utils inlining + constructor-based
 field copy, in the R1 doc's 2026-10-23 section; the element_copies
 false green it documents is the same D2's second half).
+
+## 2026-10-23 (part 6, family D piece 2): re-measured — the two
+declared-reds unchanged; the fillable-default constructor hazard is
+taken over exactly where strict inference refuses
+
+The R1 doc's "2026-10-23 (part 6, family D piece 2)" section carries
+the measured mechanism (the fill_defaults inference + the vote-rule
+fix + the kwarg-bracket placeholder, the ref-scalar parameter ABI, the
+`.value()` identity, the constructor field copy, the E1/E2 element
+inference + pointer-slot unpack, and the strict-refusal gate), the
+ladder evidence (idx 2 FAIL→PASS with real values, the other 16 tests
+byte-identical status, zero PASS→FAIL; idx 8/13 non-vacuous with the
+named Family-A remainder), and the full gate record. From this doc's
+perspective:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-23 (part 6,
+  family D piece 2), unchanged: same failure (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String (exit 1, 3 attempts)`;
+  `implicit declaration of function 'stat'`), same emitted body (A/B
+  ERROR->ERROR, byte-identical message). The D2 constructor subpath does
+  not touch this file (no bare constructor call to an imported generic
+  struct; its `stat(...)` is the C-ABI-FFI shape the part-5 section
+  maps as a sub-campaign).
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-23
+  (part 6, family D piece 2), unchanged: `s.bytes()` still lowers to the
+  zero stub, `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR,
+  byte-identical message; the method-call dependent-return closure is the
+  next sub-campaign).
+
+The zero-stub hazard surface this doc tracks: the D2 piece removes the
+copies family's template-symbol hazard (D1) AND takes over the BARE-
+LITERAL constructor calls whose type arguments the `.o` route's strict
+inference refuses — measured split in the R1 doc: `CopyCounter(1)`
+strict refuses (the fillable `trivial_copy` comptime value parameter) so
+the in-TU materialization owns it; `Interval(1, 10)` / `Optional(123)` /
+`ArcPointer(4)` / `Repr(42)` strict answers, so the `.o` route owns
+them (the strict-refusal gate in `_infer_struct_args` is the boundary;
+the full-sweep regression it fixed is documented there). The A/B C-hash
+(population-wide, 610 files, fresh per-file process both trees): 0
+status changes, 23 C->C, every one classified in the R1 doc's gate
+record (16 files the `.value()` identity, 6 files the in-TU counter/
+random-struct materialization, test_product the D2 core), 0 E-message
+changes, 0 removed definitions, zero dangling references. `test_product`
+remains floor-green and ladder-red: the copies family is VALUE-GREEN
+(idx 2), the element_copies family (idx 8/13) is now NON-VACUOUS and
+red on the measured Family-A comptime-alias remainder, and families
+A/B hold the other reds (R1 doc).

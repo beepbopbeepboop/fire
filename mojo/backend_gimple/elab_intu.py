@@ -344,7 +344,26 @@ def _is_concrete(a) -> bool:
 def _infer_struct_args(work, base, ctypes):
     """Mojo type arguments for a bare `base(<literals>)`, via the elaborator's
     OWN constructor-annotation unifier, so this pass and the `.o` route agree by
-    construction rather than by two independent readings of the same text."""
+    construction rather than by two independent readings of the same text.
+
+    PART 6 (2026-10-23, family D piece 2, full-sweep gate): the fill_defaults
+    inference takes over ONLY the calls the `.o` route's strict inference
+    REFUSES — the zero-stub hazard shapes. Measured over the D2 full sweep
+    (4 C->E regressions against the 608/2 baseline): `Interval(1, 10)`,
+    `Optional(123)`, `ArcPointer(4)` and `Repr(42)` all bind every parameter
+    from their own arguments (strict inference answers), so the `.o` route
+    already serves those calls — and materializing the same instantiation
+    in-TU beside it does not take the call over, it DEFINES a second copy of
+    a body the `.o` route's own `gcc -c` masks (test_interval's by-value
+    tuple-subscript, test_optional's empty-subscript arity, test_arc's
+    subscript-store refusal, test/format/test_utils' ref lvalue). When strict
+    inference refuses (`CopyCounter(1)`'s fillable `trivial_copy` value
+    parameter — see infer_struct_type_args' own fill_defaults note), the call
+    reaches the generated C as a declared-never-defined stub, and the
+    fill_defaults binding is the takeover this subpath exists for. A strict
+    EXCEPTION is read as "the `.o` route serves this no better than it does"
+    (its caller wraps the same call in its own try/except), so fill_defaults
+    is tried; fill_defaults has its own refusal note below."""
     import elaborate
     module_src = _module_src(work.gen, base, 'struct')
     if module_src is None:
@@ -353,7 +372,14 @@ def _infer_struct_args(work, base, ctypes):
     if any(c is None for c in c_ctys):
         return None
     try:
-        return elaborate.infer_struct_type_args(module_src, base, c_ctys)
+        _strict = elaborate.infer_struct_type_args(module_src, base, c_ctys)
+    except Exception:
+        _strict = None
+    if _strict is not None:
+        return None
+    try:
+        return elaborate.infer_struct_type_args(module_src, base, c_ctys,
+                                                fill_defaults=True)
     except Exception as e:
         work.refuse(f'{base}(<literals>): {type(e).__name__}: {e}')
         return None
@@ -382,6 +408,111 @@ def _infer_fn_args(work, base, node):
     except Exception as e:
         work.refuse(f'{base}(<literals>): {type(e).__name__}: {e}')
         return None
+
+
+def _d2_kwarg_bracket(sub) -> bool:
+    """The parser's KWARG-bracket placeholder shape (part 6 family D piece 2,
+    2026-10-23, measured on test_product's `Observable[CopyOrigin=
+    Self.CopyOrigin](copies=Pointer(to=copies))`): the SUBSCRIPT's index is an
+    IntLiteral with an empty `raw` (a dummy 0) and the real bracket content
+    rides in `attrs` as (name, value) pairs — the same mechanism
+    `_lower_subscript` documents for `x[byte=:-1]`. A real bracket argument
+    (a type name, a literal with a `raw`, a TupleExpr of them) never has the
+    empty-raw placeholder, so this discriminates the kwarg-bracket constructor
+    spelling from the `.o` route's concrete-positional-bracket domain
+    (`List[Int](...)`), which this subpath must never touch. Note
+    `_concrete_args` CANNOT tell the two apart: `_type_expr_to_ann` answers
+    '0' for the placeholder and `_is_concrete_type_arg('0')` is True."""
+    idx = sub.index
+    return (isinstance(idx, IntLiteral)
+            and (getattr(idx, 'raw', None) or '') == ''
+            and bool(sub.attrs))
+
+
+def _d2_ctor_args(work, base, node):
+    """The D2 constructor subpath's type arguments (part 6 family D piece 2,
+    2026-10-23): an imported generic struct's CONSTRUCTOR call the `.o` route
+    cannot elaborate — the zero-stub hazard shapes — exactly two, both
+    measured, nothing else:
+
+      * a BRACKETED `Base[<kwarg brackets>](...)` (the placeholder shape
+        `_d2_kwarg_bracket` measures) whose bracket parameters all fill from
+        the template's OWN provable defaults — `Observable[CopyOrigin=
+        Self.CopyOrigin]`: the bracket names an origin this codegen erases
+        (every origin spelling is the same C layout — `Pointer[Int, o]` is
+        `int64_t *` for every `o`), so the all-defaults binding IS the
+        concrete instantiation. A parameter with no provable default is a
+        refusal, not a guess;
+      * a BARE `Base(<literals>)` whose type arguments the constructor's
+        annotations infer — via `_infer_struct_args`, whose fill_defaults
+        inference takes over the value-parameter shape the `.o` route's
+        strict inference refuses (CopyCounter(1)'s `trivial_copy: Bool =
+        False` — see infer_struct_type_args' own fill_defaults note).
+
+    Shared by the seed and `_rewrite_callees` so the two cannot disagree
+    about the mangled name. Returns None for every other shape — the call
+    keeps its old path exactly."""
+    import elaborate
+    if isinstance(node.func, SubscriptExpr):
+        if not isinstance(node.func.obj, IdentExpr):
+            return None
+        if not _d2_kwarg_bracket(node.func):
+            return None
+        module_src = _module_src(work.gen, base, 'struct')
+        if module_src is None:
+            work.refuse(f'{base}[...]: no source for its home module')
+            return None
+        tmpl = elaborate.extract_struct_source(module_src, base)
+        if tmpl is None:
+            work.refuse(f'{base}[...]: no struct template in its home module')
+            return None
+        tparams = elaborate.type_param_names(tmpl)
+        if not tparams:
+            work.refuse(f'{base}[...]: {base!r} is not generic in its home module')
+            return None
+        targs = elaborate.bind_type_args(tmpl, [])
+        if targs is None:
+            work.refuse(f'{base}[...]: a bracket parameter has no provable default')
+            return None
+        return [targs[p] for p in tparams]
+    if _literal_args(node) is None:
+        return None
+    return _infer_struct_args(work, base, _literal_args(node))
+
+
+def _d2_elem_mangle(work, mm, node):
+    """The MANGLED name a BARE generic-struct-ctor list-literal element
+    instantiates (part 6 family D piece 2, 2026-10-23, measured on
+    test_product's element_copies: `var l1 = [CopyCounter(1), CopyCounter(2)]`
+    feeding `product(l1, l2, l3)`): the element's type is the ctor's own
+    inferred instantiation — the SAME `_d2_ctor_args` the seed and
+    `_rewrite_callees` use for the identical call node, so the name this
+    factory seed derives and the name the D2 ctor subpath materializes from
+    the same `CopyCounter(1)` site cannot disagree. The mangle is the
+    `{param: arg}` dict form `_materialize`'s queue keys feed
+    `mm.mangle`. Every gate is a refusal, not a guess: only an imported
+    generic struct with readable template parameters, and only the D2
+    argument shapes (kwarg-bracket all-defaults / bare all-literal)
+    answer a name; anything else returns None and the container refuses
+    exactly as before."""
+    import elaborate
+    f = getattr(node, 'func', None)
+    if type(f).__name__ != 'IdentExpr':
+        return None
+    base = getattr(f, 'name', None)
+    if base not in (work.gen._imported_generic_structs or {}):
+        return None
+    args = _d2_ctor_args(work, base, node)
+    if args is None:
+        return None
+    module_src = _module_src(work.gen, base, 'struct')
+    if module_src is None:
+        return None
+    tmpl = elaborate.extract_struct_source(module_src, base)
+    tparams = elaborate.type_param_names(tmpl) if tmpl else None
+    if not tparams or len(tparams) != len(args):
+        return None
+    return mm.mangle(base, dict(zip(tparams, args)))
 
 
 def _direct_ctor_arg_mention(node, struct_names, locs):
@@ -1180,7 +1311,8 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
                      if type(st).__name__ == 'StructDef'}
     cont = iter_factory.resolve_container(
         args[0], factory_names, locs, struct_names=_struct_names,
-        fn_returns=_fn_returns_map(stmts))
+        fn_returns=_fn_returns_map(stmts),
+        struct_ctor_mangle=lambda n: _d2_elem_mangle(work, mm, n))
     if cont is None:
         work.refuse(
             f'{base}(...): container argument is not a statically resolvable '
@@ -1519,7 +1651,8 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
     for i, a in enumerate(args):
         c = iter_factory.resolve_container(
             a, factory_names, locs, struct_names=_struct_names,
-            fn_returns=_fn_returns_map(stmts))
+            fn_returns=_fn_returns_map(stmts),
+            struct_ctor_mangle=lambda n: _d2_elem_mangle(work, mm, n))
         if c is None:
             work.refuse(
                 f'{base}(...): argument {i} is not a statically resolvable '
@@ -1686,6 +1819,7 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
            'multi_args': [{'kind': c['kind'], 'inner_mangled': im,
                            'elem_ctype': iter_factory._MOJO_ELEM_C.get(
                                c.get('elem'), 'int64_t'),
+                           'elem': c.get('elem'),
                            'moved': bool(c['moved']),
                            'sname': c.get('sname'),
                            'sname_mangled': sm}
@@ -1728,7 +1862,9 @@ def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts, import_map,
     conts = []
     for i, a in enumerate(args):
         c = iter_factory.resolve_container(a, factory_names, locs,
-                                           struct_names)
+                                           struct_names,
+                                           struct_ctor_mangle=lambda n:
+                                           _d2_elem_mangle(work, mm, n))
         if c is None:
             work.refuse(
                 f'{base}(...): argument {i} is not a statically resolvable '
@@ -2083,6 +2219,15 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         # arguments explicitly — the ROOT seed and `_rewrite_callees` own
         # that shape (their `_concrete_args` reads the brackets); this
         # subpath is the BARE spelling only (measured).
+        # PART 6 (2026-10-23, family D piece 2): the KWARG-bracket
+        # placeholder spelling (`Observable[CopyOrigin=Self.CopyOrigin](...)`)
+        # is the D2 ctor subpath's (`_d2_ctor_args`' own gate is
+        # `_d2_kwarg_bracket`) — seed() and `_rewrite_callees` resolve it,
+        # so no refusal note is filed here for it (a filed note would
+        # record a refusal for a shape this compile serves).
+        if (isinstance(node.func, SubscriptExpr)
+                and _d2_kwarg_bracket(node.func)):
+            return None
         work.refuse(f'{base}(...): the direct-ctor subpath takes the bare '
                     'spelling only')
         return None
@@ -2100,6 +2245,14 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
                     'type argument')
         return None
     if len(args_nodes) != len(tparams):
+        # PART 6 (2026-10-23, family D piece 2): the ALL-LITERAL bare
+        # spelling (`CopyCounter(1)`) is the D2 ctor subpath's domain —
+        # `_d2_ctor_args`' bare branch takes it through the constructor
+        # inference (the arity does NOT equal the type-parameter arity
+        # there: `trivial_copy` fills from its default), so seed() and
+        # `_rewrite_callees` serve it and no refusal note is filed here.
+        if _literal_args(node) is not None:
+            return None
         work.refuse(f'{base}(...): {len(args_nodes)} value args for '
                     f'{len(tparams)} type parameters')
         return None
@@ -2145,7 +2298,15 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
         'inner_mention': None, 'kind': 'direct', 'elem': None,
         'elem_ctype': 'int64_t', 'moved': False, 'wrapper_kwarg': None,
-        'param_names': pnames, 'param_defaults': {}}
+        'param_names': pnames, 'param_defaults': {},
+        # The LOCAL struct names this call's inners mention (part 6 family
+        # D piece 2): run() copies them into gen._intu_local_copy_structs so
+        # the `.copy()` receiver gate (emit_methods) admits them — the
+        # spliced in-TU `_ProductN.__init__` copies them fieldwise, and a
+        # local inner with an Observable-style counter field must get the
+        # constructor-based field copy, not the identity aliasing the old
+        # gate left in place.
+        'local_inner': targs}
     work.enqueue(('struct', base, tuple(targs)), 0, queue)
     return wrapper_mangled
 
@@ -2500,11 +2661,26 @@ def run(gen, stmts):
         if kind is None:
             return
         if kind == 'struct':
-            if not _protocol_only_overloads(gen, base):
-                return
+            if _protocol_only_overloads(gen, base):
+                args = _concrete_args(work, kind, base, n)
+            else:
+                # PART 6 (2026-10-23, family D piece 2): an imported generic
+                # struct the `.o` route cannot serve as a ROOT (a duplicated
+                # method name OUTSIDE the iteration protocol — Observable's
+                # and CopyCounter's two `__init__` overloads, measured
+                # sft=False: their fields never register, their ctor calls
+                # reach the generated C as the declared-never-defined
+                # zero-stub hazard) can still be reached as a plain
+                # CONSTRUCTOR call. `_d2_ctor_args` answers the type args
+                # for exactly the two measured shapes — the kwarg-bracket
+                # all-defaults spelling and the bare all-literal inference —
+                # and None for everything else, which keeps its old path
+                # exactly.
+                args = _d2_ctor_args(work, base, n)
         elif not _fn_returns_unbuildable_struct(work, base):
             return
-        args = _concrete_args(work, kind, base, n)
+        if kind == 'fn':
+            args = _concrete_args(work, kind, base, n)
         if args is None:
             return
         work.enqueue((kind, base, tuple(args)), 0, queue)
@@ -2593,9 +2769,25 @@ def run(gen, stmts):
             if rec['mangled'] not in gen.struct_field_types:
                 gen.struct_field_types[rec['mangled']] = {}
                 _prereg.add(rec['mangled'])
+    # The local struct names an in-TU product's DIRECT-ctor record received
+    # as inners (part 6 family D piece 2): `test_product_TestCopyIterator`
+    # in `_Product2(TestCopyIterator(copy_a), TestCopyIterator(copy_b))`.
+    # A separate admission set from `_intu_prereg_structs` — which carries
+    # the snapshot-exclusion semantics the `gen_module_impl` read-field pass
+    # relies on, and which these local names must NOT gain (they register
+    # their fields through their own local StructDef statement). The emit
+    # side's `.copy()` receiver gate (emit_methods) ORs the two.
+    _lcs = getattr(gen, '_intu_local_copy_structs', None)
+    if _lcs is None:
+        _lcs = set()
+        gen._intu_local_copy_structs = _lcs
+    for _rec in gen._intu_factory_records.values():
+        if _rec.get('kind') == 'direct':
+            _lcs.update(_rec.get('local_inner') or ())
     _rewrite_annotations(work)
     _rewrite_callees(work, stmts)
     _rewrite_ctor_calls(work, stmts)
+    _rewrite_local_struct_anns(work, stmts)
     _rewrite_intu_ctor_calls(work)
     _synthesize_inner_defaults(work, stmts)
     if work.notes:
@@ -2752,15 +2944,66 @@ def _rewrite_callees(work, stmts):
         if kind is None:
             return
         args = _concrete_args(work, kind, base, n)
-        if args is None:
-            return
-        mangled = work.alias.get((kind, base, tuple(args)))
+        mangled = work.alias.get((kind, base, tuple(args))) if args is not None else None
+        if mangled is None and kind == 'struct':
+            # PART 6 (2026-10-23, family D piece 2): the D2 ctor shapes. A
+            # kwarg-bracket call (`Observable[CopyOrigin=Self.CopyOrigin]`)
+            # reads through `_concrete_args` as ['0'] — a concrete-BUT-WRONG
+            # answer for the parser's dummy placeholder index — so the alias
+            # misses and this retry is the only rewrite path for it; the bare
+            # all-literal shape the strict inference refused is the other.
+            # `_d2_ctor_args` is the SAME argument source the seed used, so
+            # the two cannot disagree about the mangled name.
+            d2 = _d2_ctor_args(work, base, n)
+            if d2 is not None:
+                mangled = work.alias.get((kind, base, tuple(d2)))
         if mangled:
             n.func = IdentExpr(name=mangled)
             _walk_ast_invalidate(n)
     _walk(stmts, visit)
     for rec in work.records.values():
         _walk(rec['parsed'], visit)
+
+
+def _rewrite_local_struct_anns(work, stmts):
+    """Rewrite LOCAL-struct field annotations naming a materialized in-TU
+    base to the base's MANGLED name alone (part 6 family D piece 2,
+    2026-10-23, measured on test_product's local TestCopyIterator:
+    `var counter: Observable[CopyOrigin=Self.CopyOrigin]`):
+
+      * the bracket content DROPS — the registered name is what the
+        struct-field reader matches (`ann in gen.struct_field_types` ->
+        `<mangled> *`); a trailing bracket would miss that match and the
+        field would erase to the int64_t box, which is the whole reason the
+        constructor-based field copy (M-G) can see the counter as a struct
+        pointer;
+      * only bases with exactly ONE materialized instantiation qualify —
+        two in-TU instantiations of one base make a bare field spelling
+        ambiguous (its call sites rewrite to two different mangled names);
+      * the module's LOCAL StructDefs only — in-TU records' own annotations
+        are `_rewrite_annotations`' domain, and no local method signature
+        carries such a mention in the measured tree (fields only).
+    """
+    by_base = {}
+    for (kind, base, args), mangled in work.alias.items():
+        if kind == 'struct':
+            by_base.setdefault(base, []).append(mangled)
+    solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
+    if not solo:
+        return
+    for s in stmts:
+        if type(s).__name__ != 'StructDef':
+            continue
+        for f in (getattr(s, 'fields', None) or []):
+            ann = getattr(f, 'type_ann', None)
+            if not isinstance(ann, str):
+                continue
+            a = ann.strip()
+            for base, mangled in solo.items():
+                if a == base or (a.startswith(base + '[') and a.endswith(']')):
+                    f.type_ann = mangled
+                    _walk_ast_invalidate(f)
+                    break
 
 
 def _rewrite_ctor_calls(work, stmts):

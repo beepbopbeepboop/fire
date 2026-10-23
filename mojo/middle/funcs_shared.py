@@ -365,6 +365,15 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     return ctype
 
 
+_REF_SCALAR_ANN_SET = frozenset({
+    'Int', 'UInt', 'Int8', 'Int16', 'Int32', 'Int64',
+    'UInt8', 'UInt16', 'UInt32', 'UInt64',
+    'Float16', 'Float32', 'Float64', 'Bool', 'Byte'})
+_REF_SCALAR_CSET = frozenset({
+    'int64_t', 'int', 'long', 'double', 'float', '_Bool',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+
+
 def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
                  is_self: bool = False) -> str:
     """Resolve parameter C type, applying argument convention qualifiers."""
@@ -481,6 +490,26 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # no-runtime-representation type already is throughout this file.
         ctype = 'int64_t'
     conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
+    # PART 6 (2026-10-23, family D piece 2): a read-only-conv SCALAR param is
+    # a pointer to the CALLER's variable — the reference semantics real Mojo
+    # has and this codegen erased to a by-value copy. Measured across the
+    # whole stdlib sweep: exactly ONE such parameter exists — test_product's
+    # local TestCopyIterator.__init__'s `ref[Self.CopyOrigin] copies: Int` —
+    # and it is the counting mechanism: `Pointer(to=copies)` must point at
+    # the caller's copy_a/copy_b, not the parameter's dead copy (today the
+    # Observable increment lands in the dead copy and the tests read 0).
+    # The gate is the general mechanism, deliberately narrow rather than a
+    # blanket switch of every read-only param (~1050 `mut`/`ref` params,
+    # most with erased type-param annotations like product's `IterableTypeA`,
+    # where the scalar test cannot be answered safely): read-only conv AND a
+    # BARE scalar annotation AND a concrete scalar ctype. The call side
+    # (calls_shared._build_call_args_for_candidate) passes the address of an
+    # addressable lvalue argument — or boxes an rvalue in a temp and passes
+    # the temp's address, preserving today's value semantics for that arg.
+    if (conv_is_read_only(conv) and isinstance(ptype, str)
+            and ptype.strip() in _REF_SCALAR_ANN_SET
+            and ctype in _REF_SCALAR_CSET):
+        return ctype + ' *'
     # `conv_is_read_only` is the ONE definition of "immutable borrow" — it
     # covers `read`, `ref` and `imm` together (fire_compiler's `_CONV_READ_ONLY`).
     # This used to carry its own literal `('read', 'ref')` tuple, so the stdlib's

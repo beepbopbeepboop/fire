@@ -3700,8 +3700,27 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                     _iter_node.func.name, _iter_node))
             if (_frec is not None and _frec.get('multi_args')
                     and len(_frec['multi_args']) == len(_tnames)):
-                _slot_ctypes = [_ainf['elem_ctype']
-                                for _ainf in _frec['multi_args']]
+                _slot_ctypes = []
+                for _ainf in _frec['multi_args']:
+                    _tc = _ainf['elem_ctype']
+                    # PART 6 (2026-10-23, family D piece 2): a STRUCT slot
+                    # (a bare-ctor list literal feeding the product —
+                    # element_copies): the tuple slot's word IS the
+                    # element's struct pointer, and declaring the target as
+                    # that pointer type is what lets the loop body's
+                    # `a.copy_count` read the field statically — the
+                    # int64_t spelling fell to the runtime getattr
+                    # dispatch (AttributeError: copy_count at run time).
+                    # The seed-side elem is the mangled in-TU name; at loop
+                    # emission the struct is preregistered in
+                    # struct_field_types, so the membership test is the
+                    # discriminator (a scalar slot's elem, 'Int'/'String',
+                    # never is).
+                    _el = _ainf.get('elem')
+                    if (_tc == 'int64_t' and isinstance(_el, str)
+                            and _el in (gen.struct_field_types or {})):
+                        _tc = _el + ' *'
+                    _slot_ctypes.append(_tc)
 
     # Determine iterator type (may be the same struct or a separate iter type).
     # Every symbol here goes through `gen._struct_method_csym`, the tree's ONE
@@ -3862,6 +3881,21 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                          'double': 'mojo_list_get_double'}
             for _i, (_tn, _tc) in enumerate(zip(_tnames, _slot_ctypes)):
                 _acc = _slot_acc.get(_tc)
+                if _acc is None and isinstance(_tc, str) \
+                        and _tc.endswith(' *'):
+                    # PART 6 (2026-10-23, family D piece 2): a struct-
+                    # pointer slot (the element_copies unpack): the tuple
+                    # slot stores the element's WORD as int64_t (the E1
+                    # list-literal construction appends through
+                    # mojo_list_append_int), so read the word and cast it
+                    # to the struct pointer — the same two-step temp form
+                    # the E1 construction uses for the reverse direction,
+                    # which -fgimple strict mode accepts.
+                    _w = gen._new_val(
+                        'int64_t', f"mojo_list_get_int ({_listptr}, {_i})")
+                    _sv = gen._new_val(_tc, f"({_tc}){_w}")
+                    gen._emit(f"  {gen._cname(_tn)} = {_sv};")
+                    continue
                 if _acc is None:
                     gimple_ctypes._debug_note(
                         'multi-target loop slot ctype unlowered', _tc)

@@ -786,7 +786,8 @@ def infer_type_args(template_src: str, arg_ctypes):
     return [binding[p] for p in params]
 
 
-def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
+def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
+                           fill_defaults: bool = False):
     """Type args for a `Struct(...)` CONSTRUCTOR call from that call's argument
     C types, or None if they cannot all be bound.
 
@@ -828,6 +829,20 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
                  if m.name == '__init__' or m.name.startswith('__init__')]
         break
     resolved = []
+    # PART 6 (2026-10-23, family D piece 2): `fill_defaults` fills the
+    # still-unbound bracket parameters from their OWN provable defaults
+    # (`_default_type_arg` — a literal or a leading-uppercase type name),
+    # not only the erased-only ones `_fill_erased_params` covers. Measured
+    # on test_utils' `CopyCounter(1)`: its `trivial_copy: Bool = False`
+    # VALUE parameter occurs in a comptime field (not an erased span), so
+    # the erased-only fill leaves it unbound and EVERY overload that binds
+    # `T` from the argument is refused — the call reaches the generated C
+    # as a declared-never-defined mangled factory (the zero-stub hazard
+    # class). The elab_intu seed passes True; the `.o` route's caller keeps
+    # the default False (its strict refusal is what elab_intu's in-TU
+    # materialization exists to take over, and widening it here would
+    # double-define what the seed already owns).
+    _d2_defaults = (type_param_defaults(tmpl) if fill_defaults else {})
     for ctor in ctors:
         anns = [ann for pn, ann in ctor.params
                 if pn != 'self' and not pn.startswith('*')]
@@ -837,7 +852,26 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
         for ann, ct in zip(anns, arg_ctypes):
             for k, v in _unify_param_ann(ann, params, ct).items():
                 binding.setdefault(k, v)
+        # A fill_defaults-mode constructor earns a VOTE only when it bound at
+        # least one parameter FROM THE CALL itself. CopyCounter's copy ctor
+        # (`copy: Self`) unifies nothing; default-fill would bind T to its
+        # `= NoneType` default and trivial_copy to `False`, voting
+        # ['NoneType', 'False'] against the value ctor's argument-derived
+        # ['Int', 'False'] — the agreement rule then refuses the whole call
+        # as ambiguous, even though no ambiguity exists: a constructor that
+        # inferred nothing from the argument is not an inference. Strict
+        # mode (fill_defaults off) never reaches the fill loop, so its votes
+        # are unchanged.
+        _unify_bound = len(binding)
+        if _d2_defaults and _unify_bound == 0:
+            continue
         binding = _fill_erased_params(tmpl, params, binding)
+        if _d2_defaults:
+            for _p in params:
+                if _p not in binding:
+                    _d = _default_type_arg(_d2_defaults.get(_p, ''))
+                    if _d is not None:
+                        binding[_p] = _d
         if any(p not in binding for p in params):
             continue
         resolved.append([binding[p] for p in params])

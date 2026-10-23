@@ -3592,10 +3592,18 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         #       `_list` buffer is shared, the `_index` cursor is
         #       independent — exactly what the tests' independent-
         #       advance asserts need).
+        # The gate ORs in `gen._intu_local_copy_structs` (part 6 family D
+        # piece 2): the LOCAL struct names an in-TU product's direct-ctor
+        # record received as inners — test_product's TestCopyIterator,
+        # which the spliced `_Product2.__init__` copies via `inner_b.copy()`.
+        # Local, deliberately NOT `_intu_prereg_structs`: that set carries
+        # the snapshot-exclusion semantics the read-field pass relies on.
         if (len(node.args) == 0 and not (getattr(node, 'kwargs', None))
                 and isinstance(ot, str) and ot.endswith(' *')):
             _csn = gimple_exprtypes._struct_name_of(ot)
-            if _csn and _csn in getattr(gen, '_intu_prereg_structs', ()):
+            if (_csn and (_csn in getattr(gen, '_intu_prereg_structs', ())
+                          or _csn in getattr(
+                              gen, '_intu_local_copy_structs', ()))):
                 _ccands = gen._struct_method_signatures.get(
                     _gmm_sms_key(_csn, '__init__'))
                 _cch = None
@@ -3664,7 +3672,41 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                 gen._struct_allocs_needed.add(_fsn)
                                 gen._emit(
                                     f"  {_sub} = _alloc_{_fsn} ();")
-                                _emit_fw_copy(_sub, _fv, _fsn, depth + 1)
+                                # PART 6 (2026-10-23, family D piece 2): a
+                                # field whose struct type registers an
+                                # EXPLICIT copy constructor (an __init__
+                                # resolvable on the `copy` kwarg —
+                                # Observable's, CopyCounter's) is copied
+                                # THROUGH that constructor, not by raw
+                                # fieldwise recursion: real Mojo's implicit
+                                # field copy invokes the field type's copy
+                                # ctor, and that ctor is exactly where the
+                                # counting side effect lives (the Observable
+                                # copy ctor's `self._copies.value()[] += 1`
+                                # — the raw recursion would copy the pointer
+                                # word and skip the increment, leaving
+                                # copy_b at 0). The (a)-branch above does
+                                # the same for the RECEIVER; this is the
+                                # field-level twin. Structs with no copy
+                                # ctor (the _ListIterOwned family) keep the
+                                # raw recursion in the else.
+                                _fcands = gen._struct_method_signatures.get(
+                                    _gmm_sms_key(_fsn, '__init__'))
+                                _fch = None
+                                if _fcands:
+                                    _fch = gen._resolve_overload(
+                                        _fcands, [],
+                                        [('copy', gimple_ctypes.IdentExpr(
+                                            name=_fv))])
+                                if _fch is not None:
+                                    init_fname = gen._struct_method_csym(
+                                        _fsn, '__init__',
+                                        _fch['overload_id'])
+                                    gen._emit(
+                                        f"  {init_fname} ({_sub}, {_fv});")
+                                else:
+                                    _emit_fw_copy(
+                                        _sub, _fv, _fsn, depth + 1)
                                 _fv = _sub
                             gen._emit(f"  {dst}->{_fnm} = {_fv};")
                             # PART 6 (2026-10-22, family C): a TAGGED-
@@ -3922,6 +3964,30 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return gen._lower_bytes_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoMemoryView *':
         return gen._lower_memoryview_method(ov, method, node.args, node.kwargs)
+    # PART 6 (2026-10-23, family D piece 2): `.value()` on a NON-STRUCT
+    # pointer receiver is the IDENTITY — the pointer payload itself.
+    # Measured on test_utils' Observable copy ctor (`self._copies.value()[]
+    # += 1` where `_copies` is the in-TU `int64_t *` field — an
+    # Optional[Pointer[Int, origin]] unwrapped to a native pointer, None=
+    # NULL already the distinguishable word, no tag sideband): real Mojo's
+    # `Optional[Pointer[T]].value()` yields the POINTER, not a dereference
+    # of it, and the `[] += 1` that follows is the raw-pointer subscript
+    # (`*(_mojo_at_int64_t(p, 0)) = ...`, both directions natively
+    # supported). The old path fell to the generic fallback, which
+    # auto-stubbed the call as `int64_t_value(ptr)` — a declared-never-
+    # defined extern — and the `[]` subscript of the stub's int64_t result
+    # then routed to the LIST path (mojo_list_get_int on a garbage handle):
+    # the zeroed-count red signature of the copies tests. Struct pointer
+    # receivers are excluded: they have a real method dispatch above, and
+    # this branch must not steal a user struct's own `value` method.
+    if (ot.endswith(' *') and ot not in gen._RUNTIME_PTRS
+            and method == 'value'
+            and len(node.args or []) == 0
+            and not (getattr(node, 'kwargs', None) or [])
+            and gimple_exprtypes._struct_name_of(ot) not in (gen.struct_field_types or {})):
+        t = gen._new_temp(ot)
+        gen._emit(f'  {t} = {ov};')
+        return ot, t
     _RAW_PTR_METHODS = frozenset({
         'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
         'destroy_pointee', 'take_pointee', 'initialize_pointee',

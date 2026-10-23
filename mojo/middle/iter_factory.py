@@ -795,8 +795,42 @@ def list_literal_elem(elements) -> str | None:
     return None
 
 
+def _bare_struct_ctor_elem(elements, mangle_fn) -> str | None:
+    """The mangled element name of a homogeneous BARE generic-struct-ctor
+    list literal — `[CopyCounter(1), CopyCounter(2)]` (part 6 family D
+    piece 2, 2026-10-23, measured on test_product's element_copies):
+    every element is a CallExpr whose func is the SAME bare IdentExpr, and
+    `mangle_fn` (supplied by the seed — it alone can run the constructor
+    inference and the mangle the `.o` route leaves to it) answers a mangled
+    name for every element; all elements must agree, and a scalar/bracketed
+    element beside a ctor is a heterogeneous refusal exactly as in
+    `list_literal_elem`. `mangle_fn` is None-safe: absent, the shape
+    refuses exactly as before this helper existed."""
+    if not elements or mangle_fn is None:
+        return None
+    names = set()
+    for e in elements:
+        if type(e).__name__ != 'CallExpr':
+            return None
+        f = getattr(e, 'func', None)
+        if type(f).__name__ != 'IdentExpr':
+            return None
+        names.add(getattr(f, 'name', None))
+    if len(names) != 1:
+        return None
+    mangleds = set()
+    for e in elements:
+        m = mangle_fn(e)
+        if m is None:
+            return None
+        mangleds.add(m)
+    if len(mangleds) != 1:
+        return None
+    return next(iter(mangleds))
+
+
 def resolve_container(node, factory_names, locals_map, struct_names=None,
-                      fn_returns=None) -> dict | None:
+                      fn_returns=None, struct_ctor_mangle=None) -> dict | None:
     """What a factory's FIRST argument statically IS, or None (refuse).
 
     Returns one of:
@@ -871,6 +905,15 @@ def resolve_container(node, factory_names, locals_map, struct_names=None,
         vt = type(v).__name__ if v is not None else ''
         if vt == 'ListExpr':
             elem = list_literal_elem(getattr(v, 'elements', None) or ())
+            if elem is None:
+                # PART 6 (2026-10-23, family D piece 2): a bare
+                # generic-struct-ctor element (`CopyCounter(1)`) is not a
+                # scalar literal, so `list_literal_elem` refuses it — the
+                # seed-supplied mangle callback takes the homogeneous ctor
+                # shape instead (its element type is the ctor's own
+                # inferred instantiation, mangled).
+                elem = _bare_struct_ctor_elem(
+                    getattr(v, 'elements', None) or (), struct_ctor_mangle)
             if elem is None:
                 return None
             return {'kind': 'list', 'tname': 'List', 'elem': elem,
