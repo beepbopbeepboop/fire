@@ -3145,6 +3145,8 @@ def gen_module_impl(self, stmts):
             _found = {}
             _gmi_find_comptime_one(self, _imp_stmts, _iname, _found)
             if 'v' in _found:
+                if isinstance(_found['v'], str):
+                    self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
     self._import_scope_stack.append({})
     _generator_fns: dict[int, FunctionDef] = {}
@@ -12114,6 +12116,9 @@ def gen_module_impl(self, stmts):
                 if isinstance(_cvs, ComptimeVarStmt):
                     _cv = self._eval_const(_cvs.value)
                     if _cv is not None:
+                        if isinstance(_cv, str):
+                            self._comptime_str_names.add(
+                                _as_str(_cvs.target))
                         self._comptime_vals.setdefault(_cvs.target, _cv)
             _func_outer_scope = self._push_import_scope()
             self._collect_body_import_bindings(stmt.body, _func_outer_scope)
@@ -12270,6 +12275,32 @@ def gen_module_impl(self, stmts):
                                BreakStmt, ContinueStmt, ReturnStmt,
                                RaiseStmt, AssertStmt, VarDecl)):
             toplevel_stmts.append(stmt)
+        elif isinstance(stmt, ComptimeVarStmt):
+            # PART 6 (2026-10-23, family S): a module-level comptime
+            # constant with a FOLDABLE value (int / bool / str, and after
+            # comptime.py's family-S fold: the string-wrapping constructors
+            # `StringSlice("...")` & co). The old `else` below DROPPED every
+            # non-list top-level ComptimeVarStmt with a TODO comment, so the
+            # name reached no function: a read inside a function fell to the
+            # `(int64_t)0  /* ct param or undeclared: <name> */` placeholder
+            # — a compile-green, run-wrong 0 (measured 2026-10-23: the green
+            # test_string_span C's `_t7 = (int64_t)0;  /* ct param or
+            # undeclared: EVERY_CODEPOINT_LENGTH_STR */`). Recording the
+            # folded value in `self._comptime_vals` (the same table the
+            # per-function scan below at the ComptimeVarStmt-in-body site
+            # feeds) lets the IdentExpr read path answer the real value.
+            # Only FOLDABLE values are recorded; an un-fodable initializer
+            # keeps the pre-branch TODO drop exactly (honest refusal).
+            _cv_val = self._eval_const(stmt.value)
+            if _cv_val is not None:
+                if isinstance(_cv_val, str):
+                    self._comptime_str_names.add(_as_str(stmt.target))
+                self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
+            else:
+                _debug_note('top-level statement dropped',
+                            type(stmt).__name__)
+                func_parts.append(
+                    f"/* TODO: top-level {type(stmt).__name__} */")
         else:
             _debug_note('top-level statement dropped', type(stmt).__name__)
             func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
@@ -12891,6 +12922,26 @@ def gen_module_impl(self, stmts):
                 emitted.add(struct_name)
                 self._emitted_structs.add(struct_name)  # track for dedup in Section 2
         parts.append('')
+
+    # PART 6 (2026-10-23, family S): the hand-built in-TU string-iterator
+    # METHOD bodies. Their typedefs just came out of the dependency-ordered
+    # loop above (they are ordinary `struct_field_types` entries); their
+    # methods have no parsed FunctionDef to emit through the statement loop,
+    # so the C is appended here — BEFORE func_parts joins parts below, so
+    # the call sites in the test function bodies see complete definitions
+    # (no forward decl needed). Emission order is sorted by struct name,
+    # which also orders the ONE cross-struct call in this set: the pair's
+    # `___next__` calls `_SIterBytes___next__`, and `_SIterBytes` sorts
+    # first, so its definition precedes the use. The emit-side lookups that
+    # key off these symbols (the `next()` struct branch, the struct-iter
+    # loop) already answered from `func_return_types`, seeded at
+    # registration in the elab phase — before any function body emitted.
+    _siter_c = getattr(self, '_siter_method_c', None)
+    if _siter_c:
+        for _sn in sorted(_siter_c):
+            parts.append('')
+            for _ln in _siter_c[_sn]:
+                parts.append(_ln)
 
     if self._needs_type_name_table and 'type_name_table' not in self._emitted_singletons:
         self._emitted_singletons.add('type_name_table')

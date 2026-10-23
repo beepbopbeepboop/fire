@@ -974,6 +974,38 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # sentinel `comptime _InvalidIndex: Int = -1`) and `-fgimple`
             # rejects a cast applied directly to a negative literal.
             return 'int64_t', gen._new_val('int64_t', str(_ct))
+        # PART 6 (2026-10-23, family S): a comptime STRING constant — the
+        # pointer-range case the comment above routes AROUND. On the
+        # CPython path the folded value is a real `str` (module-level
+        # `comptime E = "..."` / `comptime E = StringSlice("...")` after
+        # comptime.py's family-S fold); on the self-hosted path it arrives
+        # boxed, so a pointer-range int64 is the string's char* bits. In
+        # this codegen's string model the value IS its char* buffer, so the
+        # read answers a char* the ordinary char* machinery consumes
+        # (method table, free len, subscript). Without this branch, a
+        # module-level comptime string read fell to the placeholder word 0
+        # below (measured 2026-10-23, probe f_global: `var s = E;
+        # s.byte_length()` then read the zero stub on the word receiver).
+        if isinstance(_ct, str):
+            _sname = gen._intern_string(gimple_ctypes._c_escape(_ct))
+            return 'char *', gen._new_val('char *', f'{_sname}')
+        if isinstance(_ct, int) and _ptr_slot_in_range(_ct):
+            # Pointer-range window: on the self-hosted path a folded
+            # string can arrive boxed here; on the CPython path a
+            # genuine comptime int lives here too (measured 2026-10-23:
+            # std/time/time.mojo's `_NSEC_PER_SEC` folds to 1000000000,
+            # and answering it as a char* made the `/` dispatch take the
+            # path-join arm — gcc: "pointer value used where a
+            # floating-point was expected", the C->E the first full
+            # sweep of this piece surfaced). The value alone cannot
+            # discriminate a boxed string pointer from a large int, so
+            # the storage sites mark string-typed values in
+            # `_comptime_str_names`; only a marked name answers char*,
+            # everything else keeps the pre-branch placeholder (the
+            # master behaviour for this window — an honest zero).
+            if _as_str(name) in getattr(gen, '_comptime_str_names', ()):
+                _w = gen._new_val('int64_t', str(_ct))
+                return 'char *', gen._new_val('char *', f'(char *){_w}')
     # Unknown identifier (compile-time param, undeclared external, etc.).
     # Emit a placeholder so GCC doesn't see an undeclared reference.
     t = gen._new_temp('int64_t')
@@ -3620,6 +3652,43 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 nv = gen._to_int64(lt2, lv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
             return 'char *', gen._emit_str_cat(sv, rv2, _free_sv, gen._is_fresh_operand(right_node, rv2))
+        # The measured pointer + char* MIX (2026-10-23, family S):
+        # std/collections/string/string.mojo's in-TU String.__init__ does
+        # `self += REPLACEMENT` with self a 'String *' (the materialized
+        # struct pointer) and REPLACEMENT the now-folded function-level
+        # comptime string (a real char*). Before this piece that read
+        # answered the placeholder word 0, so this exact shape was an
+        # int64 + int64 word add (the in-TU String `+=` concat is an
+        # unimplemented latent — the value was ALREADY wrong on master,
+        # the file green at the compile gate). With the char* live and no
+        # arm for (struct-ptr, char*), the mix fell to the tail's raw `+`
+        # as int64 + char* — C pointer arithmetic, which gcc -fgimple
+        # rejects with an ICE in build2 (measured: "internal compiler
+        # error: in build2, at tree.cc:5204" at string.mojo:441). Mirror
+        # master's compilable word-add: bridge the char* to a word too.
+        # EXCLUSION (measured 2026-10-23, part 6 family S, gimplerunner):
+        # `MojoBytes *` / `MojoMemoryView *` on the pointer side must NOT
+        # take this arm — the XOR bytes arm below (`bytes + X` /
+        # `X + bytes`, the struct.pack zip fix) owns those: it coerces the
+        # char* via mojo_bytes_from_cstr / mojo_memoryview_tobytes and
+        # concats real bytes. `b'k' + str(i).encode()` hit this arm
+        # first (lt2 = 'MojoBytes *', rt2 = 'char *') and emitted a
+        # WORD ADD of the two handles, stored into the set as an INT
+        # key — `print(len(s), b'k0' in s, b'k29' in s)` printed
+        # `30 False False` (gimple_set_bytes_many_rehashes) where master
+        # printed `30 True True` through mojo_bytes_concat.
+        if (lt2.endswith(' *') and rt2 == 'char *'
+                and lt2 not in ('MojoBytes *', 'MojoMemoryView *')):
+            lp = gen._new_val('int64_t', f"(int64_t){lv2}")
+            sw = gen._new_val('int64_t', f"(int64_t){rv2}")
+            t = gen._new_val('int64_t', f"{lp} + {sw}")
+            return 'int64_t', t
+        if (rt2.endswith(' *') and lt2 == 'char *'
+                and rt2 not in ('MojoBytes *', 'MojoMemoryView *')):
+            lp = gen._new_val('int64_t', f"(int64_t){lv2}")
+            sw = gen._new_val('int64_t', f"(int64_t){rv2}")
+            t = gen._new_val('int64_t', f"{lp} + {sw}")
+            return 'int64_t', t
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
     # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1

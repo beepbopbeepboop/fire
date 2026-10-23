@@ -4635,6 +4635,24 @@ int64_t mojo_str_codepoint_len(char *s) {
     return mojo_utf8_codepoint_index(s, (int64_t)strlen(s));
 }
 
+/* PART 6 (2026-10-23, family S): decode the FIRST UTF-8 code point.
+ * `Codepoint.ord(<string>)` is the measured call this backs — codepoint.mojo's
+ * `def ord(string: StringSlice[_]) -> Codepoint` ("similar to the ord() free
+ * function"), and test_iterators asserts it EQUAL to the codepoints
+ * iterator's decoded `__next__` (so a byte read, 0xE0, cannot stand in for
+ * the code point 2295). The 1/2/3/4-byte branch mirrors the lead-byte
+ * classification `mojo_str_codepoint_len`'s counter uses, so the two helpers
+ * agree on what a code point IS. NUL / empty answers 0, like `mojo_ord`. */
+int64_t mojo_str_first_codepoint(char *s) {
+    if (!s || !s[0]) return 0;
+    unsigned char *u = (unsigned char *)s;
+    int64_t c0 = u[0];
+    if (c0 < 0x80) return c0;
+    if (c0 < 0xE0) return ((c0 & 0x1F) << 6) | (u[1] & 0x3F);
+    if (c0 < 0xF0) return ((c0 & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+    return ((c0 & 0x07) << 18) | ((u[1] & 0x3F) << 12) | ((u[2] & 0x3F) << 6) | (u[3] & 0x3F);
+}
+
 /* platform.system()/platform.machine(): resolved via preprocessor macros at
  * the C compiler's own build time (not Python's `platform` module — this
  * runtime is itself compiled by whatever gcc builds the self-hosted binary,

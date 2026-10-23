@@ -827,6 +827,8 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
     _ct_node = _as_comptimevar_node(node)
     val = gen._eval_const(_ct_node.value)
     if val is not None:
+        if isinstance(val, str):
+            gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
     if isinstance(_ct_node.value, gimple_ctypes.ListExpr):
         gen._comptime_list_asts[_ct_target] = _ct_node.value

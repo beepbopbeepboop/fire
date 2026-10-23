@@ -914,6 +914,12 @@ int mojo_pyobject_cmp(char op, int64_t a, int64_t b);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 int64_t mojo_str_codepoint_len(char *s);
+/* PART 6 (2026-10-23, family S): the first UTF-8 CODE POINT of s, decoded
+ * (not its first byte — mojo_ord's byte read answers 0xE0 for "߷" where
+ * the real `Codepoint.ord` is 2295; test_iterators pins that equality
+ * against the codepoints iterator's decoded value). Same 1/2/3/4-byte
+ * sequence shape mojo_str_codepoint_len's non-continuation test counts. */
+int64_t mojo_str_first_codepoint(char *s);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);

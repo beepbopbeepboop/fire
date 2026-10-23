@@ -3011,6 +3011,31 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         kwargs=list(getattr(node, 'kwargs', None) or []))
                     return gen._lower_call(_mgc_bare_node)
 
+    # PART 6 (2026-10-23, family S): `Codepoint.ord(<string>)` — a STATIC-
+    # style call whose receiver is the TYPE name. `Codepoint` is an
+    # imported scalar type this codegen never materializes (no struct in
+    # `struct_field_types`, no value for the generic receiver path), so the
+    # old route read the receiver as the `/* ct param or undeclared:
+    # Codepoint */` placeholder word 0 and stubbed `.ord()` to 0 — a
+    # compile-green, value-wrong 0. The real semantics (codepoint.mojo's
+    # `def ord(string: StringSlice[_]) -> Codepoint`, "similar to the ord()
+    # free function") is the first UTF-8 CODE POINT of the argument, and
+    # test_iterators pins it EQUAL to the codepoints iterator's decoded
+    # `__next__` (`assert_equal(s3_iter.__next__(), Codepoint.ord("߷"))` —
+    # 2295, which the byte-based `mojo_ord` would answer 224). Gated on the
+    # measured spelling + arity: a single-arg `ord` on the `Codepoint` type
+    # name; any other shape falls through to the receiver path unchanged.
+    if (func.member == 'ord'
+            and isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and func.obj.name == 'Codepoint'
+            and len(node.args) == 1
+            and not (getattr(node, 'kwargs', None) or [])):
+        _ord_at, _ord_av = gen.lower_expr(node.args[0])
+        if _ord_at != 'char *':
+            _ord_av = gen._new_val('char *', f'(char *){_ord_av}')
+        return 'int64_t', gen._call_expr(
+            'int64_t', 'mojo_str_first_codepoint', [('char *', _ord_av)])
+
     ot, ov = gen.lower_expr(func.obj)
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
@@ -4286,6 +4311,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _hv = gen._call_expr('int64_t', 'mojo_pyobject_hash',
                                  [('int64_t', _boxv)])
             return ot, gen._new_val(ot, f'({ot}){_hv}')
+        # PART 6 (2026-10-23, family S): the Codepoint word-model accessors
+        # — in this char*/word model a Codepoint IS its ordinal word
+        # (`Codepoint.ord("a")` reaches mojo_ord → the word 97, measured in
+        # test_codepoint's green C), so the two accessors
+        # test/collections/string/test_iterators pins are identities on the
+        # word receiver: `iter.__next__().to_u32()` must answer 97 and
+        # `s1_iter.next().value()` the ordinal. The pre-branch stub here
+        # answered 0 to both — the latent value error those asserts would
+        # have made live. Only the no-argument word-receiver accessors
+        # change; every other scalar stub keeps its pre-branch behaviour.
+        if method in ('to_u32', 'value') and ot in ('int64_t', 'int') \
+                and not node.args:
+            return ot, ov_local
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
@@ -5643,6 +5681,46 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # receivers — Path objects — never reach this char*-receiver
         # handler, so this cannot mask a real fspath on them.)
         return 'char *', cstr_ov
+    # PART 6 (2026-10-23, family S): the StringSlice / StaticString method
+    # subset test/collections/string/test_iterators.mojo pins — the measured
+    # char*-intrinsic set. `byte_length` / `count_codepoints` are real
+    # runtime reads of the char* buffer (`mojo_strlen` / the existing
+    # `mojo_str_codepoint_len` UTF-8 scan the `__len__` branch above already
+    # uses — no new runtime helper). `as_bytes` boxes the char* into a WORD
+    # with the pre-branch static type (the zero stub was int64): a real
+    # MojoBytes* here broke a MEASURED consumer — test/collections/
+    # string/test_utf8's comptime list `List("a".as_bytes())` element joins
+    # its static type into the `materialize[...]() ` unroll's loop variable
+    # (the first-decl-wins `_declare_var` in emit_loops), and the sibling
+    # list-literal elements then refused (`cannot coerce MojoList * to
+    # MojoBytes *` — the C->E the first full sweep of this piece surfaced).
+    # The pinned `s.as_bytes()[i]` byte value does NOT come from this return
+    # type: _lower_subscript special-cases the subscript-on-as_bytes() shape
+    # (mojo_bytes_from_cstr + mojo_bytes_get_checked — the existing MojoBytes
+    # subscript arm's own runtime pair) without changing what `as_bytes()`
+    # returns to any other consumer. `bytes` / `codepoints` /
+    # `codepoint_slices_reversed` construct the hand-built in-TU iterator
+    # struct the elab factory seed registered for this compile; the
+    # `in gen.struct_field_types` gate keeps a call in a compile the seed
+    # did not register on the pre-branch zero stub (byte-identical old
+    # behaviour) rather than emitting a call to an undefined `_alloc_`.
+    if method == 'byte_length' and not arg_vals:
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen',
+                                         [('char *', cstr_ov)])
+    if method == 'count_codepoints' and not arg_vals:
+        return 'int64_t', gen._new_val(
+            'int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
+    if method == 'as_bytes' and not arg_vals:
+        _wp = gen._new_val('void *', f"(void *){cstr_ov}")
+        t = gen._new_val('int64_t', f"(int64_t){_wp}")
+        return 'int64_t', t
+    if method in ('bytes', 'codepoints', 'codepoint_slices_reversed') \
+            and not arg_vals:
+        _sn = {'bytes': '_SIterBytes', 'codepoints': '_SIterCodepoints',
+               'codepoint_slices_reversed': '_SIterCodepointSlices'}[method]
+        if _sn in (gen.struct_field_types or {}):
+            t = gen._new_val(f'{_sn} *', f'_alloc_{_sn} ({cstr_ov})')
+            return f'{_sn} *', t
     if method in ('encode', 'decode', 'format', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub

@@ -66,8 +66,8 @@ from mojo.middle.closures import closure_lifted_name
 from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
     CallExpr, FloatLiteral, FromImportStmt, FunctionDef, IdentExpr,
-    IntLiteral, Parser, StringLiteral, StructDef, SubscriptExpr, TupleExpr,
-    VarDecl, py_tokenize,
+    IntLiteral, MemberExpr, Parser, StringLiteral, StructDef, SubscriptExpr,
+    TupleExpr, VarDecl, py_tokenize,
 )
 
 # Literal expression -> the exact Mojo type the elaborator should bind for it.
@@ -1297,6 +1297,41 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         return _seed_multi_factory(gen, work, mm, base, node, scope, stmts,
                                    import_map, queue, records, fsrc, home,
                                    depth)
+    # PART 6 (2026-10-23, family S): `enumerate(<StringSlice-iterator
+    # method call>)` — the argument is neither a local List, a range, nor a
+    # nested free factory, so `resolve_container` below would refuse. The
+    # real `_Enumerate[InnerIteratorType]` cannot be spliced in (its header
+    # carries `Copyable where conforms_to(...)` trait constraints the splice
+    # parser does not parse, measured 2026-10-23), so the wrapper is the
+    # hand-built in-TU PAIR instead: its `__next__` returns the 2-slot
+    # (count, element) tuple the for-loop multi-target unpack reads, the
+    # element delegates to the inner's `___next__` whose StopIteration raise
+    # drives the loop's setjmp exit, and count increments only after a
+    # successful element (the real `_Enumerate.__next__` order). Measured
+    # need: test/collections/string/test_iterators.mojo's
+    # `for i, byte in enumerate(s.bytes())` — the ONLY inner that subset
+    # builds is the bytes iterator; any other siter inner refuses here (the
+    # measured pre-branch refusal), not a guess.
+    if (base == 'enumerate' and len(args) == 1
+            and isinstance(args[0], CallExpr)
+            and isinstance(args[0].func, MemberExpr)
+            and getattr(args[0].func, 'member', None) in _SITER_METHODS):
+        _sm = getattr(args[0].func, 'member', None)
+        if _SITER_METHODS[_sm] != '_SIterBytes':
+            work.refuse(
+                f'enumerate(...): the {_sm}() inner is not the bytes '
+                'iterator, the only in-TU pair inner this pass builds')
+            return None
+        _siter_register(gen, '_SIterBytes')
+        _siter_register(gen, '_SIterEnumPair')
+        rec = {
+            'kind': 'siter_enum',
+            'inner': '_SIterBytes',
+            'multi_args': [{'elem_ctype': 'int64_t', 'elem': None},
+                           {'elem_ctype': 'int64_t', 'elem': None}],
+        }
+        records[iter_factory.factory_call_key(base, node)] = rec
+        return rec
     # `factory_names` is an over-approximation (every imported generic); the
     # nested recursion re-validates each one, so a non-factory nested call
     # simply refuses the outer. It exists so `resolve_container` can tell a
@@ -2311,6 +2346,336 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
     return wrapper_mangled
 
 
+# ── PART 6 (2026-10-23, family S — test/collections/string/test_iterators)
+# The StringSlice-family iterator SUBSET, hand-built in-TU ─────────────────
+#
+# The real BytesIter / CodepointsIter / CodepointSliceIter nest
+# `_SpanIter[Byte, origin]` + `Span[Byte, origin]` + the full ImmOrigin
+# comptime value system (measured 2026-10-23: std/collections/string/
+# iterators.mojo:880 `struct BytesIter[origin: ImmOrigin]` — `var _iter:
+# _SpanIter[Byte, Self.origin]`, `__init__` = `iter(_slice.as_bytes())`),
+# and `_Enumerate`'s header carries the `Copyable where conforms_to(...)`
+# trait constraints the splice parser does not parse — splicing those real
+# bodies is a multi-campaign depth, not a piece. The landing is the measured
+# char*-intrinsic subset the file's 7 tests pin, per the "land only that
+# subset" directive: purpose-built CONCRETE in-TU structs with hand-written
+# C bodies (no type parameters, no traits), constructed from the char*
+# receiver the StringSlice / StaticString / String local IS in this
+# codegen's string model (measured: `StringSlice(x)` is the identity char*
+# — `_lower_opaque_ctor`'s one-string-argument passthrough — and a
+# `var s: StaticString` local erases to char * the same way the green
+# test_string_span C's `StaticString`-annotated parameters do). Every method
+# this pass builds is pinned by a test assertion with a real value (4/8-
+# value bytes, real UTF-8 codepoints, the reversed slices, the (remaining,
+# Optional(remaining)) bounds tuple); the other ~90 StringSpan methods keep
+# their measured `TODO: char*.<m>` zero stubs.
+#
+# The structs are registered through the SAME registries the spliced in-TU
+# materialization uses (`struct_field_types` — the dependency-ordered
+# typedef loop emits each one; `_intu_prereg_structs` — the snapshot
+# exclusion + the emit-side in-TU gates that key off it), so `next(<local>)`
+# (the emit_calls struct branch), free `len(<local>)` (the bounds branch),
+# the struct-iter for loop (the raise-exhaustion setjmp frame) and the
+# method-call dispatch all reach them unmodified.
+_SITER_STOPITER_ID = (gimple_ctypes._crc32_str(
+    'StopIteration') & 0x7fffffff) or 1
+_SITER_METHODS = {'bytes': '_SIterBytes',
+                  'codepoints': '_SIterCodepoints',
+                  'codepoint_slices_reversed': '_SIterCodepointSlices'}
+_SITER_FIELDS = {
+    '_SIterBytes': {'_slice': 'char *', 'index': 'int64_t', 'len': 'int64_t'},
+    '_SIterCodepoints': {'_slice': 'char *', 'index': 'int64_t',
+                         'len': 'int64_t'},
+    '_SIterCodepointSlices': {'_slice': 'char *', 'index': 'int64_t',
+                              'len': 'int64_t'},
+    '_SIterEnumPair': {'_inner': '_SIterBytes *', 'count': 'int64_t'},
+}
+# Method C symbols are composed by `_struct_method_csym` as
+# `{Struct}_{safe_name(method)}{overload_id}` with no qualifier for a struct
+# with no module identity — these names must match that exactly, and the
+# registered return type is what the emit side's `func_return_types`
+# lookups (the `next()` branch, the struct-iter loop's `__next__` return)
+# read.
+_SITER_RETURN = {
+    '_SIterBytes': {'__next__': 'int64_t', 'bounds': 'MojoList *'},
+    '_SIterCodepoints': {'__next__': 'int64_t', 'next': 'int64_t',
+                         'peek_next': 'int64_t', '__len__': 'int64_t'},
+    '_SIterCodepointSlices': {'__next__': 'char *'},
+    '_SIterEnumPair': {'__next__': 'MojoList *'},
+}
+_SITER_C = {
+    '_SIterBytes': [
+        '_SIterBytes * _alloc__SIterBytes (char *s)',
+        '{',
+        '  _SIterBytes *p = (_SIterBytes *)malloc (sizeof (_SIterBytes));',
+        '  p->__mojo_type_id = 0;',
+        '  p->_slice = s;',
+        '  p->index = 0;',
+        '  p->len = mojo_strlen (s);',
+        '  return p;',
+        '}',
+        f'/* family S: bytes __next__ — one unsigned byte per call, the real '
+        f'BytesIter semantics the tests pin (0x61 for "a"); exhaustion is the '
+        f'protocol StopIteration, the same mojo_exc_type_set + mojo_raise '
+        f'idom every in-TU raise-exhaustion wrapper spells (the tag is the '
+        f'crc32 of the class name, the runtime hardcodes it for the builtin '
+        f'exceptions). */',
+        'int64_t _SIterBytes___next__ (_SIterBytes *self)',
+        '{',
+        '  if (self->index >= self->len) {',
+        f'    mojo_exc_type_set ({_SITER_STOPITER_ID});',
+        '    mojo_raise ();',
+        '    return 0;',
+        '  }',
+        '  int64_t b = (int64_t)(((unsigned char *)(self->_slice))[self->index]);',
+        '  self->index = self->index + 1;',
+        '  return b;',
+        '}',
+        '/* family S: bounds() = (remaining, Optional(remaining)) — the '
+        'exact 2-slot tuple test_bytes_iter_bounds asserts against '
+        '(2, Optional(2)); the Optional word in this model is the raw '
+        'payload word (measured: the Optional(2) ctor answers the payload '
+        'word, None is 0), so slot 1 is the same count. Free len(<local>) '
+        'reads slot 1 through this (the emit_calls bounds branch). */',
+        'MojoList * _SIterBytes_bounds (_SIterBytes *self)',
+        '{',
+        '  int64_t rem = self->len - self->index;',
+        '  MojoList *t = mojo_list_new ();',
+        '  mojo_list_append_int (t, rem);',
+        '  mojo_list_append_int (t, rem);',
+        '  mojo_mark_as_tuple (t);',
+        '  mojo_list_set_kinds (t, "ii");',
+        '  return t;',
+        '}',
+    ],
+    '_SIterCodepoints': [
+        '_SIterCodepoints * _alloc__SIterCodepoints (char *s)',
+        '{',
+        '  _SIterCodepoints *p = (_SIterCodepoints *)malloc (sizeof (_SIterCodepoints));',
+        '  p->__mojo_type_id = 0;',
+        '  p->_slice = s;',
+        '  p->index = 0;',
+        '  p->len = mojo_strlen (s);',
+        '  return p;',
+        '}',
+        '/* family S: the UTF-8 decoder the CodepointsIter pins (1-/2-/3-/'
+        '4-byte sequences; the test string "a\\u0301" answers 97 then 0x0301 '
+        'and "߷കൈ\\U0001f30d!" answers its 6 codepoints). */',
+        'static int64_t _SIC_cp_at (unsigned char *u, int64_t i)',
+        '{',
+        '  int64_t c0 = u[i];',
+        '  int64_t cp;',
+        '  int64_t n;',
+        '  int64_t k;',
+        '  if (c0 < 0x80) { cp = c0; n = 1; }',
+        '  else if (c0 < 0xE0) { cp = c0 & 0x1F; n = 2; }',
+        '  else if (c0 < 0xF0) { cp = c0 & 0x0F; n = 3; }',
+        '  else { cp = c0 & 0x07; n = 4; }',
+        '  for (k = 1; k < n; k++) { cp = (cp << 6) | (u[i + k] & 0x3F); }',
+        '  return cp;',
+        '}',
+        'static int64_t _SIC_cp_len (int64_t c0)',
+        '{',
+        '  if (c0 < 0x80) { return 1; }',
+        '  if (c0 < 0xE0) { return 2; }',
+        '  if (c0 < 0xF0) { return 3; }',
+        '  return 4;',
+        '}',
+        'int64_t _SIterCodepoints___next__ (_SIterCodepoints *self)',
+        '{',
+        '  int64_t c0;',
+        '  int64_t cp;',
+        '  int64_t w;',
+        '  int64_t base;',
+        '  if (self->len <= 0) {',
+        f'    mojo_exc_type_set ({_SITER_STOPITER_ID});',
+        '    mojo_raise ();',
+        '    return 0;',
+        '  }',
+        '  c0 = (int64_t)(((unsigned char *)(self->_slice))[0]);',
+        '  cp = _SIC_cp_at ((unsigned char *)(self->_slice), 0);',
+        '  w = _SIC_cp_len (c0);',
+        '  base = (int64_t)(self->_slice);',
+        '  self->_slice = (char *)(base + w);',
+        '  self->len = self->len - w;',
+        '  return cp;',
+        '}',
+        '/* family S: next() / peek_next() are the OPTIONAL forms (the '
+        'tests pin `next() is None` after exhaustion and `peek_next() is '
+        'None` on the empty string) — the Optional word is the raw payload '
+        'word with 0 = None (None is the word 0 in this model, measured: '
+        'the None literal lowers to `0`, and `x is None` is `x == 0`), so '
+        'exhaustion answers 0 and a codepoint answers its ordinal, which '
+        'never collides (the tests never read codepoint 0 through next()). '
+        'peek_next does not advance. */',
+        'int64_t _SIterCodepoints_next (_SIterCodepoints *self)',
+        '{',
+        '  int64_t c0;',
+        '  int64_t cp;',
+        '  int64_t w;',
+        '  int64_t base;',
+        '  if (self->len <= 0) { return (int64_t)0; }',
+        '  c0 = (int64_t)(((unsigned char *)(self->_slice))[0]);',
+        '  cp = _SIC_cp_at ((unsigned char *)(self->_slice), 0);',
+        '  w = _SIC_cp_len (c0);',
+        '  base = (int64_t)(self->_slice);',
+        '  self->_slice = (char *)(base + w);',
+        '  self->len = self->len - w;',
+        '  return cp;',
+        '}',
+        'int64_t _SIterCodepoints_peek_next (_SIterCodepoints *self)',
+        '{',
+        '  if (self->len <= 0) { return (int64_t)0; }',
+        '  return _SIC_cp_at ((unsigned char *)(self->_slice), 0);',
+        '}',
+        '/* family S: __len__ = codepoints LEFT, not total (the free-len '
+        'contract, measured: a drained iterator answers 0). The REMAINDER '
+        'model is what makes _slice a live view: __next__ advances _slice '
+        'past each decoded codepoint (the pointer move goes through the '
+        'int64 bridge — raw GIMPLE rejects pointer arithmetic; the '
+        'codegen\'s own _as_charptr idiom), so the pinned field read '
+        's3_iter._slice.byte_length() answers the REMAINING bytes '
+        '(13 -> 11 -> 8 -> 5 -> 1 -> 0 across test_chars_iter) and len is '
+        'the remaining byte count. */',
+        'int64_t _SIterCodepoints___len__ (_SIterCodepoints *self)',
+        '{',
+        '  int64_t c0;',
+        '  int64_t i = 0;',
+        '  int64_t n = 0;',
+        '  while (i < self->len) {',
+        '    c0 = (int64_t)(((unsigned char *)(self->_slice))[i]);',
+        '    i = i + _SIC_cp_len (c0);',
+        '    n = n + 1;',
+        '  }',
+        '  return n;',
+        '}',
+    ],
+    '_SIterCodepointSlices': [
+        '_SIterCodepointSlices * _alloc__SIterCodepointSlices (char *s)',
+        '{',
+        '  _SIterCodepointSlices *p = (_SIterCodepointSlices *)malloc (sizeof (_SIterCodepointSlices));',
+        '  p->__mojo_type_id = 0;',
+        '  p->_slice = s;',
+        '  p->len = mojo_strlen (s);',
+        '  p->index = p->len;',
+        '  return p;',
+        '}',
+        '/* family S: the codepoint slice ending at self->index, as a fresh '
+        'NUL-terminated heap string, walking one codepoint back per call '
+        '(the tests pin "z","y","x" for "xyz" and the 🌍 first for '
+        '"hello🌍"). index is the byte boundary just AFTER the last '
+        'yielded codepoint; 0 = exhausted. */',
+        'char * _SIterCodepointSlices___next__ (_SIterCodepointSlices *self)',
+        '{',
+        '  int64_t i;',
+        '  int64_t k;',
+        '  if (self->index <= 0) {',
+        f'    mojo_exc_type_set ({_SITER_STOPITER_ID});',
+        '    mojo_raise ();',
+        '    return 0;',
+        '  }',
+        '  i = self->index - 1;',
+        '  while (i > 0 && (((unsigned char *)(self->_slice))[i] & 0xC0) == 0x80) { i = i - 1; }',
+        '  {',
+        '    char *out = (char *)malloc (self->index - i + 1);',
+        '    for (k = i; k < self->index; k++) { out[k - i] = self->_slice[k]; }',
+        '    out[self->index - i] = 0;',
+        '    self->index = i;',
+        '    return out;',
+        '  }',
+        '}',
+    ],
+    '_SIterEnumPair': [
+        '/* family S: the hand-built enumerate wrapper — the real '
+        '_Enumerate cannot be spliced (trait-constraint header); this pair '
+        'is its measured-need substitute: __next__ returns the 2-slot '
+        '(count, element) tuple the for-loop unpack reads, the element '
+        'delegates to the inner bytes __next__ whose StopIteration raise '
+        'drives the loop setjmp exit, and count increments only after a '
+        'successful element (the real _Enumerate order). */',
+        '_SIterEnumPair * _alloc__SIterEnumPair (_SIterBytes *inner, int64_t start)',
+        '{',
+        '  _SIterEnumPair *p = (_SIterEnumPair *)malloc (sizeof (_SIterEnumPair));',
+        '  p->__mojo_type_id = 0;',
+        '  p->_inner = inner;',
+        '  p->count = start;',
+        '  return p;',
+        '}',
+        'MojoList * _SIterEnumPair___next__ (_SIterEnumPair *self)',
+        '{',
+        '  int64_t e = _SIterBytes___next__ (self->_inner);',
+        '  int64_t c = self->count;',
+        '  self->count = self->count + 1;',
+        '  MojoList *t = mojo_list_new ();',
+        '  mojo_list_append_int (t, c);',
+        '  mojo_list_append_int (t, e);',
+        '  mojo_mark_as_tuple (t);',
+        '  mojo_list_set_kinds (t, "ii");',
+        '  return t;',
+        '}',
+    ],
+}
+
+
+def _siter_register(gen, name):
+    """Register one hand-built in-TU string-iterator struct for THIS compile
+    (idempotent per name; called from the factory seed when the file calls
+    the corresponding StringSlice method, so only files that USE the
+    subset gain the typedef + method C). `struct_field_types` gives the
+    dependency-ordered typedef loop its fields; `_intu_prereg_structs` is
+    the snapshot-exclusion set the elab-added names need (the same
+    registration the spliced factory loop does, measured in its own
+    comment); `func_return_types` is seeded at registration — BEFORE the
+    test functions emit — so the emit-side lookups that key off it (the
+    `next()` struct branch, the struct-iter loop's `__next__` return
+    type) answer before the method C is appended to parts in
+    module_gen's post-typedef section."""
+    sft = getattr(gen, 'struct_field_types', None)
+    if sft is None or name in sft:
+        return
+    sft[name] = dict(_SITER_FIELDS[name])
+    _prereg = getattr(gen, '_intu_prereg_structs', None)
+    if _prereg is None:
+        _prereg = set()
+        gen._intu_prereg_structs = _prereg
+    _prereg.add(name)
+    for _m, _r in _SITER_RETURN[name].items():
+        gen.func_return_types.setdefault(f'{name}_{_m}', _r)
+    # The method SIGNATURE candidates — the same dict shape module_gen's
+    # Pass-2b-bis writes for parsed struct methods. Without them
+    # `_struct_defines_method` (the free-`len` bounds gate) answers False
+    # for a hand-built struct and `len(<local>)` falls to the "unsupported
+    # type" zero stub even though the struct DEFINES bounds (measured
+    # 2026-10-23: probe f_empty emitted `_t3 = (int64_t)0  /* len() on
+    # unsupported type _SIterBytes * */` right next to the real
+    # `_alloc__SIterBytes` construction). Self-only methods, so the arity is
+    # 0 — the receiver is prepended at call construction. The key is the
+    # NUL-joined `_sms_key` form (fire_compiler._pair_key's contract: every
+    # store and lookup goes through that separator).
+    _sig = getattr(gen, '_struct_method_signatures', None)
+    if _sig is not None:
+        for _m, _r in _SITER_RETURN[name].items():
+            _key = name + '\x00' + _m
+            _sig.setdefault(_key, []).append({
+                'overload_id': '',
+                'param_names': [],
+                'param_ctypes': [],
+                'param_convs': [],
+                'min_arity': 0,
+                'max_arity': 0,
+                'ret_type': _r,
+                'ret_ann': '',
+                'has_varargs': False,
+                'pre_star_count': None,
+            })
+    _mc = getattr(gen, '_siter_method_c', None)
+    if _mc is None:
+        _mc = {}
+        gen._siter_method_c = _mc
+    if name not in _mc:
+        _mc[name] = _SITER_C[name]
+
+
 def _seed_factories(gen, work, stmts, queue):
     """Entry: find every factory call, evaluate it, register + enqueue its
     wrapper, and file the record the emit side reconstructs from. Lazy-imports
@@ -2321,6 +2686,21 @@ def _seed_factories(gen, work, stmts, queue):
     import_map = _import_name_map(stmts)
 
     def visit(node, scope):
+        # PART 6 (2026-10-23, family S): a MEMBER call `recv.bytes()` /
+        # `.codepoints()` / `.codepoint_slices_reversed()` is not a free
+        # factory — `base` is None for it and the old walk skipped it — but
+        # it is the construction site of the hand-built in-TU string-
+        # iterator structs, so register them for THIS compile when the file
+        # calls the method (only the files that use the subset gain the
+        # typedef + method C). The emit side's char*-receiver table builds
+        # the struct from the receiver; no factory record is filed for the
+        # direct call (the `enumerate(<s.iter>())` outer factory records its
+        # own siter_enum record in `_seed_one_factory` below).
+        if isinstance(node.func, MemberExpr):
+            _sm = getattr(node.func, 'member', None)
+            if _sm in _SITER_METHODS:
+                _siter_register(gen, _SITER_METHODS[_sm])
+            return
         base = (node.func.obj.name if isinstance(node.func, SubscriptExpr)
                 and isinstance(node.func.obj, IdentExpr)
                 else node.func.name if isinstance(node.func, IdentExpr)

@@ -3123,3 +3123,305 @@ byte-identical). Sweep 608/2 in both trees, warn-set 19/294
 byte-identical from both full-sweep logs, no-new-casts 19, doc-truth
 434/0, one final 53-job bucket (log /tmp/p6_probe/bucket_famb.log).
 The product ladder is now 17/17 — no staged remainder on this file.
+
+## 2026-10-23 (part 6, family S): the file this doc is named for is
+closed — test_iterators is GREEN (sweep + 7/7 ladder with real values),
+and the whole blast radius is measured and classified
+
+- `test/collections/string/test_iterators.mojo` — the last declared red
+  of this doc's family, and the one whose blocker (the `s.bytes()`
+  method-call dependent return, part 4/5's "measured 2026-10-21/22"
+  entries in `EXPECTED_FAILURES`) this section closes. Sweep state
+  moved **608/2 → 609/1**: the remaining red is `test_getsize`
+  (the C-ABI-FFI sub-campaign, tracked in
+  `CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`).
+  The `EXPECTED_FAILURES` entry is REMOVED from compile_stdlib.py
+  (measured-removal comment in its place); the clean re-sweep after the
+  dict edit reports 609/1, 0 unexpected, and no stale entries.
+
+### What was built (measured gates, not splicing)
+
+The landing is the measured char*-intrinsic subset the 7 tests pin,
+hand-built IN-TU — NOT spliced. The splice-depth blockers were
+measured before committing to hand-building: the real `BytesIter`
+nests `_SpanIter[Byte, origin]` + `Span` + the full ImmOrigin comptime
+value system (iterators.mojo:880, the same multi-campaign depth part 5
+mapped), and the `_Enumerate` header carries unparseable trait
+constraints. Splicing either body pulls the comptime value system into
+a file the compiler never fully parses; the subset needs none of it.
+
+- **The four in-TU structs** (`_SIterBytes` / `_SIterCodepoints` /
+  `_SIterCodepointSlices` / `_SIterEnumPair`) are registered PER
+  COMPILE: the elab factory seed (elab_intu._siter_register, called
+  from the factory walk's MemberExpr branch) registers exactly the
+  structs a file's own `.bytes()` / `.codepoints()` /
+  `.codepoint_slices_reversed()` calls need, so only files that use
+  the subset gain the typedef + method C (15 files in the blast
+  radius, A/B below). The emit side's char*-receiver method table
+  (emit_methods.py) builds each struct from the receiver.
+- **Method semantics** (all pinned by the ladder): `byte_length()` →
+  `mojo_strlen` (the measured byte-length of a char*, runtime h:914 —
+  NOT `mojo_str_len`, the MojoStr* h:824 form that gcc-15 refuses on a
+  char*); `count_codepoints()` → `mojo_str_codepoint_len`;
+  `_SIterCodepoints.__next__`/`_next` decode at the head of
+  `self->_slice` and advance through the int64 bridge (`self->_slice =
+  (char *)(base + w)` — the single-cast bridge -fgimple accepts);
+  `len` = remaining bytes, `__len__` = remaining codepoints,
+  `peek_next` decodes without advancing; `bounds()` answers the
+  2-slot (index, len) tuple the tests pin; exhaustion is the protocol
+  StopIteration (`mojo_exc_type_set(590612416); mojo_raise()` — the
+  crc32 tag the runtime hardcodes for builtin exceptions, the same
+  idiom every in-TU raise-exhaustion wrapper spells); `with
+  assert_raises()` = setjmp frame + `assert_raises_no_raise()`.
+- **`List[Byte](s.bytes())` collect**: a fresh MojoList plus the
+  setjmp-guarded collect loop (bump `_mojo_exc_top`, checkpoint the
+  cleanup stack, setjmp); each iteration appends the inner
+  `___next__` element; exhaustion longjmps out with the list built so
+  far. **`enumerate(s.bytes())`**: the pair wrapper builds on the
+  inner `___next__` (element first, then the running count).
+- **`Codepoint.ord(<string>)`**: spelling+arity-gated branch plus the
+  runtime helper `mojo_str_first_codepoint` (1/2/3/4-byte lead-byte
+  decode; NUL/empty → 0) in fire_runtime.h/.c — `mojo_ord` unchanged.
+  The word-model accessors `to_u32()`/`value()` on a no-argument
+  word receiver are IDENTITIES (emit_methods.py, part-6 branch) — a
+  Codepoint IS its ordinal word in this model; the pre-branch stub
+  answered 0 to both, the latent value error test_iterators'
+  `iter.__next__().to_u32()` asserts would have made live.
+- **Comptime-string provenance** (the cross-cutting half): module-
+  level non-list `ComptimeVarStmt` folds through `_eval_const`
+  (module_gen.py), the `StringSlice(<literal>)` ctor fold in the SHARED
+  `mojo/middle/comptime.py`, and the read-fallback string branch in
+  emit_exprs answer folded values as real char* (interned into the
+  TU's literal pool). The pointer-range answer window is GATED on a
+  provenance set (`gen._comptime_str_names`, init in gimple_codegen.py,
+  marked at the four storage sites): only names PROVEN str-valued
+  answer char* inside `0x100000 ≤ n ≤ 0x7fffffffffff`; anything else
+  keeps master's placeholder 0. This is what kept a genuine CPython
+  int (`_NSEC_PER_SEC` = 1e9 in time.mojo:165, inside the window) from
+  being misrouted to char* — see the regression log below. It also
+  fixed a latent tree-wide placeholder-0 (test_string_span's green C
+  carried `/* ct param or undeclared: EVERY_CODEPOINT_LENGTH_STR */`
+  at master — the constant was folded but the read never answered it).
+- **The `String()` zero-arg ctor actuals record**: the zero-arg
+  `String()`/`StringSlice`/`StaticString`/`StringSpan` ctor records
+  `gen._actual_types[t] = 'char *'` (emit_calls.py, _lower_opaque_
+  ctor), making `+` dispatch take the char*+char* cat arm (the old
+  word arm answered pointer-decimal — the reversed-concat latent
+  error) and making string-shaped operators on a fresh `String()`
+  local take the char* arm.
+
+### The first full sweep of the piece found three C→E regressions;
+all three are root-caused, fixed, and re-measured
+
+1. **test_utf8**: `materialize[GOOD_SEQUENCES]()` unroll (emit_loops
+   :781, pre-existing, fires in BOTH trees) declares the loop var from
+   the first element's arg; the as_bytes change had made
+   `List("a".as_bytes())` type the loop var `MojoBytes *`, and the
+   sibling `MojoList *` elements hard-refused ("cannot coerce
+   MojoList * to MojoBytes *"). Fix: the as_bytes static type is the
+   BOXED WORD (`('int64_t', t)` via the two-step `(void *)`→
+   `(int64_t)` cast; the old stub was the int word 0), and the pinned
+   `s.as_bytes()[i]` byte value comes from a subscript special-case
+   in `_lower_subscript` (emit_calls.py): gate = zero-arg
+   `as_bytes()` CallExpr + MemberExpr + provably char* receiver
+   (strict; local `b = s.as_bytes(); b[0]` form and slices keep their
+   pre-branch paths) → `mojo_bytes_from_cstr(receiver)` +
+   `mojo_bytes_get_checked` → int64. test_iterators' C stayed
+   byte-identical (post-#line-normalize) to the ladder-verified one.
+   Master-behavior mirror: the old `sequence` was `int` (32-bit
+   truncation, latent-wrong); the new is `int64_t` (no truncation) —
+   strictly better, compiles in both.
+2. **time.mojo:165**: gcc "pointer value used where a floating-point
+   was expected" — the read-fallback pointer branch misrouted the
+   genuine CPython int 1000000000 (`_NSEC_PER_SEC`, folded by the new
+   module-level branch, inside the pointer-range window) to char*, and
+   the `/` dispatch took `mojo_path_join`. Fix: the provenance gate
+   above; CPython large ints stay master-level 0 (the real-value
+   `_NSEC_PER_SEC` is documented out-of-scope — master divided by
+   placeholder 0, a runtime div-by-zero latent, inherited unchanged).
+3. **string.mojo:441**: `self += REPLACEMENT` with `self` an in-TU
+   materialized `String *` and `REPLACEMENT` a function-level comptime
+   `StaticString("\ufffd")` now folded to real char* — no `+` arm for
+   (struct-ptr, char*) → tail raw int64 + char* → **GCC ICE**
+   ("internal compiler error: in build2, at tree.cc:5204"). Fix: a
+   (struct-ptr, char*) arm in `_lower_binary_tail` (emit_exprs.py)
+   bridges BOTH sides to int64 words and returns the word-add —
+   mirrors master's compilable (int64)self + 0 shape; the value is
+   still latent-wrong (in-TU String `+=` concat is a declared
+   remainder, wrong on master too — C→C justified).
+
+A FOURTH, found by the A/B classification after the sweeps: the siter-
+collect gate's FIRST VERSION lowered the whole `List[X](arg)` argument
+to test its type and then fell through, so the downstream arms
+lowered it a SECOND time — every `List[Int]([1, 2, 3, 4, 5])` site in
+the tree double-evaluated its literal (measured:
+test/collections/test_asan_annotations_list +108 lines, an extra
+`mojo_list_new` + append group + set_kinds per site, the leaked first
+copy), and a non-`bytes()` member-argument (a dynamic dispatch call)
+would have run twice. Fix: the gate inspects the argument
+STRUCTURALLY before lowering anything (CallExpr + MemberExpr +
+`member == 'bytes'` + zero args + no kwargs, then the receiver
+char* check; only the pinned shape lowers, and
+`_lower_siter_collect_list` returns unconditionally, so nothing behind
+the gate sees its argument pre-lowered). Post-fix the minimal repro
+(`List[Int]([1..5])`) is BYTE-IDENTICAL to master, and the A/B
+shrank 105 → 101 C→C.
+
+A FIFTH, found by the piece's own 53-job bucket (the only execution
+gate in it — gimplerunner compiles and RUNS its inline programs; the
+610-file sweep is `-fsyntax-only` and cannot see a value error):
+`gimple_set_bytes_many_rehashes` —
+
+    s = set()
+    for i in range(30):
+        s.add(b'k' + str(i).encode())
+    print(len(s), b'k0' in s, b'k29' in s)
+
+printed `30 False False` where master prints `30 True True`. Root
+cause (measured by diffing the program's generated C across the two
+trees): the SESS2 pointer+char* word-add arm above caught the
+`b'k' + <encode result>` pair (LHS statically `MojoBytes *`, RHS the
+`char *` encode stub) BEFORE the XOR bytes arm that owns those pairs
+(the `struct.pack(...) + extra_data` zip fix): it bridged both handles
+to int64 and emitted a WORD ADD, stored into the set through
+`mojo_set_add_int` — 30 distinct pointer sums (hence `len(s) == 30`)
+that no bytes key can match. Fix: the arm's gate now EXCLUDES
+`MojoBytes *` / `MojoMemoryView *` on the pointer side, handing those
+pairs to the XOR arm (`mojo_bytes_from_cstr` / `mojo_memoryview_tobytes`
++ `mojo_bytes_concat`, master's exact lowering). Measured fallout of
+the fix: the probe program's C is BYTE-IDENTICAL to master, the full
+610-file A/B change set is UNCHANGED (same 101 files, 0 of their C
+hashes moved — no stdlib file contains a hijacked site), test_iterators'
+C is byte-identical (post-#line-normalize) to the ladder-verified one,
+and gimplerunner re-runs 461/0.
+
+### Ladder evidence (7/7 with REAL values + negative control)
+
+Re-run PASS (rc=0) on the freshly regenerated C after the gate fix —
+the C is byte-identical (post-#line-normalize) to the ladder-verified
+one, so the evidence carries over without re-derivation:
+
+- bytes: 97/98/99 for "abc"; 195/169 for the two UTF-8 bytes of "á".
+- s2 = "a\u0301": `byte_length()` 3, `count_codepoints()` 2,
+  `next()` 97 then `.to_u32()` 0x0301.
+- reversed: "xyz" → z/y/x; "abc" → "cba"; "hello🌍" → "🌍olleh";
+  "" → "".
+- EVERY_CODEPOINT_LENGTH_STR: byte_length 13; `len` decreasing
+  13→11→8→5→1→0 as codepoints are consumed.
+- bounds: (2,Opt(2)) → (1,Opt(1)) → (0,Opt(0)).
+- empty string: `assert_raises` catches the StopIteration.
+- `iter.__next__() == Codepoint.ord("߷")` = 2295 on both sides.
+- NEGATIVE CONTROL (anti-vacuity): patching the C's first expected byte
+  195→196 gives `FAIL assert_equal: words 195 / 196` + abort rc=134 —
+  the ladder genuinely executes the pinned values.
+
+### Blast radius + gates (measured)
+
+- **Sweep, both trees**: current 609/1 (1 expected = test_getsize,
+  0 unexpected); fresh worktree at `05f31f00` 608/2 (2 expected,
+  0 unexpected). No status change other than test_iterators
+  ERROR→C.
+- **A/B C-hash, all 610** (uncached per-file codegen both trees, 12
+  workers): **1 status change** (test_iterators ERROR→C), **0 E-message
+  changes** (test_getsize byte-identical), **101 C→C / 507 identical,
+  0 C→E**. Every one of the 101 is classified (a file can carry
+  several; the renumber-only class is the disjoint base):
+  - renumber/churn-only — 22: canonical-form identical (pure temp/
+    label/slit renumber, comment-only, or 3 lines of pure temp-swap;
+    0 statement change) — includes the 19 `/* TODO: top-level
+    ComptimeVarStmt */` drop-comments now replaced by folded values
+    (variant, _serialize, _grapheme_break's 19 table entries, …).
+  - asbytes — 47: `.as_bytes()` boxes a real char* word instead of 0
+    (two-step `(void *)`→`(int64_t)`); `byte_length()` → `mojo_strlen`;
+    char*-receiver sites reach their DECLARED-REMAINDER stubs
+    (`unsafe_ptr` / `unsafe_as_bytes_mut` / `write_to` /
+    `as_c_string_span` / `_unsafe_append_byte`) instead of the int64
+    stubs — value 0 on both sides at the stub sites.
+  - ctread — 30: comptime string constants read as real char* (module-
+    level folds; function-level reads) — real raise MESSAGES where
+    master dropped them (format.mojo's `l_err`/`r_err`, 3 raises
+    gained their literal strings; same 11 raises in both), real list
+    elements (bench_hash's word banks: append_int → append_str ×28),
+    the `in`/contains operators with folded RHS.
+  - strcat — 19: `+` on the recorded char* actuals takes the
+    `mojo_str_cat`/`mojo_str_from_int` arms instead of pointer-
+    decimal; single-arg `String(<word>)` copy casts became explicit.
+  - siter — 15: the in-TU struct + method C, the setjmp collect, the
+    enumerate pair wrapper.
+  - ord — 7: `Codepoint.ord` → `mojo_str_first_codepoint` (5 files) +
+    the `to_u32()`/`value()` identity accessor (iterators.mojo ×4,
+    _grapheme_break ×1 — a real int64 read from the list, where master
+    stubbed 0 and fed codepoint 0 to `is_grapheme_break` every
+    iteration; the identity is the correct value).
+  - strctor — 7: the zero-arg `String()` actuals record makes the
+    local read as char* — the `in`/`startswith` arms take the real
+    string dispatch (test_benchmark, test_python_cpython,
+    test_utils, test_suite); `write` on a fresh `String()` local takes
+    the char* str-method path (test_write, test_writable_error — the
+    Stringable-format declared remainder, 0 stub; master's word-writer
+    arm `int_write(0, ptr)` would have written to fd 0 treated as the
+    writer word — the old shape was the worse of the two); and
+    `Pointer(to=buffer)` where `buffer = String()` takes the
+    honest-null branch instead of `&buffer` (test_variadic — the
+    origin is never dereferenced: the dynamic pack call is an
+    unresolved extern in BOTH trees' C, measured; latent, C→C).
+  - castnorm — 3: the `output` read in the `write_repr_to` idiom
+    (test_set ×4, test_interval ×1, os.mojo ×2 sites) gained an
+    explicit `(int64_t)` bridge cast — same 64-bit value, same
+    statement, value-identical.
+- **Removed-symbol hazard check**: 0 of the 101 files removed a
+  definition (the siter methods/typedefs are additions; the one
+  forward-extern kind change — test_ahash's `hash_seeded_1_T_5_Int64`
+  → `hash_seeded_1_T_6_String`, the ctread-correct String
+  monomorphization of the folded comptime hash input — is the SAME
+  shape master already carried for its Int64 version: extern + call,
+  no in-TU definition in either tree; the cross-module monomorphization
+  remainder is unchanged in kind).
+- **Warn-set 19/294 BYTE-IDENTICAL** from both full-sweep logs
+  (extracted per-file "N generic struct elaboration" counts, cmp -s).
+- **no-new-casts 19** (baseline, unchanged). **formal_doc_index 133**
+  (claim column moved 8 — machine state, not a failure).
+- **Doc-claim hygiene for the runtime addition** (measured): the new
+  word-shaped entry grew the live census by 1 (fire_runtime.h 593 → 594,
+  total 696 → 697, word-shaped 283 → 284, return-word 521 → 522) — every
+  quoted figure updated through the sanctioned `test_runtime_header_scan.py
+  --fix` (6 files) + the dated drift-history rung; rthdrscan 72/0.
+  `test_formal_doc_truth` 434/0 (FORMAL.md §1's size figure 549 → 550 KB,
+  §6 phase 2's word column 283 → 284). FORMAL.md §6's triple row updated
+  to the MEASURED live values (284 / 228 / 188, both architectures, the
+  link test's own method): its exported/reachable rows were already stale
+  by +9/+9 at `05f31f00` (pre-existing: nine of part 4's eleven
+  word-shaped additions had since entered the dylib's curated export
+  manifest — all eleven now on the export table, measured; my helper adds
+  the tenth). `test_formal_runtime_link` (a suite job OUTSIDE the 53-job
+  bucket) went 6 fails → 2 fails: the remaining two are its pre-existing
+  ceiling-2 check (seven exported names no header declares — the same
+  seven at `05f31f00`; staged, not this piece).
+- **53-job bucket** under 3.14.8, final run this piece (log
+  /tmp/p6_probe/bucket_siter_final2.log): **53 passed, 0 failed, 0
+  skipped** (597.7 s, peak 2.4 GB, 0 replayed from cache) — after the
+  five fixes above. Its first run (log bucket_siter_final.log, 50/3)
+  surfaced the FIFTH regression (gimplerunner) plus the two doc-claim
+  failures above, each root-caused and re-verified individually before
+  the final run. The peak-movement note (runtimedylib, sqliteruntime) is
+  the same environmental pair every family run in this campaign reports;
+  the MEASURED_PEAK_GB table is untouched.
+
+### Staged remainder (what stays declared-red after this piece)
+
+- The rest of the StringSpan method family — ~90 methods the tests
+  don't pin — stays zero-stubbed with `/* TODO: char*.<m> */` markers
+  (the part-6 scale this piece deliberately did not take).
+- test_iterators' two `discover_tests`/`run` scaffolding stubs
+  (driver-bypassed; the file compiles and the ladder executes all 7
+  tests directly).
+- `test/os/path/test_getsize.mojo` — the C-ABI-FFI sub-campaign
+  (closure map re-verified byte-identical this piece; its
+  `EXPECTED_FAILURES` entry carries the 2026-10-23 re-measurement
+  note): `stat[PathLike]`'s comptime `CompilationTarget.is_macos()`
+  branch, the 17-field `_c_stat` C-ABI struct incl. `_CTimeSpec` +
+  `Array[Int64, 2]`, the `external_call["stat", Int32]` OUT parameter,
+  and the 18-field `_to_stat_result` projection; `#include
+  <sys/stat.h>` stays closed (conflicting types with fire_runtime.h /
+  _macos.mojo:137). Bar: the mangled stat path defined in-TU + a real
+  run returning the right st_size for a real scratch file.

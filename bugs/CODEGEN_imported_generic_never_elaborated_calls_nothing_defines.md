@@ -1488,3 +1488,42 @@ declared-red population (17/17)
   with the pattern; the 14 non-param functions byte-identical after
   per-TU `_slit_` normalization, 0 removed/added definitions), 0
   E-message changes.
+
+## 2026-10-23 (part 6, family S): test_iterators closed (sister doc);
+test_getsize re-measured — unchanged, and its entry stays accurate
+
+- `test/collections/string/test_iterators.mojo`: CLOSED by this piece —
+  sweep ERROR → C, 7/7 ladder with real values + negative control,
+  entry REMOVED from `EXPECTED_FAILURES` (measured-removal comment in
+  compile_stdlib.py). The mechanism — the four hand-built in-TU
+  string-iterator structs, the char*-intrinsic method subset, the
+  comptime-string provenance machinery — is documented in the sister
+  doc `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`
+  (family-S section); this doc's share of the evidence is the A/B:
+  the 610-file C-hash diff shows the file's ERROR signature gone
+  (the lone status change, ERROR→C) and its `next()` refusal no
+  longer in the E-message column (0 E-message changes tree-wide —
+  the only remaining E is test_getsize below, byte-identical).
+- `test/os/path/test_getsize.mojo`: RE-MEASURED, unchanged. The whole
+  family-S piece (in-TU siter structs, comptime string reads,
+  as_bytes word-boxing, the String() ctor actuals record, the
+  provenance gate) does not touch this file's failure: the sweep
+  reports the same codegen error (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String`; `implicit declaration
+  of function 'stat'`), and the A/B TSV diff shows its E-message
+  byte-identical (0 E-message changes across all 610). The closure
+  map holds verbatim: `stat[PathLike]`'s comptime
+  `CompilationTarget.is_macos()` platform branch, `_stat_macos`'s
+  `external_call["stat", Int32](path.as_c_string_span(),
+  Pointer(to=stat))` with the OUT parameter filling the 17-field
+  `_c_stat` C-ABI struct (incl. `_CTimeSpec` + `Array[Int64, 2]`)
+  that the in-TU materializer does not lay out in C-ABI order, the
+  18-field `_to_stat_result()` projection + Int casts, and the 18-
+  argument keyword constructor of `stat_result`. `#include
+  <sys/stat.h>` stays closed: conflicting types with fire_runtime.h
+  and _macos.mojo:137. The `EXPECTED_FAILURES` entry carries the
+  2026-10-23 (part 6, family S) re-measurement note.
+- Sweep state this piece: **608/2 → 609/1** — the only remaining
+  declared red is test_getsize itself; the next piece is its
+  C-ABI-FFI sub-campaign (bar: the mangled stat path defined in-TU +
+  a real run returning the right st_size for a real scratch file).

@@ -1780,6 +1780,10 @@ class GimpleGen:
         # at compile time instead of needing a real runtime value for NAME —
         # see _gen_for_iter's materialize[...] special case.
         self._comptime_list_asts: dict = {}
+        # Names whose folded comptime value is a STRING (measured
+        # provenance for the read fallback's pointer-range window — see
+        # the `_comptime_str_names` check in emit_exprs's comptime read).
+        self._comptime_str_names: set = set()
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
         # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->

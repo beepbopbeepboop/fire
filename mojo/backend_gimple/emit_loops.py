@@ -1882,6 +1882,28 @@ def _gen_for_enumerate(gen, node):
         _, start_raw = gen.lower_expr(node.iterable.args[1])
         start_val = gen._new_val('int64_t', f"(int64_t){start_raw}")
 
+    # PART 6 (2026-10-23, family S): `for i, byte in enumerate(s.bytes())` —
+    # the argument is the hand-built bytes iterator, not a list local /
+    # char* string / generator: every arm below would refuse or materialize
+    # the struct pointer as a list (wrong). The elab seed filed the
+    # siter_enum record for this outer call, so build the pair wrapper and
+    # consume it through the in-TU struct-iter loop: its setjmp frame turns
+    # the pair's StopIteration raise (which the inner bytes `___next__`
+    # emits on exhaustion) into the loop exit, and its multi-target unpack
+    # reads the pair's 2-slot (count, element) tuple from the same record.
+    # The gate fires only for the registered `_SIterBytes *` type this pass
+    # builds, so a non-siter argument behaves byte-identically to
+    # pre-branch.
+    if (lst_type == '_SIterBytes *'
+            and '_SIterBytes' in getattr(gen, '_intu_prereg_structs', ())
+            and for_target_is_tuple(node.target)):
+        _start_v = start_val if start_val is not None else '0'
+        _wp = gen._new_val('_SIterEnumPair *',
+                           f'_alloc__SIterEnumPair ({lst_val}, {_start_v})')
+        _gen_for_struct_iter(gen, node.target, '_SIterEnumPair *', _wp,
+                             node.body, node=node)
+        return
+
     if lst_type == 'MojoGenerator *':
         api = gen._generator_var_api.get(lst_val)
         if api is not None:

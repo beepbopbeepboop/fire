@@ -343,30 +343,37 @@ EXPECTED_FAILURES = {
     #   as a bare extern with 0 definitions anywhere (its home C was never
     #   generated, the `next()` refusal of this same family) — a link
     #   hazard the -fsyntax-only gate could not see.
-    'test/collections/string/test_iterators.mojo': (
-        "2026-10-22 (part 5) re-measured, still red, unchanged failure: "
-        "`test_bytes_iter_empty` — `var bytes = s.bytes()` on a local "
-        "`StringSlice` lowers to the zero stub `_t2 = 0; /* TODO: char*"
-        ".bytes */` (the StringSpan[origin] method family — ~100 methods — "
-        "has no lowering; `bytes` is the word 0), and `next(bytes)` hits the "
-        "hard refusal (measured 2026-10-22: receiver `int64_t`, in function "
-        "`test_bytes_iter_empty`) — the same codegen error the file hit at "
-        "part 4's close. 2026-10-21 measured (history): the iterator arrives "
-        "from a METHOD call, and the dependent-return factory subpath "
-        "(elab_intu._seed_factories) seeds FREE-function factory calls only "
-        "— a method-call dependent return (`StringSlice.bytes() -> BytesIter"
-        "[...]`) erases to a boxed `int64_t` on the .o route. Seeding the "
-        "method-call shape needs the dependent return resolved through the "
-        "receiver's static type — the same machinery applied to a MemberExpr "
-        "callee. Part 5's struct-fn container kind (which closed test_cycle/"
-        "test_product) does not reach this file: its one factory-shaped "
-        "site is the bytes() METHOD call, and its closure (StringSpan + "
-        "Span/_SpanIter nesting + alias/origin inference) is Part-6 scale. "
-        "See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered"
-        ".md"),
-     # 2026-10-21 (further) — REMOVED from this dict: test/collections/
-     # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
-     # (enumerate(my_set) over the set LITERAL `{4, 5, 6}`: resolve_container
+    # 2026-10-23 (part 6, family S) — REMOVED from this dict:
+    # test/collections/string/test_iterators.mojo no longer FAILS THE
+    # SWEEP — measured 2026-10-23: all 7 tests now COMPILE (C-gen
+    # completes, 92224 bytes) AND pass the full-file ladder with REAL
+    # values (LADDER PASS rc=0: bytes 97/98/99 + 195/169; s2
+    # "a\u0301" byte_length 3 / count_codepoints 2, next 97 then to_u32
+    # 0x0301; reversed "xyz" z/y/x, "abc"->"cba", "hello🌍"->"🌍olleh",
+    # ""->""; EVERY_CODEPOINT_LENGTH_STR byte_length 13 with len
+    # decreasing 13->11->8->5->1->0; bounds (2,Opt(2))->(1,Opt(1))->
+    # (0,Opt(0)); empty-string assert_raises caught; iter.__next__() ==
+    # Codepoint.ord("߷") == 2295) — the blocker is closed: the four
+    # in-TU string-iterator structs (_SIterBytes / _SIterCodepoints /
+    # _SIterCodepointSlices / _SIterEnumPair) are hand-built in-TU by the
+    # elab factory seed (elab_intu._siter_register — the file's own
+    # .bytes()/.codepoints()/.codepoint_slices_reversed() MemberExpr
+    # calls register them for this compile) with real method C
+    # (mojo_strlen byte_length, UTF-8 codepoint scans, the bounds 2-slot
+    # tuple, the enumerate pair wrapper, the List[Byte](<s.bytes()>)
+    # setjmp collect) — NOT spliced (measured splice-depth blockers:
+    # BytesIter nests the full ImmOrigin comptime system, the _Enumerate
+    # header carries unparseable trait constraints), and the ~90 other
+    # StringSpan methods stay zero-stubbed. Negative control held
+    # (patched C 195->196 -> `FAIL assert_equal: words 195 / 196`,
+    # rc=134). The remaining declared remainder is the rest of the
+    # StringSpan method family (the ladder's two discover_tests/run
+    # scaffolding stubs are driver-bypassed, expected). See
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    # (family-S section).
+    # 2026-10-21 (further) — REMOVED from this dict: test/collections/
+    # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
+    # (enumerate(my_set) over the set LITERAL `{4, 5, 6}`: resolve_container
      # refused the set-literal container, `next(it)` hit the hard refusal in
      # `test_iter`) is closed, so C-gen completes (11086 lines, 35 tests)
      # and gcc -c passes. This is a FLOOR-GREEN, not a value-green — the
@@ -614,6 +621,12 @@ EXPECTED_FAILURES = {
     # above, which is why the summary line reads 22 expected / 0 unexpected.
     'test/os/path/test_getsize.mojo': (
         "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. "
+        "RE-MEASURED 2026-10-23 (part 6, family S): unchanged — the whole "
+        "family-S piece (in-TU siter structs, comptime string reads, "
+        "as_bytes word-boxing, the String() ctor actuals record) does not "
+        "touch this file's failure: the sweep reports the same codegen "
+        "error and the A/B TSV diff shows its E-message byte-identical "
+        "(0 E-message changes across all 610 files). "
         "RE-MEASURED 2026-10-22 (part 5): unchanged — codegen fails "
         "(`gcc -c failed for the monomorphized getsize_8_PathLike_6_String "
         "(exit 1, 3 attempts)`; `implicit declaration of function 'stat'`), "

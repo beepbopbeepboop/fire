@@ -732,6 +732,73 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
     return 'void', '0'
 
 
+# PART 6 (2026-10-23, family S): the hand-built string-iterator emit helpers.
+# The elab side (elab_intu._siter_register + the siter_enum record) registered
+# the concrete structs in this compile; these two functions are the ONLY emit
+# sites that reference their `_alloc_`/`___next__` symbols directly.
+
+
+def _lower_siter_enum_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str] | None:
+    """`enumerate(<s.iter>())` over the hand-built enumerate PAIR record. The
+    real `_Enumerate` cannot be spliced in (trait-constraint header), so the
+    pair is built directly: lower the inner iterator argument (the char*
+    table branch answers `_SIterBytes *`), evaluate the optional start
+    (default 0, the real `_Enumerate.__init__` default), and call the pair
+    allocator. The loop consuming this value goes through
+    `_gen_for_struct_iter`'s multi-target unpack against the record's
+    2-slot `multi_args` (count, element)."""
+    at, av = gen.lower_expr(node.args[0])
+    if at != '_SIterBytes *':
+        return None
+    start = '0'
+    if len(node.args) >= 2:
+        _, sv = gen.lower_expr(node.args[1])
+        start = f'(int64_t){sv}'
+    t = gen._new_val('_SIterEnumPair *',
+                     f'_alloc__SIterEnumPair ({av}, {start})')
+    return '_SIterEnumPair *', t
+
+
+def _lower_siter_collect_list(gen, it_v: str) -> tuple[str, str] | None:
+    """`List[Byte](<bytes iterator>)` — the measured collector shape
+    (test/collections/string/test_iterators' `List[Byte](s.bytes())`): a
+    fresh MojoList plus the setjmp-guarded collect loop, the same frame the
+    struct-iter for loop pushes (bump _mojo_exc_top, checkpoint the cleanup
+    stack, setjmp) — each iteration appends the inner `___next__` element
+    and the exhaustion StopIteration longjmps to bb_exc, which pops the
+    frame and returns the list built so far. `it_v` is the already-lowered
+    `_SIterBytes *` value (the caller lowers the argument exactly once, the
+    double-lower rule this file's argument handling follows). Elements are
+    byte words, so append_int is the whole store (the List[Byte] subscript
+    index the source spells is Byte = the word, the only element kind this
+    collector builds — measured)."""
+    gen._func_used_setjmp = True
+    l = gen._new_temp('MojoList *')
+    gen._emit(f"  {l} = mojo_list_new ();")
+    bb_loop = gen._new_bb()
+    bb_exc = gen._new_bb()
+    top1 = gen._new_temp('int')
+    inc = gen._new_temp('int')
+    top2 = gen._new_temp('int')
+    gen._emit(f"  {top1} = _mojo_exc_top;")
+    gen._emit(f"  {inc} = {top1} + 1;")
+    gen._emit(f"  _mojo_exc_top = {inc};")
+    gen._emit(f"  {top2} = _mojo_exc_top;")
+    gen._emit("  mojo_cleanup_checkpoint_save ();")
+    sj = gen._new_temp('int')
+    gen._emit(f"  {sj} = setjmp (_mojo_exc_stack[{top2}]);")
+    ct = gen._new_temp('_Bool')
+    gen._emit(f"  {ct} = {sj} != 0;")
+    gen._emit(f"  if ({ct}) goto {bb_exc}; else goto {bb_loop};")
+    gen._emit_label(bb_loop)
+    e = gen._new_val('int64_t', f"_SIterBytes___next__ ({it_v})")
+    gen._emit(f"  mojo_list_append_int ({l}, {e});")
+    gen._emit(f"  goto {bb_loop};")
+    gen._emit_label(bb_exc)
+    gen._emit("  mojo_exc_pop ();")
+    return 'MojoList *', l
+
+
 def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[str, str]:
     """Reconstruct a dependent-return iterator factory call from the record
     the elab side (`elab_intu._seed_factories`) filed: exactly what the
@@ -1426,6 +1493,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _fk = iter_factory.factory_call_key(_fc_name, node)
         _frec = getattr(gen, '_intu_factory_records', {}).get(_fk)
         if _frec is not None:
+            # PART 6 (2026-10-23, family S): the hand-built enumerate PAIR
+            # record — its wrapper is not a spliced in-TU struct, so
+            # `_lower_factory_call` cannot reconstruct it; build the pair
+            # directly from the lowered inner iterator instead.
+            if _frec.get('kind') == 'siter_enum':
+                _se = _lower_siter_enum_call(gen, node)
+                if _se is not None:
+                    return _se
             _fr = _lower_factory_call(gen, node, _frec)
             if _fr is not None:
                 return _fr
@@ -1434,6 +1509,40 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # MojoList, an owned container that boxed to a non-pointer). Fall
             # through to the arms below — the call site behaves exactly as it
             # did before this module existed (honest refusal), no partial C.
+    # PART 6 (2026-10-23, family S): `List[Byte](<bytes iterator>)` — the
+    # hand-built collector (the argument lowers to the in-TU `_SIterBytes *`
+    # only through this pass's char* table branch, so this gate is the
+    # subset's exact shape; any other `List[X](...)` spelling falls through
+    # to the arms below byte-identically). The gate inspects the argument
+    # STRUCTURALLY before lowering anything: the first version lowered the
+    # whole argument here to test its type and then fell through, so the
+    # downstream arms lowered it a SECOND time — every `List[Int]([1, 2,
+    # 3, 4, 5])` site in the tree double-evaluated its literal (measured in
+    # test/collections/test_asan_annotations_list: +108 lines, an extra
+    # `mojo_list_new` + append group + set_kinds per site, the leaked first
+    # copy), and a non-`bytes()` member-argument (a dynamic dispatch call)
+    # would have run twice. Structural check + receiver char* check first;
+    # only the pinned shape lowers (the receiver is read once here and once
+    # inside the call — a local read both times in the measured shape), and
+    # `_lower_siter_collect_list` returns unconditionally, so nothing behind
+    # this gate ever sees its argument pre-lowered.
+    if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'List'
+            and len(node.args) == 1
+            and not (getattr(node, 'kwargs', None) or [])
+            and isinstance(node.args[0], gimple_ctypes.CallExpr)
+            and isinstance(node.args[0].func, gimple_ctypes.MemberExpr)
+            and getattr(node.args[0].func, 'member', None) == 'bytes'
+            and not node.args[0].args
+            and not (getattr(node.args[0], 'kwargs', None) or [])):
+        _rt0, _rv0 = gen.lower_expr(node.args[0].func.obj)
+        if _rt0 == 'char *':
+            _at0, _av0 = gen.lower_expr(node.args[0])
+            if _at0 == '_SIterBytes *':
+                _lc = _lower_siter_collect_list(gen, _av0)
+                if _lc is not None:
+                    return _lc
     if (isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
             and node.func.obj.name in gen._imported_generic_structs) or \
            (isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name in gen._imported_generic_structs):
@@ -5479,6 +5588,22 @@ def _lower_opaque_ctor(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tup
         else:                       gen._emit(f'  {t} = (int64_t){gen._ensure_local(at, av)};')
     else:
         gen._emit(f'  {t} = (int64_t)0;')
+        # PART 6 (2026-10-23, family S): the zero-argument STRING
+        # constructor. In this model the empty string IS word 0, and the
+        # local that receives it must be tracked as a char* from the FIRST
+        # assignment: the `+` dispatch's `_as_charptr` (emit_exprs) can only
+        # tell a string word from a real numeric zero through `_actual_types`,
+        # which is a COMPILE-TIME table — a `concat += v` inside a loop is
+        # lowered once, before the loop body's own writes have emitted, so
+        # the record must exist at the constructor. Without it the dispatch
+        # takes the "String + numeric" stringify arm and decimal-formats the
+        # accumulator through mojo_str_from_int (measured 2026-10-23:
+        # test_iterators' reversed-concat loop answered "4376482240a" — the
+        # POINTER DECIMAL of the second iteration's result plus the last
+        # slice — where the reference answers "cba").
+        if fname_raw in ('String', 'StringSlice', 'StaticString',
+                         'StringSpan'):
+            gen._actual_types[t] = 'char *'
     return 'int64_t', t
 
 
@@ -8713,6 +8838,34 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 return _ot, _addr
             _t = gen._new_val(_elem_ct, f"*{_addr}")
             return _elem_ct, _t
+
+    # PART 6 (2026-10-23, family S): `s.as_bytes()[i]` — a subscript on the
+    # RESULT of as_bytes() (the pinned test/collections/string/
+    # test_iterators shape: `assert_equal(next(bytes), s.as_bytes()[0])`).
+    # In this codegen the char* subscript answers a 1-CHAR STRING pointer
+    # (`mojo_char_at_str` — the measured Python-str rule the green files
+    # rely on), which compared wrong against the byte word `next(bytes)`
+    # answers (measured: `words 97 / <pointer>`). Real Mojo's
+    # `as_bytes()[i]` is a BYTES subscript (unsigned byte 0-255), so the
+    # measured shape gets the MojoBytes subscript arm's own runtime pair —
+    # `mojo_bytes_from_cstr` (the NUL-terminated copy) +
+    # `mojo_bytes_get_checked` — applied to the receiver directly. Gated to
+    # the exact shape: a zero-arg `as_bytes()` call on a provably char*
+    # receiver; anything else (a local `b = s.as_bytes(); b[0]`, a non-
+    # char* receiver, a slice index) keeps the pre-branch path exactly.
+    if (isinstance(node.obj, gimple_ctypes.CallExpr)
+            and isinstance(node.obj.func, gimple_ctypes.MemberExpr)
+            and node.obj.func.member == 'as_bytes'
+            and not node.obj.args and not node.obj.kwargs):
+        _recv_t, _recv_v = gen.lower_expr(node.obj.func.obj)
+        if _recv_t == 'char *':
+            _b = gen._new_val(
+                'MojoBytes *', f'mojo_bytes_from_cstr ({_recv_v})')
+            _it, _iv = gen.lower_expr(node.index)
+            _idx64 = gen._new_val('int64_t', f"(int64_t) {_iv}")
+            t = gen._new_val(
+                'int64_t', f"mojo_bytes_get_checked ({_b}, {_idx64})")
+            return 'int64_t', t
 
     ot, ov = gen.lower_expr(node.obj)
 
