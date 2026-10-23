@@ -1430,3 +1430,39 @@ remains floor-green and ladder-red: the copies family is VALUE-GREEN
 (idx 2), the element_copies family (idx 8/13) is now NON-VACUOUS and
 red on the measured Family-A comptime-alias remainder, and families
 A/B hold the other reds (R1 doc).
+
+## 2026-10-23 (part 6, family A): re-measured — test_getsize and
+test_iterators unchanged; the nested-product zero-stub population is
+materialized in-TU (78 definitions, 0 removed, 0 dangling)
+
+- `test/os/path/test_getsize.mojo` and `test/collections/string/
+  test_iterators.mojo`: re-measured through the 610-file A/B — their
+  ERROR signatures are BYTE-IDENTICAL to the D2 master, so both
+  `EXPECTED_FAILURES` entries stay accurate without a refresh. The
+  closure maps hold: `getsize`'s `stat(...)` C-ABI path (`_c_stat` 17-
+  field struct, `external_call["stat", Int32]`, the 18-field projection)
+  and test_iterators' `s.bytes()` dependent-return factory +
+  `StringSpan[origin]` method family remain the next items.
+- The zero-stub hazard surface this doc tracks, the nested-product
+  half: at D2 the comptime aliases (`Self._Product2Type` /
+  `Self._OuterProduct2Type`, `itertools.mojo`) erased to words, so the
+  spliced `_Product3`/`_Product4` `__init__` constructor calls became
+  `int64_t.<alias>() stubbed` — a stub emits NO call, so the hazard was
+  invisible while the whole nested chain was dead code (the ladder's
+  idx 8/13 crashed on the NULL tuple the stubbed `__next__` returned).
+  Family A evaluates the aliases to the named instantiations' mangled
+  names (R1 doc, the mechanism) and materializes them in-TU in the same
+  closure: 13 new nested `_Product2` instantiations (CC / Int / TCI /
+  owned / borrowed-ListIter element families, including the nested-
+  mention shapes `_Product2[A, _Product2[B, C]]` and `_Product2[A,
+  _Product3[B, C, D]]`) with 78 added DEFINITIONS — every
+  `P2_bc___next__` / `___init__` / `bounds` the spliced wrappers now
+  call is defined in the same TU. Removed-symbol check: 0 removed
+  definitions, zero dangling references; the 610-file A/B confirms no
+  other TU's surface changed (0 status changes, 1 C→C = test_product,
+  0 E-message changes).
+- Result: the ladder's element_copies / copies / product3 / product4
+  families go GREEN with their pinned copy counts (R1 doc, the
+  measurements); the remaining reds on the product ladder are the
+  comptime-FOR-parameter family (idx 4/10/16, trip_count 0 — family B),
+  byte-identical to the D2 signatures.

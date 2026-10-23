@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str, _pair_key,
+    _as_str, _pair_key, _sms_key,
 )
 import regex_compile
 import mlir
@@ -56,6 +56,16 @@ from mojo.middle.loops_shared import (
     _emit_starred_slot_list, starred_slot_index, starred_slot_name,
     ZipLongestFillRefusal,
 )
+
+
+def _gll_sms_key(struct_name, method) -> str:
+    """Same-module `str`-returning wrapper around the imported `_sms_key` —
+    the identical self-hosting reason emit_methods' `_gmm_sms_key` documents:
+    a module-level call to the imported `fire_compiler._sms_key` has its
+    `-> str` return type go unresolved under self-hosting, so the
+    `_struct_method_signatures` key-coercion rewrites the key through
+    `mojo_str_from_int(<pointer>)` and every lookup misses."""
+    return _sms_key(struct_name, method)
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     args = node.iterable.args
     var  = node.target
@@ -3879,7 +3889,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                          'int64_t': 'mojo_list_get_int',
                          '_Bool': 'mojo_list_get_bool',
                          'double': 'mojo_list_get_double'}
-            for _i, (_tn, _tc) in enumerate(zip(_tnames, _slot_ctypes)):
+            for _i, (_tn, _tc, _ainf) in enumerate(
+                    zip(_tnames, _slot_ctypes, _frec['multi_args'])):
                 _acc = _slot_acc.get(_tc)
                 if _acc is None and isinstance(_tc, str) \
                         and _tc.endswith(' *'):
@@ -3893,8 +3904,50 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                     # which -fgimple strict mode accepts.
                     _w = gen._new_val(
                         'int64_t', f"mojo_list_get_int ({_listptr}, {_i})")
-                    _sv = gen._new_val(_tc, f"({_tc}){_w}")
-                    gen._emit(f"  {gen._cname(_tn)} = {_sv};")
+                    # PART 6 (2026-10-23, family A): a slot whose element
+                    # is a mangled in-TU STRUCT is unpacked THROUGH the
+                    # element's copy constructor, not by raw pointer move.
+                    # The element_copies ladder pins the per-iteration
+                    # counts (a=2, b=2, c=1 — "the rightmost is copied
+                    # once"): real Mojo's product `__next__` copies each
+                    # CACHED A-element (`unsafe_value().copy()` — the
+                    # family-A splice rewrite makes that a real copy ctor
+                    # for a mangled element) and the for-loop unpack
+                    # copies again; the rightmost element, never cached,
+                    # gets the unpack copy alone. A raw move here leaves
+                    # every slot's count one short. Gated on the same two
+                    # tests emit_methods' `.copy()` branch (a) applies —
+                    # the struct preregistered in-TU and a copy __init__
+                    # resolvable on the `copy` kwarg — and any miss falls
+                    # back to the raw pointer store (the pre-A behaviour),
+                    # so a scalar slot and an unregistered element are
+                    # byte-identical to before.
+                    _cp = None
+                    _el = _ainf.get('elem')
+                    _csn = gimple_exprtypes._struct_name_of(_tc)
+                    if (_csn and isinstance(_el, str)
+                            and _csn in (gen.struct_field_types or {})
+                            and _csn in getattr(gen, '_intu_prereg_structs', ())):
+                        _ccands = gen._struct_method_signatures.get(
+                            _gll_sms_key(_csn, '__init__'))
+                        if _ccands:
+                            _pv = gen._new_temp(_tc)
+                            gen._emit(f"  {_pv} = ({_tc}){_w};")
+                            _recv_expr = gimple_ctypes.IdentExpr(name=_pv)
+                            _cch = gen._resolve_overload(
+                                _ccands, [], [('copy', _recv_expr)])
+                            if _cch is not None:
+                                gen._struct_allocs_needed.add(_csn)
+                                _cp = gen._new_temp(f'{_csn} *')
+                                gen._emit(f"  {_cp} = _alloc_{_csn} ();")
+                                _init_fname = gen._struct_method_csym(
+                                    _csn, '__init__', _cch['overload_id'])
+                                gen._emit(f"  {_init_fname} ({_cp}, {_pv});")
+                    if _cp is None:
+                        _sv = gen._new_val(_tc, f"({_tc}){_w}")
+                        gen._emit(f"  {gen._cname(_tn)} = {_sv};")
+                    else:
+                        gen._emit(f"  {gen._cname(_tn)} = {_cp};")
                     continue
                 if _acc is None:
                     gimple_ctypes._debug_note(

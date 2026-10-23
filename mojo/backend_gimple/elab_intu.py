@@ -2547,6 +2547,177 @@ def _rewrite_inner_bodies(work, base, concrete):
     return concrete
 
 
+# ── part 6 family A: comptime type-alias evaluation (2026-10-23) ────────────
+# The nested `_ProductN` wrappers carry their inner iterator type in a
+# COMPTIME ALIAS, not a type parameter:
+#     comptime _Product2Type = _Product2[Self.IteratorTypeB, Self.IteratorTypeC]
+#     comptime _OuterProduct2Type = _Product2[Self.IteratorTypeA, Self._Product2Type]
+#     var _inner: Self._OuterProduct2Type
+# `monomorphize_source` substitutes the type parameters but leaves every
+# `Self.<alias>` mention (the alias name is not a parameter), so the spliced
+# struct's `_inner` field erases through `_mojo_type` to a raw word and the
+# two constructor calls in `__init__` (`Self._Product2Type(inner_b^, ...)`)
+# reach the emit side as `int64_t._Product2Type() stubbed` — measured on
+# test_product's spliced `_Product3`/`_Product4` (the `_Product3.__next__`
+# that the element_copies ladder drives returns 0 -> NULL tuple -> rc=139).
+# This step evaluates each alias to the mangled name of the named
+# instantiation (recursively — the outer alias references the inner one),
+# rewrites every `Self.<alias>` mention to that bare mangled name (the
+# field annotation resolves through the registered-name branch of the
+# field loop; the constructor call is exactly the shape `_rewrite_callees`
+# produces for a registered in-TU struct), and enqueues the named
+# instantiations so they materialize in-TU in the same closure. Every
+# refusal below leaves the pre-step text untouched: the struct then
+# materializes exactly as before (stub and all).
+
+_COMPTIME_ALIAS_HEAD_RE = re.compile(
+    r'comptime\s+(_[A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\[')
+
+# `_ProductN.__next__` (N >= 3): the template's
+# `rebind_var[Self.Element](_flatten(next(self._inner)))` — `_flatten` is a
+# comptime-for variadic the emit side cannot lower (it reached the C as
+# `indirect call via SubscriptExpr` -> 0). The nested `__next__` returns a
+# LIST-BACKED right-nested 2-tuple `[head, tail-list]`; the flattened
+# element N is the head plus the tail's N-1 slots, read through the exact
+# word-subscript idiom the emit side already lowers (`mojo_list_get_int`,
+# measured on the product2 ladder C).
+_FLAT_NEXT_RE = re.compile(
+    r'([ \t]*)return\s+rebind_var\[Self\.Element\]'
+    r'\(_flatten\(next\(self\._inner\)\)\)')
+
+# `_Product2.__next__`'s element copy, `unsafe_value().copy()` on the
+# tagged-Optional side-band word: the emit side's `.copy()` gate admits
+# struct-POINTER receivers only, so on the raw word it is an identity and
+# the element's copy constructor never runs (the count the element_copies
+# ladder pins — a=2, b=2, c=1, "the rightmost is copied once" — comes from
+# this copy at the A-element level plus the for-loop unpack's own copy).
+# For an A element that is a mangled in-TU struct, rewrite the line to the
+# measured idiom: an annotated struct local (the bare mangled annotation
+# resolves to `<mangle> *` through `_resolve_type`'s registered-name
+# branch) initialized from the side-band word, then `.copy()` on the
+# pointer receiver — which the emit side lowers as alloc + the copy
+# constructor overload (emit_methods' measured branch (a)).
+_ELEM_COPY_RE = re.compile(
+    r'([ \t]*)var elem = self\._inner_a_elem\.unsafe_value\(\)\.copy\(\)')
+
+
+def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
+    """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
+    aliases of a spliced generic struct. Returns (concrete, nested_keys):
+    `concrete` with every `Self.<alias>` mention replaced by the alias's
+    mangled name (refusal -> the input text unchanged), and the
+    `('struct', base, args)` queue keys the aliases name, or None."""
+    import elaborate
+    heads = list(_COMPTIME_ALIAS_HEAD_RE.finditer(concrete))
+    if not heads:
+        return concrete, None
+    aliases = {}
+    paired = []
+    for m in heads:
+        aname, abase = m.group(1), m.group(2)
+        i = m.end()
+        depth = 1
+        while i < len(concrete) and depth:
+            c = concrete[i]
+            if c == '[':
+                depth += 1
+            elif c == ']':
+                depth -= 1
+            i += 1
+        if depth:
+            work.refuse(f'{base}: comptime alias {aname} has unbalanced '
+                        'brackets in its right-hand side')
+            return concrete, None
+        args = [a.strip() for a in
+                gimple_exprtypes._split_top_level_commas(
+                    concrete[m.end():i - 1]) if a.strip()]
+        resolved = []
+        bad = None
+        for a in args:
+            if a.startswith('Self.'):
+                ref = a[len('Self.'):]
+                if ref in aliases:
+                    resolved.append(aliases[ref])
+                else:
+                    bad = f'references {ref} without a prior alias'
+            elif 'Self.' in a:
+                bad = 'carries an unbound Self. mention in its argument'
+            else:
+                resolved.append(a)
+        if bad:
+            work.refuse(f'{base}: comptime alias {aname} {bad}')
+            return concrete, None
+        tmpl = (elaborate.extract_struct_source(module_src, abase)
+                if module_src else None)
+        pnames = elaborate.type_param_names(tmpl) if tmpl else None
+        if not pnames or len(pnames) != len(resolved):
+            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
+                        'whose template does not bind positionally')
+            return concrete, None
+        aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
+        paired.append((aname, ('struct', abase, tuple(resolved))))
+    used = [n for n, _ in paired
+            if re.search(r'Self\.' + re.escape(n) + r'\b', concrete)]
+    if not used:
+        return concrete, None
+    for n in used:
+        concrete = concrete.replace(f'Self.{n}', aliases[n])
+    return concrete, [k for n, k in paired if n in used] or None
+
+
+def _rewrite_product_next(base, targs, concrete):
+    """The `_ProductN.__next__` flatten rewrite — see _FLAT_NEXT_RE. Only
+    the measured arities (3, 4) are rewritten; any other shape keeps the
+    honest stub exactly."""
+    if not base.startswith('_Product') or len(targs) not in (3, 4):
+        return concrete
+    m = _FLAT_NEXT_RE.search(concrete)
+    if m is None:
+        return concrete
+    n = len(targs)
+    ind = m.group(1)
+    slots = ', '.join(['_r[0]'] + [f'_m[{k}]' for k in range(n - 1)])
+    repl = (f'{ind}var _r = next(self._inner)\n'
+            f'{ind}var _m = _r[1]\n'
+            f'{ind}return ({slots})')
+    return concrete[:m.start()] + repl + concrete[m.end():]
+
+
+def _rewrite_product2_elem_copy(base, targs, concrete):
+    """The element-copy rewrite — see _ELEM_COPY_RE. Fires only for an A
+    element that is a bare mangled name the emit side will have registered
+    (neither a scalar in _TYPE_MAP nor a bracketed mention nor a literal
+    like the owned iterators' size parameter), and only when the exact
+    template line is present."""
+    if base != '_Product2':
+        return concrete
+    a = targs.get('IteratorTypeA', '')
+    if '[' not in a:
+        return concrete
+    inner = a.split('[', 1)[1].rstrip(']').strip()
+    elems = [e.strip() for e in
+             gimple_exprtypes._split_top_level_commas(inner)]
+    if len(elems) != 1:
+        return concrete
+    elem = elems[0]
+    if ('[' in elem or not re.match(r'^[_A-Za-z]\w*$', elem)
+            or elem in gimple_ctypes._TYPE_MAP):
+        return concrete
+    if not _ELEM_COPY_RE.search(concrete):
+        return concrete
+
+    def _sub(mo):
+        ind = mo.group(1)
+        i = _sub.n
+        _sub.n += 1
+        src = '_elem_src' if i == 0 else f'_elem_src{i}'
+        return (f'{ind}var {src}: {elem} = '
+                f'self._inner_a_elem.unsafe_value()\n'
+                f'{ind}var elem = {src}.copy()')
+    _sub.n = 0
+    return _ELEM_COPY_RE.sub(_sub, concrete)
+
+
 def _materialize(work, key):
     """One instantiation. Returns a record dict, or None with the reason
     recorded. Every failure is a REFUSAL: nothing is emitted and the `.o` route
@@ -2607,6 +2778,20 @@ def _materialize(work, key):
         except Exception as e:
             work.refuse(f'{base}[{", ".join(args)}]: {type(e).__name__}: {e}')
             return None
+    # PART 6 (family A, 2026-10-23): the nested `_ProductN` wrappers carry
+    # their inner iterator type in comptime ALIASES (`Self._Product2Type` /
+    # `Self._OuterProduct2Type`), which `monomorphize_source` leaves alone —
+    # evaluate them to the named instantiations' mangled names and enqueue
+    # the nest, before the body rewrites and the parse. Every helper here
+    # returns the input text unchanged on any refusal, so a miss leaves the
+    # struct materializing exactly as before (stub and all); the measured
+    # shapes and their emit-side landing paths are documented on each.
+    _nested = None
+    if kind == 'struct' and targs:
+        concrete, _nested = _eval_comptime_type_aliases(
+            work, mm, module_src, base, targs, concrete)
+        concrete = _rewrite_product_next(base, targs, concrete)
+        concrete = _rewrite_product2_elem_copy(base, targs, concrete)
     if kind == 'struct' and base in _IN_TU_ITER_BODIES:
         concrete = _rewrite_inner_bodies(work, base, concrete)
         if concrete is None:
@@ -2618,7 +2803,7 @@ def _materialize(work, key):
         return None
     return {'kind': kind, 'base': base, 'args': tuple(args), 'targs': targs,
             'mangled': mangled, 'parsed': parsed, 'sites': _sites_of(parsed),
-            'src_path': src_path, 'src': concrete}
+            'src_path': src_path, 'src': concrete, 'nested': _nested}
 
 
 # ── the entry point ────────────────────────────────────────────────────────
@@ -2723,6 +2908,16 @@ def run(gen, stmts):
             gen._intu_structs[rec['mangled']] = {'base': rec['base'], 'targs': rec['targs']}
             gen._intu_struct_args[(rec['base'], rec['args'])] = rec['mangled']
         _collect_inner(work, rec, queue)
+        # Family A: the comptime aliases named nested instantiations that
+        # NO mention walk can see — the spliced source spells them as bare
+        # mangled names (no brackets), and `_collect_inner`'s walk extracts
+        # `Base[args]` mentions only. Enqueue them here so the closure
+        # materializes the whole nest in-TU; `work.enqueue` dedupes on
+        # `work.alias` and the loop's `seen` set, and a duplicate SPELLING
+        # of one mangle is one record (the continue above), so the nest is
+        # idempotent under the multi-spelling merge.
+        for nk in (rec.get('nested') or ()):
+            work.enqueue(nk, work.depth[key] + 1, queue)
     # Pre-register every materialized struct's MANGLED NAME in
     # gen.struct_field_types (empty field map) BEFORE the statement loop and
     # the signature passes run. A mangled-name annotation — the form

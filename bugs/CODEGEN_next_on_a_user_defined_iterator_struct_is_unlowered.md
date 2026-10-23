@@ -2903,3 +2903,131 @@ through) — a separate piece, not a D2 next-fix.
   sqliteruntime)` notice is byte-identical to the D1 final run — an
   environmental memory-peak drift, not a gate result; the peak table in
   `tools/suite.py` is left untouched, as D1 left it.
+
+## 2026-10-23 (part 6, family A): comptime-alias evaluation — the nested
+product wrappers get real bodies, and the element_copies / copies ladder
+families go green with their pinned counts
+
+### The measured gap this closes
+
+The nested `_Product3`/`_Product4` wrappers carry their inner iterator
+type in COMPTIME ALIASES, not type parameters (`std/itertools/
+itertools.mojo`: `comptime _Product2Type = _Product2[Self.IteratorTypeB,
+Self.IteratorTypeC]`, `comptime _OuterProduct2Type = _Product2[
+Self.IteratorTypeA, Self._Product2Type]`, `var _inner:
+Self._OuterProduct2Type`). `monomorphize_source` substitutes the type
+parameters but leaves every `Self.<alias>` mention (an alias name is not
+a parameter), so in the D2 spliced `_Product3` (measured,
+/tmp/p6_probe/d2_real_test_product.c): the `_inner` field erased to
+`int64_t` through `_mojo_type`, the `__init__` constructor calls landed
+as `int64_t._Product2Type() stubbed` / `int64_t._OuterProduct2Type()
+stubbed` (:9054/:9068), and `__next__`'s `_flatten(next(self._inner))`
+landed as `/* indirect call via SubscriptExpr */; return 0` (:9134) —
+the NULL tuple the element_copies loop dereferenced (honest rc=139 on
+idx 8/13; rc=134 on the non-looping idx 6/11, whose `next(it)` and
+`elem[0]` call sites were already resolved to the stubbed body).
+
+### The mechanism (splice-level in `elab_intu` + one unpack gate in
+`emit_loops`; every miss leaves the pre-step text untouched)
+
+- **`_eval_comptime_type_aliases`** (`mojo/backend_gimple/elab_intu.py`,
+  called from `_materialize` after `monomorphize_source`, before the
+  body rewrites and the parse): a bracket-matching parser over the
+  concrete source's `comptime <alias> = <Base>[<args>]` lines (top-level
+  comma split; `Self.<other-alias>` arguments resolve to that alias's
+  already-evaluated mangle, so the outer alias's nested mention
+  composes). Each alias evaluates to `mm.mangle(base,
+  dict(zip(pnames, resolved)))` on the base template's own parameter
+  names — the same strings the key's `_materialize` computes, so the
+  alias mangle and the nested materialization's mangle are the same
+  injective value by construction. Every `Self.<alias>` mention is then
+  rewritten to the BARE mangled name: the field annotation resolves
+  through the field loop's non-capitalized-registered-name branch
+  (`ann in struct_field_types` → `ann *`, pre-registered by the queue
+  loop), and the constructor call is exactly the spelling
+  `_rewrite_callees` emits for a registered in-TU struct. The named
+  `('struct', base, args)` keys ride in `rec['nested']` and `run()`
+  enqueues them after registration — the nest materializes in-TU in the
+  same closure, and the dependency-ordered typedef pass emits each
+  inner BEFORE its wrapper (measured: P2_bc < P2_outer < P3[CC]).
+- **`_rewrite_product_next`**: `_ProductN.__next__`'s
+  `rebind_var[Self.Element](_flatten(next(self._inner)))` (N = 3, 4 only;
+  any other arity keeps the honest stub) → `var _r = next(self._inner);
+  var _m = _r[1]; return (_r[0], _m[0], ..., _m[N-2])` — every idiom is
+  measured-working: `next(<field>)` on a registered struct pointer
+  dispatches to the nested in-TU `___next__` (the field-receiver arm,
+  the spliced P2 body's own idiom), the word subscript lowers to
+  `mojo_list_get_int`, and the flat tuple literal to
+  `mojo_list_new` + appends + `mojo_mark_as_tuple` + `set_kinds`.
+- **`_rewrite_product2_elem_copy`**: for a `_Product2` instantiation
+  whose A element is a BARE mangled in-TU struct (neither a `_TYPE_MAP`
+  scalar, nor a bracketed mention, nor a non-identifier like the owned
+  iterators' `[size]` parameter), the template line `var elem =
+  self._inner_a_elem.unsafe_value().copy()` (both occurrences, distinct
+  locals) → `var _elem_src: <mangle> = self._inner_a_elem.unsafe_value();
+  var elem = _elem_src.copy()`. The annotated struct local resolves to
+  `<mangle> *` through `_resolve_type`'s first line (registered name),
+  the side-band word is cast into it, and `.copy()` on the struct-
+  POINTER receiver runs the existing gate (preregistered) + branch (a)
+  (alloc + the copy-ctor overload resolved on the `copy` kwarg) — the
+  element's copy constructor finally runs, which is the count the pin
+  needs. Scalars keep the word identity (correct for them).
+- **The loop unpack** (`mojo/backend_gimple/emit_loops.py`,
+  `_gen_for_struct_iter`'s multi-target struct-slot branch): a slot whose
+  element is a preregistered in-TU struct is unpacked THROUGH the
+  element's copy constructor (the same two tests as branch (a):
+  preregistered + copy `__init__` resolvable on the `copy` kwarg); any
+  miss falls back to the raw pointer store, byte-identical to the
+  pre-A behaviour, so scalar slots are untouched.
+
+### Why the pinned counts hold (measured, not derived a posteriori)
+
+The copy constructor PROPAGATES the count (`self.copy_count =
+copy.copy_count + 1`, test_utils types.mojo) — it does not increment the
+source. So per iteration: each P2 level copies its CACHED A-element once
+(`unsafe_value().copy()`, count 1), the for-loop unpack copies every
+slot again (count 2), and the rightmost element — never cached — gets
+the unpack copy alone (count 1). AE_TRACE on the green runs: idx 8
+`a=2, b=2, c=1` × 8 iterations; idx 13 `2/2/2/1`; idx 7 `0/1/3`; idx 12
+`0/1/3/7` — the constructor-chain counts (the `inner_b.copy()` copies of
+the TCI/inner iterators, no element copies: those tests never call
+`__next__`). A NEGATIVE CONTROL proves the assert is live, not vacuous:
+patching the expected count 2→3 in a C copy of the same build gives
+`FAIL assert_equal: words 2 / <encoded 3>` + abort rc=134 on the first
+iteration (a=2 is the real count the stub compares).
+
+### Ladder (driver + this build's product TU, `LADDER_TEST=i` per test)
+
+- idx 8/13: rc=139 (NULL tuple on the alias stub) → **rc=0 PASS** with
+  the pinned counts above.
+- idx 6/11: rc=134 → **rc=0 PASS** with real values (`next(it)` +
+  `elem[0..2]` against the real flat 3/4-list `__next__`).
+- idx 7/12: rc=134 → **rc=0 PASS** (the nested constructor chain:
+  `_alloc_P2_bc(); P2_bc___init__(t, inner_b, inner_c); _alloc_
+  P2_outer(); P2_outer___init__(t, inner_a, product2); self->_inner =
+  t` in the spliced `__init__`).
+- idx 9/14/15 (the owned/order families, red on the same stub at D2):
+  rc=134 → **rc=0 PASS** — their wrappers' aliases evaluate through the
+  same mechanism (the `_CopyableOwnedIter[size]` mentions ride in the
+  nested instantiations' args).
+- idx 4/10/16 (the comptime-FOR-parameter family — family B, trip_count
+  0): FAIL signatures BYTE-IDENTICAL to the D2 build
+  (`words 0 / 4294967300`, `...7304`, `...7312`, rc=134) — untouched,
+  still red on their own measured blocker.
+- All five D2 greens (0/1/2/3/5) stay green: no PASS→FAIL.
+
+### Blast radius + gates
+
+A/B C-hash over all 610 files, fresh per-file process both trees: 0
+status changes, exactly 1 C→C (`test/itertools/test_product.mojo` — the
+only file whose splice set changed), 0 E-message changes. Removed-symbol
+check on that file: 0 removed definitions, 78 added — 13 new nested
+`_Product2` instantiations × 6 methods (`__init__`, copy-`__init__`,
+`__iter__`×2, `__next__`, `bounds`) across the CC/Int/TCI/owned/
+borrowed-ListIter element families, every one defined in the same TU the
+spliced wrapper calls it from, zero dangling references. Sweep 608/2 in
+both trees (the two declared reds unchanged — R2 doc), warn-set 19/294
+byte-identical to D2 from both full-sweep logs, no-new-casts 19, doc-
+truth 434 PASS / 0 FAIL, one final 53-job bucket 53/53 (log /tmp/p6_
+probe/bucket_fama.log; the peak-movement notice, if present, is the
+same environmental pair D1/D2 recorded — table untouched).
