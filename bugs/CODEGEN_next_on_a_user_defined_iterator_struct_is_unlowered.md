@@ -2208,3 +2208,148 @@ empty. The measured remainder is the 5 above plus the floor-green
 `test_set` (ladder-red on A-F); none of them is a stub or a silent green
 — every one fails a real `gcc -c`/codegen/link with a named, per-file
 reason, which is the state this dict exists to declare.
+
+## 2026-10-22 (part 5): the struct-fn container kind + the struct-literal-
+element subpath lift test_map, test_cycle and test_product — declared-red
+5 -> 2, sweep 605/5 -> 608/2
+
+### The struct-fn container kind (test_cycle, test_product)
+
+The R2-sibling blocker of the part-4 table — a LOCAL function call whose
+bracketed return annotation names a module-local GENERIC struct
+(`_owned3(1, 2, 3) -> _CopyableOwned[3]`, `_owned2(10, 20) ->
+_CopyableOwned[2]`) — is closed. `iter_factory.resolve_container` gains a
+`struct-fn` kind: the factory argument is a CallExpr to a module-level def
+(`elab_intu._fn_returns_map`), its return annotation is `Base[<args>]` with
+`Base` in the module's struct set; the record carries `sname`/`sargs`. The
+INNER mention is derived from the container struct's `comptime
+IteratorOwnedType` member with `Self.<param>` bound to the annotation's
+arguments (`struct_iter_inner`, header params via the shared
+`_header_params`; the container's own mangle via `struct_args_map`), so
+`cycle(_owned3(1, 2, 3))` seeds the `_CycleIterator[_CopyableOwnedIter[3]]`
+wrapper over the in-TU `_CopyableOwnedIter[3]`. Both the container and its
+inner are materialized in-TU (same-file generic-struct registration); the
+bare inner-ctor call the spliced container body makes is rewritten to its
+mangled name (`elab_intu._rewrite_ctor_calls` / `_rewrite_intu_ctor_calls`
+— without the rewrite the call dispatches to the module's TEMPLATE struct,
+which emits the type parameter as a runtime field — wrong layout, and the
+`_alloc__CopyableOwnedIter` class of undefined symbols). The emit side
+loweres the fn call, casts the boxed return word to the seed's determined
+container mangle (the signature pass leaves the return annotation's
+generic mention unmaterialized — the spliced `__iter__` answers the
+pointer as a WORD, the established wrapper convention; the seed applies
+the type-accurate cast), calls the container's in-TU `__iter__`, and feeds
+the inner into the wrapper constructor.
+
+Measured: `test_cycle` REAL C 269812 bytes, gcc -c rc=0, ladder **17/17
+PASS with real values** (the 15 list/range forms plus
+`test_cycle_owned` — `next(it)` = 1,2,3,1,2,3,1,2, the reset path — and
+`test_cycle_owned_single`). `test_product` REAL C 557281 bytes, gcc -c
+rc=0: the owned family now lowers (records per call site; the 2-arg/3-arg
+owned ladders PASS with real values).
+
+### The struct-literal-element subpath (test_map)
+
+`test_map_function_can_take_owned_value`'s container is `var list =
+[CopyCounter[NoneType](None)]` — a list literal whose ELEMENT is a
+generic-struct constructor call. (a) `iter_factory.list_literal_elem`
+accepts the bracketed ctor spelling — the type arguments are TYPE NAMES,
+the discriminator against a value subscript — and answers the mention
+(`CopyCounter[NoneType]`); the C-side slot stays a raw pointer word.
+(b) `elab_intu._rewrite_ann`'s `mangled_raw` bridge rewrites the
+NESTED-mention annotation text so the in-TU materializer's mangle agrees
+with the seed's. (c) `emit_calls._lower_self_ctor`'s in-TU branch
+pre-checks `_resolve_overload` on the in-TU struct's `__init__`
+candidates (CopyCounter has three overloads — the duplicate-method-name
+rule) and inlines the concrete `_lower_struct_constructor` + the
+`(int64_t){ptr}` box instead of the undefined `___new`.
+
+Measured: `test_map` REAL C 167742 bytes, gcc -c rc=0, ladder **3/3 PASS
+with real values** (Int output 2,3,4; the owned CopyCounter copy-count
+test; owned output 2,4,6; the StopIteration paths raise through the
+setjmp frames).
+
+### The factory_call_key line component (the record-collision hazard)
+
+The key is `name + type args + argument signatures + kwarg names` — a
+PURE-STRUCTURAL key. Measured hazard on test_product: `product(l1, l2)`
+at two call sites in two test functions (same local names, same
+signature, different element types) shared one record; the later seed's
+record replaced the earlier and the earlier call site would have emitted
+the later's wrapper. The key now carries the node's LINE (both sides call
+`factory_call_key` on the same node object, so they stay in sync; two
+call sites cannot share a line with the same signature and different
+static element types — same scope means same locals, different scopes
+mean different lines). The A/B measured the hazard was REAL, in two
+already-green files (C->C 2, both classified as fixes, zero C->E):
+
+1. `test/iter/test_nth.mojo` — 14 `iter(l)` call sites across the file's
+   test functions shared one record; the String instantiation leaked into
+   the Int tests: base C alloced `_ListIterOwned[String]` in 11 of 14
+   sites (lists built with `mojo_list_append_int`!) and dispatched `.nth()`
+   to the String weak stub; cur C is per-site correct (12 Int / 2 String,
+   the String pair in the one String-list test).
+2. `test/builtin/test_bool.mojo` — `map[gt0](l)` in `test_all` and
+   `test_any` (each defining its own local `gt0`) shared one record; the
+   materialized `__next__` bakes the function SYMBOL from the mangle, so
+   base's `test_all` body called `test_any_gt0` (identical `x > 0` body —
+   no value damage in this file, wrong function in general); cur bakes
+   each test's own local.
+
+### test_product: FLOOR-GREEN, not value-green (the test_set precedent)
+
+The file passes the gate (it MUST leave EXPECTED_FAILURES — a listed file
+that passes is flagged stale). The full-file ladder is 5/17 real PASS +
+2 vacuous, 10 FAIL on FOUR independent measured gaps, each pre-existing
+(the file was red before part 5 — none is a regression):
+
+- (A) the 4-arg product family (`test_product4`, `_order`, `_owned`): the
+  spliced `_Product4.__next__` downgrades to the zero stub (`/* indirect
+  call via SubscriptExpr */`) and `__init__` to stubs (`/* ct param or
+  undeclared: Self */`) — the comptime TYPE ALIAS `comptime
+  _Product2Type = _Product2[Self.IteratorTypeB, Self.IteratorTypeC]` has
+  no lowering, and `_flatten` (the right-nested tuple flattener) is
+  MLIR-op code. Next fix: comptime type-alias resolution + the nested
+  in-TU product + `_flatten` lowering.
+- (B) the comptime for-param family (`test_product{2,3,4}_param`): the
+  compile-time loop runs zero iterations (trip_count stays 0). Next fix:
+  comptime evaluation of the in-TU product iterator.
+- (C) `test_product_bounds`: `Optional[Int]` holding 0 is indistinguishable
+  from None — the spliced `_Product2.__next__`'s `if not
+  self._inner_a_elem` emits the raw word `!= 0`, so the second `next()`
+  re-fetches A and the bounds assert measures 4 vs 5. Next fix: a tagged
+  Optional representation for struct fields.
+- (D) `test_product{2,3,4}_copies`: the DIRECT wrapper construction
+  `_Product2(TestCopyIterator(a), TestCopyIterator(b))` (a bare
+  generic-ctor call, no factory) stays on the old path — the emitted C
+  calls the template symbol `_Product2(...)` (declared `extern int64_t
+  _Product2 (...)`), never compiled: a link hazard the -fsyntax-only gate
+  cannot see. The element-copies pair is the sibling seed refusal (bare
+  `CopyCounter(1)` list-literal element — no static type argument) and its
+  for-loop degrades to `mojo_unsupported_iter` (loud print, zero body
+  iterations — the 2 vacuous passes). Next fix: a direct-wrapper-
+  constructor subpath + bare-ctor element inference.
+
+### Where the population stands now (measured, final code, 2026-10-22)
+
+Sweep **608 PASSED / 2 FAILED — 2 expected, 0 unexpected, 0 stale**
+(was 605/5 at the part-4 close). Warn set: 19 files / 294 warnings —
+identical (file+count) between the 97f2256e baseline sweep and this
+sweep. A/B vs the clean 97f2256e worktree, BOTH run shapes (fresh
+process per file; in-process pool — the two shapes agree to 0 mismatches
+on BOTH trees): ERROR->C 3 (test_map, test_cycle, test_product), C->C 2
+(test_bool, test_nth — the line-component fixes above), C->E 0, ERROR
+msg changes 0, removed-symbol hazard 0 (the 3 lifted files had no base C;
+test_bool/test_nth define identical symbol sets — the rename is
+call-site-only, both mangled wrappers were defined in both).
+no-new-casts 19, unchanged (the struct-pointer casts this part adds are
+outside the container-kind guard's scan). fire_runtime.c unchanged
+(562005 bytes). The remaining declared-red 2: `test_iterators`
+(re-measured 2026-10-22, unchanged — `s.bytes()` on a local `StringSlice`
+lowers to the zero stub `_t2 = 0; /* TODO: char*.bytes */` — the
+StringSpan[origin] method family, ~100 methods, has no lowering — and
+`next(bytes)` hits the hard refusal; the part-5 struct-fn kind does not
+reach it: its one factory-shaped site is a METHOD call, and its closure is
+Part-6 scale) and `test_getsize` (re-measured 2026-10-22, unchanged —
+see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.
+md`; the closure is a C-ABI-FFI sub-campaign).

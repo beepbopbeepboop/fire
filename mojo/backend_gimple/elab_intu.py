@@ -103,7 +103,13 @@ _MAX_DEPTH = 24
 # `{data, len, cap, inl}` — the container hijack this pass must not cause.
 # Measured baseline-safe: no baseline-passing TU materializes an in-TU List,
 # so this guard only ever trims the dormant lift shapes.
-_IN_TU_LIST_BASES = ('List', 'list')
+# `Array`/`InlineArray` (2026-10-22, part 5): the same rule for Mojo's
+# fixed-size array — `types._mojo_type` erases `Array[T, N]` to `MojoList *`
+# the same way (`types.py`'s list-base branch), and a materialized local
+# struct's `var _data: Array[Int, Self.size]` field (test_cycle's
+# `_CopyableOwnedIter`) must ride that erasure, not a formal `Array_2_T_N...`
+# layout.
+_IN_TU_LIST_BASES = ('List', 'list', 'Array', 'InlineArray')
 
 # The in-TU iterator bases whose spliced stdlib bodies are rewritten to
 # lowerable expressions (see _rewrite_inner_bodies). The two List iterators:
@@ -941,6 +947,27 @@ def _fn_return_annot(name, scope, stmts):
     return ' '.join(ann.split()), None
 
 
+def _fn_returns_map(stmts) -> dict:
+    """Every MODULE-LEVEL `def` in this module, mapped to its `-> T` return
+    annotation as single-spaced source text (an annotationless def maps to
+    ''). Measured 2026-10-22 part 5: `cycle(_owned3(1, 2, 3))` — the
+    container is a local function's OWNED RETURN, and only that function's
+    own return annotation (`-> _CopyableOwned[3]`) states the container's
+    concrete instantiation. `resolve_container`'s struct-fn branch consumes
+    this map to gate the shape (a return annotation that is not a local
+    generic-struct mention answers None, the honest pre-part-5 refusal).
+    Nested defs (not top-level statements) never answer a factory container
+    in this codegen, so they are deliberately excluded."""
+    out = {}
+    for st in stmts or ():
+        if type(st).__name__ != 'FunctionDef':
+            continue
+        ann = getattr(st, 'return_type', None)
+        out[st.name] = (' '.join(ann.split())
+                        if isinstance(ann, str) else '')
+    return out
+
+
 def _call_fn_arg(node) -> str | None:
     """The function value a factory call passes as its single explicit type
     arg (measured 2026-10-21 (further): `take_while[less_than_5](nums)`),
@@ -1089,7 +1116,16 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     # simply refuses the outer. It exists so `resolve_container` can tell a
     # nested factory call from an ordinary local.
     factory_names = set(getattr(gen, '_imported_generics', {}))
-    cont = iter_factory.resolve_container(args[0], factory_names, locs)
+    # Part 5 (2026-10-22): the struct-fn container kind needs the module's
+    # own struct names (gate) and its module-level defs' return annotations
+    # (the container's concrete instantiation). Both are None-safe —
+    # without them `resolve_container` answers exactly the pre-part-5
+    # refusal for a local-fn-call argument.
+    _struct_names = {st.name for st in (stmts or ())
+                     if type(st).__name__ == 'StructDef'}
+    cont = iter_factory.resolve_container(
+        args[0], factory_names, locs, struct_names=_struct_names,
+        fn_returns=_fn_returns_map(stmts))
     if cont is None:
         work.refuse(
             f'{base}(...): container argument is not a statically resolvable '
@@ -1230,6 +1266,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         # `__iter__` returns Self, so the sub-factory's wrapper IS the inner
         # and the recursion below has already enqueued it.
         pass
+    sname_mangled = None   # struct-fn kind: the container's own mangle
     if cont['kind'] in ('list', 'set', 'pyobj-list'):
         # A set container (measured 2026-10-21 (further): `enumerate(my_set)`
         # on `var my_set = {4, 5, 6}`) rides the list path end to end: the
@@ -1268,6 +1305,55 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
         inner_mangled = mm.mangle(
             inner_base, dict(zip(inner['names'], inner['args'])))
         _register_named(gen, chome, [inner_base])
+    elif cont['kind'] == 'struct-fn':
+        # A LOCAL function call returning a module-local GENERIC struct
+        # (measured 2026-10-22 part 5: test_cycle's
+        # `cycle(_owned3(1, 2, 3))` - the container is `_CopyableOwned[3]`,
+        # an `IterableOwned` whose `comptime IteratorOwnedType` member names
+        # the inner `_CopyableOwnedIter[Self.size]` with the container's own
+        # type parameter in place of `Self.size`). Both structs are
+        # top-level statements of THIS module: the same-file registration in
+        # `_register_imported_generic_structs` already put them in
+        # `_imported_generic_structs` (the current file as their home), so
+        # the in-TU materializer extracts them from this source, and the
+        # queue roots below are their only mention sites. The container's
+        # own mangled name goes in the record - the emit side lowers the fn
+        # call, calls the container's in-TU `__iter__`, and feeds the
+        # resulting inner into the wrapper constructor.
+        _mod_src = ''
+        try:
+            if gen._current_filename:
+                _mod_src = open(gen._current_filename).read()
+        except OSError:
+            _mod_src = ''
+        if not _mod_src:
+            work.refuse(f'{base}(...): module source unreadable for the '
+                        f'struct-fn container {cont["sname"]!r}')
+            return None
+        rhs = iter_factory.iter_type_rhs(_mod_src, cont['sname'], 'owned')
+        if rhs is None:
+            work.refuse(
+                f'{base}(...): {cont["sname"]}.IteratorOwnedType member '
+                'not found')
+            return None
+        inner_base = rhs.split('[', 1)[0].strip()
+        inner = iter_factory.struct_iter_inner(_mod_src, cont['sname'], rhs,
+                                               cont['sargs'])
+        if inner is None:
+            work.refuse(
+                f'{base}(...): {inner_base} type arguments do not bind for '
+                f'{cont["sname"]}')
+            return None
+        inner_mention = inner_base + '[' + ', '.join(inner['args']) + ']'
+        inner_mangled = mm.mangle(
+            inner_base, dict(zip(inner['names'], inner['args'])))
+        sname_mangled = mm.mangle(
+            cont['sname'],
+            iter_factory.struct_args_map(_mod_src, cont['sname'],
+                                         cont['sargs']) or {})
+        work.enqueue(('struct', cont['sname'], tuple(cont['sargs'])), 0,
+                     queue)
+        work.enqueue(('struct', inner_base, tuple(inner['args'])), 0, queue)
     else:   # nested factory: its wrapper is the container (its own
             # `comptime IteratorType[...] = Self`), so the inner is that
             # wrapper's mangled name, registered by the recursion below.
@@ -1294,7 +1380,9 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
            'elem_ctype': iter_factory._MOJO_ELEM_C.get(cont.get('elem'),
                                                        'int64_t'),
            'moved': bool(cont['moved']),
-           'wrapper_kwarg': wrapper_kwarg}
+           'wrapper_kwarg': wrapper_kwarg,
+           'sname': cont.get('sname'),
+           'sname_mangled': sname_mangled}
     records[iter_factory.factory_call_key(base, node)] = rec
     if wrapper is None:
         # Bare `iter`: the inner (the iterator itself) is the queue root —
@@ -1366,9 +1454,17 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
     locs = scope[2] if scope is not None else None
     args = getattr(node, 'args', None) or []
     factory_names = set(getattr(gen, '_imported_generics', {}))
+    # Part 5 (2026-10-22): the struct-fn container kind (a local function
+    # call whose return annotation names a module-local generic struct -
+    # test_product's `product(_owned3(1, 2, 3), _owned2(10, 20))`) needs
+    # the same two maps as the single-container path.
+    _struct_names = {st.name for st in (stmts or ())
+                     if type(st).__name__ == 'StructDef'}
     conts = []
     for i, a in enumerate(args):
-        c = iter_factory.resolve_container(a, factory_names, locs)
+        c = iter_factory.resolve_container(
+            a, factory_names, locs, struct_names=_struct_names,
+            fn_returns=_fn_returns_map(stmts))
         if c is None:
             work.refuse(
                 f'{base}(...): argument {i} is not a statically resolvable '
@@ -1414,7 +1510,9 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
         return None
     mentions = []
     inner_mangleds = []
+    sname_mangleds = []   # struct-fn args: the container's own mangle
     for i, c in enumerate(conts):
+        sname_mangled = None   # struct-fn args only
         if c['kind'] in ('list', 'set'):
             _ctname = 'List' if c['kind'] == 'set' else c['tname']
             chome, csrc = _container_home(gen, _ctname)
@@ -1450,6 +1548,55 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
                 return None
             inner_mention = sub['wrapper_mangled']
             inner_mangled = sub['wrapper_mangled']
+        elif c['kind'] == 'struct-fn':
+            # A local function call returning a module-local GENERIC struct
+            # (measured 2026-10-22 part 5: test_product's
+            # `product(_owned3(1, 2, 3), _owned2(10, 20))`): the same
+            # per-argument derivation as the single-container struct-fn
+            # branch of `_seed_one_factory` - the struct's `comptime
+            # IteratorOwnedType` member names the inner, `Self.<param>`
+            # bound to the fn's return-annotation arguments. The container
+            # and inner are top-level structs of this module (same-file
+            # registration), so their queue roots are enqueued here: the
+            # wrapper's field annotations mention the inners (the container
+            # struct is otherwise unmentioned - its `__iter__` is called
+            # from the emit side, not spliced anywhere).
+            _mod_src = ''
+            try:
+                if gen._current_filename:
+                    _mod_src = open(gen._current_filename).read()
+            except OSError:
+                _mod_src = ''
+            if not _mod_src:
+                work.refuse(f'{base}(...): module source unreadable for the '
+                            f'struct-fn argument {i}')
+                return None
+            rhs = iter_factory.iter_type_rhs(_mod_src, c['sname'], 'owned')
+            if rhs is None:
+                work.refuse(
+                    f'{base}(...): argument {i}: {c["sname"]}.'
+                    'IteratorOwnedType member not found')
+                return None
+            inner_base = rhs.split('[', 1)[0].strip()
+            inner = iter_factory.struct_iter_inner(_mod_src, c['sname'],
+                                                   rhs, c['sargs'])
+            if inner is None:
+                work.refuse(
+                    f'{base}(...): argument {i}: {inner_base} type '
+                    'arguments do not bind for '
+                    f'{c["sname"]}')
+                return None
+            inner_mention = inner_base + '[' + ', '.join(inner['args']) + ']'
+            inner_mangled = mm.mangle(
+                inner_base, dict(zip(inner['names'], inner['args'])))
+            work.enqueue(('struct', c['sname'], tuple(c['sargs'])), 0,
+                         queue)
+            work.enqueue(('struct', inner_base, tuple(inner['args'])), 0,
+                         queue)
+            sname_mangled = mm.mangle(
+                c['sname'],
+                iter_factory.struct_args_map(_mod_src, c['sname'],
+                                             c['sargs']) or {})
         else:
             work.refuse(
                 f'{base}(...): argument {i} container kind '
@@ -1457,6 +1604,7 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
             return None
         mentions.append(inner_mention)
         inner_mangleds.append(inner_mangled)
+        sname_mangleds.append(sname_mangled)
     wrapper_mangled = mm.mangle(
         wrapper, dict(zip(iter_params, mentions)))
     _register_named(gen, home, [wrapper])
@@ -1483,8 +1631,11 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
            'multi_args': [{'kind': c['kind'], 'inner_mangled': im,
                            'elem_ctype': iter_factory._MOJO_ELEM_C.get(
                                c.get('elem'), 'int64_t'),
-                           'moved': bool(c['moved'])}
-                          for c, im in zip(conts, inner_mangleds)]}
+                           'moved': bool(c['moved']),
+                           'sname': c.get('sname'),
+                           'sname_mangled': sm}
+                          for c, im, sm in zip(conts, inner_mangleds,
+                                               sname_mangleds)]}
     records[iter_factory.factory_call_key(base, node)] = rec
     work.enqueue(('struct', wrapper, tuple(mentions)), 0, queue)
     return rec
@@ -2143,7 +2294,7 @@ def _materialize(work, key):
         return None
     return {'kind': kind, 'base': base, 'args': tuple(args), 'targs': targs,
             'mangled': mangled, 'parsed': parsed, 'sites': _sites_of(parsed),
-            'src_path': src_path}
+            'src_path': src_path, 'src': concrete}
 
 
 # ── the entry point ────────────────────────────────────────────────────────
@@ -2281,6 +2432,8 @@ def run(gen, stmts):
                 _prereg.add(rec['mangled'])
     _rewrite_annotations(work)
     _rewrite_callees(work, stmts)
+    _rewrite_ctor_calls(work, stmts)
+    _rewrite_intu_ctor_calls(work)
     if work.notes:
         gen._intu_notes = work.notes
     return work.extra
@@ -2306,17 +2459,33 @@ def _skip(gen) -> bool:
 
 
 def _rewrite_annotations(work):
+    # The NESTED-mention bridge (measured 2026-10-22, part 5, test_map): a
+    # wrapper whose inner is itself a generic mention spells its field as
+    # `var _inner: _ListIterOwned[CopyCounter[NoneType]]`. The rewrite runs
+    # innermost-first, so after the inner round the OUTER mention's type
+    # argument is the inner's MANGLED name while work.alias keys hold the
+    # RAW mention the seed enqueued — the direct lookup misses and the outer
+    # stays unrewritten, the field erases to int64_t, and the wrapper's
+    # `__next__` body (`next(self._inner)`) is refused at definition time
+    # (the "prototype only" degradation). Translate a mangled argument back
+    # to the raw mention for the lookup; the innermost-first order and the
+    # single-argument gate mean this fires exactly on that shape — a
+    # mention whose argument was never rewritten is untouched.
+    mangled_raw = {}
+    for (kind, base, args), mangled in work.alias.items():
+        if kind == 'struct':
+            mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
         for holder, attr in rec['sites']:
             ann = _get(holder, attr)
             if not isinstance(ann, str) or '[' not in ann:
                 continue
-            new = _rewrite_ann(work, ann)
+            new = _rewrite_ann(work, ann, mangled_raw)
             if new != ann:
                 _set(holder, attr, new)
 
 
-def _rewrite_ann(work, ann):
+def _rewrite_ann(work, ann, mangled_raw):
     """`ann` with every MATERIALIZED `Base[Args]` mention replaced. Bounded by
     the annotation's own bracket depth: each round that changes the string
     removes at least one bracket pair, so this cannot spin."""
@@ -2324,6 +2493,10 @@ def _rewrite_ann(work, ann):
         hit = None
         for base, args, start, end in _mentions(ann):
             mangled = work.alias.get(('struct', base, tuple(args)))
+            if mangled is None and len(args) == 1:
+                raw = mangled_raw.get(args[0])
+                if raw is not None:
+                    mangled = work.alias.get(('struct', base, (raw,)))
             if mangled:
                 hit = (start, end, mangled)
                 break
@@ -2364,4 +2537,131 @@ def _rewrite_callees(work, stmts):
             _walk_ast_invalidate(n)
     _walk(stmts, visit)
     for rec in work.records.values():
+        _walk(rec['parsed'], visit)
+
+
+def _rewrite_ctor_calls(work, stmts):
+    """Rewrite a module function's OWN bare `Base(args)` constructor call to
+    the base's in-TU MANGLED name (part 5, 2026-10-22, measured on
+    test_cycle/test_product: `def _owned3(...) -> _CopyableOwned[3]` whose
+    body ends in `return _CopyableOwned(data^)`, a no-bracket spelling the
+    argument-less inferer cannot solve — `size` is not inferable from a
+    `MojoList *` argument, and the .o route's overload ambiguity refusal
+    erases the call to a box).
+
+    The rewrite hands the call to the CONCRETE-struct constructor dispatch
+    (emit_calls' `_fname_ctor in gen.struct_field_types` arm, which the
+    in-TU pre-registration above made true for the mangled name) — the
+    in-TU `__init__` overload the seed's materialization registered.
+
+    The instantiation is determined per call:
+      * the base's SOLE in-TU instantiation binds every bare call to it;
+      * with SEVERAL (test_cycle's `_CopyableOwned[1]` + `_CopyableOwned[3]`
+        both materialized in one TU), the ENCLOSING function's own return
+        annotation (`-> _CopyableOwned[3]`) names the instantiation — a
+        call in a function whose return annotation does not name one of the
+        base's in-TU instantiations is left alone (its old honest path
+        stands).
+    Bracketed spellings are NOT touched here: `_rewrite_callees` already
+    rewrote the concrete ones, and a bracketed call whose arguments the
+    inferer cannot solve is the .o route's business, not this pass'.
+    """
+    gen = work.gen
+    by_base = {}
+    for (kind, base, args), mangled in work.alias.items():
+        if kind == 'struct':
+            by_base.setdefault(base, {})[tuple(args)] = mangled
+    if not by_base:
+        return
+    for st in stmts or ():
+        if type(st).__name__ != 'FunctionDef':
+            continue
+        ret = getattr(st, 'return_type', None)
+        ret_args = None
+        if isinstance(ret, str):
+            m = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^\]]+)\]\s*$',
+                         ' '.join(ret.split()))
+            if m:
+                ret_args = (m.group(1),
+                            tuple(a.strip() for a in m.group(2).split(',')))
+        body = getattr(st, 'body', None) or ()
+
+        def visit(n, _ret=ret_args):
+            if type(n).__name__ != 'CallExpr':
+                return
+            f = getattr(n, 'func', None)
+            if type(f).__name__ != 'IdentExpr':
+                return
+            insts = by_base.get(f.name)
+            if not insts:
+                return
+            if len(insts) == 1:
+                args = next(iter(insts))
+            elif _ret and _ret[0] == f.name and _ret[1] in insts:
+                args = _ret[1]
+            else:
+                return      # ambiguous: the old honest path stands
+            n.func = IdentExpr(name=insts[args])
+            _walk_ast_invalidate(n)
+        _walk(list(body), visit)
+
+
+def _rewrite_intu_ctor_calls(work):
+    """The SAME rewrite, for the BODIES of in-TU materialized records
+    (part 5, 2026-10-22, measured on test_cycle: the spliced
+    `_CopyableOwned[3]` body's `__iter__` ends in
+    `return _CopyableOwnedIter(self._data.copy(), 0)` — a bare call whose
+    target's `size` is not inferable from a `MojoList *` argument either).
+
+    Unrewritten, the call dispatches to the module's own TEMPLATE struct
+    (the generic struct the test file defines, emitted as a concrete C
+    struct with the type parameter as a runtime FIELD — a different layout
+    than the mangled instantiation, and a `___init__` symbol the .o route
+    never compiles): a link-time failure, or a silently wrong object.
+
+    The enclosing record supplies the context the module-function pass gets
+    from the return annotation: the record's MONOMORPHIZED source names the
+    target's concrete instantiation in a bound mention (`comptime
+    IteratorOwnedType: Iterator = _CopyableOwnedIter[3]` after the
+    `Self.size -> 3` splice) — EXACTLY ONE distinct in-TU instantiation of
+    the base is mentioned in the record's source, and that one binds every
+    bare call to it; zero or several is a refusal to guess (the old path
+    stands). The sole-instantiation shortcut needs no mention at all."""
+    by_base = {}
+    for (kind, base, args), mangled in work.alias.items():
+        if kind == 'struct':
+            by_base.setdefault(base, {})[tuple(args)] = mangled
+    if not by_base:
+        return
+    for rec in work.records.values():
+        if rec['kind'] != 'struct':
+            continue
+        src = rec.get('src') or ''
+        if not src:
+            continue
+
+        def visit(n, _src=src):
+            if type(n).__name__ != 'CallExpr':
+                return
+            f = getattr(n, 'func', None)
+            if type(f).__name__ != 'IdentExpr':
+                return
+            insts = by_base.get(f.name)
+            if not insts:
+                return
+            if len(insts) == 1:
+                args = next(iter(insts))
+            else:
+                mentions = set()
+                for m in re.finditer(
+                        rf'\b{re.escape(f.name)}\s*\[\s*([^\]]+)\s*\]',
+                        _src):
+                    a = tuple(x.strip() for x in m.group(1).split(','))
+                    if a in insts:
+                        mentions.add(a)
+                if len(mentions) != 1:
+                    return      # ambiguous: the old honest path stands
+                args = next(iter(mentions))
+            f.name = insts[args]
+            _walk_ast_invalidate(n)
         _walk(rec['parsed'], visit)

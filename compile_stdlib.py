@@ -99,8 +99,11 @@ def discover_roots(base: Path) -> list:
 # protocol in runtime-MojoList terms — see the comment block in
 # EXPECTED_FAILURES and bugs/CODEGEN_next_on_a_user_defined_iterator_
 # struct_is_unlowered.md, "2026-10-20 (further)"). test_peek/
-# test_enumerate/test_take/test_drop left this dict; test_cycle keeps a
-# narrowed entry for its 2 user-defined-IterableOwned sites.
+# test_enumerate/test_take/test_drop left this dict. 2026-10-22 (part 5):
+# test_cycle, test_product and test/iter/test_map also left it (the
+# struct-fn container kind + the struct-literal-element subpath); the
+# removal comments carry the measured evidence, incl. test_product's
+# FLOOR-GREEN-but-ladder-partial classification (the test_set precedent).
 
 EXPECTED_FAILURES = {
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
@@ -341,17 +344,26 @@ EXPECTED_FAILURES = {
     #   generated, the `next()` refusal of this same family) — a link
     #   hazard the -fsyntax-only gate could not see.
     'test/collections/string/test_iterators.mojo': (
-        "2026-10-21 measured: `test_bytes_iter_empty` — `var bytes = s.bytes()` "
-        "on a local `StringSlice`: the iterator arrives from a METHOD call, "
-        "and the dependent-return factory subpath (elab_intu._seed_factories) "
-        "seeds FREE-function factory calls only — a method-call dependent "
-        "return (`StringSlice.bytes() -> BytesIter[...]`) erases to a boxed "
-        "`int64_t` on the .o route, so `next(bytes)` (measured receiver "
-        "`int64_t`, hard refusal, in function `test_bytes_iter_empty`) has "
-        "nothing to dispatch on. Seeding the method-call shape needs the "
-        "dependent return resolved through the receiver's static type — the "
-        "same machinery applied to a MemberExpr callee. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+        "2026-10-22 (part 5) re-measured, still red, unchanged failure: "
+        "`test_bytes_iter_empty` — `var bytes = s.bytes()` on a local "
+        "`StringSlice` lowers to the zero stub `_t2 = 0; /* TODO: char*"
+        ".bytes */` (the StringSpan[origin] method family — ~100 methods — "
+        "has no lowering; `bytes` is the word 0), and `next(bytes)` hits the "
+        "hard refusal (measured 2026-10-22: receiver `int64_t`, in function "
+        "`test_bytes_iter_empty`) — the same codegen error the file hit at "
+        "part 4's close. 2026-10-21 measured (history): the iterator arrives "
+        "from a METHOD call, and the dependent-return factory subpath "
+        "(elab_intu._seed_factories) seeds FREE-function factory calls only "
+        "— a method-call dependent return (`StringSlice.bytes() -> BytesIter"
+        "[...]`) erases to a boxed `int64_t` on the .o route. Seeding the "
+        "method-call shape needs the dependent return resolved through the "
+        "receiver's static type — the same machinery applied to a MemberExpr "
+        "callee. Part 5's struct-fn container kind (which closed test_cycle/"
+        "test_product) does not reach this file: its one factory-shaped "
+        "site is the bytes() METHOD call, and its closure (StringSpan + "
+        "Span/_SpanIter nesting + alias/origin inference) is Part-6 scale. "
+        "See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered"
+        ".md"),
      # 2026-10-21 (further) — REMOVED from this dict: test/collections/
      # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
      # (enumerate(my_set) over the set LITERAL `{4, 5, 6}`: resolve_container
@@ -392,33 +404,32 @@ EXPECTED_FAILURES = {
      # genuine improvement kept in the codegen. Full measurement record:
      # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
      # "2026-10-21 (further)".
-    'test/iter/test_map.mojo': (
-        "2026-10-21 (further) measured — the Part 2 blocker (thin-FUNCTION "
-        "value type argument) is CLOSED: map now seeds its positional "
-        "`_MapIterator[function]` return — parse_return's positional arm "
-        "(the bare identifier is the FUNCTION VALUE the call passes as its "
-        "explicit type arg, gated so it must resolve to an actual def in "
-        "scope — a bare type arg can never bind the function slot), the "
-        "wrapper header's parameters classified by annotation (`Iterator` "
-        "-> inner, `def(...)` -> function, other -> derived, where derived "
-        "binds from the function value's OWN return annotation — `def "
-        "add_one(x: Int) -> Int` supplies OutputType=Int, `def to_str` "
-        "supplies String), and `map` joins the no-import builtin factory "
-        "table (test_map calls it without an import line, like enumerate/"
-        "iter). The reduced-file scratch ladder (2 tests: test_map + "
-        "test_map_owned) is LADDER PASS 2/2 with real values — Int output "
-        "(next(m) = 2, 3, 4), String output (next(m2) = \"1\", \"2\", "
-        "\"3\"), exhaustion raising StopIteration via `m.__next__()` in "
-        "both. The ONE remaining test (test_map_function_can_take_owned_"
-        "value) is blocked by an independent cross-module gap: CopyCounter "
-        "from test_utils (`CopyCounter[NoneType](None)` + `.copy_count`) — "
-        "the single-module ladder link cannot supply test_utils (the same "
-        "family as test_set's check_write_to); its container argument "
-        "(`var list = [CopyCounter[NoneType](None)]`) is also refused by "
-        "the seed's container gate (measured note: `map(...): container "
-        "argument is not a statically resolvable local List / range / "
-        "nested factory`). See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    # 2026-10-22 (part 5) — REMOVED from this dict: the last remaining
+    # blocker (test_map_function_can_take_owned_value) is closed. The
+    # part-5 struct-literal-element subpath lands:
+    #   (a) iter_factory.list_literal_elem accepts a list-literal element
+    #       that is a generic-struct CONSTRUCTOR call — the bracketed
+    #       `CopyCounter[NoneType](None)` spelling (the type arguments are
+    #       TYPE NAMES, the discriminator against a value subscript) — and
+    #       answers the mention (`CopyCounter[NoneType]`) the seed feeds
+    #       expand_inner/mm.mangle; the C-side slot stays a raw pointer
+    #       word (_MOJO_ELEM_C default);
+    #   (b) elab_intu._rewrite_ann's mangled_raw bridge rewrites the
+    #       NESTED-mention annotation text (`_MapIterator[...CopyCounter[
+    #       NoneType]...]`) so the in-TU materializer's mangle agrees with
+    #       the seed's;
+    #   (c) emit_calls._lower_self_ctor's in-TU branch pre-checks
+    #       `_resolve_overload` on the in-TU struct's `__init__` candidates
+    #       (CopyCounter has three overloads — the duplicate-method-name
+    #       rule) and inlines the concrete `_lower_struct_constructor` +
+    #       the `(int64_t){ptr}` box instead of emitting the undefined
+    #       `___new`.
+    # Measured 2026-10-22: the REAL file's C regenerates (167760 bytes,
+    # gcc -c rc=0) and the full-file ladder is 3/3 PASS with real values
+    # (Int output 2,3,4; owned CopyCounter copy_counts; owned output 2,4,6;
+    # the StopIteration paths raise through the assert_raises setjmp
+    # frames). See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    # is_unlowered.md, "2026-10-22 (part 5)".
     # 2026-10-22 (part 4) — REMOVED from this dict: all three now pass the
     # syntax gate (the pre-shape-fix part-4 sweep reported each as STALE;
     # the final sweep is 605 PASSED / 5 FAILED, 0 unexpected, 0 stale).
@@ -485,48 +496,89 @@ EXPECTED_FAILURES = {
     # positional arm + the DERIVED parameter (bound from the function
     # value's own return annotation), is what lifted map's mechanism —
     # see test/iter/test_map's entry above for its one remaining blocker.
-    'test/itertools/test_cycle.mojo': (
-        "2026-10-21 (further) measured — 15 of 17 `cycle(...)` call sites "
-        "compile, LINK and run with real values (Int/String/Bool lists, "
-        "`List[Int]()`, `range(...)`, the copyable/iterator-protocol/for-"
-        "loop/composition forms — ladder PASS 15/15 on a copy of the file "
-        "without the 2 user-owned tests). The 2 remaining sites "
-        "(`cycle(_owned3(1, 2, 3))` line 283 in test_cycle_owned, "
-        "`cycle(_owned1(42))` line 302 in test_cycle_owned_single) are "
-        "refused at the SEED's container gate (measured notes, x2: `cycle"
-        "(...): container argument is not a statically resolvable local "
-        "List / range / nested factory`): the container argument is a "
-        "LOCAL FUNCTION CALL (`_owned3(1, 2, 3)`) whose bracketed return "
-        "type requires local generic elaboration, and its value is a "
-        "USER-DEFINED `IterableOwned` struct (`_CopyableOwned[3]` — module-"
-        "local, comptime-parameterized, in-TU `_CopyableOwnedIter[3]` over "
-        "`Array[Int, 3]`) — neither a List/Set local nor a nested factory, "
-        "so no record can be filed. The boxed `it` local then hits next()'s "
-        "hard refusal — `cannot compile module: next(...) on next(IdentExpr) "
-        "(receiver typed int64_t) has no lowering` — not a stub. Landing "
-        "needs the local-generic-elaboration gap (R2 sibling: a local fn's "
-        "bracketed return boxes to int64_t) and the in-TU user-struct "
-        "iterator (`next-on-a-user-defined-iterator-struct` family). See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
-    'test/itertools/test_product.mojo': (
-        "2026-10-22 (part 4) remeasured — the part-4 two-container factory "
-        "seed lifts the NON-OWNED shapes: `test_product2` / `_param` / "
-        "`_unequal` / `_copies` (products of two List locals) now lower — the "
-        "module compiles through them. The refusal relocated to "
-        "`test_product2_owned`: `product(_owned3(1, 2, 3), _owned2(10, 20))` — "
-        "the container arguments are LOCAL FUNCTION CALLS returning owned "
-        "values (the same R2 local-generic-elaboration + owned family as "
-        "test_cycle's user-owned sites); the seed cannot file records for "
-        "them, the boxed `it` stays `int64_t`, and `next(it)` hits the hard "
-        "refusal (measured 2026-10-22: receiver `int64_t`, in function "
-        "`test_product2_owned`). 2026-10-21 measured (history): `test_product2` "
-        "— `product(l1, l2)`: the return type depends on TWO containers "
-        "(`_Product2[IterableTypeA.IteratorType[origin_of(iterable_a)], "
-        "IterableTypeB.IteratorType[origin_of(iterable_b)]]`) — the factory "
-        "seed resolved a SINGLE container argument (args[0]) and modeled one "
-        "inner iterator in the wrapper; a two-iterable dependent return was "
-        "not representable in that record shape. See "
-        "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md"),
+    # 2026-10-22 (part 5) — REMOVED from this dict: both remaining sites
+    # (test_cycle_owned's `cycle(_owned3(1, 2, 3))`, test_cycle_owned_
+    # single's `cycle(_owned1(42))`) are closed by the part-5 struct-fn
+    # container kind — a LOCAL function call whose RETURN annotation names
+    # a module-local GENERIC struct (`-> _CopyableOwned[3]`, an
+    # `IterableOwned` whose `comptime IteratorOwnedType` member names the
+    # inner `_CopyableOwnedIter[Self.size]`). The seed resolves the fn's
+    # return annotation (elab_intu._fn_returns_map, module-level defs only),
+    # derives the inner mention with Self.<param> bound to the annotation's
+    # arguments (iter_factory.struct_iter_inner), materializes both local
+    # structs in-TU (same-file registration), and rewrites the bare
+    # constructor calls the inferer cannot solve (elab_intu._rewrite_
+    # ctor_calls: sole-instantiation or enclosing-return-annotation
+    # binding; _rewrite_intu_ctor_calls: the spliced container body's
+    # inner-ctor call, bound by the record's own concrete mention). The
+    # emit side lowers the fn call, casts the boxed return word to the
+    # seed's determined container mangle (the signature pass leaves the
+    # return annotation's generic mention unmaterialized), calls the
+    # container's in-TU `__iter__` (whose pointer->word answer the
+    # established wrapper convention makes), and feeds the inner into the
+    # wrapper constructor. Measured 2026-10-22: the REAL file compiles
+    # (269812 bytes, gcc -c rc=0) and the full-file ladder is 17/17 PASS
+    # with real values — the 15 list/range forms plus test_cycle_owned
+    # (next(it) = 1,2,3,1,2,3,1,2 — the reset path) and test_cycle_owned_
+    # single. See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    # is_unlowered.md, "2026-10-22 (part 5)".
+    # 2026-10-22 (part 5) — REMOVED from this dict: the part-5 struct-fn
+    # container kind (shared with test_cycle) lifts the OWNED family —
+    # `product(_owned3(1, 2, 3), _owned2(10, 20))` and the 3-arg/4-arg
+    # owned sites now lower: the seed files a multi record per call site
+    # (per-argument struct-fn derivation; factory_call_key now carries the
+    # node's line so same-shape same-name calls in different test
+    # functions keep distinct records — the A/B measured the hazard real
+    # in test_nth, whose 14 `iter(l)` sites let the String instantiation
+    # leak into 11 Int-test sites, and in test_bool), materializes the
+    # per-argument local structs,
+    # and the emit side reconstructs each container from its fn call's
+    # boxed word + in-TU `__iter__` before the wrapper constructor.
+    # Measured 2026-10-22: the REAL file compiles (557281 bytes, gcc -c
+    # rc=0) — FLOOR-GREEN, not value-green: the full-file ladder is 5/17
+    # real PASS + 2 vacuous, 10 FAIL on FOUR independent measured gaps,
+    # each pre-existing (the file was red before part 5, so none is a
+    # regression — the 2026-10-21 (further) part-4 product mechanism was
+    # never ladder-run on this file):
+    #   (A) 4-arg product family (test_product4, test_product4_order,
+    #       test_product4_owned — the last one IS the part-5 mechanism
+    #       hitting the gap): the spliced `_Product4.__next__` downgrades
+    #       to a zero stub (`/* indirect call via SubscriptExpr */`) and
+    #       its `__init__` to stubs (`/* ct param or undeclared: Self */`,
+    #       `/* int64_t._Product3Type() stubbed */`) — the comptime TYPE
+    #       ALIAS `comptime _Product2Type = _Product2[Self.IteratorTypeB,
+    #       Self.IteratorTypeC]` has no lowering, and `_flatten` (the
+    #       right-nested tuple flattener) is MLIR-op code. Next fix:
+    #       comptime type-alias resolution + the nested in-TU product
+    #       instantiation + `_flatten` lowering.
+    #   (B) comptime for-param family (test_product{2,3,4}_param):
+    #       `comptime for i, j in product(range(2), range(2))` — the
+    #       compile-time loop runs zero iterations (trip_count stays 0;
+    #       the assert_equal(trip_count, 4) measures 0). Next fix:
+    #       comptime evaluation of the in-TU product iterator.
+    #   (C) test_product_bounds: `Optional[Int]` holding 0 is
+    #       indistinguishable from None — the spliced `_Product2.__next__`
+    #       guards `if not self._inner_a_elem` and the emitted test is the
+    #       raw word `_t3 != 0` (Some(0) reads as empty), so the second
+    #       next() re-fetches A; the bounds assert measures 4 vs 5. Next
+    #       fix: a tagged Optional representation (is_some side-band) for
+    #       struct fields.
+    #   (D) test_product{2,3,4}_copies: the DIRECT wrapper construction
+    #       `_Product2(TestCopyIterator(a), TestCopyIterator(b))` (a bare
+    #       generic-ctor call, no factory) stays on the old path — the
+    #       emitted C calls the template symbol `_Product2(...)` (declared
+    #       `extern int64_t _Product2 (...)`), never compiled: a link
+    #       hazard the -fsyntax-only gate cannot see (the ladder driver
+    #       must stub it). The element_copies pair is the sibling seed
+    #       refusal (bare `CopyCounter(1)` list-literal element — no
+    #       static type argument) and its for-loop degrades to
+    #       mojo_unsupported_iter (loud print, zero body iterations).
+    #       Next fix: a direct-wrapper-constructor subpath (seed a bare
+    #       `_ProductN(args)` whose local struct rvalue arguments supply
+    #       the type mentions; the emit rides the existing concrete-ctor
+    #       dispatch). See
+    #       bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    #       is_unlowered.md, "2026-10-22 (part 5)".
     # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
     # `explicit-failed` half of the census, not the `next(...)` half above.
     # `std/os/path/path.mojo`'s `getsize` is a bracket template, and once the
@@ -562,6 +614,26 @@ EXPECTED_FAILURES = {
     # above, which is why the summary line reads 22 expected / 0 unexpected.
     'test/os/path/test_getsize.mojo': (
         "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. "
+        "RE-MEASURED 2026-10-22 (part 5): unchanged — codegen fails "
+        "(`gcc -c failed for the monomorphized getsize_8_PathLike_6_String "
+        "(exit 1, 3 attempts)`; `implicit declaration of function 'stat'`), "
+        "and the emitted body is still `stat (path)` + "
+        "`_mojo_dispatch_getattr(..., \"st_size\")`. The closure was mapped "
+        "in full: std/os/fstat.mojo's `stat[PathLike]` selects the platform "
+        "arm with a comptime branch (`CompilationTarget.is_macos()`); "
+        "`_stat_macos` is `external_call[\"stat\", Int32](path.as_c_string_"
+        "span(), Pointer(to=stat))` — an FFI call with an OUT PARAMETER "
+        "filling the `_c_stat` C-ABI struct (17 mixed-width fields incl. "
+        "`_CTimeSpec` + `Array[Int64, 2]`), which the in-TU materializer "
+        "does not lay out in C-ABI order; the result travels through "
+        "`_to_stat_result()` (18-field projection + Int casts) and the "
+        "18-argument keyword constructor of `stat_result`. Every link of "
+        "that chain (C-ABI struct layout, external_call out-struct, "
+        "`as_c_string_span`, comptime target branch, Error-with-String "
+        "raise) is an unmeasured mechanism — a C-ABI-FFI sub-campaign, not "
+        "a next-fix. Part 5's factory machinery does not touch this file "
+        "(no dependent-return factory call; the failure is in the "
+        "monomorphized module compile, identical to the 2026-10-20 state). "
         "UPDATE 2026-10-20: the first of the three defects is closed — "
         "`__fspath__()` on a String receiver is now lowered as the identity "
         "(stdlib's `String.__fspath__` returns self, and this codegen's "

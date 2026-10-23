@@ -453,6 +453,100 @@ def expand_inner(container_src: str, inner_base: str, rhs: str,
     return {'names': derived_n + names, 'args': out}
 
 
+def _header_params(src: str, sname: str) -> list | None:
+    """The header parameters of `struct <sname>[...]` as an ORDERED list of
+    `(name, default)` pairs (default is the empty string when absent), or
+    None when the header is not found or its brackets do not close. The `//`
+    derived-parameter separator is skipped like a parameter with no name."""
+    m = re.search(rf'^struct\s+{re.escape(sname)}\s*\[', src, re.M)
+    if not m:
+        return None
+    close = _matching_bracket(src, m.end() - 1)
+    if close is None:
+        return None
+    head = src[m.end():close]
+    out = []
+    for p in _split_top_commas(head):
+        p = p.strip()
+        if not p or p == '//':
+            continue
+        h, _, d = p.partition('=')
+        nm = h.split(':', 1)[0].strip()
+        if nm:
+            out.append((nm, d.strip()))
+    return out
+
+
+def struct_iter_inner(container_src: str, sname: str, rhs: str,
+                      sargs: list) -> dict | None:
+    """The FULL explicit type-argument list for the inner iterator of a
+    USER-STRUCT container (measured 2026-10-22, part 5: test_cycle's
+    `cycle(_owned3(1, 2, 3))` — the container is a LOCAL function's owned
+    return, a user `IterableOwned` struct `_CopyableOwned[3]`, whose own
+    `comptime IteratorOwnedType: Iterator = _CopyableOwnedIter[Self.size]`
+    member names the inner with the container's CONCRETE type arguments in
+    place of the container's type parameters).
+
+    Unlike `expand_inner` (the LIST container's element parameter is the
+    fixed token `Self.T`), the member text here carries the container's own
+    parameter NAME (`Self.size`): bind every `Self.<param>` to the concrete
+    argument the call spells, positionally against the container's header
+    parameters — a parameter the call omits takes its header default, and a
+    `Self.` member no header parameter names (or a parameter with neither
+    argument nor default) is a refusal, not a guess. The inner's own header
+    must be present in the same source (the measured shapes keep both
+    structs in the test module) so its parameter NAMES can key the mangle's
+    `{param: value}` dict. Returns {'names', 'args'} (parallel lists) or
+    None, exactly as `expand_inner` does."""
+    hparams = _header_params(container_src, sname)
+    if hparams is None:
+        return None
+    names = [nm for nm, _ in hparams]
+    defaults = {nm: d for nm, d in hparams}
+    out = rhs
+    for i, nm in enumerate(names):
+        val = sargs[i] if i < len(sargs) else defaults.get(nm, '')
+        if not val:
+            return None
+        out = re.sub(rf'\bSelf\.{re.escape(nm)}\b', val, out)
+    if re.search(r'\bSelf\.\w+', out):
+        return None
+    if '[' not in out:
+        return None
+    inner_base = out.split('[', 1)[0].strip()
+    bracket = out[out.index('[') + 1:out.rindex(']')]
+    iargs = [a.strip() for a in _split_top_commas(bracket)] if bracket else []
+    inames = _header_params(container_src, inner_base)
+    if inames is None:
+        return None      # the member names a struct this source does not declare
+    inames = [nm for nm, _ in inames]
+    if len(inames) != len(iargs):
+        return None      # the member's arity does not bind the inner's header
+    return {'names': inames, 'args': iargs}
+
+
+def struct_args_map(container_src: str, sname: str,
+                    sargs: list) -> dict | None:
+    """The `{param: value}` mangle dict for a USER struct's CONCRETE type
+    arguments: the call's arguments positionally against the struct's header
+    parameters, a trailing parameter the call omits taking its header
+    default, a parameter with neither argument nor default a refusal (None).
+    Sibling of `struct_iter_inner`'s own binding rule — the seed uses it for
+    the container's OWN mangled name (the emit side calls the container's
+    in-TU `__iter__` through it)."""
+    hparams = _header_params(container_src, sname)
+    if hparams is None:
+        return None
+    defaults = {nm: d for nm, d in hparams}
+    out = {}
+    for i, (nm, _) in enumerate(hparams):
+        val = sargs[i] if i < len(sargs) else defaults.get(nm, '')
+        if not val:
+            return None
+        out[nm] = val
+    return out
+
+
 def _split_top_commas(s: str) -> list[str]:
     """Top-level comma split (bracket-depth aware, string-skip — the same
     rule `mojo.middle.exprtypes._split_top_level_commas` applies; re-imposed
@@ -551,7 +645,22 @@ def factory_call_key(name: str, node) -> tuple:
     `take_while[less_than_5](nums)` — two calls with the same container
     local but different predicates are DIFFERENT instantiations; a key
     without the type arg let the second seed's record silently replace the
-    first, and both call sites would have emitted the same wrapper)."""
+    first, and both call sites would have emitted the same wrapper).
+
+    The LINE is the positional discriminator (2026-10-22 part 5): the
+    structural key is per-call-SHAPE, not per-call-SITE, so same-name
+    same-shape calls in DIFFERENT test functions shared one record and the
+    later seed's record silently replaced the earlier — measured in the
+    A/B on two already-green files: test_nth's 14 `iter(l)` sites (the
+    String instantiation leaked into 11 Int-test sites: lists built with
+    mojo_list_append_int were alloced as _ListIterOwned[String]) and
+    test_bool's `map[gt0](l)` in test_all baking the test_any_gt0 symbol.
+    (test_product's own line-30/line-82 `product(l1, l2)` pair is the same
+    hazard with identical element types — harmless there, latent in
+    general.) Two call sites cannot share a LINE with the same signature
+    and different static element types (same scope => same locals;
+    different scopes => different lines), so the line never merges
+    distinct instantiation semantics."""
     fn = getattr(node, 'func', None)
     type_args = ()
     if type(fn).__name__ == 'SubscriptExpr':
@@ -560,7 +669,8 @@ def factory_call_key(name: str, node) -> tuple:
             type_args = (arg_signature(idx),)
     args = getattr(node, 'args', None) or ()
     kws = getattr(node, 'kwargs', None) or ()
-    return (name, type_args, tuple(arg_signature(a) for a in args),
+    return (name, getattr(node, 'line', 0), type_args,
+            tuple(arg_signature(a) for a in args),
             tuple(k[0] for k in kws))
 
 
@@ -570,6 +680,44 @@ def factory_call_key(name: str, node) -> tuple:
 # `_Bool`, strings `char *`, numeric lists promote int -> double.
 _MOJO_ELEM_C = {'Int': 'int64_t', 'String': 'char *', 'Bool': '_Bool',
                 'Float64': 'double'}
+
+
+def _struct_ctor_mention(e) -> str | None:
+    """The generic-struct MENTION a list-literal CONSTRUCTOR element spells,
+    or None. `CopyCounter[NoneType](None)` -> `CopyCounter[NoneType]`.
+
+    Measured 2026-10-22 (part 5, test_map): the element is a CallExpr whose
+    func is a SubscriptExpr — a generic struct CONSTRUCTOR, not a value
+    subscript — and its type arguments are TYPE NAMES (IdentExprs; a
+    multi-argument spelling is a TupleExpr of them). The value-subscript
+    spelling (`f[0](x)`) indexes with a literal or expression, never a bare
+    type name, so the IdentExpr-index gate is the discriminator. The mention
+    is the mangled-NAME-side spelling the seed feeds `expand_inner` and
+    `mm.mangle` (the in-TU materializer takes the same text through
+    `bind_type_args`); the C-side slot is a raw pointer word (see
+    `_MOJO_ELEM_C`'s default). A mention that does not turn out to be a
+    registered generic struct is refused downstream in the seed — exactly as
+    every other unresolved container is — so the gate here stays textual."""
+    f = getattr(e, 'func', None)
+    if type(f).__name__ != 'SubscriptExpr':
+        return None
+    obj = getattr(f, 'obj', None)
+    if type(obj).__name__ != 'IdentExpr':
+        return None
+    idx = getattr(f, 'index', None)
+    t = type(idx).__name__
+    if t == 'IdentExpr':
+        args = [idx.name]
+    elif t == 'TupleExpr':
+        args = [a.name for a in (getattr(idx, 'elements', None) or ())
+                if type(a).__name__ == 'IdentExpr']
+        if len(args) != len(getattr(idx, 'elements', None) or ()):
+            return None
+    else:
+        return None
+    if not args or any(not a for a in args):
+        return None
+    return f"{obj.name}[{', '.join(args)}]"
 
 
 def list_literal_elem(elements) -> str | None:
@@ -617,8 +765,25 @@ def list_literal_elem(elements) -> str | None:
             # element through `mojo_list_append_str` — the list IS a
             # String list.
             kinds.add('String')
+        elif t == 'CallExpr':
+            # A GENERIC STRUCT constructor element (measured 2026-10-22
+            # part 5: test_map's `var list = [CopyCounter[NoneType](None)]`)
+            # — the element type is the struct MENTION itself, carried as a
+            # distinct kind so the homogeneity answer below is exact: two
+            # elements of the same struct kind are one element type, any
+            # mix (struct beside a scalar, or two different structs) is a
+            # heterogeneous refusal, exactly as a String beside an Int is.
+            _mention = _struct_ctor_mention(e)
+            if _mention is not None:
+                kinds.add(('struct', _mention))
+            else:
+                return None
         else:
             return None
+    if len(kinds) == 1:
+        _k = next(iter(kinds))
+        if isinstance(_k, tuple):
+            return _k[1]
     if 'String' in kinds:
         return 'String' if kinds == {'String'} else None
     if kinds == {'Bool'}:
@@ -630,7 +795,8 @@ def list_literal_elem(elements) -> str | None:
     return None
 
 
-def resolve_container(node, factory_names, locals_map, struct_names=None) -> dict | None:
+def resolve_container(node, factory_names, locals_map, struct_names=None,
+                      fn_returns=None) -> dict | None:
     """What a factory's FIRST argument statically IS, or None (refuse).
 
     Returns one of:
@@ -658,7 +824,19 @@ def resolve_container(node, factory_names, locals_map, struct_names=None) -> dic
           `<Struct> *` result is the wrapper's `_values[i]`. `struct_names`
           must be supplied for this kind (the caller's module-local struct
           names); with it absent the shape answers None, exactly as before
-          part 4 added it."""
+          part 4 added it.
+      {'kind': 'struct-fn', 'fn': <fn>, 'sname': <struct>, 'sargs': [...],
+           'moved': True}
+           a LOCAL function call whose RETURN annotation names a module-local
+           generic struct (measured 2026-10-22 part 5: test_cycle's
+           `cycle(_owned3(1, 2, 3))` - `def _owned3(...) -> _CopyableOwned[3]`,
+           an `IterableOwned` whose `comptime IteratorOwnedType` member names
+           the inner `_CopyableOwnedIter[Self.size]`). The rvalue selects the
+           owned overload like every direct rvalue; `fn_returns` (the caller's
+           own module-level defs' return annotations, built by the seed from
+           the module's statements) and `struct_names` must both be supplied
+           for this kind - without either, the shape answers None, as before
+           part 5."""
     moved = False
     if type(node).__name__ == 'UnaryOp' and getattr(node, 'op', '') == '^':
         moved = True
@@ -789,6 +967,30 @@ def resolve_container(node, factory_names, locals_map, struct_names=None) -> dic
             # struct names) so a runtime-name collision cannot claim the
             # shape; without it the answer is None, as before part 4.
             return {'kind': 'struct', 'sname': fn, 'moved': True}
+        if fn in (fn_returns or ()):
+            # A LOCAL function call whose RETURN annotation names a
+            # module-local generic struct (measured 2026-10-22 part 5:
+            # test_cycle's `cycle(_owned3(1, 2, 3))` - `def _owned3(...) ->
+            # _CopyableOwned[3]`, an `IterableOwned` whose `comptime
+            # IteratorOwnedType` member names the inner
+            # `_CopyableOwnedIter[Self.size]`). The rvalue selects the owned
+            # overload like every direct rvalue. `fn_returns` (built by the
+            # seed from the caller's own module-level defs) and
+            # `struct_names` both gate this: a return annotation that is not
+            # a local generic-struct mention - or a base not defined in the
+            # module - answers None, the honest pre-part-5 refusal.
+            _ann = (fn_returns or {}).get(fn)
+            if isinstance(_ann, str):
+                _am = re.match(
+                    r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^\]]+)\]\s*$',
+                    ' '.join(_ann.split()))
+                if _am and _am.group(1) in (struct_names or ()):
+                    return {'kind': 'struct-fn', 'fn': fn,
+                            'sname': _am.group(1),
+                            'sargs': [a.strip() for a in _am.group(2)
+                                      .split(',')],
+                            'moved': True}
+            return None
         if (type(f).__name__ == 'MemberExpr'
                 and getattr(f, 'member', None) == '__iter__'
                 and not (getattr(node, 'args', None) or ())):

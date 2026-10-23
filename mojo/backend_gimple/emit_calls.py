@@ -904,6 +904,46 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
             if _ainf['kind'] == 'factory':
                 # a NESTED factory argument: its wrapper pointer IS the inner
                 _inner_v = _cont_v
+            elif _ainf['kind'] == 'struct-fn':
+                # A LOCAL FUNCTION CALL argument (2026-10-22 part 5:
+                # test_product's `product(_owned3(1, 2, 3), _owned2(10,
+                # 20))`): the same reconstruction as the single-container
+                # struct-fn branch below - the fn call is the in-TU
+                # container, and its in-TU `__iter__` (the var-self
+                # overload, zero arguments) returns the inner. When the
+                # fn's declared return is a boxed word (its return
+                # annotation's generic mention unmaterialized in the
+                # signature pass) the word IS exactly the container
+                # pointer: the type-accurate cast to the seed's determined
+                # mangled struct (the pyobj-list unbox's scale).
+                if not (_cont_t is not None and _cont_t.endswith(' *')):
+                    if _cont_t == 'int64_t' and _ainf.get('sname_mangled'):
+                        _cont_v = gen._new_val(
+                            f"{_ainf['sname_mangled']} *",
+                            f"({_ainf['sname_mangled']} *){_cont_v}")
+                        _cont_t = f"{_ainf['sname_mangled']} *"
+                    else:
+                        return None
+                _mc = gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(name=_cont_v),
+                        member='__iter__',
+                        line=getattr(_arg_node, 'line', 0)),
+                    args=[], kwargs=[],
+                    line=getattr(_arg_node, 'line', 0))
+                try:
+                    _it, _inner_v = gen._lower_method_call(_mc)
+                except Exception:
+                    return None
+                if not _it.endswith(' *') and _it == 'int64_t' \
+                        and _ainf.get('inner_mangled'):
+                    # the spliced `__iter__` answers the inner as a word
+                    # (its `Self.<member>` return annotation erases); the
+                    # word IS the pointer - the same type-accurate cast
+                    # the single-container branch applies
+                    _inner_v = gen._new_val(
+                        f"{_ainf['inner_mangled']} *",
+                        f"({_ainf['inner_mangled']} *){_inner_v}")
             elif _ainf['moved']:
                 if not (_cont_t is not None and _cont_t.endswith(' *')):
                     return None
@@ -964,6 +1004,52 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
         _cont_arg = gimple_ctypes.IdentExpr(name=_set_list)
     if rec['kind'] == 'factory':
         inner_v, inner_t = cont_v, cont_t
+    elif rec['kind'] == 'struct-fn':
+        # A LOCAL FUNCTION CALL container (2026-10-22 part 5, measured on
+        # test_cycle's `cycle(_owned3(1, 2, 3))`): the fn call lowered above
+        # is the in-TU container struct (its body builds the in-TU
+        # instantiation the seed materialized), and the container's in-TU
+        # `__iter__` (the var-self overload, zero arguments - the only
+        # overload on the measured user structs) returns the inner pointer
+        # the wrapper constructor below consumes. When the fn's declared
+        # return is a boxed word (the signature pass left the generic
+        # mention in the return annotation unmaterialized) the word IS
+        # exactly the container pointer: the type-accurate cast to the
+        # seed's determined mangled struct (the pyobj-list unbox's scale).
+        if not (cont_t is not None and cont_t.endswith(' *')):
+            if cont_t == 'int64_t' and rec.get('sname_mangled'):
+                cont_v = gen._new_val(
+                    f"{rec['sname_mangled']} *",
+                    f"({rec['sname_mangled']} *){cont_v}")
+                cont_t = f"{rec['sname_mangled']} *"
+            else:
+                return None
+        _mc = gimple_ctypes.CallExpr(
+            func=gimple_ctypes.MemberExpr(
+                obj=gimple_ctypes.IdentExpr(name=cont_v),
+                member='__iter__',
+                line=getattr(node, 'line', 0)),
+            args=[], kwargs=[], line=getattr(node, 'line', 0))
+        try:
+            _it, inner_v = gen._lower_method_call(_mc)
+        except Exception:
+            return None
+        if _it.endswith(' *'):
+            inner_t = _it
+        elif _it == 'int64_t' and rec.get('inner_mangled'):
+            # The spliced `__iter__`'s return annotation - a `Self.<member>`
+            # comptime reference this codegen does not splice - erases to a
+            # word: the body's pointer->word cast at the return point makes
+            # the word EXACTLY the inner pointer (the wrapper family's
+            # established convention - every materialized `__iter__` in the
+            # iterator protocol answers a word), so the type-accurate cast
+            # to the seed's determined inner mangle recovers it.
+            inner_v = gen._new_val(
+                f"{rec['inner_mangled']} *",
+                f"({rec['inner_mangled']} *){inner_v}")
+            inner_t = f"{rec['inner_mangled']} *"
+        else:
+            return None
     else:
         _is_ptr = cont_t is not None and cont_t.endswith(' *')
         if rec['moved']:
@@ -5131,6 +5217,30 @@ def _lower_self_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # "" when outside a method body) before any body lowering.
     sname = _as_str(gen._current_struct_name)
     if sname:
+        if sname in getattr(gen, '_intu_structs', {}):
+            # An in-TU materialized struct has no separately-compiled object
+            # defining `<sname>___new` — the stub declaration would be a
+            # dangling link reference even in a body nothing calls (measured
+            # 2026-10-22, part 5: CopyCounter's in-TU `__init__(out self)`
+            # body `self = Self(Self.T())` left `CopyCounter_...___new`
+            # undefined at ladder link). Construct inline exactly the way a
+            # call site would — allocation + the `__init__` overload the real
+            # argument types select — and box the pointer the way the
+            # historical `___new` call's result boxed it (the consumer casts
+            # the word back to the struct pointer).
+            _cands = gen._struct_method_signatures.get(
+                _sms_key(sname, '__init__'))
+            _chosen = (gen._resolve_overload(_cands, node.args,
+                                             getattr(node, 'kwargs', None) or [])
+                       if _cands else None)
+            if _chosen is not None:
+                _ct, _cv = gen._lower_struct_constructor(
+                    sname, list(node.args),
+                    getattr(node, 'kwargs', None) or [])
+                return 'int64_t', gen._new_val('int64_t', f'(int64_t){_cv}')
+            # No overload the real argument types select: the old path's
+            # stub call stands (honest — the call site would fail the same
+            # resolution), never a partial inline.
         arg_pairs = [gen.lower_expr(a) for a in node.args]
         gen._self_ctor_stubs[sname] = True
         return 'int64_t', gen._call_expr('int64_t', f'{sname}___new', arg_pairs)

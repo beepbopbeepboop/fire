@@ -1248,3 +1248,54 @@ The elaborator-decline census is not re-run (same treatment as the
 2026-10-21 sections above). The declared-red population it complements is
 now the 5 entries named in the R1 doc's 2026-10-22 table (plus the
 floor-green `test_set`, out of the sweep).
+
+## 2026-10-22 (part 5): re-measured — test_getsize unchanged, the closure
+mapped in full; the declared-red population is 5 -> 2
+
+The part-5 campaign (struct-fn container kind + struct-literal-element
+subpath; see the R1 doc's "2026-10-22 (part 5)" section for the measured
+mechanisms, the ladder evidence, and the full gate record: sweep 608/2,
+A/B both shapes C->E 0, warn set 19/294 identical, no-new-casts 19
+unchanged) lifts 3 of the 5 declared-red entries (test_map, test_cycle,
+test_product — all from the R1 doc's census). From this doc's
+perspective the measured surface is unchanged, plus the closure mapping:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-22, unchanged:
+  codegen fails (`gcc -c failed for the monomorphized
+  getsize_8_PathLike_6_String (exit 1, 3 attempts)`; `implicit
+  declaration of function 'stat'`); the emitted body is still
+  `stat (path)` + `_mojo_dispatch_getattr(..., "st_size")` — the result
+  modelled as a word, `.st_size` fetched dynamically. The factory changes
+  do not touch this file (no dependent-return factory call; the failure
+  is in the monomorphized module compile — A/B ERROR->ERROR, no message
+  change). This session mapped the closure in full, and it is a C-ABI-FFI
+  sub-campaign, not a next-fix: std/os/fstat.mojo's `stat[PathLike]`
+  selects the platform arm with a comptime branch
+  (`CompilationTarget.is_macos()`); `_stat_macos` is
+  `external_call["stat", Int32](path.as_c_string_span(),
+  Pointer(to=stat))` — an FFI call with an OUT PARAMETER filling the
+  `_c_stat` C-ABI struct (17 mixed-width fields incl. `_CTimeSpec` +
+  `Array[Int64, 2]`), which the in-TU materializer does not lay out in
+  C-ABI order; the result travels through `_to_stat_result()` (18-field
+  projection + `Int(...)` casts) and the 18-argument keyword constructor
+  of `stat_result`. Every link of that chain (C-ABI struct layout,
+  external_call out-struct, `as_c_string_span`, the comptime target
+  branch, the `Error("unable to stat '", path, "'")` raise) is an
+  unmeasured mechanism. The `#include <sys/stat.h>` route stays closed:
+  every TU includes fire_runtime.h and std/os/_macos.mojo declares `stat`
+  itself via `external_call["stat", Int32]` (conflicting types).
+- `test/collections/string/test_iterators.mojo` (listed in this doc's
+  family table for the shared method-call dependent-return family) —
+  RE-MEASURED 2026-10-22, unchanged: `s.bytes()` on a local `StringSlice`
+  lowers to the zero stub `_t2 = 0; /* TODO: char*.bytes */` and
+  `next(bytes)` hits the hard refusal (A/B ERROR->ERROR, no message
+  change). The part-5 struct-fn kind does not reach it: its one
+  factory-shaped site is a METHOD call, and its closure (the
+  StringSpan[origin] method family, ~100 methods, + Span/_SpanIter
+  nesting + alias/origin inference) is Part-6 scale.
+
+The elaborator-decline census is not re-run (same treatment as the
+2026-10-21 sections above). The declared-red population it complements is
+now the 2 entries above (plus the floor-green `test_set`, out of the
+sweep, and the floor-green `test_product`, ladder-red on the 4 measured
+families A-D in the R1 doc).
