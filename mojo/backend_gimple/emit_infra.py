@@ -1893,8 +1893,19 @@ def _emit_through(gen, line: str, level: int) -> None:
     if fr.frame_kind == 'try':
         if stripped.startswith('return ') or stripped == 'return;':
             if stripped.startswith('return ') and stripped != 'return;':
-                fr.return_value = stripped[7:].rstrip(';').strip()
-                fr.has_return_value = True
+                # ONE variable carries the value of every early return in
+                # this region to the deferred `return` after `finally`. The
+                # value text itself used to be kept, so with two returns in
+                # the body only the LAST one's temp was returned and the
+                # other path returned an unassigned temp: `return True, out`
+                # before a later `return False, out` came back as garbage
+                # (the self-hosted compiler's `_infer_return_maybe_kinds`).
+                _rv = stripped[7:].rstrip(';').strip()
+                if not fr.has_return_value:
+                    _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
+                    fr.return_value = gen._new_temp(_rt)
+                    fr.has_return_value = True
+                _emit_through(gen, f"  {fr.return_value} = {_rv};", level - 1)
             else:
                 fr.return_value = ''
                 fr.has_return_value = False

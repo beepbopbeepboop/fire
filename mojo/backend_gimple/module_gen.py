@@ -821,7 +821,7 @@ wrong-static-answer failure the whole table exists to avoid.
 
 
 def _infer_return_maybe_kinds(gen, body, params=None,
-                            callee_kinds=None) -> tuple:
+                            callee_kinds=None) -> tuple[bool, list]:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -7088,16 +7088,24 @@ def gen_module_impl(self, stmts):
         # it cheap — memoised by body identity, NOT by `(body, params)`,
         # because two definitions never share a body node and the params
         # are that node's own.
-        _mk_cache: dict = {}
+        # TWO caches of one slot type each, not one of `(maybe, slot_kinds)`
+        # pairs: a `(bool, list)` read back out of a dict has no per-slot
+        # types in the compiled compiler, so `_maybe` came out a `MojoList *`,
+        # `if _maybe:` asked the length of the word 1, and no function was
+        # ever marked -- every kinds-carrying return read its slots with the
+        # str accessor there.
+        _mk_maybe: dict = {}
+        _mk_slots: dict = {}
 
         def _mk(name, body, params=None):
             _k = id(body)
-            _v = _mk_cache.get(_k)
-            if _v is None:
-                _v = _infer_return_maybe_kinds(
+            if _k not in _mk_maybe:
+                _r_maybe, _r_slots = _infer_return_maybe_kinds(
                     self, body, params, callee_kinds)
-                _mk_cache[_k] = _v
-            _maybe, _slotkinds = _v
+                _mk_maybe[_k] = bool(_r_maybe)
+                _mk_slots[_k] = _r_slots
+            _maybe: bool = _mk_maybe[_k]
+            _slotkinds: list = _mk_slots[_k]
             if _maybe:
                 self._return_maybe_kinds.add(name)
             if _slotkinds:
