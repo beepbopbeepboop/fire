@@ -230,6 +230,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
+    # PART 6 (2026-10-22, family C): the tagged-Optional read table is
+    # per-function (temp names are per-function); clear it like the other
+    # per-func maps so a stale entry can never leak into the next body.
+    gen._tagged_opt_read: dict[str, tuple] = {}
     # This function's higher-order parameters whose declared default names
     # a compiled generator of this compile — `{param: generator api}`.
     # Per-FUNCTION, like every other map here (and reset HERE, not left to

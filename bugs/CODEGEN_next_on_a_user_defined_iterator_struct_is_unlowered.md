@@ -2353,3 +2353,143 @@ reach it: its one factory-shaped site is a METHOD call, and its closure is
 Part-6 scale) and `test_getsize` (re-measured 2026-10-22, unchanged —
 see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.
 md`; the closure is a C-ABI-FFI sub-campaign).
+
+## 2026-10-22 (part 6): the tagged-Optional field side-band closes gap (C)
+— `test_product_bounds` is value-green (6,5,4,3,2,1,0), zero regressions
+
+Part 6's first target was gap (C) from the part-5 section above — the
+`Optional[Int]` field whose stored word 0 (Some(0)) is indistinguishable
+from None in the raw-word representation. It landed as a TAGGED
+representation: an in-TU materialized struct (the `elab_intu` `_intu_structs`
+set) whose field annotation is `Optional[...]` with a NON-POINTER scalar
+payload (`ft == 'int64_t'`; pointer payloads keep the raw word — None is
+NULL and already distinguishable) gains an adjacent `_Bool <f>_is_some`
+side-band in the C typedef (module_gen's field-registration tag mark +
+`_render_struct_typedef_body`, all 3 call sites). Writers (emit_stmts
+member-store branch): `None` → 0; an `Optional[...]` constructor → 1 with a
+value arg, 0 empty; a `.copy()` on a read of the SAME tagged field (the
+spliced copy constructor `self._x = copy._x.copy()`) → the source
+side-band (a raw-word `!= 0` would mis-tag Some(0)); anything else
+(element, `next(...)`, fieldwise-init parameter) → 1. Readers
+(emit_exprs `_lower_MemberExpr`): each tagged-field read temp is recorded in
+`gen._tagged_opt_read` (reset per function in `_reset_func`); positive
+truthiness (`_ensure_bool_cond`'s int64 arm) → `obj->f_is_some`; negative
+`not` (`_lower_UnaryOp`'s int64 arm) → `is_some == 0`. Documented value-
+level boundary: a stored Optional-typed value word that is genuinely None
+or Some(0) ACROSS A CALL BOUNDARY is not distinguishable — no measured
+spliced body stores one.
+
+Blast radius (measured over the whole 610-file sweep, 8 workers): exactly
+3 files / 5 in-TU instantiations carry `Optional[...]` fields —
+`test/iter/test_once.mojo` (`_Once[Int64]._inner`), `test/iter/test_peek.
+mojo` (`_PeekableIterator[_ListIterOwned[Int]]._next`), `test/itertools/
+test_product.mojo` (`_Product2[...]._inner_a_elem` × 3 instantiations). All
+three are floor-green today, so they classify C->C and stay green (the
+side-band is strictly more correct; their tested values are non-zero, so
+old and new semantics agree). The writer has THREE sites, because the
+side-band must be set wherever a tagged field's word is written:
+(1) the plain member-store path (emit_stmts `AssignStmt`); (2) the
+Optional CONSUMING read — `x.unsafe_take()` (emit_methods: read-the-
+word-then-zero-store; `ot` there is the field's VALUE type, so the struct
+name comes from the receiver's lowered type, not `ot`): the consume
+clears the field, so the tag must clear with it — measured miss:
+`_PeekableIterator.__next__`'s `bb_3` zeroed the word without the tag and
+the next `if self._next:` (tag reader) re-served the stale cached value
+(test_peek's `test_peekable_with_peeking` FAILED on the tagged C where
+the clean-master C passed — the rebuilt 6/6 ladder caught it; the same
+shape is `_Once.__next__`, std/iter/__init__.mojo:361); (3) the
+SYNTHESIZED FIELDWISE `.copy()` (emit_methods `_emit_fw_copy`): the
+side-band is a layout-only member (NOT in `struct_field_types`), so the
+fieldwise loop never copies it and the fresh object's tag byte is malloc
+garbage (its `_alloc` is a plain malloc) — measured miss: test_once's
+`it.copy()` copied the word, not the tag.
+
+The gate regression this caught (and the GIMPLE strictness rule it
+measured): the first side-band emission — `self->_inner_a_elem_is_some =
+(0);` — is a HARD gimple-frontend error ("expected expression before '('
+token") inside a `__GIMPLE`-tagged function, while the same shape in an
+ordinary function is fine. The measured rule (gimple_test matrix, 2026-10-
+22): a `__GIMPLE` function's body must ALREADY BE valid raw GIMPLE — the
+store's RHS must be a register (parenthesized expressions, casts on
+constants, constant-to-`_Bool` conversions, and same-type-mismatching
+binary operands are all hard frontend errors; the baseline's own
+`_new_val` docstring documents the negative-literal analogue). Every
+side-band store/read now routes through a same-type `_Bool` temp
+(`_new_val('_Bool', '0'|'1')` → `t = (_Bool)0;` — cast of a non-negative
+literal into a register; field reads are same-type component-ref reads).
+
+The VALUE-LEVEL residual (the second half of gap C): `test_product_bounds`
+still fails at i=1 even with the field tag, because `_Product2.bounds`
+(itertools.mojo:169 — the ONE `not X[1]` in the stdlib; `_Product3`/
+`_Product4.bounds` delegate to an inner `_Product2`) guards the upper
+formula with `if not a_bounds[1] or not initial_b_bounds[1]` — a None-ness
+test on the `Optional[Int]` slot 1 of the `*_bounds` runtime tuples. Slot 1
+flows as a raw int64 word through the tuple, so the guard lowers to
+`word == 0` and misreads an exhausted iterator's Some(0) count as None
+(measured emitted C: `_t23 = mojo_list_get_int (a_bounds, 1); _t24 = _t23
+== 0LL;` → early `return (lower_bound, None)` → the test's
+`bounds()[1].value()` reads 0 where 1 is expected). The guard is DEAD for
+every measured instantiation: both `*_bounds` values come from
+`_ListIter.bounds`, which wraps a non-negative count in slot 1
+UNCONDITIONALLY (`return (iter_len, {iter_len})`) — it never emits a None
+there, so `not Some(count)` is a compile-time false. The fold lands in
+`monomorphize_source` beside the part-4 `Int.MAX` fold: `if not a_bounds[
+1] or not initial_b_bounds[1]:` → `if False:` (the upper formula then runs
+unconditionally and is value-correct: slot-1 words are the counts, and
+`or_else(0)` under the None=0 word encoding is the identity — exactly
+or_else(0)). NOT a sentinel: INT64_MIN is not expressible as a
+`__GIMPLE`-safe C literal — `_signed_int64_c_literal`'s own INT64_MIN form
+`(-0x7FFFFFFFFFFFFFFFLL - 1)` is a hard gimple-frontend error inside
+`__GIMPLE` functions, and `bounds()` is one (measured 2026-10-22). A
+non-list iterator arg (e.g. `_CountIterator`, whose default bounds() could
+put a None in slot 1) would need a true value-level Optional
+representation — the staged next mechanism.
+
+LADDER EVIDENCE (same driver, same runtime, per-test A/B baseline-C vs
+tagged-C, 17 tests): EXACTLY ONE test moves — `test_product_bounds` FAIL
+("words 4 / 5" on the part-5 baseline: the untagged ternary `b_bounds =
+b.bounds() if self._inner_a_elem else (0, Optional[Int](0))` reads
+Some(0) as falsy → lower 4 where 5 is expected) → PASS with the full
+6,5,4,3,2,1,0 value sequence (both asserts at every i). The other 16 are
+per-test identical (their first failing assert is the SAME in both
+binaries — e.g. idx2 `test_product2_copies` `words 0 / 4294967297` on
+both: the family-D old-path stub). Zero PASS->FAIL.
+
+`test_peek` (the second blast-radius file with a value ladder): rebuilt
+against the tagged C with the part-5 driver + runtime — 6/6 PASS,
+matching the part-5 baseline's 6/6 (the clean-master C rebuilt with the
+same driver also 6/6: the A/B is apples-to-apples). This is the ladder
+that caught writer site (2)/(3) above: on the pre-fix tagged C,
+`test_peekable_with_peeking` FAILED (word 0 where the consume+refetch
+sequence expected a fresh element) while the clean-master C passed.
+`test_once` has no value ladder in the campaign (part 5 re-verified
+peek/enumerate/take/drop only); its latent value-level state is the
+pre-existing old-path hazard (the monomorphized `once_1_T_5_Int64`
+constructor symbol is declared extern and never defined in either TU —
+present in the baseline C identically), refined but not worsened by the
+tag: the alloc is a plain malloc, so the tag byte is uninitialized until
+a writer site sets it.
+
+GATE RECORD (2026-10-22, final code, python3.14.8): sweep 608/2 in BOTH
+trees (current + clean 7eb19149 worktree) — 2 expected (test_iterators,
+test_getsize), 0 unexpected, 0 stale; the 2 expected re-measured with
+byte-identical messages. A/B C-hash (fresh per-file process, same script,
+both trees): 610 files, 0 status changes, EXACTLY 3 hash changes
+(test_once, test_peek, test_product — the measured blast radius, all
+C->C), 0 E-message changes. Determinism: second sweep run — all 608 C
+files stably cached (gcc-CAS 608/610; the 2 misses are the E files, which
+never reach the gcc stage). Warn set 19/294 byte-identical (per-file
+count+detail, temp-dir normalized). no-new-casts 19, unchanged.
+
+The remaining test_product ladder-red families are UNCHANGED from part 5
+(measured: identical first failing assert on baseline vs tagged): (A) the
+4-arg family — the comptime type alias `_Product2Type` + `_flatten`
+(MLIR-op code); (B) the comptime for-param family — trip_count stays 0;
+(D) the copies family — the direct wrapper construction stays on the old
+path (the `_Product2(...)` template symbol, a link hazard the -fsyntax-
+only gate cannot see). Next fixes are the documented staged remainders:
+(A) comptime type-alias resolution + `_flatten` lowering; (B) comptime
+evaluation of the in-TU product iterator; (D) a direct-wrapper-
+constructor subpath + bare-ctor element inference; and the value-level
+Optional representation for the bounds-guard shape above (needed only for
+a non-list iterator arg).

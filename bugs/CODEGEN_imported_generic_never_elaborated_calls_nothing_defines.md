@@ -1299,3 +1299,42 @@ The elaborator-decline census is not re-run (same treatment as the
 now the 2 entries above (plus the floor-green `test_set`, out of the
 sweep, and the floor-green `test_product`, ladder-red on the 4 measured
 families A-D in the R1 doc).
+
+## 2026-10-22 (part 6): re-measured — test_getsize and test_iterators
+unchanged; gap (C) closed in the R1 doc (ladder-red 4 -> 3)
+
+The part-6 campaign's first target was the R1 doc's gap (C) — the
+tagged-Optional field side-band + the dead-guard fold in
+`monomorphize_source` (see the R1 doc's "2026-10-22 (part 6)" section for
+the measured mechanism, the GIMPLE strictness rule, the ladder evidence
+(`test_product_bounds` FAIL -> PASS, full 6,5,4,3,2,1,0 sequence, zero
+regressions), and the full gate record: sweep 608/2 in both trees, A/B
+C-hash 610 files with EXACTLY 3 C->C changes (test_once, test_peek,
+test_product — the measured blast radius), warn set 19/294 byte-identical,
+no-new-casts 19 unchanged). From this doc's perspective the declared-red
+surface is UNCHANGED, re-measured on the part-6 sweep:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-22 (part 6),
+  unchanged: same failure (`gcc -c failed for the monomorphized
+  getsize_8_PathLike_6_String (exit 1, 3 attempts)`; `implicit
+  declaration of function 'stat'`), same emitted body (`stat (path)` +
+  `_mojo_dispatch_getattr(..., "st_size")`). The family-C side-band does
+  not touch this file (no in-TU `Optional[...]` field; A/B ERROR->ERROR,
+  no message change). The `#include <sys/stat.h>` route stays closed
+  (conflicting types with fire_runtime.h / _macos.mojo's own
+  `external_call["stat", Int32]` declaration); the fix is the C-ABI-FFI
+  sub-campaign mapped in the part-5 section above, plus the
+  NamedTemporaryFile/`with`/`.write`/`.byte_length` closure the test
+  needs.
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-22
+  (part 6), unchanged: `s.bytes()` still lowers to the zero stub,
+  `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR, no message
+  change; the method-call dependent-return closure is the next sub-
+  campaign).
+
+The declared-red population is still these 2 entries. `test_product`
+remains floor-green and ladder-red, now on the 3 measured families
+A/B/D (family C closed by this section's mechanism — the staged next
+mechanisms for A/B/D are in the R1 doc's part-6 section, and the value-
+level Optional representation for the bounds-guard shape is the staged
+next mechanism for any non-list iterator arg to the product family).

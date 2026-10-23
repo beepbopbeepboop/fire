@@ -1013,8 +1013,24 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
             # and a C-style cast is not a legal gimple operand. See
             # emit_infra.py's range()-bound note for the full rationale.
-            zero = gen._new_val('int64_t', "0LL")
-            gen._emit(f"  {t} = {ov} == {zero};")
+            _tag = gen._tagged_opt_read.get(ov)
+            if _tag is not None:
+                # PART 6 (2026-10-22, family C): `not <tagged Optional>` is
+                # true exactly when the field is None — test the is_some
+                # side-band, not the raw word (Some(0) is word 0 but must
+                # read back as "not None" = false here). Three raw-GIMPLE
+                # steps: read the side-band into a same-type `_Bool` temp
+                # (a cast may not sit on a component ref), mirror the
+                # existing _Bool-`not` arm below (cast to int, compare),
+                # because comparison operands must share a type.
+                _ov2, _op2, _sf2 = _tag
+                _sv = gen._new_temp('_Bool')
+                gen._emit(f"  {_sv} = {_ov2}{_op2}{_sf2}_is_some;")
+                int_t = gen._new_val('int', f"(int){_sv}")
+                gen._emit(f"  {t} = {int_t} == 0;")
+            else:
+                zero = gen._new_val('int64_t', "0LL")
+                gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type
             # Cast _Bool to int before comparing with integer 0
@@ -2297,6 +2313,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member in field_map:
         field_type = field_map[node.member]
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
+        # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
+        # field so the boolean-context conversions (_ensure_bool_cond /
+        # `not`) consult the is_some side-band instead of the raw word.
+        # Value-context reads record but are never consulted.
+        if (struct_name in gen._tagged_optional_fields
+                and node.member in gen._tagged_optional_fields[struct_name]):
+            gen._tagged_opt_read[t] = (
+                ov, op, gimple_ctypes._safe_field(node.member))
         # Propagate element/dict-val type from stored field metadata so
         # subscript/iteration later recovers the right element type instead
         # of defaulting to int64_t (see BUG-2026-044).

@@ -1115,7 +1115,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name, fields):
+def _render_struct_typedef_body(struct_name, fields, optional_tags=None):
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1155,6 +1155,14 @@ def _render_struct_typedef_body(struct_name, fields):
                 lines.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
             else:
                 lines.append(f"  {ft} {safe_fn};")
+                # PART 6 (2026-10-22, family C): the tagged Optional
+                # side-band — an adjacent _Bool the spliced-body writes
+                # store and the boolean-context reads consult (Some(0) vs
+                # None for non-pointer scalar payloads). In-TU materialized
+                # structs only (optional_tags comes from
+                # gen._tagged_optional_fields, gated on _intu_structs).
+                if optional_tags and field_name in optional_tags:
+                    lines.append(f"  _Bool {safe_fn}_is_some;")
     else:
         lines.append(f"  int _dummy;")
     lines.append(f"}} {struct_name};")
@@ -5638,6 +5646,23 @@ def gen_module_impl(self, stmts):
                             _non_none_s = [p for p in _parts_s if p and p != 'None']
                             if len(_non_none_s) == 1:
                                 _fann_s = _non_none_s[0]
+                        # PART 6 (2026-10-22, family C): mark the tagged
+                        # Optional field (is_some side-band) — in-TU
+                        # materialized structs only (the layout change is
+                        # gated on `_intu_structs`; the old `.o` route keeps
+                        # the raw-word Optional), non-pointer scalar payloads
+                        # only (a pointer payload's None=NULL is already a
+                        # distinguishable raw word).
+                        if (ft == 'int64_t' and _opt_m
+                                and _as_str(s.name) in getattr(self, '_intu_structs', {})):
+                            _payload_base = _fann_s.split('[')[0].strip()
+                            if (_payload_base not in ('Pointer', 'UnsafePointer',
+                                                      'OwnedPointer', 'ArcPointer',
+                                                      'ImmPointer', 'MutPointer',
+                                                      'Reference')
+                                    and '*' not in _fann_s):
+                                self._tagged_optional_fields.setdefault(
+                                    _as_str(s.name), set()).add(f_name)
                         if ft == 'int64_t' and _fann_s and _fann_s != _as_str(field.type_ann).strip():
                             ft = _mojo_type(_fann_s)
                         if isinstance(ft, str) and ft.startswith('MojoTuple_'):
@@ -12849,7 +12874,9 @@ def gen_module_impl(self, stmts):
                 if struct_name == 'Pointer':
                     parts.append('#define _MOJO_POINTER_STRUCT_DEF')
                     _td_start = len(parts)
-                parts.extend(_render_struct_typedef_body(struct_name, fields))
+                parts.extend(_render_struct_typedef_body(
+                    struct_name, fields,
+                    optional_tags=self._tagged_optional_fields.get(struct_name)))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
@@ -15141,7 +15168,9 @@ def gen_module_impl(self, stmts):
                 _flds = self.struct_field_types.get(_sn)
                 if _flds is None:
                     return None
-                return '\n'.join(_render_struct_typedef_body(_sn, _flds))
+                return '\n'.join(_render_struct_typedef_body(
+                    _sn, _flds,
+                    optional_tags=self._tagged_optional_fields.get(_sn)))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
                 if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
@@ -15237,7 +15266,10 @@ def gen_module_impl(self, stmts):
                     for _me_sn in sorted(_mirror_extra_structs):
                         _me_flds = self.struct_field_types.get(_me_sn, {})
                         _me_td = '\n'.join(
-                            _render_struct_typedef_body(_me_sn, _me_flds))
+                            _render_struct_typedef_body(
+                                _me_sn, _me_flds,
+                                optional_tags=self._tagged_optional_fields
+                                .get(_me_sn)))
                         cpp_parts.append(_me_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)

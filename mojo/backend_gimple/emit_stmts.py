@@ -979,6 +979,57 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     ginf._note_global_callable_store(gen, tname, v)
 
 
+def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
+                             struct_name, safe_field):
+    """PART 6 (2026-10-22, family C): the C expression for the `is_some`
+    side-band of a tagged-Optional field STORE. The word store already
+    happened; this answers the tag:
+      - a None RHS stores None -> '0';
+      - an `Optional[...]` constructor: a value arg wraps Some -> '1', an
+        empty call is None -> '0';
+      - a `.copy()` on a READ OF THE SAME TAGGED FIELD (the spliced copy
+        constructor `self._x = copy._x.copy()`) -> the bare source-field
+        expression (a raw-word `!= 0` would mis-tag Some(0));
+      - anything else is a value store (an element, `next(...)`, a
+        fieldwise-init parameter holding `Optional(element)`): always
+        Some -> '1'. A stored Optional-typed value word that is genuinely
+        None or Some(0) is the documented value-level boundary (the raw
+        word carries no tag across a call boundary); no measured spliced
+        body stores one.
+
+    The RETURN VALUE is consumed by the caller as a GIMPLE operand, so it
+    is either the single-digit constant '0'/'1' or a bare component-ref
+    expression — never parenthesized: a `__GIMPLE`-tagged function's body
+    must already BE valid raw GIMPLE, where a parenthesized expression is
+    a hard frontend error ("expected expression before '(' token") and a
+    cast may not sit directly on a component ref (see `_new_val`'s own
+    docstring for the measured negative-literal analogue). The caller
+    routes the value through a same-type `_Bool` temp before the plain
+    field store, the one shape gimple's verifier accepts."""
+    v = value_node
+    if isinstance(v, NoneLiteral):
+        return '0'
+    if isinstance(v, IdentExpr) and v.name == 'None':
+        return '0'
+    if isinstance(v, CallExpr):
+        _fn = v.func
+        _fn_name = None
+        if isinstance(_fn, IdentExpr):
+            _fn_name = _fn.name
+        elif isinstance(_fn, MemberExpr):
+            _fn_name = _as_str(_fn.member)
+        if _fn_name == 'Optional':
+            return '1' if getattr(v, 'args', None) else '0'
+        if (isinstance(_fn, MemberExpr) and _fn_name == 'copy'
+                and isinstance(_fn.obj, MemberExpr)
+                and _as_str(_fn.obj.member) == target_node.member):
+            # `copy.<field>.copy()` — copy the source field's side-band.
+            _st, _sv = gen.lower_expr(_fn.obj.obj)
+            _sf = gimple_ctypes._safe_field(_as_str(_fn.obj.member))
+            return f"{_sv}{op}{_sf}_is_some"
+    return '1'
+
+
 def _gen_stmt_AssignStmt(gen, node):
     # Box tracking (part 4, further, test_python_object): a box-producing
     # VALUE records its target local (`c = a / b` makes c a box — a
@@ -1770,6 +1821,31 @@ def _gen_stmt_AssignStmt(gen, node):
             if _reified is not None:
                 vtype, v = field_type, _reified
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
+            # PART 6 (2026-10-22, family C): the tagged-Optional side-band
+            # store — the word store above is the payload; the adjacent
+            # `_Bool <f>_is_some` records Some/None so a Some(0) payload is
+            # not misread as None by the boolean-context reads. Gated on the
+            # field having been marked tagged (in-TU struct, non-pointer
+            # scalar Optional payload), so no other store is touched.
+            if (struct_name in gen._tagged_optional_fields
+                    and node.target.member in gen._tagged_optional_fields[struct_name]):
+                _sf = gimple_ctypes._safe_field(node.target.member)
+                _some = _tagged_opt_is_some_expr(
+                    gen, node.value, node.target, ot, ov, op,
+                    struct_name, _sf)
+                # GIMPLE strict mode: the store's RHS must be a register —
+                # a constant, a cast, or a component ref all need their own
+                # same-type `_Bool` temp first (measured: `p->b = (0)`,
+                # `p->b = 0`, `p->b = (_Bool)0`, `p->b = (p->b)` are all
+                # hard gimple-frontend errors in a `__GIMPLE`-tagged fn;
+                # `t = ...; p->b = t;` is not — see `_new_val`'s docstring
+                # and the gimple_test6/8 matrix in the part-6 record).
+                if _some in ('0', '1'):
+                    _some_t = gen._new_val('_Bool', _some)
+                else:
+                    _some_t = gen._new_temp('_Bool')
+                    gen._emit(f'  {_some_t} = {_some};')
+                gen._emit(f'  {ov}{op}{_sf}_is_some = {_some_t};')
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the
             # element type for subscript/list-iter dispatch — without this,
@@ -2760,6 +2836,19 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {b} = {ip} != {zero};")
         return b
     if ctype == 'int64_t':
+        # PART 6 (2026-10-22, family C): a temp holding a READ of a tagged
+        # Optional field tests the is_some side-band, not the raw word —
+        # the whole point is that Some(0) (word 0) is truthy, where the
+        # generic `!= 0` below would read it as None.
+        _tag = gen._tagged_opt_read.get(val)
+        if _tag is not None:
+            _ov, _op, _sf = _tag
+            b = gen._new_temp('_Bool')
+            # Same-type component-ref read into the `_Bool` temp, NO
+            # parens: `t = (p->b)` is a gimple-frontend error in a
+            # `__GIMPLE`-tagged function, `t = p->b` is not (m4 shape).
+            gen._emit(f"  {b} = {_ov}{_op}{_sf}_is_some;")
+            return b
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
         gen._emit(f"  {zero} = (int64_t)0;")

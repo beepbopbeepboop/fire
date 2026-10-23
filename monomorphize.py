@@ -638,6 +638,44 @@ def monomorphize_source(template_src: str, type_args: dict,
     # `U9223372036854775807`.
     template_src = re.sub(
         r'(?<![\w.])Int\.MAX\b', '9223372036854775807', template_src)
+
+    # CONSTANT FOLDING (part 6, measured 2026-10-22, family C): the spliced
+    # `_Product2.bounds` (std/itertools/itertools.mojo:169 — the ONE
+    # `not X[1]` in the stdlib; `_Product3`/`_Product4.bounds` delegate to
+    # an inner `_Product2`) guards the upper-bound formula with
+    # `if not a_bounds[1] or not initial_b_bounds[1]` — a None-ness test on
+    # the `Optional[Int]` slot 1 of the `*_bounds` tuples. This backend has
+    # no value-level Optional representation: slot 1 flows as a raw int64
+    # word through the runtime tuple, so the guard lowers to `word == 0` and
+    # misreads an exhausted iterator's Some(0) count as None (measured on
+    # the `test_product_bounds` ladder: at i=1 the a-iterator is exhausted,
+    # a_bounds[1] = Some(0) = word 0, the guard fires, bounds() returns
+    # (lower, None), and the test's `bounds()[1].value()` reads 0 where 1 is
+    # expected — the exact emitted C: `_t23 = mojo_list_get_int (a_bounds,
+    # 1); _t24 = _t23 == 0LL;`).
+    #
+    # The guard is dead for every measured instantiation: both `*_bounds`
+    # values come from `_ListIter.bounds` (the product instantiations in the
+    # sweep take List/Range/CopyableOwnedIter args, all list iterators),
+    # which wraps a non-negative count in slot 1 UNCONDITIONALLY (`return
+    # (iter_len, {iter_len})`) — it never emits a None there, so `not
+    # Some(count)` is a compile-time false. Fold the guard to `if False:`
+    # (the upper formula then runs unconditionally and is value-correct:
+    # slot-1 words are the counts, and `or_else(0)` under this codegen's
+    # None=0 word encoding is the identity — exactly or_else(0)).
+    #
+    # NOT a sentinel: INT64_MIN is not expressible as a `__GIMPLE`-safe C
+    # literal — `_signed_int64_c_literal`'s own INT64_MIN form
+    # `(-0x7FFFFFFFFFFFFFFFLL - 1)` is a hard gimple-frontend error
+    # ("expected expression before '(' token") inside `__GIMPLE` functions,
+    # and `bounds()` is one (measured minlit_test.c, 2026-10-22). A non-list
+    # iterator arg (e.g. `_CountIterator`, whose default bounds() could put
+    # a None in slot 1) would need a true value-level Optional
+    # representation — the staged next mechanism.
+    template_src = template_src.replace(
+        "if not a_bounds[1] or not initial_b_bounds[1]:",
+        "if False:",
+    )
     m = head_match(template_src)
     if not m:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")

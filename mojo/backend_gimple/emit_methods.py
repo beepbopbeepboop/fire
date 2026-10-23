@@ -3667,6 +3667,28 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                 _emit_fw_copy(_sub, _fv, _fsn, depth + 1)
                                 _fv = _sub
                             gen._emit(f"  {dst}->{_fnm} = {_fv};")
+                            # PART 6 (2026-10-22, family C): a TAGGED-
+                            # Optional field's is_some side-band is a
+                            # layout-only member (module_gen's typedef
+                            # renderer adds it; it is NOT in
+                            # struct_field_types), so this fieldwise loop
+                            # never copies it — the fresh object's tag
+                            # byte would be malloc garbage (its _alloc is
+                            # a plain malloc) and every tag reader
+                            # (`if self._f:` -> `f_is_some`) would act on
+                            # uninitialized state. Measured: test_once's
+                            # `it.copy()` copied the word, not the tag.
+                            # Propagate it with the same same-type
+                            # component-ref read + store the writers use.
+                            _tagged_f = gen._tagged_optional_fields.get(
+                                sname)
+                            if _tagged_f and _as_str(_fn) in _tagged_f:
+                                _sv = gen._new_temp('_Bool')
+                                gen._emit(
+                                    f"  {_sv} = {src_local}->{_fnm}"
+                                    f"_is_some;")
+                                gen._emit(
+                                    f"  {dst}->{_fnm}_is_some = {_sv};")
 
                     _emit_fw_copy(t, _recv_local, _csn, 0)
                     return f'{_csn} *', t
@@ -4136,6 +4158,28 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 z = gen._new_temp(ot)
                 gen._emit(f'  {z} = ({ot})0;')
                 gen._emit(f'  {_ut_lv} = {z};')
+                # PART 6 (2026-10-22, family C): the consume clears the
+                # field, so a TAGGED-Optional field's side-band must clear
+                # with it — the plain-AssignStmt writer hook in
+                # emit_stmts does not see this store (it is emitted here,
+                # not from a `self._x = None` statement). Measured miss:
+                # `_PeekableIterator.__next__`'s `bb_3` zeroed the word
+                # without the tag, so the next `if self._next:` (tag
+                # reader) re-served the stale cached value — test_peek's
+                # `test_peekable_with_peeking` got word 0 where the
+                # consume+refetch sequence expected a fresh element.
+                # `ot` is the FIELD's value type here (the temp holds the
+                # consumed word), so the struct name comes from the
+                # RECEIVER's lowered type (the `self` IdentExpr — no
+                # emission, just a name lookup).
+                _ut_rtype, _ut_rval = gen.lower_expr(func.obj.obj)
+                _ut_struct = gimple_exprtypes._struct_name_of(_ut_rtype)
+                if (_ut_struct in gen._tagged_optional_fields
+                        and _ut_field in gen._tagged_optional_fields[_ut_struct]):
+                    _zb = gen._new_val('_Bool', '0')
+                    gen._emit(
+                        f'  {_ut_var}->{gimple_ctypes._safe_field(_ut_field)}'
+                        f'_is_some = {_zb};')
                 return ot, t
         # `.__bool__()` on an integer-scalar receiver — the boxed
         # PythonObject truthiness (2026-10-21 part 4, further,

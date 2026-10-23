@@ -1833,6 +1833,27 @@ class GimpleGen:
         # repr() must still render them as "True"/"False" like real Python
         # bools instead of falling into the plain-int branch and printing 0/1.
         self.struct_bool_fields: dict[str, set[str]] = {}
+        # PART 6 (2026-10-22, family C): struct name -> the field names of
+        # IN-TU MATERIALIZED structs whose annotation is `Optional[...]`
+        # with a NON-POINTER scalar payload (Int/Int64/... — a zero payload
+        # value is a legitimate Some(0), so the raw-word None=0 convention
+        # misreads it; pointer payloads keep the raw word, None=NULL is
+        # already distinguishable). Each such field gets an adjacent
+        # `_Bool <f>_is_some` side-band in the C layout (measured blast
+        # radius over the 610-file sweep: 5 instantiations in 3 files —
+        # _Once[Int64]._inner, _PeekableIterator[_ListIterOwned[Int]]._next,
+        # _Product2[...]._inner_a_elem x3). Spliced-body writes store the
+        # side-band; boolean-context reads consult it; value reads
+        # (unsafe_value/unsafe_take/.copy()) keep the raw word.
+        self._tagged_optional_fields: dict[str, set[str]] = {}
+        # PART 6 (2026-10-22, family C): temp-name -> (obj_cname, op,
+        # safe_field) for a temp holding a READ of a tagged-Optional field.
+        # The boolean-context conversions (_ensure_bool_cond's int64 arm and
+        # _lower_UnaryOp's `not` int64 arm) consult it to test the is_some
+        # side-band instead of the raw word, so Some(0) reads back Some.
+        # Value-context reads (unsafe_value/.copy()) record but are never
+        # consulted. Reset per function with the other per-func tables.
+        self._tagged_opt_read: dict[str, tuple] = {}
         # struct name -> field names declared `object = None` (or bare
         # `object`, no default_factory) in the real dataclass but hardcoded
         # here to a concrete 'MojoList *'/'MojoDict *' ctype anyway (e.g.
