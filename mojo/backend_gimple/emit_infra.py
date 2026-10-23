@@ -4444,10 +4444,15 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # discriminator is right in both directions (a string comes back as
         # itself, an int as its decimal) and is what argument coercion to a
         # `str` parameter already uses for the same word.
+        # An UNANNOTATED parameter is the same word: `str(ann)` in
+        # `_elem_ann_consider(out, tgt, ann)` printed the annotation's address.
+        _untyped = getattr(gen, '_cur_untyped_params', ())
         if et == 'int64_t' and (
                 ev in gen._dyn_word_vals
+                or _as_str(ev) in _untyped
                 or (isinstance(enode, gimple_ctypes.IdentExpr)
-                    and enode.name in gen._dyn_word_locals)):
+                    and (enode.name in gen._dyn_word_locals
+                         or _as_str(enode.name) in _untyped))):
             return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
