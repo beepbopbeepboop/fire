@@ -2493,3 +2493,153 @@ evaluation of the in-TU product iterator; (D) a direct-wrapper-
 constructor subpath + bare-ctor element inference; and the value-level
 Optional representation for the bounds-guard shape above (needed only for
 a non-list iterator arg).
+
+## 2026-10-23 (part 6, family D piece 1): the direct wrapper constructor
+— the old-path template symbol is gone from the emitted C, the hazard
+that the -fsyntax-only gate cannot see
+
+The copies family (idx 2/7/12: `test_product{2,3,4}_copies`) constructs
+the product iterator DIRECTLY — `var _product_iter = _Product2(
+TestCopyIterator(copy_a), TestCopyIterator(copy_b))` (test_product.mojo:
+287/298/313) — a bare constructor call to the imported generic struct,
+with no dependent-return factory between, so no `_factory_returns` record
+exists and the old path names the BARE TEMPLATE SYMBOL. Measured in the
+baseline emitted C: `extern int64_t _Product2 (...);  /* from
+std.itertools.itertools */` (declaration only — no definition in any TU)
+called as `_t5 = _Product2 (_t3, _t4);` — a link hazard the -fsyntax-only
+gate cannot see (the ladder driver was stubbing it).
+
+The fix is SEED-SIDE ONLY (`mojo/backend_gimple/elab_intu.py`; the emit
+side needed zero changes — the factory-record arm at emit_calls.py:1425
+already consumes `kind='direct'` records through `_lower_factory_call`'s
+direct branch → `_lower_struct_constructor(wrapper_mangled, args)`):
+
+- The `_seed_one_factory` hook: a struct base's home lives in
+  `_imported_generic_structs`, which `_factory_home` never reads (it
+  answers None for a struct), so a struct-base call used to be refused
+  before any subpath ran. Now: base in `_imported_generic_structs`,
+  home a DIFFERENT module than the caller (a same-module generic struct
+  compiles to one concrete C struct whose constructor IS defined — the
+  ordinary local-struct path is its correct answer; measured: this file's
+  own `TestCopyIterator(copy_a)` calls must keep their old path), and the
+  BARE spelling only (the bracketed spelling names its type arguments
+  explicitly — the ROOT seed and `_rewrite_callees` own that shape) →
+  `_seed_direct_ctor`.
+- `_seed_direct_ctor`'s gates, cheapest first, every one measured: a
+  generic struct template in the home module; no keyword arguments; the
+  value-argument arity EQUALS the type-parameter arity (the wrapper's
+  `__init__` takes one value per inner); every argument resolves to a
+  LOCAL-struct mention — `_direct_ctor_arg_mention` accepts exactly two
+  readable shapes: a local-struct CONSTRUCTOR rvalue (`TestCopyIterator(
+  copy_a)` — its type parameter is erased by the local-struct emission,
+  so the bare name IS the concrete type) or a local var whose annotation
+  names a local struct. The record is filed `kind='direct'` on the SAME
+  `iter_factory.factory_call_key(base, node)` the emit side computes,
+  with `param_names` from the template's matching-arity `__init__` (a
+  reconstruction scaffold — the REAL overload resolution happens in
+  `_lower_struct_constructor` at emit time), and the materialization
+  RIDES THE QUEUE (`work.enqueue(('struct', base, targs))`), so
+  pre-registration, the annotation/callee rewrites and the inner walk all
+  run on it unchanged. The same hook also sees `CopyCounter(1)` /
+  `Observable[...](...)`-shaped imports — each refused at a measured gate
+  (literal arg / bracketed spelling / kwarg), so their call sites keep
+  their old path exactly.
+- The SECOND hazard the syntax gate cannot see, found while verifying:
+  the spliced `_Product2[TestCopyIterator, TestCopyIterator].bounds()`
+  calls `self._inner_a.bounds()` — `TestCopyIterator` (test-file-local,
+  conforming to `Iterator`) does NOT define `bounds`, and the trait's
+  DEFAULT implementation (`std/iter/__init__.mojo`: `Iterator.bounds` →
+  `return (0, None)`) is compiled nowhere in a single-TU build. Unfixed,
+  the call auto-stubs to a forward declaration nothing defines
+  (`test_product_TestCopyIterator_bounds` — the TU would link-fail even
+  with the constructor hazard removed). `_synthesize_inner_defaults`
+  (elab_intu, run in `run()` after the rewrites) synthesizes the trait
+  default as a REAL METHOD on the local struct (a method, not a field —
+  the layout is untouched; the emitter emits it exactly like the
+  struct's own methods, and the spliced call resolves to it). Only the
+  one measured method is synthesized; idempotent per struct; every other
+  protocol method a local inner lacks keeps its old path, to be measured
+  when a test actually needs it.
+
+LADDER EVIDENCE (same driver, same runtime, 17 tests): the object-level
+hazard is GONE — `nm -u` baseline references `__Product2`, `__Product3`,
+`__Product4` (undefined); the new object references NONE of them, and
+`nm -g` shows the in-TU definitions it calls instead: the mangled
+constructors (`__Product2_13_IteratorTypeA_16_TestCopyIterator_...
+___init__` × the value + copy overloads, ×3 for `_Product3`, ×4 for
+`_Product4`) and the synthesized `_test_product_TestCopyIterator_bounds`
+(returns the `(0, None)` tuple — measured body: two `append_int(0)`
+slots). The new TU LINKS with zero undefined product symbols (the driver's
+bare-symbol stubs are now unreferenced). The emitted copies-test body is
+the real construction: `_alloc__Product2_..._TestCopyIterator...()` +
+`_alloc_TestCopyIterator()` + `test_product_TestCopyIterator___init__`
+per argument + the mangled `___init__(_t1, _t2, _t3)` — and the spliced
+`bounds()` calls `test_product_TestCopyIterator_bounds(_t1)` (a defined
+method), no auto-stub. Per test: the 12 ladder-red tests fail at the
+SAME first assert as the baseline (identical `words ...` signatures), the
+5 green tests stay green, ZERO PASS->FAIL. The copies tests (idx 2/7/12)
+STILL FAIL at `assert_equal(copy_b, 1)` with `words 0 / 4294967297` —
+the constructor now runs for real, but the copy count stays 0.
+
+Why it still fails — the STAGED D2 (measured, named): `TestCopyIterator.
+counter` is a WORD. `Observable` (test/test_utils/types.mojo) is never
+materialized in the TU — the constructor call `Observable[CopyOrigin=...
+](copies=Pointer(to=copies))` stays on the old path (measured emitted C:
+`_t1 = (int64_t)0;  /* indirect call via SubscriptExpr */; self->counter
+= _t1;`), so there is no counter object to increment; and the spliced
+`inner_b.copy()` hits the `.copy()` receiver gate (`_csn in
+_intu_prereg_structs` — TestCopyIterator is local, not in-TU) → the
+identity fallback (`self->_inner_b = inner_b` — alias, no field copy, no
+copy constructor). Value-green needs test_utils INLINING (Observable with
+its copy constructor `self._copies.value()[] += 1`; the `Pointer(to=...)`
+ctor; the `.value()[] += 1` write) + a CONSTRUCTOR-BASED field copy in
+the fieldwise loop (the `counter` field must run Observable's copy
+constructor, not a raw pointer copy) + admitting the local inner to the
+`.copy()` gate — a separate sub-campaign (D2), not a next-fix on this
+piece.
+
+Also MEASURED here (a false green the driver was hiding, now documented):
+idx 8/13 (`test_product{3,4}_element_copies`) pass VACUOUSLY. The seed
+refuses `product(l1, l2, l3)` over `l1 = [CopyCounter(1), CopyCounter(2)]`
+(the bare-ctor list element has no type inference — no record) → the call
+takes the old path → `product_13_IterableTypeA_3_Int_...` (a mangled
+FACTORY symbol declared but never defined — the same hazard class; the
+driver's `{ return 0; }` stub makes the for-loop iterate ZERO times, so
+every assert inside the body is skipped). The `CopyCounter(1)` rvalue
+erases to the literal 1 (the lists are Int lists, not CopyCounter lists).
+D2 covers this: bare-ctor element inference (the seed must infer the
+`CopyCounter` element) + the same test_utils inlining.
+
+GATE RECORD (2026-10-23, final code, python3.14.8): the FIRST bucket
+run caught one miss the -fsyntax-only gate and the A/B both cannot see —
+the self-host census check `every_ast_mutation_site_invalidates_the_
+walk_memo` FAILED on the new code: `_synthesize_inner_defaults` writes an
+AST node's field (`sd.methods.append(fn)` — the injected bounds method)
+without invalidating the `_walk_ast` memo (the codegen's AST walks are
+memoized; a mutation that skips the invalidation serves a stale walk to
+the next pass — the check is the source-level half of the 2026-10-05
+two-check contract, `walk_ast_memo_never_answers_stale_over_real_
+compiles` being the corpus half). Fixed with `_walk_ast_invalidate(sd)`
+beside the append (the same pattern as the three existing elab_intu
+mutation sites); the gimple job then passed standalone and in the final
+bucket. The fix changes NO generated C — the memo is a cache, and
+test_product's C re-dumped after the fix is BYTE-IDENTICAL to the pre-fix
+dump (620,745 chars). With the fix in: sweep 608/2 in BOTH trees
+(current + clean a83d92be worktree) — 2 expected (test_iterators,
+test_getsize), 0 unexpected, 0 stale, exit 0. A/B C-hash (fresh per-file
+process, same script, both trees): 610 files, 0 status changes, EXACTLY
+1 C->C hash change (`test/itertools/test_product.mojo` — the intended
+file; every other file whose hook fired was refused at a measured gate
+and is byte-identical), 0 E-message changes. Warn set 19/294
+byte-identical (per-file count+detail). no-new-casts 19, unchanged.
+formal_doc_index 133 documents regenerated; doc-truth PASS=434 FAIL=0.
+gcc syntax gate on the new C: exit 0.
+
+The remaining staged remainders, in measured order: (D2) test_utils
+inlining + constructor-based field copy + the `.copy()` gate admission —
+the copies family value-green (copy_b 0→1) AND the element_copies false
+green; (A) comptime type-alias + `_flatten` (shared with D-piece-2 for
+the `_Product3`/`_Product4` copies); (B) comptime for-param
+evaluation; the value-level Optional representation for the bounds-guard
+shape (needed only for a non-list iterator arg). `test_iterators` /
+`test_getsize` (R2 doc) are UNCHANGED by this piece.

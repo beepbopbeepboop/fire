@@ -384,6 +384,36 @@ def _infer_fn_args(work, base, node):
         return None
 
 
+def _direct_ctor_arg_mention(node, struct_names, locs):
+    """The local-struct mention a direct-ctor call argument names, or None
+    (part 6 family D, 2026-10-23, measured on test_product's
+    test_product2_copies: `TestCopyIterator(copy_a)`). Two readable shapes and
+    nothing else, because the mangled name must spell a struct this TU
+    DEFINES:
+
+      * a local-struct CONSTRUCTOR rvalue (`TestCopyIterator(copy_a)`): the
+        callee names the struct — its type parameter (the origin) is erased
+        by the local-struct emission, so the bare name IS the concrete type;
+      * a local VAR whose annotation names a local struct (`var x:
+        TestCopyIterator = ...`): the annotation names it.
+
+    Everything else — a literal, a move (`x^`), a method call, a subscript
+    spelling, a non-local name, an unannotated local — is a refusal for this
+    subpath, and the call site keeps its old path exactly."""
+    f = getattr(node, 'func', None)
+    if isinstance(node, CallExpr):
+        if isinstance(f, IdentExpr) and f.name in struct_names:
+            return f.name
+        return None
+    if isinstance(node, IdentExpr):
+        if locs is not None and node.name in locs:
+            ann = getattr(locs[node.name], 'type_ann', None)
+            if isinstance(ann, str) and ann.strip() in struct_names:
+                return ann.strip()
+        return None
+    return None
+
+
 # The only method names whose OVERLOADING this pass can carry. Justification is
 # structural, not a convenience: the two consumers this pass exists for —
 # `emit_calls._lower_call`'s `next(<struct>)` branch and
@@ -1073,6 +1103,31 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     args = getattr(node, 'args', None) or []
     home = _factory_home(gen, import_map, base)
     if not home:
+        # Part 6 family D (2026-10-23, measured on test_product's
+        # test_product2_copies): a DIRECT WRAPPER CONSTRUCTOR — the base is
+        # an imported generic STRUCT (its home lives in
+        # `_imported_generic_structs`, which `_factory_home` above never
+        # reads — it answers None for a struct), and the call is the bare
+        # constructor spelling with no dependent-return factory in between.
+        # On the old path the call names the BARE template symbol (`extern
+        # int64_t _Product2 (...);`, no definition in any TU) — a link hazard
+        # the -fsyntax-only gate cannot see. Gated on the struct living in
+        # ANOTHER module than the caller: a same-module generic struct
+        # compiles to one concrete C struct whose constructor IS defined in
+        # this TU, so the ordinary local-struct constructor path is its
+        # correct answer (measured: this file's own `TestCopyIterator(
+        # copy_a)` calls, which must keep their old path).
+        _shome = getattr(gen, '_imported_generic_structs', {}).get(base)
+        if (_shome
+                and os.path.normpath(str(_shome)) != os.path.normpath(
+                    str(getattr(gen, '_current_filename', '') or ''))):
+            try:
+                _ssrc = open(_shome).read()
+            except OSError:
+                return None
+            return _seed_direct_ctor(gen, work, mm, base, node, _ssrc,
+                                     _shome, scope, stmts, import_map,
+                                     queue, records)
         return None
     try:
         fsrc = open(home).read()
@@ -1987,6 +2042,114 @@ def _seed_direct_factory(gen, work, mm, base, node, fsrc, home, queue, records):
     return rec
 
 
+def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
+                      import_map, queue, records):
+    """The DIRECT-WRAPPER-CONSTRUCTOR subpath (part 6 family D, 2026-10-23,
+    measured on test_product's test_product2_copies):
+
+        var _product_iter = _Product2(
+            TestCopyIterator(copy_a), TestCopyIterator(copy_b))
+
+    a bare constructor call to an imported generic struct whose type
+    arguments are the call's own ARGUMENT TYPES — no dependent-return factory
+    in between, so no `_factory_returns` record exists, and the old path
+    names the bare template symbol (the `extern int64_t _Product2 (...);`
+    link hazard the syntax gate cannot see). Deliberately narrow; every check
+    is measured, not guessed:
+
+      * the base is a generic struct in its home module (the caller verified
+        the home is another module than the caller's and `fsrc` is its
+        source);
+      * no keyword arguments (a `*`-only or defaulted-kwarg constructor
+        cannot be bound from this pass's positional reading);
+      * the value-argument arity EQUALS the type-parameter arity (the
+        wrapper's `__init__` takes one value per inner, and the type
+        arguments are exactly those inners' types);
+      * every argument resolves to a LOCAL-struct mention (a local
+        struct-constructor rvalue, or a local var annotated with a local
+        struct) — the only argument type this codegen can spell in the
+        mangled name AND define in this TU.
+
+    The record is filed `kind='direct'` on the SAME key the emit side
+    computes (`iter_factory.factory_call_key`): `_lower_factory_call`'s
+    direct branch reconstructs exactly the constructor — alloc + the in-TU
+    `__init__` (the same `_lower_struct_constructor` the factory records
+    use), positional args in call order. The materialization itself rides
+    the queue, so pre-registration, the annotation/callee rewrites and the
+    inner walk all run on it unchanged."""
+    import elaborate
+    if not isinstance(node.func, IdentExpr):
+        # The bracketed spelling (`_Product2[X, Y](...)`) names its type
+        # arguments explicitly — the ROOT seed and `_rewrite_callees` own
+        # that shape (their `_concrete_args` reads the brackets); this
+        # subpath is the BARE spelling only (measured).
+        work.refuse(f'{base}(...): the direct-ctor subpath takes the bare '
+                    'spelling only')
+        return None
+    tmpl = elaborate.extract_struct_source(fsrc, base)
+    if tmpl is None:
+        work.refuse(f'{base}(...): no struct template in its home module')
+        return None
+    tparams = elaborate.type_param_names(tmpl)
+    if not tparams:
+        work.refuse(f'{base}(...): {base!r} is not generic in its home module')
+        return None
+    args_nodes = getattr(node, 'args', None) or []
+    if getattr(node, 'kwargs', None):
+        work.refuse(f'{base}(...): a keyword argument is not a positional '
+                    'type argument')
+        return None
+    if len(args_nodes) != len(tparams):
+        work.refuse(f'{base}(...): {len(args_nodes)} value args for '
+                    f'{len(tparams)} type parameters')
+        return None
+    locs = scope[2] if scope is not None else None
+    struct_names = {st.name for st in (stmts or ())
+                    if type(st).__name__ == 'StructDef'}
+    targs = []
+    for a in args_nodes:
+        m = _direct_ctor_arg_mention(a, struct_names, locs)
+        if m is None:
+            work.refuse(f'{base}(...): an argument has no statically '
+                        'resolvable local-struct type')
+            return None
+        targs.append(m)
+    # The constructor parameter names, in order — the record's positional
+    # map (the emit side's direct branch walks them against node.args).
+    # Read from the template's `__init__` overload whose arity matches;
+    # they are scaffolding for the reconstruction — the REAL overload
+    # resolution happens in `_lower_struct_constructor` at emit time.
+    pnames = None
+    try:
+        for s in Parser(py_tokenize(tmpl)).parse_module():
+            if not isinstance(s, StructDef) \
+                    or getattr(s, 'name', None) != base:
+                continue
+            for mth in (getattr(s, 'methods', None) or []):
+                if getattr(mth, 'name', None) != '__init__':
+                    continue
+                mp = getattr(mth, 'params', None) or []
+                if len(mp) == len(args_nodes) + 1:
+                    pnames = [p[0] for p in mp[1:]]
+                    break
+            if pnames is not None:
+                break
+    except Exception:
+        pnames = None
+    if pnames is None:
+        pnames = [f'_direct_arg_{i}' for i in range(len(args_nodes))]
+    wrapper_mangled = mm.mangle(base, dict(zip(tparams, targs)))
+    _register_named(gen, home, [base])
+    records[iter_factory.factory_call_key(base, node)] = {
+        'name': base, 'wrapper': base, 'wrapper_param': None,
+        'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
+        'inner_mention': None, 'kind': 'direct', 'elem': None,
+        'elem_ctype': 'int64_t', 'moved': False, 'wrapper_kwarg': None,
+        'param_names': pnames, 'param_defaults': {}}
+    work.enqueue(('struct', base, tuple(targs)), 0, queue)
+    return wrapper_mangled
+
+
 def _seed_factories(gen, work, stmts, queue):
     """Entry: find every factory call, evaluate it, register + enqueue its
     wrapper, and file the record the emit side reconstructs from. Lazy-imports
@@ -2434,6 +2597,7 @@ def run(gen, stmts):
     _rewrite_callees(work, stmts)
     _rewrite_ctor_calls(work, stmts)
     _rewrite_intu_ctor_calls(work)
+    _synthesize_inner_defaults(work, stmts)
     if work.notes:
         gen._intu_notes = work.notes
     return work.extra
@@ -2456,6 +2620,65 @@ def _skip(gen) -> bool:
     fn = str(getattr(gen, '_current_filename', '') or '')
     return os.path.basename(fn) in ('gimple_codegen.py',) or fn.endswith(
         os.path.join('mojo', 'backend_gimple', 'elab_intu.py'))
+
+
+def _synthesize_inner_defaults(work, stmts):
+    """A materialized wrapper's SPLICED body calls the inner's protocol
+    methods; for a LOCAL inner struct (this module's own StructDef) that does
+    not override one, the call must reach the TRAIT'S DEFAULT implementation.
+    Unsynthesized, `self._inner_a.bounds()` in the spliced
+    `_Product2[TestCopyIterator, TestCopyIterator].bounds()` auto-stubs to a
+    forward declaration nothing defines (`TestCopyIterator_bounds` — a link
+    failure the syntax gate cannot see), because the `Iterator` trait's
+    default `bounds` (`std/iter/__init__.mojo`: `return (0, None)`) is
+    compiled nowhere in a single-TU build.
+
+    Synthesized as a real method on the local struct (a method, not a field
+    — the layout is untouched): the emitter emits `bounds` exactly like the
+    struct's own methods, and the spliced call resolves to it. Only the one
+    measured method is synthesized (`bounds` — the one the product wrappers'
+    spliced `bounds()` calls); every other protocol method a local inner
+    lacks keeps its old path, to be measured when a test actually needs it.
+    Idempotent per struct (a struct that overrides `bounds` is skipped)."""
+    if not stmts:
+        return
+    struct_defs = {}
+    for s in stmts:
+        if type(s).__name__ == 'StructDef':
+            struct_defs.setdefault(s.name, s)
+    if not struct_defs:
+        return
+    for rec in work.records.values():
+        if rec.get('kind') != 'struct':
+            continue
+        for a in rec.get('args') or ():
+            sd = struct_defs.get(a)
+            if sd is None:
+                continue
+            have = {getattr(m, 'name', None)
+                    for m in (getattr(sd, 'methods', None) or [])}
+            if 'bounds' in have:
+                continue
+            snippet = ('def bounds(self) -> Tuple[Int, Optional[Int]]:\n'
+                       '    return (0, None)\n')
+            try:
+                parsed = Parser(py_tokenize(snippet)).parse_module()
+            except Exception as e:
+                work.refuse(f'{a}: the trait-default bounds snippet failed '
+                            f'to parse: {type(e).__name__}: {e}')
+                continue
+            fn = None
+            for s in parsed:
+                if type(s).__name__ == 'FunctionDef' \
+                        and getattr(s, 'name', None) == 'bounds':
+                    fn = s
+                    break
+            if fn is None:
+                work.refuse(f'{a}: the trait-default bounds snippet parsed '
+                            'no function')
+                continue
+            sd.methods.append(fn)
+            _walk_ast_invalidate(sd)
 
 
 def _rewrite_annotations(work):

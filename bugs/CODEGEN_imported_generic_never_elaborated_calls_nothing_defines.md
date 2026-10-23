@@ -1338,3 +1338,48 @@ A/B/D (family C closed by this section's mechanism — the staged next
 mechanisms for A/B/D are in the R1 doc's part-6 section, and the value-
 level Optional representation for the bounds-guard shape is the staged
 next mechanism for any non-list iterator arg to the product family).
+
+## 2026-10-23 (part 6, family D piece 1): re-measured — test_getsize and
+test_iterators unchanged; the copies-family template-symbol hazard is
+removed (R1 doc)
+
+The part-6 campaign's second target was the R1 doc's gap (D) piece 1 —
+the DIRECT wrapper constructor subpath in `elab_intu` (the bare
+`_ProductN(local-struct args)` spelling the copies tests use), which
+removes the old-path `extern int64_t _Product2 (...);` template symbol
+the -fsyntax-only gate cannot see, plus the trait-default `bounds`
+synthesis on the local inner struct (see the R1 doc's "2026-10-23 (part
+6, family D piece 1)" section for the measured mechanism, the ladder
+evidence — hazard gone from the object, TU links, 12 ladder-red tests at
+the identical first assert, zero PASS->FAIL — and the full gate record:
+sweep 608/2 in both trees, A/B C-hash 610 files with EXACTLY 1 C->C
+change, `test/itertools/test_product.mojo` (the intended file), warn set
+19/294 byte-identical, no-new-casts 19 unchanged). From this doc's
+perspective the declared-red surface is UNCHANGED, re-measured on the
+D1 sweep. (Gate note: the D1 bucket's first run failed the self-host
+census check `every_ast_mutation_site_invalidates_the_walk_memo` on the
+new `sd.methods.append` site in elab_intu — fixed with
+`_walk_ast_invalidate(sd)`, zero generated-C change, gimple job green;
+see the R1 doc's 2026-10-23 gate record.)
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-23 (part 6,
+  family D piece 1), unchanged: same failure (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String (exit 1, 3 attempts)`;
+  `implicit declaration of function 'stat'`), same emitted body. The
+  direct-ctor subpath does not touch this file (no bare constructor call
+  to an imported generic struct — its `stat(...)` is an FFI call; A/B
+  ERROR->ERROR, no message change). The `#include <sys/stat.h>` route
+  stays closed; the fix is the C-ABI-FFI sub-campaign mapped in the
+  part-5 section above.
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-23
+  (part 6, family D piece 1), unchanged: `s.bytes()` still lowers to the
+  zero stub, `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR,
+  no message change; the method-call dependent-return closure is the
+  next sub-campaign).
+
+The declared-red population is still these 2 entries. `test_product`
+remains floor-green and ladder-red, now on 3 measured families A/B/D
+with D's LINK HAZARD removed (the copies family's remaining red is
+value-level — the staged D2: test_utils inlining + constructor-based
+field copy, in the R1 doc's 2026-10-23 section; the element_copies
+false green it documents is the same D2's second half).
