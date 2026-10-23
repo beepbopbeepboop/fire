@@ -3697,47 +3697,13 @@ def _gen_stmt_ExprStmt(gen, node):
             return
         # Check closure call (nested function defined in this scope)
         if raw_name in gen._closure_envs:
-            lifted   = f"{gen.current_func_name}_{raw_name}"
-            env_var  = gen._closure_envs[raw_name]
-            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
-            # Handle kwargs for closure calls
-            kwargs = getattr(node.value, 'kwargs', []) or []
-            kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
-            # Pad kwargs to expected arity
-            # Note: expected_params[0] is the env pointer, which gets prepended separately
-            expected_params = gen.func_param_types.get(lifted, [])
-            # Subtract 1 for the env pointer that will be prepended
-            user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
-            if expected_params and len(arg_pairs) < user_param_count:
-                # Pad with the closure's own declared defaults before
-                # falling back to a bare 0 -- see the registration in
-                # the closure-scan pass (Pass 3) and _lower_closure_
-                # call's identical padding for the expression-context
-                # twin of this same call shape.
-                _dflts = gen._func_param_defaults.get(lifted) or []
-                while len(arg_pairs) < user_param_count:
-                    _pos = len(arg_pairs)
-                    _pname = _dflts[_pos][0] if _pos < len(_dflts) else None
-                    if _pname is not None and _pname in kwarg_dict:
-                        arg_pairs.append(kwarg_dict[_pname])
-                    elif _pos < len(_dflts):
-                        # See _lower_closure_call's identical choice of
-                        # self.lower_expr over _default_expr_to_pair:
-                        # closure defaults commonly reference the
-                        # OUTER function's own live variables
-                        # (`iterator=iterator`), which needs real
-                        # expression lowering in the current (outer)
-                        # scope, not literal-only handling.
-                        arg_pairs.append(gen.lower_expr(_dflts[_pos][1]))
-                    else:
-                        arg_pairs.append(('int', '0'))
-            fname_c  = gimple_ctypes._safe_name(lifted)
-            if env_var:
-                env_type = gen.func_param_types.get(lifted, ['void *'])[0]
-                full_arg_pairs = [(env_type, env_var)] + arg_pairs
-            else:
-                full_arg_pairs = arg_pairs
-            gen._emit_call('void', '', fname_c, full_arg_pairs)
+            # The statement-level closure call is `_lower_closure_call` with
+            # its value discarded -- ONE binding of positional / keyword /
+            # default arguments (`_bind_closure_kwargs`). This used to be a
+            # third copy that padded against `func_param_types[lifted]` minus
+            # one for the env, and the compiled compiler padded every
+            # `_mkrf(a, b, c, d)` with a fifth argument there.
+            gen._lower_closure_call(raw_name, node.value)
             return
         # Sibling-closure call, bare-statement twin of _lower_call's
         # identical `_lambda_outer_closures` fallback a few hundred

@@ -1078,6 +1078,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
                 bb_not_dict = gen._new_bb(); bb_not_list = gen._new_bb()
+                bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
                 bb_after = gen._new_bb()
                 it64 = gen._to_int64(it_type, it_val)
                 isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
@@ -1086,6 +1087,13 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
                 gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_not_list};")
                 gen._emit_label(bb_not_list)
+                # A SET is the third container a word can be. Without this arm
+                # `for m in getattr(ci, 'mut_names', None) or []:` over a
+                # frozenset ran zero times in the compiled compiler, so a
+                # closure call group never shared its `nonlocal` cells.
+                iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
+                gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+                gen._emit_label(bb_not_set)
                 gen._emit_unsupported_iter(it_type, node)
                 gen._emit(f"  goto {bb_after};")
                 # `for item in <x>.items():` — even when `x`'s type is
@@ -1138,6 +1146,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # the same [key, value] pairs.
                     gen._dict_items_val_elems[lp] = 'int64_t'
                 gen._gen_for_list(var, lp, node.body, share_var_with_sibling_arm=True)
+                gen._emit(f"  goto {bb_after};")
+                gen._emit_label(bb_set)
+                _for_set_ptr = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
+                _set_lp = gen._call_expr('MojoList *', 'mojo_set_to_list',
+                                         [('MojoSet *', _for_set_ptr)])
+                gen._gen_for_list(var, _set_lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_after)
             else:
