@@ -425,8 +425,18 @@ def captures_only_locals(gen, node, enclosing: dict) -> bool:
     written for captures a `var`-bound local (`lambda: n`, `lambda:
     len(xs)`, `lambda x: n + x`).
     """
+    # Explicit membership over `_as_str` views rather than `set(a) & set(b)`:
+    # the compiled compiler's intersection of two untyped sets came back
+    # empty, so `_sig_pn = lambda pn: gen._cpp_kw_param_renames.get(pn, pn)`
+    # -- the very repro above -- was inlined there and lifted here.
     params = getattr(gen, '_cur_func_params', None) or ()
-    return not (set(free_names(node, enclosing)) & set(params))
+    _pset: set = set()
+    for _p in params:
+        _pset.add(_as_str(_p))
+    for _fn in free_names(node, enclosing):
+        if _as_str(_fn) in _pset:
+            return False
+    return True
 
 
 def reducible_lambdas(gen) -> dict:

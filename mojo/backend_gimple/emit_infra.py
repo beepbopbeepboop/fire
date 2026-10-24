@@ -157,7 +157,7 @@ def _reset_func(gen, body: list = None, params: list = None,
                                     if body is not None else set())
     if params is not None:
         for _p in params:
-            gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
+            gen._cur_func_params.add(_as_str(_p[0] if isinstance(_p, (tuple, list)) else _p))
             if (isinstance(_p, (tuple, list)) and len(_p) > 1 and _p[1] is None
                     and not _as_str(_p[0]).startswith('*')):
                 gen._cur_untyped_params.add(_as_str(_p[0]))

@@ -2890,10 +2890,17 @@ def _bound_names_in(x, out: set) -> None:
         _bound_names_in(x.elements, out)
 
 def _int_dict_scan(node, ok: set, other: set) -> None:
-    if isinstance(node, (list, tuple)):
-        for e in node:
-            _int_dict_scan(e, ok, other)
-        return
+    """Every node under `node` through `_walk_ast`, not a recursion over
+    `node.__dict__.values()`: the compiled compiler has no instance
+    `__dict__`, so there the scan saw the function node alone and no local
+    was ever int-keyed (`_generator_fns: dict[int, FunctionDef]` iterated its
+    keys as strings)."""
+    for _n in gimple_exprtypes._walk_ast(node):
+        _int_dict_note(_n, ok, other)
+
+
+def _int_dict_note(node, ok: set, other: set) -> None:
+    """`_int_dict_scan`'s per-node half: what ONE node binds."""
     if isinstance(node, VarDecl):
         if ',' not in node.name and _is_int_keyed_dict_annotation(node.type_ann):
             ok.add(node.name)
@@ -2926,11 +2933,6 @@ def _int_dict_scan(node, ok: set, other: set) -> None:
     elif hasattr(node, 'handlers'):
         for h in node.handlers:
             _bound_names_in(h.name, other)
-    if not hasattr(node, '__dict__'):
-        return
-    for v in node.__dict__.values():
-        if isinstance(v, (list, tuple)) or hasattr(v, '__dict__'):
-            _int_dict_scan(v, ok, other)
 
 def _compute_int_keyed_dicts(fn) -> set:
     """The locals/params of `fn` that are provably `Dict[Int, V]`: every place
