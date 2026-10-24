@@ -70,6 +70,7 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
+import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
@@ -13121,6 +13122,21 @@ def gen_module_impl(self, stmts):
             )
         _new_alloc_n_count += 1
     if _new_alloc_n_count > 0:
+        parts.append('')
+
+    # PART 6 (2026-10-23, closing piece): the C-ABI-FFI stat block for a
+    # monomorphized getsize[PathLike] TU — see emit_calls.py's
+    # _CABI_STAT_BLOCK comment for the measured chain and validation.
+    # `_needs_cabi_stat` is set during body lowering (the branch owns the
+    # call-site rewrite and the struct_field_types registration); this
+    # TU-scope block carries the C-ABI struct spelling, the REAL 2-arg
+    # system-stat prototype, and the static materialized
+    # stat_8_PathLike_6_String the call site binds to. Emitted BEFORE the
+    # function bodies (below), which is what its call site needs; the
+    # static definition means at most one per translation unit even if
+    # several call sites ever fire the branch.
+    if self._needs_cabi_stat:
+        parts.append(_gmi_emit_calls._CABI_STAT_BLOCK)
         parts.append('')
 
     global_decls = []  # kept for compatibility, but won't be emitted

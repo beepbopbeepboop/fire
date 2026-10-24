@@ -3469,6 +3469,47 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and fname_raw not in gen.func_return_types):
         return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
 
+    # PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI — see
+    # _CABI_STAT_BLOCK's own comment for the full measured chain, the
+    # closed <sys/stat.h> route, and the validation. Gated to the exact
+    # shape nothing else can serve: a BARE `stat(<one char* arg>)` call in
+    # a TU that has no import or local binding for `stat` — the isolated
+    # monomorphized getsize[PathLike] TU, where `stat` is the stdlib
+    # generic (std/os/fstat.mojo:179) the bound body still spells bare.
+    # Every main-pipeline TU is excluded by construction: path.mojo
+    # IMPORTS stat (from ..fstat — `stat in gen.imported_symbols`) and
+    # fstat.mojo locally Binds it, so the gate cannot fire there (their
+    # C is byte-identical to master — verified by the full-tree A/B).
+    # The ONE positional argument must lower to `char *` (the pinned
+    # String-path convention: after the part-5 __fspath__ identity fix the
+    # arg IS the path buffer, exactly what the real 2-arg signature
+    # `int stat(const char *, struct stat *)` takes as arg 1 — the
+    # as_c_string_span view over the same buffer). A stat call with any
+    # other argument type keeps the pre-branch path exactly (the honest
+    # declared-red, not a widened guess).
+    if (fname_raw == 'stat'
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and not node.kwargs
+            and len(node.args) == 1
+            and 'stat' not in gen.imported_symbols
+            and not gen._locally_binds_name('stat')):
+        _stat_rt, _stat_rv = gen.lower_expr(node.args[0])
+        if _stat_rt == 'char *':
+            gen._needs_cabi_stat = True
+            if 'gs_stat_result' not in gen.struct_field_types:
+                gen.struct_field_types['gs_stat_result'] = _CABI_STAT_RESULT_FIELDS
+            if 'gs_ctimespec' not in gen.struct_field_types:
+                gen.struct_field_types['gs_ctimespec'] = _CABI_STAT_CTIMESPEC_FIELDS
+            # The call returns a gs_stat_result * (this codegen's universal
+            # struct-as-pointer convention) so the chained `.st_size` read
+            # resolves through _lower_MemberExpr's static field branch
+            # (`struct_field_types['gs_stat_result']` was just registered)
+            # as a direct `->st_size` field read — NOT the pre-branch
+            # boxed-word + dynamic `_mojo_dispatch_getattr` model.
+            _stat_t = gen._new_val(
+                'gs_stat_result *', f'stat_8_PathLike_6_String ({_stat_rv})')
+            return 'gs_stat_result *', _stat_t
+
     return gen._lower_named_call(fname_raw, node)
 
 
@@ -7386,6 +7427,148 @@ def _kwarg_param_names(gen, fname_raw: str, fname: str, n_expected: int, kwarg_d
     if len(names) == n_expected:
         return names
     return None
+
+
+# PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI, spelled
+# in codegen for the monomorphized getsize[PathLike] TU. The isolated TU
+# (monomorphize.build: `GimpleGen(module_name='', no_mangle={mangled})`
+# over the bound source `return stat(path.__fspath__()).st_size`) carries
+# NO import knowledge, so the bare `stat(path)` call it contains fell to
+# _lower_named_call's reserved-name path with no prototype (gcc: implicit
+# declaration of function 'stat' — a C23 hard error) and its result was
+# modelled as a boxed int64_t word reinterpreted void* with a dynamic
+# `_mojo_dispatch_getattr(..., "st_size")` — both wrong: the real chain
+# (measured from the stdlib source) is
+#   getsize[PathLike] (std/os/path/path.mojo:382)
+#     -> stat[PathLike] (std/os/fstat.mojo:179; comptime-if
+#        CompilationTarget.is_macos() arm -> _stat_macos(fspath^).
+#        _to_stat_result())
+#     -> _stat (std/os/_macos.mojo:136, alias _stat_macos):
+#        external_call["stat", Int32](path.as_c_string_span(),
+#        Pointer(to=stat)) — the REAL `int stat(const char *, struct
+#        stat *)` FILLING A CALLER-OWNED struct (OUT parameter),
+#        `var stat = _c_stat()` default-init, err == -1 -> raise
+#        Error("unable to stat '", path, "'")
+#     -> _to_stat_result (std/os/_macos.mojo:114): the 15-field projection
+#        (11 Int() casts + 4 _CTimeSpec pass-throughs) into stat_result
+#        (std/os/fstat.mojo:44).
+# The `#include <sys/stat.h>` route stays CLOSED — the header's prototype
+# conflicts with the _macos TU's own external_call declaration of `stat`
+# (`extern int32_t stat (int, _c_stat *)` — first arg a truncated word),
+# the same <time.h>/clock_gettime precedent documented at
+# runtime/fire_runtime.h — so the C-ABI layout is spelled HERE instead.
+# `gs_cstat` mirrors the platform's REAL struct stat, measured with an
+# offsetof probe compiled by the same gcc against the SDK header (sizeof
+# 144, align 8; offsets 0/4/6/8/16/20/24/32/48/64/80/96/104/112/116/120/
+# 124/128 — note the packed dev/mode/nlink/ino head is THIS platform's
+# measured ABI, not the x86_64-era layout). The spelling was validated
+# two ways before landing: (1) an offsetof comparison of the spelled
+# struct against the header's, all 18 fields + sizeof + align matching;
+# (2) a real run of the exact block shape (own struct, own 2-arg
+# prototype, system stat call) against a real scratch file, returning
+# byte-identical size/ino/mode/uid/dev to the system-header reference.
+# The prototype is the REAL 2-arg signature — no 1-arg, no word-arg.
+# `stat_8_PathLike_6_String` is the campaign mangle of stat[PathLike]
+# with PathLike=String (monomorphize.mangle, same scheme as the caller's
+# own getsize_8_PathLike_6_String); it is static (one definition per TU
+# is all the link needs — the call stays inside this TU, and static
+# keeps two TUs that ever both materialize stat from colliding at link
+# time).
+# `gs_stat_result` / `gs_ctimespec` (the Mojo-level stat_result, 15
+# fields in fstat.mojo declaration order, and its _CTimeSpec timespecs)
+# are registered in gen.struct_field_types by the branch: that is what
+# makes (a) the chained `.st_size` read resolve through
+# _lower_MemberExpr's static field branch as a direct `->st_size` field
+# read, and (b) the TU's own struct-emit pass spell their typedefs in
+# the struct section (with the campaign's __mojo_type_id header). This
+# block therefore spells only what the pass does NOT spell: the C-ABI
+# `gs_cstat` (a system-ABI layout the campaign emitter would lay out in
+# declaration order with widened fields — the measured layout blocker),
+# the REAL 2-arg system-stat prototype, and the static helper.
+_CABI_STAT_RESULT_FIELDS = {
+    'st_mode': 'int64_t',
+    'st_ino': 'int64_t',
+    'st_dev': 'int64_t',
+    'st_nlink': 'int64_t',
+    'st_uid': 'int64_t',
+    'st_gid': 'int64_t',
+    'st_size': 'int64_t',
+    'st_atimespec': 'gs_ctimespec',
+    'st_mtimespec': 'gs_ctimespec',
+    'st_ctimespec': 'gs_ctimespec',
+    'st_birthtimespec': 'gs_ctimespec',
+    'st_blocks': 'int64_t',
+    'st_blksize': 'int64_t',
+    'st_rdev': 'int64_t',
+    'st_flags': 'int64_t',
+}
+_CABI_STAT_CTIMESPEC_FIELDS = {'tv_sec': 'int64_t', 'tv_nsec': 'int64_t'}
+_CABI_STAT_BLOCK = """
+/* PART 6 (2026-10-23, closing piece): C-ABI-FFI system stat() for the
+   monomorphized getsize[PathLike] call site — see emit_calls.py's
+   _CABI_STAT_BLOCK comment for the measured chain, the closed
+   <sys/stat.h> route, and the offsetof/real-run validation of this
+   spelling. gs_ctimespec/gs_stat_result (the Mojo-level stat_result)
+   are spelled by this TU's own struct-emit pass above (driven by the
+   struct_field_types registration in the lowering branch, with the
+   campaign's __mojo_type_id header); this block adds only the C-ABI
+   layout the pass cannot lay out, the REAL 2-arg system-stat
+   prototype, and the static materialized helper.
+   The timespecs inside gs_cstat are INLINED 16-byte C-ABI structs, NOT
+   the TU's gs_ctimespec typedef: the struct-emit pass spells that one
+   with the campaign's 8-byte type-tag header (24 bytes measured), and
+   embedding it shifted st_size from its real ABI offset 96 to 128 —
+   the system stat() writes at 96, so the first field read after the
+   timespecs returned 0 (measured in the ladder: 15-byte file -> 0).
+   Inlining keeps gs_cstat exactly the 144-byte ABI layout validated
+   above; the helper copies the 4 timespecs WORD BY WORD (C forbids
+   assigning between distinct struct types). */
+typedef struct {
+  uint32_t st_dev; uint16_t st_mode; uint16_t st_nlink; uint64_t st_ino;
+  uint32_t st_uid; uint32_t st_gid; uint32_t st_rdev;
+  struct { int64_t tv_sec; int64_t tv_nsec; } st_atimespec;
+  struct { int64_t tv_sec; int64_t tv_nsec; } st_mtimespec;
+  struct { int64_t tv_sec; int64_t tv_nsec; } st_ctimespec;
+  struct { int64_t tv_sec; int64_t tv_nsec; } st_birthtimespec;
+  int64_t st_size; int64_t st_blocks; int32_t st_blksize;
+  uint32_t st_flags; uint32_t st_gen; int32_t st_lspare; int64_t st_qspare[2];
+} gs_cstat;
+extern int stat (const char *, gs_cstat *);
+static gs_stat_result * stat_8_PathLike_6_String (char * path)
+{
+  gs_cstat _cs;
+  memset (&_cs, 0, sizeof(_cs));
+  int _rc = stat (path, &_cs);
+  if (_rc == -1) {
+    char * _msg = mojo_str_cat (mojo_str_cat ((char *)"unable to stat '", path), (char *)"'");
+    mojo_exc_type_set (471634805);
+    mojo_exc_msg_set (_msg);
+    mojo_exc_obj_set (_msg);
+    mojo_raise ();
+  }
+  gs_stat_result * _r = (gs_stat_result *) malloc (sizeof (gs_stat_result));
+  _r->st_mode = (int64_t)_cs.st_mode;
+  _r->st_ino = (int64_t)_cs.st_ino;
+  _r->st_dev = (int64_t)_cs.st_dev;
+  _r->st_nlink = (int64_t)_cs.st_nlink;
+  _r->st_uid = (int64_t)_cs.st_uid;
+  _r->st_gid = (int64_t)_cs.st_gid;
+  _r->st_size = (int64_t)_cs.st_size;
+  _r->st_atimespec.tv_sec = _cs.st_atimespec.tv_sec;
+  _r->st_atimespec.tv_nsec = _cs.st_atimespec.tv_nsec;
+  _r->st_mtimespec.tv_sec = _cs.st_mtimespec.tv_sec;
+  _r->st_mtimespec.tv_nsec = _cs.st_mtimespec.tv_nsec;
+  _r->st_ctimespec.tv_sec = _cs.st_ctimespec.tv_sec;
+  _r->st_ctimespec.tv_nsec = _cs.st_ctimespec.tv_nsec;
+  _r->st_birthtimespec.tv_sec = _cs.st_birthtimespec.tv_sec;
+  _r->st_birthtimespec.tv_nsec = _cs.st_birthtimespec.tv_nsec;
+  _r->st_blocks = (int64_t)_cs.st_blocks;
+  _r->st_blksize = (int64_t)_cs.st_blksize;
+  _r->st_rdev = (int64_t)_cs.st_rdev;
+  _r->st_flags = (int64_t)_cs.st_flags;
+  return _r;
+}
+"""
 
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

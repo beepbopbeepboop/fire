@@ -619,56 +619,55 @@ EXPECTED_FAILURES = {
     # the correct thing here: it refused to emit a call it cannot lower instead
     # of emitting the above. That is the same situation as the 21 entries
     # above, which is why the summary line reads 22 expected / 0 unexpected.
-    'test/os/path/test_getsize.mojo': (
-        "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. "
-        "RE-MEASURED 2026-10-23 (part 6, family S): unchanged — the whole "
-        "family-S piece (in-TU siter structs, comptime string reads, "
-        "as_bytes word-boxing, the String() ctor actuals record) does not "
-        "touch this file's failure: the sweep reports the same codegen "
-        "error and the A/B TSV diff shows its E-message byte-identical "
-        "(0 E-message changes across all 610 files). "
-        "RE-MEASURED 2026-10-22 (part 5): unchanged — codegen fails "
-        "(`gcc -c failed for the monomorphized getsize_8_PathLike_6_String "
-        "(exit 1, 3 attempts)`; `implicit declaration of function 'stat'`), "
-        "and the emitted body is still `stat (path)` + "
-        "`_mojo_dispatch_getattr(..., \"st_size\")`. The closure was mapped "
-        "in full: std/os/fstat.mojo's `stat[PathLike]` selects the platform "
-        "arm with a comptime branch (`CompilationTarget.is_macos()`); "
-        "`_stat_macos` is `external_call[\"stat\", Int32](path.as_c_string_"
-        "span(), Pointer(to=stat))` — an FFI call with an OUT PARAMETER "
-        "filling the `_c_stat` C-ABI struct (17 mixed-width fields incl. "
-        "`_CTimeSpec` + `Array[Int64, 2]`), which the in-TU materializer "
-        "does not lay out in C-ABI order; the result travels through "
-        "`_to_stat_result()` (18-field projection + Int casts) and the "
-        "18-argument keyword constructor of `stat_result`. Every link of "
-        "that chain (C-ABI struct layout, external_call out-struct, "
-        "`as_c_string_span`, comptime target branch, Error-with-String "
-        "raise) is an unmeasured mechanism — a C-ABI-FFI sub-campaign, not "
-        "a next-fix. Part 5's factory machinery does not touch this file "
-        "(no dependent-return factory call; the failure is in the "
-        "monomorphized module compile, identical to the 2026-10-20 state). "
-        "UPDATE 2026-10-20: the first of the three defects is closed — "
-        "`__fspath__()` on a String receiver is now lowered as the identity "
-        "(stdlib's `String.__fspath__` returns self, and this codegen's "
-        "String IS its char* buffer): the monomorphized TU's call is "
-        "`stat(path)`, passing the real path, where it was `stat(0)` from "
-        "the 0-stub (measured before/after in the generated C). TWO defects "
-        "remain, both value-level, and the TU still fails gcc -c on the "
-        "first: (1) bare `stat` — a CROSS-STDLIB call to the generic "
-        "`stat[PathLike: stdPathLike]` (std/os/fstat.mojo) that the isolated "
-        "monomorphized TU has no prototype for (`implicit declaration of "
-        "function 'stat'`); it needs transitive elaboration of the callee "
-        "with PathLike=String and a call rewrite to the mangled symbol + "
-        "linked object; (2) the result is modelled as int64_t, reinterpreted "
-        "as `void *`, with `.st_size` fetched by dynamic "
-        "`_mojo_dispatch_getattr` — the real signature is "
-        "`int stat(const char *, struct stat *)`, an out-param filling a "
-        "caller-owned struct, so a prototype alone would not fix it. Not "
-        "fixable by `#include <sys/stat.h>` either: every TU includes "
-        "fire_runtime.h and std/os/_macos.mojo:137 declares `stat` itself "
-        "via `external_call[\"stat\", Int32]`. Reachable only once the "
-        "codegen models the out-param. See "
-        "bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md"),
+    # 2026-10-23 (part 6, closing piece) — REMOVED from this dict:
+    # test/os/path/test_getsize.mojo no longer FAILS THE SWEEP — measured
+    # 2026-10-23: the monomorphized getsize_8_PathLike_6_String TU now
+    # COMPILES (gcc -c passes; before: `implicit declaration of function
+    # 'stat'`, 3 attempts) and the sweep is 610/0 — the campaign's arc
+    # 592/18 -> 608/2 -> 609/1 -> 610/0, this file was the last red. The
+    # two measured defects are both closed in the emitted C: (1) the
+    # bare `stat (path)` (no prototype) is now `stat_8_PathLike_6_String
+    # (path)` — a static in-TU materialization of stat[PathLike] with
+    # PathLike=String whose body is the REAL chain: a C-ABI gs_cstat
+    # (144 bytes; offsets 0/4/6/8/16/20/24/32/48/64/80/96/104/112/116/
+    # 120/124/128 validated against the SDK header by an offsetof probe
+    # compiled with the same gcc — note the packed dev/mode/nlink/ino
+    # head is THIS platform's measured ABI) zero-filled as the _c_stat()
+    # default-init, the REAL 2-arg system `extern int stat (const char *,
+    # gs_cstat *)` OUT call, err == -1 -> Error("unable to stat
+    # '<path>'") via the mojo_exc_type_set + mojo_exc_msg_set +
+    # mojo_raise idiom (the crc32 Error tag 471634805), and the 15-field
+    # _to_stat_result projection (11 Int casts + the 4 _CTimeSpec word
+    # pairs) into the in-TU gs_stat_result; (2) the result was a boxed
+    # int64_t word + dynamic `_mojo_dispatch_getattr (void *, "st_size")`
+    # and is now a `gs_stat_result *` + a direct `->st_size` field read
+    # (the struct_field_types registration drives both). The
+    # `#include <sys/stat.h>` route stays closed (its prototype conflicts
+    # with the _macos TU's own external_call declaration of `stat` — the
+    # <time.h>/clock_gettime precedent at runtime/fire_runtime.h:
+    # 1581-1596); the C-ABI layout is spelled in codegen instead
+    # (emit_calls._CABI_STAT_BLOCK + the branch gated in _lower_call to
+    # bare `stat(<one char* arg>)` with NO import or local binding — the
+    # isolated monomorphized TU only: path.mojo IMPORTS stat and
+    # fstat.mojo locally Binds it, so their C is untouched). LADDER (the
+    # 2026-10-03 bar): nm on the monomorphized object shows the
+    # instantiation's stat path DEFINED (t _stat_8_PathLike_6_String; T
+    # _getsize_8_PathLike_6_String), the real link leaves no undefined
+    # symbol for it (only the system `stat`, resolved by libSystem), and
+    # a REAL RUN against real scratch files of known size returns the
+    # right st_size — 0/15/999 -> 0/15/999 (LADDER PASS rc=0), negative
+    # control held (patching the C's st_size projection +1 in a copy ->
+    # 1/16/1000, LADDER FAIL rc=1 — the values flow from the real stat,
+    # not a stub). The full test binary's wrapper remains a staged
+    # remainder of the PRE-EXISTING main-pipeline closure gap, not this
+    # piece's class: the test's own `NamedTemporaryFile(delete=False)`
+    # call lowers to a zero-arg `NamedTemporaryFile ()` whose bare ctor
+    # symbol no object defines (the struct-ctor qualifier-mismatch class
+    # named in monomorphize.build's docstring), and `assert_equal`/
+    # `main` the same — measured: the link's undefined list is exactly
+    # those plus runtime/libc, none stat-related. See
+    # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
+    # defines.md (2026-10-23 closing section).
 }
 
 def get_stdlib_path():

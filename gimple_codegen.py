@@ -2006,6 +2006,13 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
+        # PART 6 (2026-10-23, closing piece): set True by emit_calls when a
+        # bare `stat(<char*>)` C-ABI FFI call site is lowered in this TU;
+        # module_gen then emits the one C-ABI struct/prototype/helper block
+        # (gs_cstat + the materialized stat_8_PathLike_6_String). Per-TU:
+        # the block is static, so at most one definition per translation
+        # unit regardless of how many call sites fire the branch.
+        self._needs_cabi_stat: bool = False
         # Which per-translation-unit device-introspection definitions have been
         # emitted ('definitions' once the empty or full sidecar is out) -- shared
         # by reference with every nested temp_gen (emit_resolve), exactly like

@@ -1527,3 +1527,159 @@ test_getsize re-measured — unchanged, and its entry stays accurate
   declared red is test_getsize itself; the next piece is its
   C-ABI-FFI sub-campaign (bar: the mangled stat path defined in-TU +
   a real run returning the right st_size for a real scratch file).
+
+## 2026-10-23 (part 6, closing piece): test_getsize CLOSED — the
+C-ABI-FFI sub-campaign lands, the 610-file sweep is 610/0, and the
+2026-10-03 false-PASS bar is met with real values
+
+### The two defects, closed in the emitted C (measured before/after)
+
+Pre-fix, the monomorphized `getsize_8_PathLike_6_String` TU's body was
+`_t2 = stat (path);` (bare `stat`, no prototype — `implicit declaration
+of function 'stat'`, a C23 hard error that killed `gcc -c` on 3
+attempts) whose result was modelled as a boxed `int64_t` word,
+reinterpreted `(void *)`, with `.st_size` fetched by dynamic
+`_mojo_dispatch_getattr (_t3, "st_size")`. Post-fix, the same body is:
+
+    before:  _t2 = stat (path);
+             _t3 = (void *)_t2;
+             _t4 = _mojo_dispatch_getattr (_t3, _t5);  /* "st_size" */
+             return _t4;
+    after:   _t2 = stat_8_PathLike_6_String (path);
+             _t3 = _t2->st_size;
+             return _t3;
+
+`stat_8_PathLike_6_String` (the campaign mangle of `stat[PathLike]`
+with `PathLike=String`, same scheme as the caller's own
+`getsize_8_PathLike_6_String`) is a `static` in-TU materialization
+emitted once per TU by `emit_calls._CABI_STAT_BLOCK` (driven by the
+gated branch at the tail of `_lower_call` + `module_gen`'s
+`_needs_cabi_stat`). Its body is the REAL measured chain
+(`std/os/path/path.mojo:382` → `std/os/fstat.mojo:179` comptime-if
+macos arm → `std/os/_macos.mojo:136` → the `_to_stat_result` projection
+at `_macos.mojo:114`): a zero-filled C-ABI `gs_cstat` (the `_c_stat()`
+default-init, measured `memset 0`), the REAL 2-arg system call
+`extern int stat (const char *, gs_cstat *)` with the OUT parameter
+filling the caller-owned struct (no 1-arg prototype), `err == -1` →
+`Error("unable to stat '<path>'")` via `mojo_str_cat` +
+`mojo_exc_type_set (471634805)` (the crc32 `Error` tag) +
+`mojo_raise`, and the 15-field projection (11 `Int`-widening casts +
+the 4 `_CTimeSpec` word pairs) into the in-TU `gs_stat_result` — whose
+typedef the TU's own struct-emit pass spells from the branch's
+`struct_field_types` registration, the same registration that makes
+the chained `.st_size` resolve as a direct `->` field read instead of
+the dynamic getattr.
+
+The gate is narrow by construction: a bare `stat(<one char* arg>)`
+call in a TU with NO import and NO local binding for `stat` — the
+isolated monomorphized TU only. `std/os/path/path.mojo` IMPORTS
+`stat` (from `..fstat`) and `std/os/fstat.mojo` locally BINDS it, so
+neither main-pipeline TU can fire the branch; the 610-file A/B
+confirms exactly one file's C changed (see below). The
+`#include <sys/stat.h>` route stays CLOSED per the decision
+(conflicting types with fire_runtime.h and the `_macos` TU's own
+`external_call` declaration of `stat` — the `<time.h>`/`clock_gettime`
+precedent); the C-ABI layout is spelled in codegen instead.
+
+### The C-ABI layout: measured on this platform, validated twice
+
+The SDK header's `struct stat` (Darwin 27, arm64) measures as 144
+bytes, align 8, with offsets 0/4/6/8/16/20/24/32/48/64/80/96/104/112/
+116/120/124/128 — note the packed `dev`/`mode`/`nlink`/`ino` head
+(u32/u16/u16/u64) is THIS platform's measured ABI, not the
+x86_64-era layout the earlier closure map assumed. The codegen
+spelling was validated before landing, both ways: (1) an offsetof
+probe compiled with the same gcc compares the spelled struct against
+the header's — all 18 fields + sizeof + align matching; (2) a real
+run of the EXACT block shape (own-spelled struct, own 2-arg
+prototype, system `stat` call) against a real 12345-byte scratch
+file returned `size=12345 ino=94996773 mode=100644 uid=505
+dev=16777230` — byte-identical to the system-header reference run.
+
+A latent layout bug was caught and fixed by the real run before
+landing: the first block version embedded the TU's `gs_ctimespec`
+typedef in `gs_cstat` — which the struct-emit pass spells with the
+campaign's 8-byte type-tag header (24 bytes) — shifting `st_size`
+from its real ABI offset 96 to 128, so the ladder's 15-byte file
+answered 0. The timespecs are inlined 16-byte C-ABI structs and the
+projection copies them word by word (C forbids assigning between
+distinct struct types); documented in `_CABI_STAT_BLOCK`'s own
+comment.
+
+### Ladder: the 2026-10-03 bar, met with real values
+
+- `nm` on the monomorphized object: the instantiation's stat path is
+  DEFINED in the module's own object — `t _stat_8_PathLike_6_String`
+  (static — one definition per TU is all the link needs, and static
+  keeps two TUs that ever both materialize `stat` from colliding) and
+  `T _getsize_8_PathLike_6_String` (the caller's entry); the only
+  undefined stat-path symbol is the SYSTEM `stat`, which the real
+  link resolves from libSystem.
+- The real link (test driver + the monomorphized object +
+  `build/libmojostdlib.arm64.dylib`) leaves no undefined symbol for
+  the stat path, and the binary runs.
+- REAL RUN against real scratch files of known size (created in the
+  scratch dir, cleaned up after): 0/15/999 bytes → `got=0/15/999`
+  (LADDER PASS rc=0). This is the false-PASS cautionary tale's
+  answer: the vacuous 0-stub shape (both sides answering 0) would
+  have passed a syntax-only gate; the 15/999 cases cannot.
+- Negative control: patching a COPY of the C's `st_size` projection
+  `+1` rebuilds to `got=1/16/1000` (LADDER FAIL rc=1) — the values
+  flow from the real `stat()`, not a stub.
+
+### Field counts, corrected (measured against the stdlib source)
+
+The family-S section's closure map carried "17-field `_c_stat`" and
+"18-field `_to_stat_result()` projection / 18-argument keyword
+constructor". Measured this piece: `_c_stat`
+(`std/os/_macos.mojo:33`) has **18** Mojo fields;
+`stat_result` (`std/os/fstat.mojo:44`) has **15** fields (11 `Int` +
+4 `_CTimeSpec`), and the 15-arg keyword constructor — the projection
+copies exactly those 15 (11 casts + 4 timespecs). The earlier "18"
+conflated the two.
+
+### Battery
+
+- Sweep: current tree **610/0** (0 expected, 0 unexpected, rc=0; the
+  stale-entry hygiene gate fired once pre-removal, clean after);
+  fresh master worktree at 1057cd70: **609/1** (test_getsize, the
+  baseline). The campaign arc lands: 592/18 → … → 608/2 → 609/1 →
+  **610/0** — the 610-file stdlib compiles, end to end.
+- A/B (610 files, both trees, fresh process per file): exactly ONE
+  changed file — `test/os/path/test_getsize.mojo`, ERROR → C (the
+  file whose isolated TU this piece fixed; its own C now exists).
+  Zero C→E, zero unclassified. Removed-symbol hazard check: the
+  master's file never produced an object (its compile failed), so it
+  contributed no symbols to remove, and the other 609 files' C is
+  byte-identical — no TU's symbol surface changed elsewhere.
+- Warn set: 19 files / 294 total, byte-identical from both
+  full-sweep logs. no-new-casts: 19 (baseline). formal_doc_index:
+  133 documents, block current.
+- `EXPECTED_FAILURES`: the final entry REMOVED with the
+  measured-removal comment in compile_stdlib.py — the dict is now
+  empty and the hygiene gate passes on a clean re-sweep.
+
+### Staged remainder (pre-existing main-pipeline class, not this
+piece's)
+
+The full test BINARY's wrapper still cannot link, for reasons that
+pre-date and do not touch the stat chain: the test's own
+`NamedTemporaryFile(delete=False)` call lowers to a zero-arg
+`NamedTemporaryFile ()` whose bare ctor symbol no object defines
+(the struct-ctor qualifier-mismatch class named in
+`monomorphize.build`'s docstring — the home TU defines
+`std_tempfile_tempfile_NamedTemporaryFile___init__`, not the bare
+name), and `std_testing___init___assert_equal` / `main` the same.
+Measured: the link's undefined list is exactly those plus
+runtime/libc symbols, none stat-related. That closure is a separate
+sub-campaign; the stat chain itself — the subject of this doc — is
+closed.
+
+### Status
+
+CLOSED. The headline figure in the first section (96 sites / 51
+names / 60 files, later the 1938/851/381 total) is the class; this
+piece closes its last live member: the 610-file sweep is 610/0 with
+every remaining execution-level gap either closed with real-value
+ladders (this doc's and the sister doc's families) or declared and
+measured in the staged remainders named above.
