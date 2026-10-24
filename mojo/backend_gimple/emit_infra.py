@@ -382,6 +382,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unambiguously): the value is a string, an int, or any handle, and only
     # the runtime can say which. `_stringify_value` asks it
     # (`mojo_cstr_or_int_str`) instead of formatting the word as a decimal.
+    # A function body starts OUTSIDE every try/with emit frame. A lambda is
+    # lifted -- and its body emitted -- while the enclosing function may be
+    # inside a `try`, and that frame then intercepted the LAMBDA's `return`
+    # as the try's own early return (`_elaborate_generic_call_lambda_1`
+    # assigned a temp of the parent function and jumped to its finally).
+    gen._emit_frames = []
     gen._dyn_word_vals: set = set()
     # The LOCALS such a word was bound to (`x = obj.attr`, or one slot of an
     # unpack whose source carries no element type): same question, asked of
@@ -849,6 +855,7 @@ class FuncState:
         self.fs_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
+        self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
         self.fs_maybe_kinds_vals: set = set()
@@ -941,6 +948,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_closure_vals = gen._closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
+    st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
@@ -1042,6 +1050,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._closure_vals = st.fs_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
+    gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals

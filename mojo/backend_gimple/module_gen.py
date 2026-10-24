@@ -877,7 +877,9 @@ def _infer_return_maybe_kinds(gen, body, params=None,
     does it, because this function is called from inside a fixpoint that owns
     `gen.var_types`."""
     _pk = _param_slot_kinds(params)
-    _ck = callee_kinds if callee_kinds is not None else ()
+    # A SET either way: `set-or-()` joined to a list in the compiled
+    # compiler, and `name in _ck` then strcmp'd the set's slots as a list's.
+    _ck: set = callee_kinds if callee_kinds is not None else set()
     _saved_vt = gen.var_types if gen is not None else None
     if gen is not None:
         gen.var_types = dict(_as_dict(_saved_vt))
