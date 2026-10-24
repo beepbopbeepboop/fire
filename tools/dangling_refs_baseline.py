@@ -32,6 +32,18 @@ honestly bound.
 """
 BASELINE = {
     'test_suite.py': 6,
+    # `tools/control.py` is owner-held (the campaign may read it, not edit
+    # it), and its `norm_claim` docstring spells the accepted claim forms
+    # — `FORMAL_x`, `FORMAL_x.md`, `bugs/FORMAL_x.md` — as one worked
+    # example. `FORMAL_x.md` is a placeholder: no such doc exists, so the
+    # walk counts the docstring as a dangling citation, and a docstring
+    # cannot be reworded by this campaign without touching the owner's
+    # file. One deliberate ceiling entry, raised 2026-10-24 after reading
+    # the b73591b9 diff (the same deliberate-entry pattern the test_suite
+    # .py negative controls above use). If the owner rewords the docstring
+    # the ratchet reports this entry as stale on the green path and it may
+    # be dropped.
+    'tools/control.py': 1,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
@@ -127,6 +139,9 @@ BARE_BASELINE = {
     'test_mutable_async_capture.py': 1,
     'test_runtime_header_scan.py': 1,
     'test_suite.py': 11,
+    # Deliberate, same reason as the prefixed entry above: the owner-held
+    # `norm_claim` docstring's `FORMAL_x.md` half of the worked example.
+    'tools/control.py': 1,
     'tools/dangling_doc_refs.py': 1,
     'tools/formal_fuzz.py': 1,
     'tools/formal_sweep_causes.py': 1,

@@ -5317,7 +5317,28 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'nothing reports green forever, which is the one thing it must not be '
           f'able to do, and the fixtures are the only corpus that exists here by '
           f'construction')
-    outside = {n: v for n, v in by_doc.items() if n not in fixtures}
+    # The ratchet's prefixed ledger (tools/dangling_refs_baseline.BASELINE)
+    # is the declared set of files that still carry DELIBERATE citations of
+    # deleted docs (its header: "deliberate rather than unfixed" — the
+    # test_suite.py negative controls are the precedent). A name cited ONLY
+    # in such a ledgered file is not a sweep gap: it is a declared entry
+    # held to its per-file ceiling by the doc-refs job, and growth in a
+    # ledgered file fails THERE, so the zero invariant below covers the rest.
+    # Measured 2026-10-24: the owner-held tools/control.py's `norm_claim`
+    # docstring spells `bugs/FORMAL_x.md` as one worked example of a claim
+    # form (a placeholder — no such doc), and this file cannot be reworded
+    # by the campaign (owner-held), so its one citation sits behind a
+    # deliberate ledger entry with a comment. Without this exclusion the
+    # check below is red on the owner's b73591b9 commit for a line the
+    # campaign has no right to edit.
+    try:
+        import dangling_refs_baseline as _baseline_mod
+        _ledgered_files = set(getattr(_baseline_mod, 'BASELINE', {}))
+    except ImportError:
+        _ledgered_files = set()
+    outside = {n: v for n, v in by_doc.items()
+               if n not in fixtures
+               and not (v and all(f in _ledgered_files for f, _ in v))}
     check('dangling refs: ...and outside those controls the corpus is empty, '
           'which is what a sweep buys',
           not outside,
