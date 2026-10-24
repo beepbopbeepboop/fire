@@ -13986,6 +13986,44 @@ def gen_module_impl(self, stmts):
                 # index, not "up to it": a range ending at it still `break`s
                 # on the inherited declaration earlier in the list.
                 _own_idx = _own_class_field_index(s.fields, aname)
+                if _own_idx < 0:
+                    # `aname` is NOT declared in this struct object's own
+                    # `.fields` (e.g. the list is empty): the registration
+                    # under this struct's name was made by a DIFFERENT
+                    # same-named StructDef in `all_struct_defs` —
+                    # `_class_attrs` is keyed by struct name only, so a
+                    # closure carrying two classes of one name (a same-home
+                    # redefinition, or same-named classes accumulated in
+                    # the import mirror) conflates them. This object
+                    # declares no `aname`, so it must emit nothing for it.
+                    # The non-empty-`fields` spelling of the same case was
+                    # already an implicit no-op here (`range(-1, 0)` reads
+                    # `fields[-1]`, whose name cannot match `aname`, and
+                    # the body did nothing); only the empty-`fields`
+                    # spelling was live, and it crashed: `[][-1]` is an
+                    # IndexError.
+                    #
+                    # Measured on BOTH `566ba1c9` (master) and `8c48013c`
+                    # (the row-16 failed-import rollback): a single module
+                    # defining `class Box: tag = 1` and later redefining
+                    # `class Box:` bare died in THIS loop — the redefined
+                    # copy is a same-home redefinition (no `_struct_cname_
+                    # by_id` rename), walks here with the owner's
+                    # non-empty `_class_attrs['Box']`, and `[][-1]` killed
+                    # the build before any binary. The row-16 fix did not
+                    # cause it; it EXPOSED it at scale: the rollback un-
+                    # poisoned the self-import guard, whole-program
+                    # closures (measured, `Lib/importlib/resources/
+                    # readers.py`: 77+ tracebacks, every one this line,
+                    # across `io`/`stat`/`genericpath`/`operator`/
+                    # `keyword`/`types`/... while the pre-fix master probe
+                    # of the identical build finished in minutes with zero
+                    # crashes) carried same-named class pairs into this
+                    # loop. Regression: `test_link_mode.py`'
+                    # `test_class_redefinition_does_not_crash_class_attr_
+                    # emission` (fails before on both trees, prints `1` ==
+                    # CPython after).
+                    continue
                 for _pick in range(_own_idx, _own_idx + 1):
                     field = _as_list(s.fields)[_pick]
                     _cfd = _class_field_decl(field)

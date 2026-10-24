@@ -1099,7 +1099,73 @@ def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
     return ok
 
 
+def test_class_redefinition_does_not_crash_class_attr_emission() -> bool:
+    """A SAME-HOME class redefinition whose LATER copy drops the class
+    attribute must not crash the class-attr emission loop.
+
+    `class Box:` defined twice in one module (Python: the second binding
+    replaces the first), the first carrying `tag = 1`, the second bare. In
+    gen_module_impl's struct-identity pass the second Box is a same-home
+    redefinition, NOT a cross-module collision, so it gets no
+    `_struct_cname_by_id` entry and keeps the bare name `Box`. The class-
+    attr registration keys `tag` under the owner's (first Box's) name. The
+    LATER class-attr EMISSION loop then walks the second, field-less Box
+    with that same non-empty `_class_attrs['Box']` map:
+    `_own_class_field_index([], 'tag') == -1`, and the old
+    `range(-1, 0)` read `fields[-1]` on the empty list — a hard
+    `IndexError: list index out of range` that killed the whole build.
+
+    Measured: on BOTH `566ba1c9` (master) and `8c48013c` (the row-16 fix),
+    this exact single-file shape died with `IndexError: list index out of
+    range` at the emission's `field = _as_list(s.fields)[_pick]`, before
+    producing any binary. The row-16 fix (failed-import rollback) did not
+    introduce the bug — it un-poisoned the self-import guard so that whole-
+    program closures (e.g. `Lib/importlib/resources/readers.py`) carried
+    same-named class pairs into the shared stmt mirror and reached this loop
+    77+ times, one per affected module; the minimal single-file shape above
+    is the same crash with the closure stripped away.
+
+    The fix is a `continue` when `_own_idx < 0`: a struct object that does
+    not declare `aname` in its own `.fields` emits nothing for it (the
+    owner, which does declare it, emits it once). This is the non-empty-
+    `fields` no-op the old code already performed implicitly, minus the
+    empty-list index. Asserting `1` (not just a clean build) pins the REAL
+    value: `Box.tag` is read from the first Box's emitted class attribute
+    before the redefinition replaces the binding — a vacuous pass would
+    print `0` if the attribute were dropped."""
+    pkg = {
+        'main.py': (
+            'class Box:\n'
+            '    tag = 1\n'
+            '\n'
+            '\n'
+            'def f():\n'
+            '    return Box.tag\n'
+            '\n'
+            '\n'
+            'r = f()\n'
+            '\n'
+            '\n'
+            'class Box:\n'
+            '    """redefinition, no class attributes"""\n'
+            '\n'
+            '\n'
+            'print(r)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '1')
+    if not ok:
+        print(f"  ✗ class_redefinition_does_not_crash_class_attr_emission: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
+    test_class_redefinition_does_not_crash_class_attr_emission,
     test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
