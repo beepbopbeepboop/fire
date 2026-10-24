@@ -1007,6 +1007,98 @@ def test_transitive_struct_method_is_not_variadic_stubbed() -> bool:
     return ok
 
 
+def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
+    """A failed imported-module attempt must not poison a later import of
+    the same file under a different spelling.
+
+    Measured 2026-10-23 in the c_analyzer/c_parser cluster (non-formal
+    campaign, bugs/BUGFIX_ROADMAP.md rows 13-16): building
+    `Tools/c-analyzer/c_parser/parser/__init__.py` on master, the failed
+    `..info` attempt left (a) its guard entries in `_compiling_file_paths`
+    (the set is add-only, and the attempt's OWN nested import of
+    `c_parser/parser/_regexes.py` planted that file's path), and (b) stale
+    spelling-CLAIM knowledge published under the attempt's corpse spelling.
+    A later import of `_regexes.py` under the sibling spelling was then
+    guard-REFUSED and compiled "with nothing", so `_common.py:50` emitted
+    its call under the corpse suffix `parser__regexes__ind_15d274`
+    ((int64_t,int64_t,char*)) while the real definition is
+    `parser__regexes__ind_0f1876` — implicit declaration plus seven
+    dangling toplevels in the generated C (the fixed tree unifies all 35
+    `_ind` references on 0f1876; see build/remes/r16fix3.log and
+    bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
+
+    The fix (mojo/backend_gimple/emit_resolve.py, `_compile_imported_module`
+    except handler) snapshots the attempt's guard entries, its
+    `_sub_toplevels` tail, and the three spelling-CLAIM registries, and
+    discards the attempt's additions on failure. The SIGNATURE registries
+    are deliberately NOT rolled back: their values are spelling-isolated,
+    and rolling them back measured a NEW error — `conflicting types for
+    'info_get_default_storage_9f63a2'` on r13 — because the survivor
+    spelling's forward declaration then fell back to int64 instead of the
+    char* the failed attempt had inferred.
+
+    This fixture is the minimal mirror. `t/poison.py`'s
+    `bad(items: list)` carries the measured `.iterutil` refusal shape
+    (`items = iter(items); next(items)` on a receiver typed `MojoList *`
+    has no lowering in this codegen) — a DETERMINISTIC content refusal, so
+    the attempt fails identically on master and on the fixed tree, and the
+    only thing the fix changes is what the failure LEAVES BEHIND.
+    `from .shared import S` plants the guard entry on `t/shared.py`
+    during the attempt. `t/sub/mod.py` takes S THROUGH poison
+    (`from ..poison import S` — a used name is what makes link mode
+    attempt the import at all; S still resolves after the failure because
+    its home is `t/shared.py`, which compiles fresh under the sibling
+    spelling) and `s` from shared under that sibling spelling `..shared`.
+
+    On master the leftover guard entry REFUSES `..shared`, so mod's
+    `s("x")` call site emits `implicit declaration of 'shared_s_...'`
+    plus `assignment to 'char *' from 'int'` and the build fails with no
+    binary. On the fixed tree the attempt rolls its state back, `..shared`
+    compiles for real, and the binary prints `s X!` like CPython.
+    """
+    pkg = {
+        't/__init__.py': '',
+        't/sub/__init__.py': '',
+        't/shared.py': (
+            'S = "s"\n'
+            '\n'
+            '\n'
+            'def s(text):\n'
+            '    return text.upper() + "!"\n'
+        ),
+        't/poison.py': (
+            'from .shared import S\n'
+            '\n'
+            '\n'
+            'def bad(items: list):\n'
+            '    items = iter(items)\n'
+            '    return next(items)\n'
+        ),
+        't/sub/mod.py': (
+            'from ..poison import S\n'
+            'from ..shared import s\n'
+            '\n'
+            '\n'
+            'def run():\n'
+            '    print(S, s("x"))\n'
+        ),
+        't/__main__.py': (
+            'from .sub.mod import run\n'
+            '\n'
+            '\n'
+            'run()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 't/__main__.py', td)
+        py_rc, py_stdout = _cpython_run(td, 't/__main__.py', as_module=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout == 's X!\n')
+    if not ok:
+        print(f"  ✗ failed_import_attempt_does_not_poison_later_spelling: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
     test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
@@ -1025,6 +1117,7 @@ CASES = [
     test_dotted_sibling_import_qualifier_agrees,
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
     test_unannotated_param_with_disagreeing_call_sites,
+    test_failed_import_attempt_does_not_poison_later_spelling,
 ]
 
 
