@@ -1,5 +1,80 @@
 # FORMAL_listdir_no_run_time_sequence: a run-time-length blob is answerable; a run-time-length LIST is not
 
+**Status 2026-10-05 (`work/formal71-docs`): the loud stop this document landed in
+October was landing it HALF-WAY — five of the seven run-time diagnostics on this
+path write their text with a CHARACTER count where `write(2, …)` wants a BYTE
+count, so every message holding an em-dash or an ellipsis ended mid-word on BOTH
+architectures. Fixed at the root (one reader, both emitters), and step 2 of
+"What landed" — the build-time refusal this document has left open since
+2026-10-01 — is DECLINED with a measurement rather than left pending: it costs a
+program that is correct today. What is left is unchanged and is still one piece,
+the blob that grows. Everything under this line is the history the document
+grew.**
+
+**The defect, measured on both architectures and byte for byte, is that the
+message lost its last four bytes.** `model.list_append_overflow_message('ys', 1)`
+is 774 characters and 778 bytes, and `_emit_overflow_diagnostic` passed
+`len(text)` as the `write` length:
+
+```
+$ .tmp/…/c2_arm64 5 2>err ; wc -c err
+    774 err                      # the message is 778 bytes
+    … so the overflow follows the appe
+```
+
+which is exactly where the sentence the 2026-10-05 round added begins — "Moving
+the appends into a function of their own does NOT help" — so the one repair the
+message warns against is the one it lost. The same arithmetic takes 2-4 bytes off
+`dict_store_overflow_message`, `dict_store_no_room_message`,
+`dict_store_other_blob_message` and `blob_growth_overflow_message`;
+`int_parse_trap_message` and `int_overflow_trap_message` are ASCII today and lose
+nothing, which is why two emitters carrying `len(text)` passed every needle for
+as long as they did. **`model.diagnostic_length` is the one reader now and both
+`_emit_overflow_diagnostic`s ask it**, and `test_formal_run.py`'s stderr group
+compares each stop's stderr against the message `formal/model.py` builds, byte for
+byte, captured as BYTES — `text=True` replaced the broken character with U+FFFD
+and every needle still matched, which is how a truncated diagnostic reads as a
+complete one. All four rows go red without the fix. The five stderr rows that reach
+a message through `_emit_stop_diagnostic` (`list_append_overflow_is_loud`, the
+advice row, `dict_store_past_its_reservation_is_loud`,
+`blob_growth_concat_past_its_reservation_is_loud` and `subscript_out_of_range_is_loud`)
+are re-run green on both architectures with the fix. **The reader is called `diagnostic_length` and there is exactly ONE of them:**
+`work/formal402-docs` landed the same fix independently the same week under the
+name `diagnostic_byte_length`, and the 2026-10-17 merge deleted the second
+binding, because "two independent answers to one question is how the fourth word
+of a message diverges between architectures" is this document's own argument.
+
+**Step 2 is declined, and the measurement is the reason.** "Then the capacity
+itself … refuse a `list` whose length is not bounded by construction" would
+convert a loud run-time stop into a build refusal, and the program it refuses is
+one this path answers correctly today:
+
+```mojo
+def main(n) -> Int:
+    var ys = []
+    while n > 100:
+        ys.append(7)          # one SITE, and the body may never run
+        n = n + 1
+    printf("len=%d\n", len(ys))
+```
+
+Measured on both architectures, `n = 1` and `n = 5` answer `len=0`, which is what
+CPython answers; the reservation of one site is not an approximation of that
+program, it is exact for every input on which the loop does not run. A build-time
+refusal cannot tell that program from `while i < n: ys.append(i)`, so it takes
+away a correct answer to buy an earlier version of a loud message — and the loud
+message is already there for every input the reservation does NOT cover, which is
+the only case where a reader needs it. **The capacity stays a run-time check and
+the missing piece stays the heap**, so this document's item 2 is unchanged: a
+`malloc`'d blob that GROWS.
+
+One correction to the section below, which describes a test row that reads
+differently: `the_overflow_advice_names_spellings_that_work` pins the message by
+needles (`SITES outside any loop`, `for … in range(n)`, `does NOT help`) and not
+by the literal `sites=1 counted=1|` that section quotes — no such text is in the
+message. The row's meaning is unchanged; only the spelling of the claim was
+stale, and the exact-bytes comparison above is what now pins the whole sentence.
+
 **Status 2026-10-03 (`work/formal16-5`): item 1 was DONE AND HAD GONE RED ON
 `master` — a newer refusal could not see the callee's own declaration, so
 `names[0]` stopped building while the row that pins it was failing in the suite.

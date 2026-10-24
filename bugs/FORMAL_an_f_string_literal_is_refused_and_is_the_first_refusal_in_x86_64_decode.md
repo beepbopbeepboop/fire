@@ -1,17 +1,89 @@
 # An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py`
 
 **Area:** `formal/model.py::interpolated_literal_refusal` (asked over the module
-by `refuse_interpolated_literals`), both backends. **Status: OPEN — the refusal
-itself is still the right answer and still stands. Filed by `work/formal23-1`
-2026-10-04; NOT fixed here (the fix is a value-model decision and the file that
-exposes it belongs to another doc's reproduction). PARTIAL WORK 2026-10-05 on
-`work/formal27-2`, in "What landed" at the end: the refusal's ADVICE was false
-and is now true and pinned by a test, and the ceiling for this file was measured
-(it is `**kw`, not composition).**
+by `refuse_interpolated_literals`), both backends. **Status: OPEN — a literal
+with a replacement field is still refused and the buffer it needs is still the
+real fix. Filed by `work/formal23-1` 2026-10-04; NOT fixed here (the fix is a
+value-model decision and the file that exposes it belongs to another doc's
+reproduction). PARTIAL WORK 2026-10-05 on `work/formal27-2`, in "What landed" at
+the end: the refusal's ADVICE was false and is now true and pinned by a test, and
+the ceiling for this file was measured (it is `**kw`, not composition). PARTIAL
+WORK 2026-10-08 on `work/formal167-docs`: the ONE case that needs no buffer — an
+f-string with NO replacement field — is now FOLDED to the text it denotes and
+BUILT (it was refused before), pinned by five CPython-pair rows in
+`test_formal_run.py`; a literal with a field, and therefore every literal this
+doc's file holds, is unchanged.**
+
+**Update 2026-10-12 (`work/formal292-docs`): the CONSTANT half of composition
+LANDED, and the refusal is now narrowed to the run-time half it is actually
+about.** `formal/model.py` has `fold_constant_string_literals`, run by
+`formal/build.py::_prepare_functions` BEFORE `refuse_interpolated_literals`, and
+it realises the shape this doc's "What it would take" names — *"a compile-time
+composition for the case where every hole is a literal"* — together with the
+constant `+`/`*` over strings that sentence calls the prerequisite (*"landing
+composition means landing concatenation first"*). An f-string every field of
+which is a literal, and a `str + str` / `str * int` whose operands are all
+literals, now BUILD and answer CPython: each folds to an ordinary interned
+literal, which is the same `char *` every other string literal on this path is
+and so needs no buffer. A field that is a NAME, a CALL or an operator, a format
+spec, a conversion and a t-string still get the sentence above, unchanged — the
+field counts and the wording are the same, because the pass answers only what it
+can. Measured both architectures: `"ab" + "cd"` prints `abcd` (was a refusal),
+`"=" * 3` prints `===`, `f"n={5}"` prints `n=5`, `f"{'a'}b{None}"` prints
+`abNone`, `rf"a\n{5}"` keeps the literal backslash, and `f"n={k}"` is still
+refused by name. Pinned by `test_formal_run.py`'s four
+`fstring_...folds`/`raw_fstring_...` rows and its three
+`str_concat...`/`str_repeat...` rows; the old `str_concat_refused` row asserted
+the refusal of `"ab" + "cd"`, which is a CONSTANT, so it is now
+`str_concat_of_two_variables_refused` (two VARIABLES, the run-time half) beside
+the answered `str_concat_of_two_literals_folds`. **What is still missing is
+unchanged and is §2's project**: the buffer that answers a run-time value, so
+this doc stays open with only the constant half closed.
 
 Found 2026-10-04 while re-measuring
 `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose
 file used to be refused at the `**kw` spread and is now refused here instead.
+
+## What landed 2026-10-13 (`work/formal363-docs`): a field-less f-string is not a composition, and is no longer refused
+
+**The refusal was over-broad by exactly one shape: an interpolated literal with
+NO `{…}` field has no composition to do, and its own message said so — "This one
+has NO field at all … so its value is a CONSTANT and this refusal is over a
+missing buffer rather than a run-time value" — while refusing it anyway.** A
+constant string needs no buffer; it is interned into `__TEXT` like any other
+literal's bytes. So it is folded instead:
+
+* `formal/model.py::interpolated_literal_constant(node)` reads such a token into
+  its one spelling (`interpolated_literal_segments` already unescapes `{{`/`}}`
+  and leaves every backslash as written), or answers `None` for a literal that
+  HAS a field or that the reader cannot take apart;
+* `fold_constant_interpolated_literals(stmts)` rewrites each such node into the
+  plain `StringLiteral` it is — `is_raw` carried from the literal's own PREFIX
+  through `interpolated_literal_quote_start`, so `rf"\d+"` keeps its backslash
+  rather than being decoded into a newline;
+* `formal/build.py::_prepare_functions` runs the fold immediately in front of
+  `refuse_interpolated_literals`, so that refusal's subject is exactly the
+  INTERPOLATING literals it is for. A caller that skipped the fold would refuse
+  a correct program, never miscompile one — the fold is the fix and the refusal
+  is the backstop;
+* `interpolated_literal_refusal`'s "NO field at all" sentence is kept (it is a
+  pure function `test_refusal_taxonomy.py` still calls directly), but through
+  the pipeline it is now unreachable.
+
+**Measured on both architectures**, `f"hello"`, `f"a{{b}}"`, `rf"\d+"`,
+`f"x\ny"` and `t"hello"` all build, run and print CPython's text; pinned by
+`test_formal_run.py`'s `an_fstring_with_no_field_is_the_plain_string`,
+`a_raw_fstring_with_no_field_keeps_its_backslash` and
+`a_tstring_with_no_field_is_the_plain_string`, and the INTERPOLATING refusal
+rows beside them are unchanged.
+
+**What this does NOT move, and the doc above stands for it:** every one of
+`formal/x86_64_decode.py`'s 13 f-strings INTERPOLATES a run-time field, so all
+13 still take the buffer path and this file's first refusal is still the
+line-133 f-string, with the `**kw` spread still behind it. The interpolating
+case is untouched, and the buffer (§"What it would take") is still the whole of
+what this doc is about. This is the field-less half of the same subject, not the
+subject.
 
 ## What landed 2026-10-05 (`work/formal27-2`), and what is still missing
 
@@ -100,11 +172,15 @@ not a change.
 
 ## What it would take, and the cheap half of it
 
-* **The cheap half is the caller's spelling, and the refusal already names it:**
-  `print(f"v={v}")` becomes `print("v=", v)` (the parts as separate operands) or
-  `printf("v=%d", v)`. That is a per-site edit and it is what
+* **The cheap half is the caller's spelling, and the refusal now names the one
+  that WORKS:** `print(f"v={v}")` becomes `printf("v=%d", v)`. That is a
+  per-site edit and it is what
   `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s option 1 is
-  for its own construct.
+  for its own construct. **`print("v=", v)` is NOT the rewrite and the landed
+  refusal no longer offers it** — `print` inserts a space between operands, so
+  it prints `v= 7` where the f-string prints `v=7`, which is a different answer
+  with exit status 0; see "What landed" above and
+  `test_formal_run.py::fstring_print_of_two_operands_is_not_the_rewrite`.
 * **The real fix is a buffer**, and there are exactly two shapes it can be:
   a run-time scratch area the emitters own (a `__DATA` cell per string
   expression, or a stack slot), or a compile-time composition for the case where
@@ -131,3 +207,33 @@ $ grep -c 'f"' formal/x86_64_decode.py
 $ python3 -c 'exec("f\"n={7}\"")'   # what CPython answers
 n=7
 ```
+
+## What landed 2026-10-08 (`work/formal167-docs`): the constant half
+
+**An f-string with no replacement field is a CONSTANT, and the refusal was over
+a buffer it does not need.** The refusal's own sentence already said so —
+`_interpolated_shape_sentence`'s "This one has NO field at all … so its value is
+a CONSTANT and this refusal is over a missing buffer rather than a run-time
+value" — and CPython prints `abc` for `print(f"abc")` where this path refused the
+program. `formal/model.py::fold_constant_interpolated_literals` now rewrites such
+a literal IN PLACE into the ordinary string literal it denotes (`value` becomes
+the composed text, `is_interpolated` becomes `False`, `is_raw` carries the `r` of
+an `rf"…"`), and `formal/build.py::_prepare_functions` asks it immediately before
+`refuse_interpolated_literals`, so the refusal never sees the foldable ones.
+
+**This is the one case, and it is not the buffer.** A `t`-string is NOT folded —
+its value is a `Template`, not a `str` — and neither is any literal with a field:
+those still reach the refusal, and the buffer is still what would lift them. The
+fold moves **0 files** in the corpus, which the interpolated-literal census
+already measures and says in its own row: **0 files have EVERY interpolated
+literal interpolating nothing** (375 literals do, and each sits in a file that
+also holds one with a field). So this is a correctness fix for a program the
+corpus does not write yet, not a coverage win — and it is exactly the case the
+census's hard `== 0` row exists to notice becoming worth something.
+
+Pinned by `test_formal_run.py`'s five CPython pairs:
+`interpolated_with_no_field_folds_to_its_text`, `…_can_be_empty`,
+`…_unescapes_braces`, `…_decodes_escapes` and
+`raw_interpolated_with_no_field_stays_raw` — each built on BOTH architectures and
+required to print CPython's own answer, so the escape and `is_raw` halves are
+measured against the language rather than stated.

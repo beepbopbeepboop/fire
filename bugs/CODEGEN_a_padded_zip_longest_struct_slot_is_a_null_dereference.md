@@ -5,7 +5,7 @@
 read on a statically-typed struct pointer). Found 2026-10-05 while fixing the
 padded slot's FILL VALUE — commit `e301ba41`, *"zip_longest: a padded slot is
 refused unless this path can spell what fills it"*, which closed
-`FORMAL_zip_longest_double_slot_fills_with_zero_not_none.md`. That commit's
+`FORMAL zip longest double slot fills with zero not none`. That commit's
 subject is the FILL; this is the same padded row seen from the other end — the
 value is right, the USE of it is not guarded.
 

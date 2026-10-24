@@ -408,15 +408,24 @@ def check_proof_refusal_class(tmpdir, verbose):
 def check_oracle_timeout(tmpdir, verbose):
     """The oracle's three answers, and the one that crashed on the third.
 
-    `F.cpython_answer` returns an `(exit, stdout)` tuple, `("error", detail)` for
-    a program CPython will not run, and `None` for a CPython TIMEOUT.  Reading it
-    as "not an error tuple" is what this file's tool did on its first cut, so the
-    third answer was unpacked three lines later and raised `TypeError:
+    `F.cpython_answer` returns an `(OracleAnswer | None, reason)` pair:
+    `OracleAnswer` when CPython ran the program, and `None` for BOTH failures —
+    a program CPython REJECTS (the reason carries its traceback) and a CPython
+    TIMEOUT (the reason is `ORACLE_TIMEOUT_REASON`).  `F.oracle_answer` is the
+    one accessor for "did it answer", and `F.is_oracle_timeout` the one reader
+    that tells the two `None`s apart; `behaviour` consults both.  Reading the
+    pair as "not an error tuple" is what this file's tool did on its first cut,
+    so the third answer was unpacked three lines later and raised `TypeError:
     cannot unpack non-iterable NoneType object` — killing the whole campaign on
     a program the ORACLE could not finish, and reporting nothing about the
-    backend.  `F.has_oracle` is the one reader of the three; this asserts both
-    that `behaviour` consults it and that each of the three answers lands on the
-    verdict that names it.
+    backend.  This asserts that `behaviour` classifies each of the three answers
+    as the verdict that names it.
+
+    The fixtures are the CURRENT shape, not the pre-`OracleAnswer` tuple: the
+    `dba0a355` refactor gave "no answer" ONE shape, and the old
+    `(0, "")`/`("error", …)` tuples stopped being `OracleAnswer`s — which left
+    this case RED from that commit until now, silently, because it is the
+    harness's own reading rather than a backend's.
 
     `F.build` and `F.run` are stubbed so this costs no compiler: the property
     under test is the CROSS of one oracle answer with a matching image, which is
@@ -436,14 +445,14 @@ def check_oracle_timeout(tmpdir, verbose):
         cases = [
             # (the oracle's `ref`, its `err`, expected per-input verdict,
             #  expected top verdict)
-            ((0, ""), "", "ok", "match"),
-            (("error", "boom"), "", "generator-error", "generator-error"),
-            (None, "CPYTHON TIMEOUT",
+            (FF.OracleAnswer(0, ""), "", "ok", "match"),
+            (None, "boom", "generator-error", "generator-error"),
+            (None, FF.ORACLE_TIMEOUT_REASON,
              "CPYTHON-TIMEOUT", "CPYTHON-TIMEOUT"),
         ]
         for ref, err, want_per, want_top in cases:
-            label = ("ok" if ref and ref[0] != "error"
-                     else ("error" if ref else "timeout"))
+            label = ("ok" if ref is not None
+                     else ("timeout" if FF.is_oracle_timeout(err) else "error"))
             FF.cpython_answer = lambda *a, **k: (ref, err)
             try:
                 verdict, per = P.behaviour("arm64", src, [3], 3, 1, tmpdir,

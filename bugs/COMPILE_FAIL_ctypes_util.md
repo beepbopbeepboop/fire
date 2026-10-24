@@ -1,5 +1,172 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-10-24, post-fsdec — the `os_fsdecode`/`os_fsencode` 0-arg-stub class named in the entry below is GONE as a gcc class; this row's own blocker — the resource kill — is unchanged)
+
+The entry below named three downstream next blockers standing behind the
+resource kill: util.py:221's `shutil_which_15d274`, the `os_fsdecode`/
+`os_fsencode` 0-arg-stub class, and the ntpath implicit-declaration family.
+This session removed the middle one, as a gcc class.
+
+**What the class was (measured).** `fsencode`/`fsdecode` are nested defs inside
+a factory in `Lib/os.py` (`def _fscodec(): ... def fsdecode(filename): ...`),
+bound at module level by `fsencode, fsdecode = _fscodec()`. The importer's
+text scan (`module_loader._scan_source`) stripped every line before matching,
+so the nested def registered as a module-level fn export, and because the
+scan's parameter extraction keeps only ANNOTATED params (`if ':' in param`)
+while stdlib's nested defs are unannotated, the entry came out
+`int64_t fsdecode (void)`. The importer then emitted
+`extern int64_t os_fsdecode (void);` for `os.fsdecode(x)` in every TU that
+calls it (Lib/ntpath.py:317/373/387/461, Lib/posixpath.py:266/278/325) —
+gcc's `too many arguments to function 'os_fsdecode'; expected 0, have 1` —
+and the prototype was doubly wrong: the C function a nested def compiles to
+is named after the ENCLOSING function (`closure_lifted_name`: `outer_inner`),
+so the `module_name` symbol the extern names does not exist at all; the
+module-level binding is a VALUE, and its cross-module call belongs to the
+fallback path.
+
+**The fix.** The indent block stack in `_scan_source` (`module_loader.py`):
+a `def`/`fn` line whose innermost open block is a function body is a nested
+closure and is not registered as a module-level export. Module-level defs
+under module-level control flow and class methods (innermost block not a
+function) register exactly as before; the overload-COUNTING pre-pass is left
+byte-identical, so a module-level def that merely shares a name with a nested
+one keeps its measured variadic treatment. On `Lib/os.py` the scan went
+61 → 55 entries and the six removed are exactly the six indented defs
+(`fsdecode`, `fsencode`, `encode`, `decode`, `encodekey`, `check_str`; each
+verified indented in the source). No previously-working behavior is touched:
+a cross-module STATIC call to a nested def could never have linked pre-fix
+(the symbol does not exist under the name the scan advertised), so the
+affected population was already-broken code, now on the loud fallback.
+
+**Before/after pair (like-for-like single-file builds, 8 GB ceiling).**
+Row 24 (zipfile): first gcc error UNCHANGED at `ntpath.py:287:9` (implicit
+declaration of `abspath_9f63a2`); the fsdecode class 27 error lines (11
+`os_fsdecode` + 16 `os_fsencode`) → 0; gcc error lines 329 → 302; module
+rejections unchanged (62, first rejection byte-identical: the
+`_collections_abc` generator `.close()` class); 2.5 → 2.6 GB —
+`build/remes/r24post_kwfix.log` pre-fix, `r24post_fsdec.log` post-fix.
+Row 25 (mailbox): first gcc error UNCHANGED at `reprlib.py:71:7`; the class
+14 error lines (6 + 8) → 0; gcc error lines 273 → 259; the `calendar.py:663`
+persistence unchanged (9 lines); rejections unchanged (68); 3.0 → 3.5 GB —
+`r25post_kwfix.log` / `r25post_fsdec.log`. The standalone ntpath dump pair
+(`build/remes/fsdec_ntpath_prefix_6b80a973.ci` /
+`fsdec_ntpath_postfix_5ad80ae8.ci`) shows the class gone from the emitted C:
+25 `os_fs*` lines (the `(void)` externs plus all 13 call sites) → 0; the
+same 13 call sites now lower to the weak "unavailable in compiled mode" stub
+(`__attribute__((weak)) int64_t fsdecode (...)` — a per-call `mojo_print` +
+return 0). That fallback is LOUD, not a silent fold: every call prints
+`fsdecode: unavailable in compiled mode`, and this row dies at gcc (or the
+memory kill) long before the runtime is reached. The minimal 2-file shape
+pre-fix died at gcc (`too many arguments to function 'a_os_f'; expected 0,
+have 1`, `build/remes/fsdec_osname_prefix_765117ff.log`); post-fix it builds
+and its runtime is a SEPARATE measured class — the enclosing `return f`
+resolves to the module GLOBAL `f` (its own still-zero global; the emitted C
+shows `_mk` reading `_root_globals.f`) and the call segfaults — named as a
+next blocker, pinned as measured behavior in
+`test_link_mode.py::test_nested_def_is_not_a_module_level_fn_export`.
+
+**This row itself.** The like-for-like re-run (`build/remes/r10post_fsdec.log`
+vs `r10post.log`) is the SAME resource-kill class: 34 module rejections both
+runs, gcc never runs (0 error lines both), breach 9.6 → 8.2 GB (run-to-run
+load variance; both > 8.0). Nothing about this row's blocker moved; the named
+next blockers behind the kill are now: util.py:221's `shutil_which_15d274`,
+the ntpath implicit-declaration family, and — where the budget reaches runtime
+— the weak-stub fallback above.
+
+Status: OPEN — the row is still red, in the RESOURCE class, unchanged by this
+fix; the named downstream blockers are updated above.
+
+## Status (2026-10-24, campaign row 10 — the `_endian` blocker is FIXED; the row moves to the RESOURCE class; doc stays open)
+
+Campaign re-measurement on master `566ba1c9` (`build/remes/r10.log`, 8 GB
+ceiling): exit 1, peak 2.2 GB, 67 gcc `error:` lines. By module:
+ctypes/__init__ 19, util 13, subprocess 9, ntpath 7, os 5, _aix_support 5,
+sysconfig 3, threading 2, **_endian 2**, selectors 1. The FIRST two are the
+ones this session fixed:
+
+```
+ctypes/_endian.py:63:27: error: 'struct _ctypes__endian_toplev' has no member named 'BigEndianStructure'
+ctypes/_endian.py:70:27: error: 'struct _ctypes__endian_toplev' has no member named 'BigEndianUnion'
+```
+
+**Root cause (measured).** `comptime.eval_const` folds `sys.platform` but
+not `sys.byteorder`, so _endian's top-level `if sys.byteorder == "little":`
+/ `elif "big":` conditional is unresolvable and BOTH branches emit. In the
+dead (big) branch the plain assignment `BigEndianStructure = Structure`
+references a module global that the live branch's `class BigEndianStructure`
+never registers as a lookable member. Minimal single-file shape (the branch
+pair with the class/assignment styles swapped, exactly as in _endian) dies
+with the same one error on master: `'struct _root_toplev' has no member
+named 'BE'; did you mean 'LE'` (`build/remes/r10repro_prefix_765117ff.log`,
+`build/remes/r10d1_prefix_765117ff.log`).
+
+**Two more defects stacked behind the fold (measured on the fixed tree).**
+(1) The EMISSION loop ran the IfStmt as a RUNTIME branch even once the
+condition was foldable: it re-evaluated `sys.byteorder` at run time
+(`_mojo_dispatch_getattr(sys, "byteorder")` — an AttributeError, the
+compiled stdlib's sys exposes no such attribute), degraded class refs to
+`(int64_t)0` zero stubs (so `LE == Base` "printed True" as `0 == 0`) and
+dropped the class defs as `/* TODO: StructDef */` — a hard gcc error before
+the fold, a silent miscompile after it. (2) The struct passes built
+`all_struct_defs` from the RAW statement list, so a class defined inside a
+resolved top-level branch registered no fields and no class attributes —
+a `_dummy`-only stub whose attribute reads fell to a dispatch on a NULL
+receiver (`AttributeError: v`).
+
+**The fix (three parts, one rule: a resolvable top-level conditional must
+resolve identically in every consumer).**
+- `mojo/middle/comptime.py::eval_const`: fold `sys.byteorder` — a host
+  constant in exactly the sense the `sys.platform` fold is one (CPython's
+  value is fixed for the machine the binary runs on), AttributeError-safe,
+  unaliased `import sys` (the self-host route declines the fold and emits
+  both branches, byte-identical to pre-fold; no compiler source file uses
+  the idiom, so self-host is unaffected either way).
+- `mojo/backend_gimple/module_gen.py` emission loop: iterate
+  `_flatten_resolved_conditionals(stmts)` — the same local the Phase-1.7
+  global scan uses — so the taken branch's statements dispatch as genuine
+  top-level statements, the other branch never emits, and an unresolved
+  condition still falls through to the runtime-branch path unchanged.
+- `module_gen.py` `all_struct_defs`: flattened for both the own and the
+  imported statement lists (the definition moved to its first use, ahead of
+  the struct passes); classes in a resolved branch now register fields and
+  class attributes like any top-level class.
+
+**Measured after the fix** (uniform `765117ff` + fix worktree):
+- Minimal shape builds and prints the REAL value: `7`, matching CPython on
+  the same text (`build/remes/r10d1_postfix.log`).
+- Regression: `test_link_mode.py::test_byteorder_conditional_toplevel_
+  emits_only_the_host_branch` — fails-before with the single gcc error
+  above on the unfixed tree, passes with the real value after; the value is
+  read off a plain live-branch global on purpose (a dead-branch assignment
+  whose target is the live branch's class is what trips the pre-fix error,
+  and on the fixed tree that same assignment claims the class's name as a
+  value global in the name-claim view, diverting a static class-attribute
+  read off that name to a NULL-receiver dispatch — measured
+  `AttributeError: v`, isolated to that single element by four one-element
+  probes; the class-name-as-VALUE zero-stub gap from the 2026-08-26 entry
+  is separate and not pinned here).
+- Real file (`Lib/ctypes/util.py`): the two `_endian` errors are GONE (zero
+  `_endian` lines) and the file now goes DEEPER — it dies at the 8 GB
+  ceiling in the import-closure phase (`memcap: BREACH 8.6 GB > 8.0 GB
+  (108%)`, rc=125, 34 module rejections logged, gcc never runs;
+  `build/remes/r10post_final.log`). The row therefore moves to the
+  RESOURCE class (rows 3/23 family): under the ceiling the build is killed
+  in closure processing BEFORE the pre-fix residual classes are ever
+  reached — util.py:221's `shutil_which_15d274` (this file's own recorded
+  next blocker from the 2026-10-02 entry), the `os_fsdecode`/`os_fsencode`
+  0-arg-stub class, and the ntpath implicit-declaration family all stand
+  downstream of the kill and remain the named next blockers when the
+  budget allows.
+- Non-regression: the two landed campaign regressions (the idxerr
+  class-attr-emission crash, the r16 failed-import poisoning) both pass on
+  the fixed tree. The 53-job gate is 53/53 green on the fixed tree
+  (2026-10-24; `doc-refs` and `suite-self-test` both re-run and passed after
+  the row-20 doc deletion below was reconciled with the citation ratchet).
+
+Status: OPEN — the file is still red, now in the RESOURCE class rather than
+the two `_endian` gcc errors. Per the no-forced-close rule the doc stays;
+the next blockers are named above.
+
 ## Status (2026-10-02 — this file's own errors are down to ONE, and that one is a filed bug in another claim's area)
 
 `python3 fire.py build -o .tmp/util /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`

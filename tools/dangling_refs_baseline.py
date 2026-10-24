@@ -32,4 +32,117 @@ honestly bound.
 """
 BASELINE = {
     'test_suite.py': 6,
+    # `tools/control.py` is owner-held (the campaign may read it, not edit
+    # it), and its `norm_claim` docstring spells the accepted claim forms
+    # — `FORMAL_x`, `FORMAL_x.md`, `bugs/FORMAL_x.md` — as one worked
+    # example. `FORMAL_x.md` is a placeholder: no such doc exists, so the
+    # walk counts the docstring as a dangling citation, and a docstring
+    # cannot be reworded by this campaign without touching the owner's
+    # file. One deliberate ceiling entry, raised 2026-10-24 after reading
+    # the b73591b9 diff (the same deliberate-entry pattern the test_suite
+    # .py negative controls above use). If the owner rewords the docstring
+    # the ratchet reports this entry as stale on the green path and it may
+    # be dropped.
+    'tools/control.py': 1,
+}
+
+# `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
+# of a `<STEM>.md` with no `bugs/` in front of it, counted only when no `.md` of
+# that basename exists anywhere in this repository. Read by
+# `tools/dangling_doc_refs.py --ratchet` through `load_baseline(
+# "BARE_BASELINE")`, written by the same `--write-baseline`, and separate from
+# `BASELINE` for the reason `BARE_REF` gives.
+#
+# Seeded from the census, so it is green on arrival and can only shrink: a file
+# that fixes its bare citations drops below its ceiling and needs no edit here,
+# and a file that GAINS one — which is what deleting a bug doc whose name is
+# cited without the directory does to every file that named it — is a failure at
+# the delete rather than at the next reader's convenience
+# (`the surviving-citation bug`).
+#
+# The exclusions are the walk's, not this table's: `tools/dangling_refs_baseline
+# .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
+# reason the header above gives for its prefixed entry.
+BARE_BASELINE = {
+    'bugs/BUGFIX_ROADMAP.md': 11,
+    'bugs/CODEGEN_container_constructor_argument_ignored_and_array_segfaults.md': 1,
+    'bugs/CODEGEN_ctor_temp_field_read_loses_element_type.md': 2,
+    'bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md': 1,
+    'bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md': 1,
+    'bugs/CODEGEN_generator_function_Lib_ipaddress.md': 2,
+    'bugs/CODEGEN_generator_function_Lib_mailbox.md': 2,
+    'bugs/CODEGEN_generator_function_Lib_modulefinder.md': 2,
+    'bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md': 1,
+    'bugs/CODEGEN_module_boundary_carries_no_value_types.md': 2,
+    'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
+    'bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md': 1,
+    'bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
+    'bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md': 2,
+    'bugs/COMPILE_FAIL_Android_android.md': 2,
+    'bugs/COMPILE_FAIL_Modules__decimal_tests_randdec.md': 1,
+    'bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 2,
+    'bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md': 7,
+    'bugs/COMPILE_FAIL_Tools_unicode_gencodec.md': 2,
+    'bugs/COMPILE_FAIL_collections___init__.md': 1,
+    'bugs/COMPILE_FAIL_decorator_application_dropped.md': 3,
+    'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md': 1,
+    'bugs/COMPILE_FAIL_importlib_metadata___init__.md': 1,
+    'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
+    'bugs/COMPILE_FAIL_zipfile___init__.md': 3,
+    'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md': 5,
+    'bugs/DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md': 1,
+    'bugs/FORMAL_a_conditional_value_in_a_dylib_export.md': 2,
+    'bugs/FORMAL_a_tuple_for_targets_element_is_the_iterables_kind.md': 1,
+    'bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
+    'bugs/FORMAL_arm64_known_proof_gaps.md': 1,
+    'bugs/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md': 1,
+    'bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md': 1,
+    'bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md': 2,
+    'bugs/FORMAL_float_binary64_only.md': 1,
+    'bugs/FORMAL_fuzz_ledger.md': 1,
+    'bugs/FORMAL_known_limits.md': 4,
+    'bugs/FORMAL_model_fuzz_ledger.md': 1,
+    'bugs/FORMAL_module_state_no_storage.md': 4,
+    'bugs/FORMAL_proof_coverage_census_2026-10-03.md': 2,
+    'bugs/FORMAL_string_value_model.md': 2,
+    'bugs/FORMAL_sweep_singles_second_half.md': 1,
+    'bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
+    'bugs/FORMAL_time_struct_shaped_answers.md': 1,
+    'bugs/PERF_selfhost_memory_leak_hunt.md': 1,
+    'bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md': 7,
+    'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md': 4,
+    'bugs/hard/README.md': 40,
+    'fire.py': 1,
+    'formal/model.py': 4,
+    'gimple_codegen.py': 1,
+    'mojo/backend_gimple/cpp_async.py': 3,
+    'mojo/backend_gimple/cpp_core.py': 6,
+    'mojo/backend_gimple/emit_calls.py': 1,
+    'mojo/backend_gimple/emit_exprs.py': 4,
+    'mojo/backend_gimple/emit_funcs.py': 1,
+    'mojo/backend_gimple/emit_methods.py': 2,
+    'mojo/backend_gimple/emit_stmts.py': 4,
+    'mojo/backend_gimple/module_gen.py': 3,
+    'mojo/middle/exprtypes.py': 2,
+    'mojo/middle/infra_infer.py': 1,
+    'mojo/middle/resolve_shared.py': 2,
+    'mojo/middle/stmts_shared.py': 1,
+    'rerun_and_consolidate_v2.py': 2,
+    'test_coro_detached_async.py': 1,
+    'test_coro_future_await.py': 1,
+    'test_coro_nested_async_capture.py': 1,
+    'test_dangling_doc_refs.py': 2,
+    'test_gimple.py': 2,
+    'test_gimple_async_runner.py': 1,
+    'test_gimple_generator_runner.py': 1,
+    'test_gimple_runner.py': 4,
+    'test_mutable_async_capture.py': 1,
+    'test_runtime_header_scan.py': 1,
+    'test_suite.py': 11,
+    # Deliberate, same reason as the prefixed entry above: the owner-held
+    # `norm_claim` docstring's `FORMAL_x.md` half of the worked example.
+    'tools/control.py': 1,
+    'tools/dangling_doc_refs.py': 1,
+    'tools/formal_fuzz.py': 1,
+    'tools/formal_sweep_causes.py': 1,
 }

@@ -34,7 +34,8 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
-                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
+                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES,
+                          BOOL_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import collections
@@ -245,22 +246,6 @@ def _range_args(iterable):
         return list(iterable.args)
     return None
 
-
-def _strip_stars(tree):
-    """A `fire_compiler.for_target_tree`, with a leading `*` dropped from every
-    leaf.
-
-    This backend has never handled a starred for-target as a REST binding: it
-    read the leaf names from `_lbn_target_names`, which drops the star, and
-    passed them to `_emit_for_unpack` as ordinary leaves. Preserving that here
-    keeps the nested fix from turning the (already broken on both backends)
-    starred spelling into a build refusal on one architecture only — see
-    `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`."""
-    if isinstance(tree, list):
-        return [_strip_stars(c) for c in tree]
-    if isinstance(tree, str) and tree.startswith("*"):
-        return tree[1:].strip()
-    return tree
 
 
 def _collect_var_names(f: F.FunctionDef) -> list:
@@ -598,22 +583,6 @@ def _binds_name(target, name: str) -> bool:
     return False
 
 
-def _for_tree_leaves(tree) -> list:
-    """Leaf names of `model.for_target_tree`'s output, nested groups flattened.
-
-    A star leaf keeps its `*`, so the caller's identifier check refuses it —
-    the same refusal `_tuple_target_key` makes of a `*rest` tuple target, and
-    the reason the for-loop's target validation is a leaf walk rather than
-    `_lbn_target_names` (which strips the star and would pass a `*rest`
-    through to a store under a name nothing allocated)."""
-    if isinstance(tree, list):
-        out = []
-        for child in tree:
-            out.extend(_for_tree_leaves(child))
-        return out
-    return [tree]
-
-
 def _dotted(func) -> str:
     """`recv.method` as written, for a diagnostic that quotes the source."""
     name = _callee_symbol(func)
@@ -628,6 +597,42 @@ def _call(name: str, args: list):
     shuffle) means it goes through exactly the path a printf written by hand
     does — same argument registers, same variadic convention, same return."""
     return F.CallExpr(func=F.IdentExpr(name=name), args=list(args))
+
+
+def _for_target_refusal(tree):
+    """Why `tree` (`model.for_target_tree`'s output) is not a `for` target, or
+    None when it is one.
+
+    A target is a single plain name, or a tuple/list of them, where a leaf may
+    be a trailing `*name` rest binding — the one spelling `_emit_for_unpack`
+    binds as a REST blob rather than as an element. This reader is shared by the
+    for-loop and the comprehension so the two cannot come to disagree about
+    which spellings are targets (the shape a private copy produced for the
+    nested-group arity check, before `model.for_target_tree`).
+    """
+    bad = "must be a plain name or tuple of plain names"
+    if tree is None:
+        return bad
+    if isinstance(tree, str):
+        # A bare `*rest` target (`for *rest in …`) is not Python and is not a
+        # target here; a single plain name is.
+        return None if tree.isidentifier() else bad
+    if not tree:
+        return bad
+    for i, child in enumerate(tree):
+        if isinstance(child, list):
+            why = _for_target_refusal(child)
+            if why is not None:
+                return why
+            continue
+        if not isinstance(child, str):
+            return bad
+        if child.startswith("*"):
+            if i != len(tree) - 1 or not child[1:].strip().isidentifier():
+                return bad
+        elif not child.isidentifier():
+            return bad
+    return None
 
 
 class X86_64Codegen:
@@ -742,6 +747,20 @@ class X86_64Codegen:
         self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
+        # Lazily filled by `_callee_returns_value` from `self._functions`: the
+        # names whose calls produce no value, transitively over `return <call>`
+        # chains (`model.returnless_function_names`). None means "not computed".
+        self._returnless = None
+        # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
+        # parameters each function measures as TEXT, transitively through calls
+        # that forward a bare parameter (`model.text_measured_parameters`).
+        # None means "not computed"; the same one-table-per-compile shape as
+        # `_returnless`.
+        self._text_measured = None
+        # Lazily filled by `_callee_returned_parameter`: `{name: index or None}`
+        # for the call whose result is its own argument handed back. Computed
+        # once per callee, because it walks the callee's body.
+        self._returned_parameter: dict = {}
         # Filled by `compile()`: a callable NAME -> the label a call to it
         # lands on, and the per-definition labels it points at, which are not
         # published in `info["labels"]`. arm64's `_entry_labels` is the same
@@ -856,6 +875,21 @@ class X86_64Codegen:
         # Base depth for comprehension generator temps (`_ci{d}`/`_cb{d}`),
         # so a comprehension nested in a for-list cannot alias its temps.
         self._compr_depth = 0
+        # The RESULT blob size of the most recently emitted comprehension; arm64's
+        # `_last_compr_result_size`. A comprehension used as another
+        # comprehension's ELEMENT is byte-copied per iteration, and its blob size
+        # is this recorded reservation rather than the ledger delta (which also
+        # carries the nested iterables). 0 means "no comprehension emitted here".
+        self._last_compr_result_size = 0
+        # The SIZE of the result blob the last `_emit_list_concat` reserved, for
+        # the same reason and the same reader: a `+` whose element is a
+        # comprehension element reserves its two operands' blobs first and its
+        # result last, so the ledger delta is bigger than the blob RAX points at
+        # and the per-iteration copy has to be sized from the result alone.
+        # `_emit_list_concat` is the one place that reserved it. 0 means "no
+        # concat emitted here", and a 0 there is a refusal rather than a
+        # zero-byte copy.
+        self._last_concat_result_bytes = 0
         # The COMPREHENSION scope stack: `model.ValueKinds`.
         # `comprehension_generator_scopes` maps, outermost first, pushed by
         # `_emit_compr_gen` after each generator's target store. A comprehension
@@ -931,6 +965,9 @@ class X86_64Codegen:
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
         self._vkinds_cache: dict = {}
+        # `{name: DictExpr}` for the CURRENT function's single-literal locals,
+        # set beside `_vkinds` in `_emit_function`.
+        self._spread_mappings: dict = {}
 
     # ── entry point ──────────────────────────────────────────────────
 
@@ -1372,6 +1409,7 @@ class X86_64Codegen:
             self._functions.values(), self._return_types)
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
+        self._materialised = {}
         # Blocks for CONTAINERS this function RECEIVES from a callee that
         # returns one, and the COPY after each such call that fills them.  The
         # third kind of block in the same region as the constructor frames and
@@ -1444,6 +1482,10 @@ class X86_64Codegen:
         # list literal needs for `append`. Whole-function properties, so they
         # are computed once here rather than guessed at each use site.
         self._vkinds = self._scan_value_kinds(f)
+        # The same whole-function property as `_vkinds`, for the same reason:
+        # `{name: DictExpr}` for the locals whose only binding is a dict
+        # literal, so a `**d` spread is un-spread exactly like a literal.
+        self._spread_mappings = self._vkinds.dict_inits()
         self._list_caps, self._list_caps_by_name = self._scan_list_caps(
             f, self._vkinds)
         self._dict_caps, self._dict_caps_by_name = M.dict_store_capacity(
@@ -1457,7 +1499,7 @@ class X86_64Codegen:
         # **The stack-floor guard goes FIRST, before the `sub` below, and that
         # position is load-bearing rather than tidy** — the same fix and the same
         # reasoning as arm64's (`_emit_stack_floor_guard` there, and
-        # `model.stack_floor_charge` for the measurement). It used to be emitted
+        # `model.stack_floor_budget_for_limit` for the measurement). It used to be emitted
         # immediately after `sub rsp, _frame_bytes`, so by the time it compared
         # anything this function's frame had been reserved and the frame pointer
         # pushed: the frame that crossed the real stack limit had already TOUCHED
@@ -1865,7 +1907,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the floor is an ABSOLUTE SP and every caller after this one is deeper
         # than this one: a floor that ignored its own frame would let one more
         # frame through than the budget allows. That is the same correction
-        # `model.stack_floor_charge` makes on the arm64 side.
+        # `model.stack_floor_budget_for_limit` makes on the arm64 side.
         self._emit_mov_imm(Reg.R9, M.STACK_FLOOR_MARGIN_BYTES + self._frame_bytes)
         self.asm.emit(encode_sub_r64_r64(Reg.R10, Reg.R10, Reg.R9))
         # MAX with MIN: `cmp r10, r9` computes `r10 - r9`, so carry is set
@@ -2250,12 +2292,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(stmt, F.PassStmt):
             return
 
-        if isinstance(stmt, F.GlobalStmt):
+        if isinstance(stmt, (F.GlobalStmt, F.NonlocalStmt)):
             # `global NAME` is a binding declaration only. formal's locals are
             # callee-saved registers or stack slots; there is no separate
             # module-global storage to redirect subsequent stores into, so the
             # declaration is a no-op and the AssignStmt still targets the
             # local. Same reading as the arm64 backend.
+            #
+            # `nonlocal NAME` is the same kind of declaration for the capture
+            # ABI: a READ resolves to the by-value parameter `_flatten_closures`
+            # prepends, so the statement emits nothing, and a WRITE never
+            # reaches here — `model.nonlocal_write_refusal` refuses it in the
+            # shared pipeline, because a write would change only the lifted
+            # copy. So the only `nonlocal` that gets this far is the read-only
+            # spelling, and it lowers to nothing exactly as `global` does.
             return
 
         if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
@@ -3076,6 +3126,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # same_function.md`.
             key = self._frame_member_slot(stmt.target)
             if key is None:
+                if self._try_member_frame_aug(stmt, op):
+                    return
                 self._refuse_member_target(stmt.target)
             name = key
         else:
@@ -3088,9 +3140,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # BOTH backends refused, from the same line of source. `stmt.op` is
         # the spelling to quote, so the diagnostic names the `+=` the reader
         # is looking at rather than the `+` the table is keyed on.
+        #
+        # A SET ALGEBRA on a SET target (`s &= t`) is a blob-on-either-side
+        # shape, so it is handled by the delegation below rather than here:
+        # `_emit_binop` reaches this backend's `_emit_set_op` for the two-set
+        # case (arm64's emitter is reached the same way), and the shared gate's
+        # `set_algebra_refusal` names a not-two-sets pair.  Growing a second
+        # copy at this site would let the two spellings of one operator drift.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
-            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op,
+            left_is_set=self._expr_is_set_like(stmt.target),
+            right_is_set=self._expr_is_set_like(stmt.value))
         if reason is not None:
             raise CodegenError(reason)
         # `/` `//` `%` and `**` are neither an ALU table entry nor a shift:
@@ -3649,38 +3710,57 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """Give the element its OWN container per iteration, or refuse.
 
         The x86-64 twin of arm64's method over the same shared predicate
-        (`M.comprehension_element_is_flat_container`) and the same message, so
-        the two architectures cannot materialise — or refuse — an element
-        differently. RAX on entry holds the element's blob and on exit the
-        per-iteration copy `_compr_append_elem` appends.
+        (`M.comprehension_element_is_flat_container`, which also accepts a
+        nested comprehension whose produced values are words) and the same
+        message, so the two architectures cannot materialise — or refuse — an
+        element differently. RAX on entry holds the element's blob and on exit
+        the per-iteration copy `_compr_append_elem` appends.
 
-        `i` is the result blob's count word (elements appended so far), the
-        destination is `array_base + i * bytes_`, and the copy is `memcpy`,
-        which returns the destination in RAX for free. `before` is the ledger
-        position as the element's emission began, so `bytes_` is the element's
-        own footprint, measured BEFORE the array below steps the same ledger.
+        The blob size is the ledger delta for a literal (its own reservation), the
+        nested comprehension's recorded RESULT size
+        (`_last_compr_result_size`) for a comprehension, because the delta also
+        carries the nested iterables, the concat's OWN result size for a `+`,
+        because the delta also carries its two operands, and the delta PLUS a
+        returned block's size for a call — because `container_returned_blob_sites`
+        parks those blocks ABOVE the blob region precisely so they cannot collide
+        with the ledger, so one block is rewritten per iteration exactly as a
+        display is while the ledger does not move at all. `i` is the result blob's
+        count word (elements appended so far), the destination is
+        `array_base + i * blob_size`, and the copy is `memcpy`, which returns the
+        destination in RAX for free. `before` is the ledger position as the
+        element's emission began, measured BEFORE the array below steps the same
+        ledger.
         """
         bytes_ = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            bytes_ += ret[0]
         if not bytes_ or cap <= 1:
             return
-        if not M.comprehension_element_is_flat_container(element):
+        if M.comprehension_element_is_flat_container(element):
+            blob_size = (self._last_concat_result_bytes
+                         if isinstance(element, F.BinaryOp) else bytes_)
+        elif M.comprehension_result_is_flat(element) \
+                and self._last_compr_result_size > 0:
+            blob_size = self._last_compr_result_size
+        else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
                 cap, bytes_))
-        array_off = self._reserve_blob(cap * bytes_,
+        array_off = self._reserve_blob(cap * blob_size,
                                        "comprehension element array")
         # count = result element count so far (= this iteration's ordinal).
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        # dest = array_base + count * bytes_
+        # dest = array_base + count * blob_size
         self._emit_blob_base(array_off, Reg.R11)
-        self._emit_mov_imm(Reg.RDI, bytes_)
+        self._emit_mov_imm(Reg.RDI, blob_size)
         self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
         self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
-        # memcpy(dest, src, bytes_): rdi=dest, rsi=src, rdx=n.
+        # memcpy(dest, src, blob_size): rdi=dest, rsi=src, rdx=n.
         self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.R11))
-        self._emit_mov_imm(Reg.RDX, bytes_)
+        self._emit_mov_imm(Reg.RDX, blob_size)
         self._emit_extern_call("memcpy")            # returns dest in RAX
 
     # ── how many times the code being emitted runs ────────────────────
@@ -3904,8 +3984,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # reserves the way `xs = []; xs.append(1)` does.
         extra = self._list_caps.get(id(node), 0) if node is not None \
             else 0
-        offset = self._reserve_blob(
-            M.BLOB_HEADER_BYTES + (count + extra) * stride, what)
+        nbytes = M.BLOB_HEADER_BYTES + (count + extra) * stride
+        offset = self._reserve_blob(nbytes, what)
+        if node is not None:
+            self._materialised[id(node)] = (offset, nbytes)
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, count)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -3947,6 +4029,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
         offset = self._reserve_blob(8 * (1 + cap), "a list literal")
+        self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -3982,6 +4065,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                        M.literal_splat_operand_is_static)
         cap = max(cap, self._list_caps.get(id(expr), 0))
         offset = self._reserve_blob(8 * (1 + cap), "list unpack")
+        self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, 0)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -4276,50 +4360,69 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _print_call(self, args: list):
         """`(format, operands)` for a `print` of `args`.
 
-        A literal operand contributes a fragment to the format and NO operand
-        to the call; a value contributes a conversion and one operand. Passing
-        the literals as well is the mistake this shape exists to prevent: the
-        format would ask printf for fewer arguments than it was handed, and
-        everything after the first literal would be read one slot late.
+        TWO LINES OF DELEGATION, and `model.print_call_spelling` is where the
+        decision and every reason for it live: which operand is a fragment and
+        which is a value, that a `bool` is `True`/`False` rather than the word's
+        own `1`/`0`, that `None` is the four characters rather than a `0`, that a
+        `bytes` literal is CPython's `repr()` of it, and the four shapes this
+        path refuses with a sentence that says what CPython prints. This method
+        was the whole of that once, and `arm64_codegen.py` had the same method
+        again — which is the argument for one copy rather than two, and before
+        the move both printed `1` for `True` and `ab` for `b"ab"`.
 
-        The int conversion follows the operand's own type. The model's default
-        integer is UNSIGNED, and `%lld` on a UInt64 whose top bit is set would
-        print a negative number, so signedness decides; the width does not, a
-        narrow int already sign/zero-extends to the word it is stored in."""
-        frags, operands = [], []
-        for a in args:
-            if isinstance(a, F.StringLiteral):
-                frags.append(M.print_literal(a))
-                continue
-            # A value this path cannot carry is refused HERE rather than
-            # rendered: `print(g(1, 2))` for a `g` with no `return` printed
-            # whatever `g`'s epilogue left in the return register (measured `0`
-            # on BOTH architectures, where CPython printed `None`), and a printed
-            # `None` is the shape this path has no representation for. The
-            # decision is `ValueKinds.no_value_callee_of` and the words are
-            # `model.returnless_value_refusal`, both shared with arm64.
-            callee = self._vkinds.no_value_callee_of(a)
-            if callee is not None:
-                raise CodegenError(M.returnless_value_refusal(callee))
-            kind = self._expr_str_kind(a)
-            if M.string_operand_is_string(kind):
-                frags.append("%s")
-            elif M.is_number_kind(kind):
-                # `is_number_kind` and not `== INT_KIND`: a type TAG is a word,
-                # so `print(t)` for `t = bool` prints the tag, which is what it
-                # printed before `TYPE_KIND` existed (`t` was then an `int` by
-                # `_value_kind`'s default). Asking `== INT_KIND` here would make
-                # the construct's own positive case a refusal.
-                frags.append("%lld" if cmp_signed(self._ttype(a)) else "%llu")
-            else:
-                raise CodegenError(
-                    f"print() cannot tell whether {type(a).__name__} is a "
-                    f"string or a number on the formal x86-64 path, and "
-                    f"guessing would print an address as if it were text (or "
-                    f"a number as if it were text). Annotate the name, or "
-                    f"print a literal, or bind it to a literal first")
-            operands.append(a)
-        return frags, operands
+        The int conversion follows the operand's own type, and the model asks
+        for that through a hook because it is this backend's `_ttype` and the
+        model's default integer is UNSIGNED: `%lld` on a `UInt64` whose top bit
+        is set prints a negative number, so signedness decides and the width
+        does not (a narrow int already sign/zero-extends to the word it is
+        stored in)."""
+        return M.print_call_spelling(
+            args,
+            no_value_callee=self._vkinds.no_value_callee_of,
+            kind_of=self._expr_str_kind,
+            is_signed=lambda a: cmp_signed(self._ttype(a)),
+            is_bool=self._print_operand_is_bool,
+            is_none=self._vkinds.is_none_value,
+            is_bytes=self._vkinds.is_bytes_value,
+            backend="x86-64")
+
+    def _print_operand_is_bool(self, e) -> bool:
+        """Whether `print` must render `e` as `True`/`False`.
+
+        `model.bool_valued_shape` covers the three shapes that are bools
+        whatever any declaration says (a literal, a comparison, a `not`), and
+        `ValueKinds.is_bool_value` covers a NAME a signature or a statement of
+        this function declared `Bool`. Two shapes are left, and both need the
+        EMITTER's tables rather than the model's — which is why they are here
+        and not in `is_bool_value`: a CALL's declared return type
+        (`self._functions`, which holds the flat names `formal/build.py` lifted
+        methods to) and a FIELD's declared type (`self._frame_candidates` and
+        `self._structs`, the same tables `_declared_kind_for` reads).
+
+        The two backends' copies of this are the same method with the same three
+        lines, which is the point: they read the same shared readers with the
+        same vocabularies, so a `Bool` this path renders as `True` on arm64 is a
+        `Bool` it renders as `True` on x86-64."""
+        if M.bool_valued_shape(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            return bool(self._vkinds.is_bool_value(e))
+        if isinstance(e, F.CallExpr):
+            fn = self._functions.get(M._flat_callee(e) or "")
+            if fn is None:
+                return False
+            return M.annotation_is_bool(getattr(fn, "return_type", None),
+                                        BOOL_TYPE_NAMES)
+        if isinstance(e, F.MemberExpr):
+            root = e.obj
+            if not isinstance(root, F.IdentExpr):
+                return False
+            cands = self._frame_candidates.get(root.name) or []
+            if not cands:
+                return False
+            return M.frame_slot_field_is_bool(cands, e.member,
+                                             BOOL_TYPE_NAMES)
+        return False
 
     def _refuse_frame_order_operand(self, op: str, operand) -> None:
         """Raise if `operand` is a bare name this function holds as a FRAME.
@@ -4360,7 +4463,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 None if name.name in self._frame_holders else
                 M.one_word_value_text_evidence(
                     self._one_word_candidates.get(name.name),
-                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)),
+            container_of=lambda e: self._vkinds.kind_of(e))
 
     def _printf_arg_text(self, arg):
         """The DECODED TEXT of a `printf` vararg, or None when unseen.
@@ -4376,7 +4480,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.string_literal_text(arg)
 
     def _printf_arg_conversion_class(self, arg):
-        """`"float"` / `"int"` / None — see `model.printf_arg_float_evidence`.
+        """`"float"` / `"int"` / `"container"` / None — see
+        `model.printf_arg_float_evidence`.
 
         The third hook of `model.printf_format_refusal`, and the same two facts
         the other two ask for: this function's `ValueKinds` and the flow-
@@ -4409,7 +4514,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Delegation, and nothing else: the callee's declared parameters, the
         receiver that is dropped rather than counted (`method_function_name`
         lifts `Box.put` to one flat name and its `params` still carry `self`),
-        the three-way evidence and the words are all
+        the evidence and the words are all
         `model.call_argument_kind_refusal`, shared with arm64. The RECEIVER is
         the reason it is not a bare copy of the arm64 body: a method call's
         `args` do not include the receiver while the lifted method's `params`
@@ -4429,6 +4534,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason = M.call_argument_kind_refusal(
             name, list(e.args or ()), [p[1] for p in params],
             self._printf_arg_conversion_class, TYPE_NAMES)
+        if reason is not None:
+            raise CodegenError(reason)
+
+    def _refuse_foreign_bytes_into_text_parameter(self, name, e) -> None:
+        """Raise when KERNEL BYTES are passed into a parameter the callee `len`s.
+
+        Delegation, and the same words arm64 reads:
+        `model.foreign_bytes_into_text_parameter_refusal` is the whole of the
+        rule, and the input it needs is the callee's BODY rather than its
+        declaration — a `String` parameter is the honest type, so only what the
+        body does with it says whether a byte count would be a wrong answer.
+        The parameters it is measured at are the TRANSITIVE set
+        (`model.text_measured_parameters`), so `def f(s): return g(s)` is the
+        same call one hop out. A no-op for a callee this image does not declare.
+        """
+        callee = self._functions.get(name)
+        if callee is None:
+            return
+        if self._text_measured is None:
+            self._text_measured = M.text_measured_parameters(
+                self._functions.values())
+        reason = M.foreign_bytes_into_text_parameter_refusal(
+            name, callee, list(e.args or ()), self._expr_str_kind,
+            measured=self._text_measured.get(name))
         if reason is not None:
             raise CodegenError(reason)
 
@@ -4642,6 +4771,33 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     raise CodegenError(word)
                 self._emit_optional_unwrap(e, how, word)
                 return
+        # THE STRING-METHOD PLAN, asked for EVERY string method and BEFORE the
+        # receiver guard, because the order is what lets the two coexist: a
+        # method that FOLDS has no receiver question to ask (its receiver is a
+        # literal by definition) and a method that does not is refused by
+        # whichever of the two has the more specific thing to say. Before the
+        # guard it can reach the thirty-five methods `model.STRING_FOLDED_
+        # METHODS` computes from text the build can see; after it, every one of
+        # them would already have been refused by name for want of a buffer.
+        #
+        # The DECISION is the model's and is shared by both backends; the kinds
+        # are this backend's, and the plan needs them only for the five methods
+        # whose arguments are read as `char *`.
+        accept = None
+        if M.is_string_method(method):
+            args = list(e.args)
+            plan, payload = M.string_method_call_plan(
+                method, _dotted(e.func), obj, args,
+                [self._expr_str_kind(a) for a in args])
+            if plan is None:
+                raise CodegenError(payload)
+            if plan == M.STRING_PLAN_FOLD_INT:
+                self._emit_mov_imm(Reg.RAX, payload)
+                return
+            if plan == M.STRING_PLAN_FOLD_TEXT:
+                self._emit_expr(F.StringLiteral(payload))
+                return
+            accept = payload
         reason = M.value_method_refusal(
             method, self._method_recv_kind(e), _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
@@ -4664,7 +4820,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         elif how == "file_close":
             self._emit_file_close(e)
         elif how == "str_lstrip":
-            self._emit_str_lstrip(e)
+            self._emit_str_lstrip(e, accept=accept)
         elif how in ("str_startswith", "str_endswith"):
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
@@ -4793,8 +4949,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     # ADDRESS by the time the store is emitted.
     def _emit_pointer_store(self, target, value) -> None:
         obj = target.func.obj
+        # The VALUE's kind decides whether a store through a DOUBLE pointee is
+        # exact (a double: store its bits) or a silent wrong answer (an integer:
+        # `p.value() = 1` writes a denormal). `_expr_str_kind` is the same
+        # reader the LOAD's consumers ask, so the two sides agree.
         how, why = M.pointer_store_lowering(
-            self._cur_fn, target, self._structs, self._functions, self._structs)
+            self._cur_fn, target, self._structs, self._functions, self._structs,
+            value=value, class_of=self._printf_arg_conversion_class)
         if how is None:
             raise CodegenError(M.pointer_store_refusal(
                 target.func.member, why
@@ -4812,6 +4973,39 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_mov_rm32_r32(Reg.RAX, 0, Reg.R11))
         else:
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+
+    def _try_member_frame_aug(self, stmt, op: str) -> bool:
+        """`p.value().b <op>= v` — a member of a frame a POINTER names.
+
+        The plain store `p.value().b = v` already resolves the frame
+        (`model.pointer_frame_expression`, the same decision the read arm
+        makes), so the augmented form DESUGARS onto the two arms that exist —
+        `p.value().b = p.value().b <op> v` — rather than growing a second
+        read-modify-write that would have to restate every operator's lowering
+        a third time. That is the same desugaring the named-holder arm already
+        does for the operators it delegates to `_emit_binop`.
+
+        It is offered only when the dereference's receiver is a NAME, because
+        the desugaring emits the base once for the read and once for the store,
+        and a receiver that is a CALL would run twice. A name is a register
+        read, so both emissions are the same load.
+
+        Returns True when the statement was emitted; False when the base is not
+        this shape, so the caller keeps its own refusal instead.
+        """
+        base = M.member_base_node(stmt.target)
+        if not (isinstance(base, F.CallExpr)
+                and isinstance(base.func, F.MemberExpr)
+                and isinstance(base.func.obj, F.IdentExpr)):
+            return False
+        st, _why = M.pointer_frame_expression(
+            self._cur_fn, base, self._structs, self._structs)
+        if st is None:
+            return False
+        self._emit_stmt(F.AssignStmt(
+            target=stmt.target,
+            value=F.BinaryOp(op=op, left=stmt.target, right=stmt.value)))
+        return True
 
     # A STORE into a frame a POINTER names — `p.value().field = v`, the store
     # half of the member-read arm's `p.value().field`.  It exists because the
@@ -4855,21 +5049,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
         return None if obj is None else self._expr_str_kind(obj)
 
-    def _emit_str_lstrip(self, e) -> None:
-        """`s.lstrip()` — an INTERIOR pointer to the first non-whitespace byte.
+    def _emit_str_lstrip(self, e, *, accept=None) -> None:
+        """`s.lstrip()` / `s.lstrip(chars)` — an INTERIOR pointer to the answer.
 
-        `strspn(s, STRIP_CHARS)` IS the left-strip: it returns the length of the
+        `strspn(s, ACCEPT)` IS the left-strip: it returns the length of the
         initial segment of `s` made only of those characters, so `s + that` is
         the answer. Nothing is written and nothing is copied, which is what
         makes this pointer-bounded and `strip` not.
 
         The character set is model.STRIP_CHARS, ONE definition for both
         backends. An earlier version hand-wrote the scan loop per architecture
-        and each copy had its own bug."""
+        and each copy had its own bug.
+
+        **THE ACCEPT SET IS THE ARGUMENT**, and that is the whole of the
+        `chars` parameter: `model.string_method_lstrip_accept_set` decides which
+        set it is and refuses the call where a byte set and a character set
+        would disagree, so `accept is None` here means exactly one thing — the
+        source wrote no `chars`. It was `STRIP_CHARS` UNCONDITIONALLY before
+        this, so `"xxaxx".lstrip("x")` built, ran and answered `"xxaxx"` where
+        CPython answers `"axx"`."""
+        chars = (F.StringLiteral(accept) if accept is not None
+                 else F.StringLiteral(M.STRIP_CHARS))
         # One push, so [rsp] = s.
         self._emit_expr(e.func.obj)
         self._push_slot(Reg.RAX)
-        self._emit_expr(F.StringLiteral(M.STRIP_CHARS))
+        self._emit_expr(chars)
         self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))    # accept set
         self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 0))  # s
         self._emit_extern_call("strspn")
@@ -4900,11 +5104,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reads before the start of the buffer. Unsigned compares, matching the
         signedness `strlen` actually returns."""
         args = list(e.args)
-        name = "str.endswith" if at_end else "str.startswith"
+        # The arity and the affix's kind were BOTH decided by
+        # `model.string_method_call_plan` in the method dispatch above, which
+        # is also where a tuple affix is folded and where a number where an
+        # affix belongs is refused. This check remains as the emitter's own
+        # statement of the shape it can emit, and it is a `raise` rather than
+        # an `assert` because a backend that reached it with two arguments
+        # would read `args[1]` — the plan is what makes that unreachable, not
+        # this line.
         if len(args) != 1:
             raise CodegenError(
-                f"{name}() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.{'endswith' if at_end else 'startswith'}() reached its "
+                f"lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         # RDI, not RAX: an expression leaves its value in RAX and the first
         # ARGUMENT register is RDI. Omitting the move is not a wrong-answer bug
         # but a fault inside libc — strlen dereferences whatever RDI held.
@@ -4998,10 +5211,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         are literals the answer is Python's and is folded here instead, which
         is why the two literals never reach `strstr` at all."""
         args = list(e.args)
+        # `model.string_method_call_plan` owns the arity and the needle's kind;
+        # see `_emit_str_affix` for why this line remains.
         if len(args) != 1:
             raise CodegenError(
-                f"str.find() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.find() reached its lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         verdict, folded = M.string_position_verdict(
             f"{M.spelled(e.func.obj)}.find({M.spelled(args[0])})",
             e.func.obj, args[0])
@@ -5045,10 +5261,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `strlen(s) + 1` — and it is also the case that would otherwise spin
         forever, since `strstr` returns the cursor unchanged for it."""
         args = list(e.args)
+        # `model.string_method_call_plan` owns the arity and the needle's kind;
+        # see `_emit_str_affix` for why this line remains.
         if len(args) != 1:
             raise CodegenError(
-                f"str.count() takes exactly one argument on this path "
-                f"(got {len(args)})")
+                f"str.count() reached its lowering with {len(args)} arguments; "
+                f"`model.string_method_call_plan` decides the arity and should "
+                f"have refused this call first")
         self._while_counter += 1
         n = self._while_counter
         fn = self.func_name
@@ -5553,11 +5772,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         System V argument triple can be set without saving anything. RSP is
         already 16-byte aligned (the append's own pushes are a multiple of it)
         and is left where it was, so the pushed base and value stay readable
-        past the call."""
+        past the call.
+
+        **The length is `M.diagnostic_length(text)` and not `len(text)`**, which
+        is arm64's fix and the same defect: a `write` length is a BYTE count, a
+        message is a Python `str`, and every non-ASCII character is a byte the
+        program never wrote. Measured on this tree before the fix, both
+        architectures wrote 774 of the list-append message's 778 bytes and
+        stopped mid-word. One shared reader for both emitters, so the two
+        machines cannot write a different number of bytes of the same sentence,
+        and `test_formal_run.py`'s `STDERR_EXACT_CASES` is the row that keeps
+        it honest."""
         self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
         self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
         self._emit_mov_imm(Reg.RDI, 2)                 # fd = stderr
-        self._emit_mov_imm(Reg.RDX, len(text))         # length
+        # The interned blob is UTF-8 + NUL, so this is the BYTE count and not
+        # `len(text)`; see `model.diagnostic_length` for the truncation the
+        # character count caused on a non-ASCII message.
+        self._emit_mov_imm(Reg.RDX, M.diagnostic_length(text))   # length
         self._emit_mov_imm(Reg.RAX, 0)                 # AL = 0 (not varargs)
         self._emit_extern_call("write")
 
@@ -5850,12 +6082,48 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         frame-holder analysis's own, published per function by
         `formal/build.py`, so this asks the same question the hand-off checks
         ask rather than re-deriving what a name holds.
+
+        **A CONSTRUCTION is the one non-name this extends to**, and it is not
+        the exception above: `h.x` is a FIELD and a construction is not — it is
+        the address, decided by `struct_is_framed(P)` from `P`'s own field list.
+        Measured before it was asked: `for v in P(1, 2)` printed `v=2` on BOTH
+        architectures where CPython prints `v=1` then `v=2`. The shared
+        recognition is `M.framed_construction_structs`, so the name arm stays the
+        holder table this method already consulted.
         """
-        if not isinstance(obj, F.IdentExpr) or obj.name not in self._frame_holders:
+        if isinstance(obj, F.IdentExpr) and obj.name in self._frame_holders:
+            cands = self._frame_candidates.get(obj.name) or ()
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name for st in cands]))
+        for st in M.framed_construction_structs(obj, self._structs):
+            raise CodegenError(M.frame_container_operand_refusal(
+                op, M.spelled(obj), [st.name]))
+
+    def _refuse_frame_unpack_operand(self, obj) -> None:
+        """Raise if `obj` is a BARE NAME holding a frame address.
+
+        The container family's fourth member, asked through the SAME holder
+        table as `_refuse_frame_container_operand` — one recognition with two
+        callers, not two recognitions. What is new is that `_emit_for_unpack`
+        reads its operand exactly as the other four container lowerings do:
+        offset 0 as the arity, `base + 8 + 8k` per target.
+
+        `M.frame_value_expr_structs` answers it for a bare name and for a
+        CONSTRUCTION of a framed struct, which is the shape that got through:
+        `a, b = P(1, 2)` has no name in it for the holder table to speak about.
+
+        `model.frame_unpack_operand_refusal` holds the measurement, and the
+        x86-64 column of it is why this could not be left to arm64's fix:
+        `p = P(2, 99); a, b = p` answered `a=99 b=171778048` here and
+        `a=99 b=0` on arm64 — two different wrong answers to one source, both
+        exit 0.
+        """
+        structs = M.frame_value_expr_structs(obj, self._frame_candidates,
+                                             self._structs)
+        if not structs:
             return
-        cands = self._frame_candidates.get(obj.name) or ()
-        raise CodegenError(M.frame_container_operand_refusal(
-            op, M.spelled(obj), [st.name for st in cands]))
+        raise CodegenError(M.frame_unpack_operand_refusal(
+            M.spelled(obj), [st.name for st in structs]))
 
     def _refuse_non_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a plain WORD this function bound to an integer.
@@ -5919,7 +6187,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         disagree about which bases qualify.
         """
         kind = self._expr_str_kind(obj)
-        evidence = M.scalar_container_base_evidence(obj, kind)
+        evidence = M.scalar_container_base_evidence(
+            obj, kind, getattr(self, "_vkinds", None))
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
@@ -6245,6 +6514,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.Comprehension):
             return self._compr_cap(e)
         if isinstance(e, F.CallExpr):
+            # `range` is the ONE call with a length this path can read off the
+            # header, and reading it is what makes `_compr_cap` size
+            # `[.. for i in range(20)]` the same 20 elements arm64's does —
+            # which `_compr_cap`'s own docstring already claimed and which was
+            # false: this arm did not exist, so every `range` iterable here was
+            # `BLOB_ESTIMATE_FALLBACK` and x86-64 reserved up to 64x what
+            # arm64 reserved for the same source. Through `_range_info`, which
+            # is the one normaliser for the three spellings, so the
+            # one-argument `range(3)` — which is how almost every `range` in
+            # this repository and the stdlib is written — is not the
+            # no-bound answer it used to be. arm64's twin is the same four
+            # lines over the same two shared functions.
+            if isinstance(e.func, F.IdentExpr) and e.func.name == "range":
+                si, ti, pi = _range_info(list(e.args))
+                bound = M.loop_trip_count(self._static_int(si),
+                                          self._static_int(ti),
+                                          self._static_int(pi))
+                return bound if bound is not None else M.BLOB_ESTIMATE_FALLBACK
             return M.BLOB_ESTIMATE_FALLBACK
         if isinstance(e, F.BinaryOp):
             if e.op in ("+", "|"):
@@ -6349,7 +6636,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(M.frame_blob_refusal(
                 "a list concatenation", 16, avail))
         cap = min(want, (avail - 8) // 8)
-        offset = self._reserve_blob(8 + 8 * cap, "a list concatenation")
+        nbytes = 8 + 8 * cap
+        offset = self._reserve_blob(nbytes, "a list concatenation")
+        # The RESULT's own size, recorded here because this is the one place
+        # that reserved it. A comprehension whose element is a concat copies
+        # this blob per iteration (`_materialize_compr_element`) and must not
+        # size the copy from the ledger delta, which also carries the two
+        # operands this function reserved just above.
+        self._last_concat_result_bytes = nbytes
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
         self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
@@ -6520,6 +6814,250 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
 
+    def _emit_set_filter_pass(self, offset: int, src: Reg, src_n: Reg,
+                              other: Reg, other_n: Reg,
+                              keep_present: bool) -> None:
+        """Append every `src[i]` whose membership in `other` matches to the
+        result blob at `offset`, whose count is in R10.
+
+        The x86-64 twin of `ARM64Codegen._emit_set_filter_pass`, over the same
+        three operators and the same two-pass symmetric difference: `a & b`
+        keeps the left elements the right holds, `a - b` the left elements the
+        right lacks, and `a ^ b` runs both (each side's elements the other
+        lacks) into one result.  `src`/`other` are the base registers the two
+        operands were loaded into (RSI for the left, RDX for the right) and
+        `src_n`/`other_n` their count words (R8/R9).  The count R10 is a
+        PARAMETER of the site rather than reset here because the two passes of
+        a symmetric difference append into one result.
+
+        The elements are read as whole 8-byte slots, which is what a set means
+        on this path (`bugs/FORMAL_set_value_model.md`: a set lowers as a
+        LIST), so an element is a word and `1 in {1, 2}` is a word compare.
+
+        REGISTER PLAN.  src/other/src_n/other_n are the caller's; R10 is the
+        count; R11 the outer index `i`, RCX the membership index `k`, RAX the
+        element and RDI the address scratch (recomputed from RBP at the one
+        store, because the scan overwrote it).  Nothing here makes a call, so
+        the caller-saved scratch is free across both loops.
+        """
+        self._emit_mov_imm(Reg.R11, 0)                        # i = 0
+        self._while_counter += 1
+        lp = f"{self.func_name}_sfp{self._while_counter}"
+        lpd = f"{self.func_name}_sfd{self._while_counter}"
+        lk = f"{self.func_name}_sfk{self._while_counter}"
+        lkf = f"{self.func_name}_sff{self._while_counter}"
+        lkn = f"{self.func_name}_sfn{self._while_counter}"
+        keep = f"{self.func_name}_sfe{self._while_counter}"
+        nxt = f"{self.func_name}_sfs{self._while_counter}"
+        self.asm.label(lp)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, src_n))
+        self._emit_jcc(COND_AE, lpd)                          # i >= n → done
+        # elem = src[i] → RAX
+        self._emit_elem_addr(src, Reg.R11, Reg.RDI, 8, 3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+        self._emit_mov_imm(Reg.RCX, 0)                        # k = 0
+        self.asm.label(lk)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, other_n))
+        self._emit_jcc(COND_AE, lkn)                          # k >= n → miss
+        self._emit_elem_addr(other, Reg.RCX, Reg.RDI, 8, 3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RDI, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.RAX))
+        self._emit_jcc(COND_E, lkf)                           # equal → hit
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 1))
+        self._emit_jmp(lk)
+        self.asm.label(lkf)
+        self._emit_jmp(keep if keep_present else nxt)
+        self.asm.label(lkn)
+        self._emit_jmp(nxt if keep_present else keep)
+        self.asm.label(keep)
+        self._emit_blob_base(offset, Reg.RDI)
+        self._emit_elem_addr(Reg.RDI, Reg.R10, Reg.RCX, 8, 3)  # &dst[count]
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))        # count++
+        # The growing count has to reach the blob's own count word: R10 is the
+        # loop's register copy, and a result whose count word stayed at 0 is
+        # `len` of nothing with the appended elements sitting above it — the
+        # exact defect arm64's filter pass stores the count to avoid.
+        self._emit_blob_base(offset, Reg.RDI)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
+        self.asm.label(nxt)
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(lp)
+        self.asm.label(lpd)
+
+    def _emit_set_union(self, left, right) -> None:
+        """`a | b` as set union over two blobs → a fresh blob in RAX.
+
+        The x86-64 twin of `ARM64Codegen._emit_set_union`: copy all of the
+        left operand into the result (so the result's count starts at `nL` and
+        nothing else describes it), then for each right-hand element scan the
+        result so far and append it only when it is absent.  The reservation
+        and the run-time growth guard are the concatenation's — the worst case
+        is `nL + nR` distinct elements — and the guard is emitted BEFORE either
+        loop, because the append loop's `result[count]` store is bounded by the
+        guard and by nothing else.
+
+        `container_union_refusal` (asked in `_emit_binop`) has already refused
+        every `|` shape except two sets, so this runs only for the operator
+        CPython defines as union.
+
+        REGISTER PLAN.  RSI the left operand, RDX the right, R8/R9 their count
+        words, RDI the result base, R11 the outer index, RAX the element, RCX
+        the membership index and R10 a scratch that carries the result's count
+        during the append scan (reloaded from `[RDI]` where it is needed,
+        because the growing count is the loop variant).  No call happens in
+        either loop, so the caller-saved scratch is free.
+        """
+        legacy = max(1, self._blob_est(left) + self._blob_est(right))
+        exact = max(1, self._blob_est(left, exact=True)
+                   + self._blob_est(right, exact=True))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 8:
+            raise CodegenError(M.frame_blob_refusal("a set union", 8, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                              # left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left, exactly as `_emit_list_concat` does.
+        avail = self._blob_available() - self._blob_used()
+        if avail < 8:
+            raise CodegenError(M.frame_blob_refusal("a set union", 8, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a set union")
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
+        self._emit_blob_base(offset, Reg.RDI)                    # dst
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R9))       # nL + nR
+        self._emit_blob_growth_guard("a set union", Reg.RAX, cap, "uni")
+        # THE COUNT IS nL, NOT nL + nR: the result starts out holding the nL
+        # left-hand elements and nothing else, and the append loop below grows
+        # it by one per element it actually appends.  With the sum written here
+        # `len` and a subscript read a number no store produced — the same
+        # defect arm64's union carried for a while (see its comment).
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        # copy all of left into dst[0..nL)
+        self._emit_mov_imm(Reg.R11, 0)                        # i = 0
+        self._while_counter += 1
+        ul = f"{self.func_name}_su{self._while_counter}"
+        uld = f"{self.func_name}_sud{self._while_counter}"
+        self.asm.label(ul)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R8))
+        self._emit_jcc(COND_AE, uld)                          # i >= nL → done
+        self._emit_elem_addr(Reg.RSI, Reg.R11, Reg.RAX, 8, 3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # left[i]
+        self._emit_elem_addr(Reg.RDI, Reg.R11, Reg.RCX, 8, 3)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(ul)
+        self.asm.label(uld)
+        # append each right element that is not already in the result
+        self._emit_mov_imm(Reg.R11, 0)                        # j = 0
+        self._while_counter += 1
+        ur = f"{self.func_name}_sur{self._while_counter}"
+        urd = f"{self.func_name}_surd{self._while_counter}"
+        uss = f"{self.func_name}_sus{self._while_counter}"
+        usf = f"{self.func_name}_suf{self._while_counter}"
+        usn = f"{self.func_name}_sun{self._while_counter}"
+        self.asm.label(ur)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R9))
+        self._emit_jcc(COND_AE, urd)                          # j >= nR → done
+        self._emit_elem_addr(Reg.RDX, Reg.R11, Reg.RAX, 8, 3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # right[j]
+        self._emit_mov_imm(Reg.RCX, 0)                        # k = 0
+        self.asm.label(uss)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RDI, 0))   # count
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.R10))
+        self._emit_jcc(COND_AE, usn)                          # k >= count → append
+        self._emit_elem_addr(Reg.RDI, Reg.RCX, Reg.R10, 8, 3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R10, 0))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.RAX))
+        self._emit_jcc(COND_E, usf)                           # present → next j
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 1))
+        self._emit_jmp(uss)
+        self.asm.label(usn)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RDI, 0))   # count
+        self._emit_elem_addr(Reg.RDI, Reg.R10, Reg.RCX, 8, 3)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))        # count++
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
+        self.asm.label(usf)
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(ur)
+        self.asm.label(urd)
+        self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_set_op(self, left, right, op: str) -> None:
+        """`a & b`, `a - b` and `a ^ b` as set operations → a fresh blob in RAX.
+
+        The x86-64 twin of `ARM64Codegen._emit_set_op`: the left's elements the
+        right holds (`&`), the left's the right lacks (`-`), or the elements
+        exactly one side holds (`^`).  The capacity and the guard are the
+        union's with one difference — an intersection or a difference can hold
+        at most `nL` elements, so its reservation and guard total are `nL`,
+        while a symmetric difference is the union of two disjoint differences
+        and reserves the union's `nL + nR`.  Both numbers come from the shared
+        `_blob_site_growth`, so this backend sizes the same program the same
+        way arm64 does.
+
+        The elements are compared as whole 8-byte slots for the reason
+        `_emit_set_union` gives: a set lowers as a list here, so an element is
+        a word.
+        """
+        symdiff = op == "^"
+        legacy = max(1, self._blob_est(left)
+                     + (self._blob_est(right) if symdiff else 0))
+        exact = max(1, self._blob_est(left, exact=True)
+                    + (self._blob_est(right, exact=True) if symdiff else 0))
+        want = self._blob_site_growth(legacy, exact, left, right)
+        avail = self._blob_available() - self._blob_used()
+        if avail < 8:
+            raise CodegenError(
+                M.frame_blob_refusal("a set operation", 8, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        self._emit_expr(left)
+        self._push_slot(Reg.RAX)                              # left
+        self._emit_expr(right)
+        self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))   # right
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, _SLOT))
+        avail = self._blob_available() - self._blob_used()
+        if avail < 8:
+            raise CodegenError(
+                M.frame_blob_refusal("a set operation", 8, avail))
+        cap = max(1, min(want, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a set operation")
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
+        self._emit_blob_base(offset, Reg.RDI)                    # dst
+        if symdiff:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R9))   # nL + nR
+            what, tag = "a set symmetric difference", "ssd"
+        else:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))   # nL
+            what = "a set intersection" if op == "&" else "a set difference"
+            tag = "sin" if op == "&" else "sdf"
+        self._emit_blob_growth_guard(what, Reg.RAX, cap, tag)
+        self._emit_mov_imm(Reg.R10, 0)                        # count = 0
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
+        if symdiff:
+            # (a - b) then (b - a); the two are disjoint by construction, so
+            # appending the second to the first is the whole of `^`.
+            self._emit_set_filter_pass(offset, Reg.RSI, Reg.R8, Reg.RDX, Reg.R9,
+                                       False)
+            self._emit_set_filter_pass(offset, Reg.RDX, Reg.R9, Reg.RSI, Reg.R8,
+                                       False)
+        else:
+            self._emit_set_filter_pass(offset, Reg.RSI, Reg.R8, Reg.RDX, Reg.R9,
+                                       op == "&")
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` / `needle not in haystack`, list blob or string.
 
@@ -6676,12 +7214,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # answer. arm64 reads the same tree through the same `M` reader.
             ttree = M.for_target_tree(stmt.target) \
                 if isinstance(stmt.target, str) else None
-            # `*rest` leaves keep their star in the tree; strip it so a starred
-            # for-target keeps the (already broken on both backends) spelling
-            # from becoming a build refusal on one architecture only — see
-            # `bugs/FORMAL_a_starred_for_target_is_broken_on_both_backends.md`.
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            # The SHAPE's leaves, for the same reason the arm64 site asks for
+            # them: a star leaf keeps its `*`, so a starred for-target is
+            # refused HERE, by this identifier check, with the same sentence
+            # arm64 gives it — the option (1) refusal, pinned by
+            # `test_formal_run.py`'s `both_arch_refuse_a_starred_for_target`
+            # and its two sibling rows.
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"for-loop target must be a plain name or tuple of plain "
@@ -6707,12 +7246,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # where arm64 and CPython both answer.  `M.for_target_tree` is the
             # one parser both backends now use, so the two cannot disagree
             # about what a target's shape is.
-            ttree = M.for_target_tree(stmt.target) if isinstance(
-                stmt.target, str) else None
-            if ttree is None:
-                raise CodegenError(
-                    f"for-loop target must be a plain name or tuple of plain "
-                    f"names (got {stmt.target!r})")
+            #
+            # A `*rest` leaf KEEPS its star: `_emit_for_unpack` owns the rest
+            # binding, so stripping it here (which this did while the star was
+            # broken on both backends) would bind the star's name to the whole
+            # element and leave the star's own arm unreachable.
+            ttree = M.for_target_tree(stmt.target) \
+                if isinstance(stmt.target, str) else None
+            why = _for_target_refusal(ttree)
+            if why is not None:
+                raise CodegenError(why)
 
             self._while_counter += 1
             wid = self._while_counter
@@ -6830,6 +7373,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # arrangement and the same reason (`model.dict_store_capacity`).
         reserved = self._dict_caps.get(id(expr), n)
         offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
+        self._materialised[id(expr)] = (offset, 8 + 16 * reserved)
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -7046,19 +7590,43 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         reason.
         """
         fn = self.func_name
+        # A trailing `*name` leaf binds a REST blob of the element's tail; the
+        # arity check then requires `count >= n_fixed` rather than `count ==
+        # len(targets)`, and the star's own arm builds the tail blob. This is
+        # the x86-64 twin of arm64's `_emit_for_unpack` / its `star_i` branch,
+        # and the two must agree or `for a, *rest in [(1,)]` is a build refusal
+        # on one machine and a wrong program on the other (the starred
+        # for-target defect this arm fixes).
+        star_i = -1
+        for i, child in enumerate(targets):
+            if isinstance(child, str) and child.startswith("*"):
+                if i != len(targets) - 1:
+                    raise CodegenError(
+                        f"starred for-target {child!r} must be last")
+                star_i = i
+        n_fixed = len(targets) - (1 if star_i >= 0 else 0)
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
         self._if_counter += 1
         uid = self._if_counter
         ok_label = f"{fn}_fu{uid}_ok"
         bad_label = f"{fn}_fu{uid}_bad"
-        self._emit_jcc(COND_NE, bad_label)
+        if star_i >= 0:
+            # `count < n_fixed` is the only arity failure a star has — the rest
+            # may be empty.
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, n_fixed))
+            self._emit_jcc(COND_L, bad_label)
+        else:
+            self.asm.emit(encode_cmp_r64_imm32(Reg.R11, len(targets)))
+            self._emit_jcc(COND_NE, bad_label)
         self._emit_jmp(ok_label)     # arity matches: skip the exit
         self.asm.label(bad_label)
         self._emit_call_exit(1)
         self.asm.label(ok_label)
         for i, target in enumerate(targets):
+            if isinstance(target, str) and target.startswith("*"):
+                self._emit_for_unpack_star_rest(target[1:], tag, n_fixed)
+                continue
             # `stride` is 0 for a `[count][e0...]` blob and `M.PAIR_STRIDE` for
             # a dict's `[npairs][k0][v0]...`: a tuple unpack over a dict binds
             # the KEYS, and an element-stride read binds the key and the value.
@@ -7080,6 +7648,62 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._pop_slot(Reg.R10)
             else:
                 self._store_var(target, Reg.RAX)
+
+    def _emit_for_unpack_star_rest(self, name: str, tag: str,
+                                   n_fixed: int) -> None:
+        """Bind `name` to a fresh blob of the tail `[n_fixed, count)`.
+
+        The x86-64 twin of arm64's `_emit_for_unpack_star_rest`, and it has to
+        agree with it element for element: the loop runs while `i < rest_count`,
+        copies `src[8 + 8*(n_fixed + i)]` to `rest[8 + 8*i]`, and caps the rest
+        at 64 elements — the same `rest_cap` arm64 uses — exiting 1 on overflow.
+        The bound is a CAP rather than the source's own length so a long tail is
+        a loud stop rather than a silent overrun of the reserved blob.
+
+        On entry R10 is the source element's blob base and R11 its count, which
+        is what the caller holds across the whole unpack; this routine uses
+        RDX/RCX/R8/R9/RAX and leaves R10/R11 alone.
+        """
+        rest_cap = 64
+        offset = self._reserve_blob(8 + 8 * rest_cap,
+                                    "a for-star unpacking buffer")
+        self._emit_blob_base(offset, Reg.RDX)            # RDX = rest base
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R11))
+        self.asm.emit(encode_sub_r64_imm32(Reg.RCX, n_fixed))  # RCX = rest_count
+        self.asm.emit(encode_mov_r64_imm32(Reg.R8, 0))   # R8 = i
+
+        self._while_counter += 1
+        w = self._while_counter
+        loop = f"{tag}_sl{w}"
+        done = f"{tag}_sd{w}"
+        oob = f"{tag}_so{w}"
+        oob_end = f"{tag}_sx{w}"
+        self.asm.label(loop)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.RCX))
+        self._emit_jcc(COND_AE, done)                    # i >= rest_count
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R8, rest_cap))
+        self._emit_jcc(COND_AE, oob)                     # i >= cap
+        # src address: R9 = R10 + 8 + 8*(n_fixed + i)
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_add_r64_imm32(Reg.R9, n_fixed))
+        self.asm.emit(encode_shift_r64_imm8("<<", Reg.R9, 3))
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.R10))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R9, 8))
+        # dst address: R9 = RDX + 8 + 8*i
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R8))
+        self.asm.emit(encode_shift_r64_imm8("<<", Reg.R9, 3))
+        self.asm.emit(encode_add_r64_r64(Reg.R9, Reg.RDX))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RCX))  # rest[0] = count
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
+        self._store_var(name, Reg.RAX)
+        self._emit_jmp(oob_end)
+        self.asm.label(oob)
+        self._emit_call_exit(1)
+        self.asm.label(oob_end)
 
     # ── expressions (result in RAX) ──────────────────────────────────
 
@@ -7503,10 +8127,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # architectures disagreeing about a number neither computed. See
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
+        #
+        # A SET ALGEBRA is decided further down, at the one site that asks
+        # `set_algebra_refusal` for every two-blob shape (see the `&`/`-`/`^`
+        # guard below the union gate), so it is NOT answered here: a second
+        # two-set guard at this point would pre-empt that site and let the two
+        # spellings of one operator word the refusal differently.
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
             left=e.left, right=e.right, fn=self._cur_fn,
-            untyped_callee=self._untyped_callee)
+            untyped_callee=self._untyped_callee,
+            left_is_set=self._expr_is_set_like(e.left),
+            right_is_set=self._expr_is_set_like(e.right))
         if reason is not None:
             raise CodegenError(reason)
         # `|` on a container is a SET UNION only between two SETS, and it has
@@ -7534,20 +8166,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if reason is not None:
                 raise CodegenError(reason)
         # `&`, `-`, `^` between two BLOBS are SET ALGEBRA, and the shared gate
-        # now DEFERS them (see `model.SET_ALGEBRA_OPS`).  This backend has no
-        # `_emit_set_algebra`, so every two-blob shape is refused by name —
-        # both the two-set case (which arm64 lowers) and the not-two-sets case
-        # (a CPython `TypeError`).  Without this the deferral would let the
-        # operands reach the integer ALU as two blob ADDRESSES, which is the
+        # now DEFERS them (see `model.SET_ALGEBRA_OPS`), so this is the site
+        # that decides.  Lowered here only for two SETS, which is what CPython
+        # defines them for; anything else is refused by name rather than
+        # reaching the integer ALU with two blob ADDRESSES, which is the
         # measured bug the gate exists for (`s & {2}` answered 2 on arm64 and
-        # 163061056 here; `s - {2}` SIGSEGVed on both).
+        # 163061056 here; `s - {2}` SIGSEGVed on both).  This backend now has
+        # its own `_emit_set_op` (the same per-element membership scan arm64's
+        # is), so the two-set case is an ANSWER on both machines rather than
+        # an arm64-only lowering, and `backend_has_emitter=True` is the truth
+        # for the refusal below: a not-two-sets pair is CPython's `TypeError`.
         if op in M.SET_ALGEBRA_OPS and (
                 M.container_operand_is_blob(self._expr_str_kind(e.left))
                 or M.container_operand_is_blob(self._expr_str_kind(e.right))):
+            left_set = self._expr_is_set_like(e.left)
+            right_set = self._expr_is_set_like(e.right)
+            if left_set and right_set:
+                self._emit_set_op(e.left, e.right, op)
+                return
             raise CodegenError(M.set_algebra_refusal(
                 op, M.spelled(e.left), M.spelled(e.right),
-                self._expr_is_set_like(e.left), self._expr_is_set_like(e.right),
-                backend_has_emitter=False))
+                left_set, right_set, backend_has_emitter=True))
         if op in _CMP_CONDS:
             unsigned, signed = _CMP_CONDS[op]
             # A FRAME ADDRESS has no order, and the compare below would decide
@@ -7589,15 +8228,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                  or self._is_container_expr(e.left)
                                  or self._is_container_expr(e.right)):
             if op == "|":
-                # This backend has no union emitter, and it used to lower the
-                # operator as a plain CONCATENATION — answering `[1, 2] | [2, 3]`
-                # with `[1, 2, 2, 3]`, a list with a repeat, which sums to 8
-                # where CPython says 6. Measured on the pre-change tree, exit 0
-                # and the wrong number, so this was a wrong answer rather than a
-                # refusal. arm64 lowers it correctly FOR TWO SETS, which is what
-                # makes the refusal an answer rather than a shrug.
-                raise CodegenError(M.set_union_refusal(
-                    M.spelled(e.left), M.spelled(e.right)))
+                # `container_union_refusal` above has already refused every
+                # `|` shape except two SETS, so this IS a set union.  It used
+                # to be lowered as a plain CONCATENATION — answering
+                # `[1, 2] | [2, 3]` with `[1, 2, 2, 3]`, a list with a repeat,
+                # which sums to 8 where CPython says 6 — and then refused on
+                # this backend once the gate landed, because there was no
+                # union emitter here.  There is now: `_emit_set_union` is the
+                # same copy-then-dedup loop arm64 runs, so the operator is an
+                # answer on both machines.
+                self._emit_set_union(e.left, e.right)
+                return
             self._emit_list_concat(e.left, e.right)
             return
 
@@ -8077,11 +8718,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Python's integer division."""
         signed = cmp_signed(common_type(self._ttype(e.left),
                                         self._ttype(e.right)))
+        folded_right = M.fold_literal_expr(e.right)
         reason = M.division_overflow_refusal(
-            M.fold_literal_expr(e.left), M.fold_literal_expr(e.right),
+            M.fold_literal_expr(e.left), folded_right,
             op if op != "/" else "//", [e.left, e.right])
         if reason:
             raise CodegenError(reason)
+        # The divide-by-zero test, when it is emitted at all. A nonzero LITERAL
+        # divisor cannot be zero, so the test is dead code and so is the exit
+        # that follows it — which on this backend is an extern `exit` call, the
+        # same unfollowable-call shape arm64's `bl fflush` is.
+        # `model.division_needs_zero_guard` is the shared decision.
+        needs_guard = M.division_needs_zero_guard(folded_right)
         self._if_counter += 1
         cid = self._if_counter
         fn = self.func_name
@@ -8092,9 +8740,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_expr(e.right)
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
         self._pop_slot(Reg.RAX)
-        self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
-        self._record_cond_branch()
-        self._emit_jcc(COND_E, div0_label)
+        if needs_guard:
+            self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+            self._record_cond_branch()
+            self._emit_jcc(COND_E, div0_label)
         if signed:
             self.asm.emit(encode_cqo())
             self.asm.emit(encode_idiv_r64(Reg.R11))
@@ -8111,10 +8760,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_floor_quotient()
         self._emit_trunc(common_type(self._ttype(e.left),
                                      self._ttype(e.right)))
-        self._emit_jmp(ok_label)
-        self.asm.label(div0_label)
-        self._emit_call_exit(1)
-        self.asm.label(ok_label)
+        if needs_guard:
+            self._emit_jmp(ok_label)
+            self.asm.label(div0_label)
+            self._emit_call_exit(1)
+            self.asm.label(ok_label)
 
     def _emit_floor_correction(self) -> None:
         """`R8 = fdiv_correction(r, d)`, the 0-or-1 word `//` and `%` differ by.
@@ -9083,6 +9733,15 @@ preference.
             keys.append(self._tuple_target_key(el))
         if not keys:
             raise CodegenError("tuple assignment needs at least one target")
+        # The container family's refusal, asked before the RHS is emitted so a
+        # frame address cannot reach `_emit_for_unpack`'s arity check — which
+        # reads offset 0 of the operand and calls it a count, so on a frame it
+        # compares the target arity against a FIELD's value. Measured here and
+        # on arm64: `p = P(2, 99); a, b = p` printed `a=99 b=171778048` on
+        # x86-64 and `a=99 b=0` on arm64, and with `x = 1` the same program
+        # exited 1 printing nothing, where CPython prints `a=2 b=99` and
+        # `a=1 b=2`.
+        self._refuse_frame_unpack_operand(stmt.value)
         self._emit_expr(stmt.value)
         # The stride is the DICT question, asked at the one call site with a
         # container on the right. arm64's `_emit_tuple_assign` reads the same
@@ -9312,6 +9971,24 @@ preference.
             self._compr_depth = d0
         self._emit_blob_base(offset, Reg.RAX)
 
+
+
+    def _take_element_copy(self, node, region):
+        """`(src offset, nbytes, dst region base, dst stride)` for the append,
+        or None when this element needs no storage of its own.
+
+        The x86-64 twin of arm64's, for arm64's reasons: the record is what the
+        element's own emission reserved and the region is what the prediction
+        sized, so a blob one of them saw and the other did not is a refusal
+        rather than the aliasing bug the region exists to remove."""
+        made = self._materialised.pop(id(node), None)
+        if made is None:
+            return None
+        if region is None:
+            raise CodegenError(M.comprehension_element_not_sized(
+                M.spelled(node)))
+        return (made[0], made[1], region[0], region[1])
+
     def _emit_compr_gen(self, expr: F.Comprehension, gi: int, res_offset: int,
                         is_dict: bool, cap: int, d0: int) -> None:
         """Recursive generator walk: gen[gi] … gen[-1], then append.
@@ -9404,8 +10081,10 @@ preference.
             # `M.for_target_tree`.
             ttree = M.for_target_tree(gen.target) \
                 if isinstance(gen.target, str) else None
-            ttree = _strip_stars(ttree)
-            leaves = _for_tree_leaves(ttree) if ttree is not None else []
+            # The SHAPE's leaves, for the same reason the `for` site asks for
+            # them: a star leaf keeps its `*`, so a starred comprehension
+            # target is refused HERE with the same sentence arm64 gives it.
+            leaves = M.for_target_leaves(ttree) if ttree is not None else []
             if not leaves or any(not n.isidentifier() for n in leaves):
                 raise CodegenError(
                     f"comprehension target must be a plain name or tuple of "
@@ -9444,14 +10123,113 @@ preference.
         finally:
             self._loops.pop()
 
-    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
+    def _emit_compr_element(self, element, cap: int):
+        """RAX = the element's value, and `(base, span)` when it needs a COPY.
+
+        The x86-64 twin of arm64's `_emit_compr_element`, over the same two
+        shared decisions (`model.comprehension_element_borrowes_inner_container`
+        for the refusal and the frame ledger for the span) and the same
+        `container_returned_blob_sites` blocks, so one source decides what is
+        copied on both machines rather than two emitters each answering.
+
+        THE element site is reserved ONCE, at the element's own place in the
+        source, so a container the element BUILDS is rewritten in place on every
+        iteration of the generator — and the append copies the ADDRESS, which is
+        the same address every time. Every element of the result is then one
+        container holding the LAST iteration's contents:
+        `for v in [[x + y for x in [1, 2]] for y in [10, 20, 30]]` answered 93
+        where CPython answers 63, on both architectures, with exit 0 and nothing
+        on stderr.
+
+        **So the question is not "is the element a container" but "did the
+        element reserve anything here"**, and the frame ledger already answers
+        it: `_list_cursor` moves only when something was reserved, and a name, an
+        arithmetic expression and the generator's own target all reserve nothing.
+        That distinction is the language's, not a convenience: `[one for y in
+        ys]` is three references to ONE list in CPython too, so aliasing a name's
+        container is right and only a container the element BUILDS is the bug.
+        """
+        if M.comprehension_element_borrowes_inner_container(element):
+            raise CodegenError(M.comprehension_element_shared_inner_message(element))
+        before = self._list_cursor
+        self._emit_expr(element)
+        # A container the element BUILDS moved the blob cursor; one a CALL
+        # handed back did not, because `container_returned_blob_sites` parks
+        # those blocks above the blob region up front. Same per-site aliasing
+        # (`[mk(y) for y in ys]` answered 90 where CPython answers 60), so the
+        # span is the sum of the two and RAX is the block either way.
+        span = self._list_cursor - before
+        ret = self._ret_blob_sites.get(id(element))
+        if ret is not None:
+            span += ret[0]
+        if not span:
+            return None
+        return (self._reserve_blob(span * cap, "a comprehension's own copy of "
+                                   "its element"), span)
+
+    def _emit_compr_element_copy(self, base: int, nbytes: int) -> None:
+        """RAX = THIS iteration's own copy of the element blob, in slot R10.
+
+        The x86-64 twin of arm64's `_emit_compr_element_copy`. R10 is the result
+        blob's count — the index the append is about to write at — so the copy
+        lands in the slot the append fills, and the capacity guard that ran
+        before this has already answered an out-of-range iteration with
+        `exit(1)` rather than with a write one slot past the reservation.
+
+        The copy is over the element's whole RESERVED SPAN, not over its blob
+        alone: a nested comprehension also reserves its iterable and a display's
+        capacity scan can enlarge its own, so the element's blob is only ever a
+        PART of what `span` words. The count word at a blob's head is what every
+        reader goes by, so the words past the live elements are never read.
+
+        R10 (count), RDI (the destination address `_emit_elem_addr` already
+        built) and RSP are live across this, and R12-R15 are callee-saved and
+        hold locals, so the loop's own registers are R8/R9/RCX/RSI/RDX/RAX/R11.
+        """
+        nwords = nbytes // 8
+        self._emit_mov_imm(Reg.R9, nbytes)                # R9 = the span
+        self._emit_blob_base(base, Reg.R11)               # R11 = copies base
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.R11))
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R10))
+        self.asm.emit(encode_imul_r64_r64(Reg.R11, Reg.R9))   # R11 = count*span
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.RSI))   # R11 = this slot
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RAX))    # R8 = the element
+        self.asm.emit(encode_mov_r64_imm32(Reg.R9, 0))        # R9 = i = 0
+        self._emit_mov_imm(Reg.RCX, nwords)
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_cecp{wid}"
+        self.asm.label(loop)
+        self._emit_elem_addr(Reg.R11, Reg.R9, Reg.RSI, header=0, scale=3)
+        self._emit_elem_addr(Reg.R8, Reg.R9, Reg.RDX, header=0, scale=3)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.RCX))
+        self._emit_jcc(COND_B, loop)
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))   # RAX = the copy
+
+    def _compr_append_elem(self, res_offset: int, cap: int,
+                           copies=None) -> None:
         """Append RAX to the list result; exit(1) past the reserved capacity.
+
+        `copies` is `_emit_compr_element`'s `(base, span)` for an element that
+        reserved a container of its own; `None` for every other caller and for
+        every element that reserved nothing, which is what keeps `[one for y in
+        ys]` aliasing, as CPython does.
 
         Registers: R11 the result blob, R10 the count, RDI the element's
         address. RDI rather than R11 because `_emit_elem_addr` builds the
         destination FROM the index first, so the base register has to survive
         that first move — passing the same register for both computes
-        base+8*base."""
+        base+8*base.
+
+        `copy` is None for every element that is not a fresh blob, and then the
+        instructions below are byte for byte the ones this emitted before the
+        element region existed — which is the point: a comprehension of integers
+        produces exactly the code it always did.
+        """
         self._push_slot(Reg.RAX)                     # the element
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
@@ -9469,17 +10247,27 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI)
         self._pop_slot(Reg.RAX)
+        if copies is not None:
+            self._emit_compr_element_copy(*copies)
         self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
 
-    def _compr_append_pair(self, res_offset: int, cap: int) -> None:
+    def _compr_append_pair(self, res_offset: int, cap: int,
+                           key_copies=None, val_copies=None) -> None:
         """Append a (key, value) pair to a dict result.
 
         The caller leaves the KEY in a pushed slot and the VALUE in RAX, so
         the VALUE is pushed here to complete the pair; the pop order below
-        unwinds it in the opposite order."""
+        unwinds it in the opposite order.
+
+        `key_copies`/`val_copies` are `_emit_compr_element`'s `(base, span)` for
+        a key or a value that reserved a container of its own; a dict
+        comprehension's key and value are two independent element positions and
+        each gets its own region. Both copies are emitted after BOTH pops, so
+        each reads the word its own pop just put in RAX.
+        """
         self._push_slot(Reg.RAX)                     # VALUE above KEY
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # npairs
@@ -9497,9 +10285,19 @@ preference.
         self.asm.label(ok)
         self._emit_elem_addr(Reg.R11, Reg.R10, Reg.RDI, header=8, scale=4)
         self._pop_slot(Reg.R8)                       # VALUE
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
+        if val_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*val_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 8, Reg.R8))
         self._pop_slot(Reg.R8)                       # KEY
-        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
+        if key_copies is not None:
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+            self._emit_compr_element_copy(*key_copies)
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -9531,6 +10329,7 @@ preference.
             int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES,
             float_names=FLOAT_TYPE_NAMES,
+            bool_names=BOOL_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
@@ -9538,13 +10337,37 @@ preference.
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
+            callee_is_bool=lambda callee: self._callee_is_bool(
+                callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
                 fn, e, self._structs, self._functions),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
+
+    def _pointee_kind_for(self, fn):
+        """`pointee_kind` bound to `fn`, for `ValueKinds`.
+
+        arm64's hook over the same shared `model.pointee_kind_of`, so the two
+        machines cannot disagree about what `p.value()` over a `Pointer[Float64]`
+        yields — the kind is what makes `Int(p.value())` an `FCVTZS`/
+        `CVTTSD2SI` rather than a bit move, and a disagreement would be one
+        machine converting and the other moving.  The tables are BOUND for
+        `_declared_kind_for`'s reason: `_vkinds_cache` outlives the function
+        that was emitting when the hook was built.
+        """
+        structs = self._structs
+        fdefs = self._functions
+
+        def kind_of_deref(expr):
+            return M.pointee_kind_of(fn, expr, structs, fdefs,
+                                     int_names=TYPE_NAMES,
+                                     string_names=STRING_TYPE_NAMES,
+                                     float_names=FLOAT_TYPE_NAMES)
+        return kind_of_deref
 
     def _declared_is_dict_for(self, fn_name):
         """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.
@@ -9983,19 +10806,48 @@ ctor_field_value=self._ctor_field_value_for(name),
         arm64's `_callee_returns_value` over the same shared reader, and for the
         same reason the dict-ness hook above is duplicated in that shape and not
         in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.function_returns_a_
-        value` decides it — a `return` with a value at any depth of the body, a
-        declared return type, or a `yield` — and NO STACK, because walking one
-        body for its first value-returning `return` cannot recurse where
-        `_callee_kind`'s kind question does.
+        construct is printed here and refused there. `model.returnless_function_
+        names` decides it — the names whose calls produce no value, closed over
+        bare-name `return <call>` chains, so `def f(a): return g(a)` with `g`
+        return-less is not read as a value one hop out. Its least fixed point is
+        what keeps a cycle reading as a value rather than as an unwritten word.
 
-        True for a name that is not a function of this unit, which leaves every
-        caller with the answer it had: a linked module's export has no body here
-        to read, and a refusal asked about it would be a refusal about a
-        function this backend never saw.
+        **The answer is carried through `return f(…)`, and the recursion lives in
+        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
+        return-less `g` is a function whose result is `None` in CPython too, so
+        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
+        deeper, and the shape `v = g(); print(v)` already covers one binding up.
+        The resolver is built over `self._functions` (the emitter's own table)
+        and the cycle stop and the not-of-this-unit default are the shared
+        resolver's, so the two backends cannot answer this one differently.
         """
         fn = self._functions.get(name)
-        return True if fn is None else M.function_returns_a_value(fn)
+        if fn is None:
+            return True
+        if self._returnless is None:
+            self._returnless = M.returnless_function_names(
+                self._functions.values())
+        return name not in self._returnless
+
+    def _callee_returned_parameter(self, name):
+        """The positional index of a parameter `name` hands straight back.
+
+        `model.returned_parameter_position` is the whole reader — every exit is
+        a bare parameter name and they all name the same one — and this is the
+        cache, because it walks the callee's body and every call site asks the
+        same question about the same declaration. The answer is what lets
+        `ValueKinds` carry a FOREIGN-BYTES argument through
+        `def ident(s: String): return s`, which a declared `-> String` cannot
+        say and whose loss was a wrong number on both architectures.
+
+        `None` for a callee this image does not declare, which leaves the call
+        result classified exactly as it was.
+        """
+        if name not in self._returned_parameter:
+            fn = self._functions.get(name)
+            self._returned_parameter[name] = (
+                None if fn is None else M.returned_parameter_position(fn))
+        return self._returned_parameter[name]
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -10030,6 +10882,36 @@ ctor_field_value=self._ctor_field_value_for(name),
         if ann in TYPE_NAMES:
             return M.INT_KIND
         return vk.return_kind
+
+    def _callee_is_bool(self, name, stack):
+        """Whether a call to this unit's function `name` produces a BOOL.
+
+        `_callee_is_dict`'s twin on the bool axis, and it is the same method for
+        the same reason: a `Bool` result is `INT_KIND` here (a word holding 0 or
+        1), so the KIND cannot say it, and what is observable about it is that
+        CPython prints `True`/`False` where `is_number_kind` says `%lld` — so
+        `b = flag(); print(b)` printed `1` where CPython prints `True`, on both
+        architectures.
+
+        Only the DECLARED return type is read, where `_callee_is_dict` also
+        consults the RETURN STATEMENTS: `return_is_bool` would be a third
+        `return_*` axis on `ValueKinds` for a second spelling of the same fact,
+        and the declared type is what `_print_operand_is_bool` reads for the
+        same question at the same call site. A callee that returns `True`
+        without saying `-> Bool` claims nothing, which is the conservative
+        direction and leaves `print` with the number it printed.
+
+        The stack is `_callee_kind`'s, for the reason `_callee_is_dict`'s is: a
+        `def a(): return b()` / `def b(): return a()` cycle must stop rather
+        than recurse.
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.annotation_is_bool(getattr(fn, "return_type", None),
+                                BOOL_TYPE_NAMES):
+            return True
+        return None
 
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
         """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
@@ -10213,16 +11095,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             return True
         if isinstance(e, F.IdentExpr):
             return e.name in self._set_vars
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
-            # `+` is a concatenation and `|` a union, and both leave a SET a
-            # set — but only where one side is one, and a list-plus-set is a
-            # CPython `TypeError` whose refusal is
-            # `container_union_refusal`'s answer rather than this one's.
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "&", "^", "-"):
+            # `+` is a concatenation, `|` a union and `&`/`^`/`-` set algebra;
+            # all leave a SET a set where a side is one, and a set combined
+            # with a non-set is a CPython `TypeError` this path refuses
+            # downstream (so the predicate is only ever consulted on programs
+            # that build).  The three set-algebra operators are here because
+            # `c = a & b` must make `c` a set for `c - d` to be recognised —
+            # this backend then refuses that pair by name.
             return (self._expr_is_set_like(e.left)
                     or self._expr_is_set_like(e.right))
-        if isinstance(e, F.BinaryOp) and e.op in ("&", "-", "^"):
-            # Set algebra is defined for two sets and nothing else, so a result
-            # is a set exactly when BOTH sides are.
+        if isinstance(e, F.BinaryOp) and e.op in M.SET_ALGEBRA_OPS:
+            # `&`, `^` and `-` leave a SET only when BOTH sides are sets:
+            # `s & [1]` is a CPython `TypeError`, so it is left for the refusal
+            # the operator gate already owns rather than marked set-like here.
             return (self._expr_is_set_like(e.left)
                     and self._expr_is_set_like(e.right))
         return False
@@ -10581,6 +11467,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         # and a different rule: that one reads the FORMAT, this one reads the
         # DECLARATION. `model.call_argument_kind_refusal`, shared with arm64.
         self._refuse_word_position_kind_mismatch(name, e)
+        # …and a KERNEL-BYTES argument reaching a parameter the callee measures
+        # as TEXT. Beside the check above and for the same reason — this is the
+        # last point where the resolved callee and its arguments are both in
+        # hand — and a different rule: that one reads the DECLARATION, this one
+        # reads the callee's own BODY (`model.
+        # foreign_bytes_into_text_parameter_refusal`, shared with arm64).
+        self._refuse_foreign_bytes_into_text_parameter(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
@@ -10599,7 +11492,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # language failure this backend exists to prevent.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and not M.string_operand_is_string(
+                and not M.is_non_pointer_string(
                     self._expr_str_kind(e.func.obj)) \
                 and M.optional_payload_annotation(
                     self._optional_receiver_annotation(e.func.obj)) is None:
@@ -10616,6 +11509,19 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
             return
+        # …and a METHOD call on a MODULE GLOBAL is neither: the name is not a
+        # local, so `_is_value_receiver` answers False, and nothing on the link
+        # line provides `H.append`, so the extern path would emit a call against
+        # a dotted symbol and the build would die four stages later with the
+        # LINK AUDIT's sentence about a symbol. The model's shared reader owns
+        # the words so the two architectures cannot describe one call
+        # differently; arm64's copy carries the same measurement.
+        if isinstance(e.func, F.MemberExpr):
+            reason = M.module_global_method_refusal(
+                e.func.obj, e.func.member, self._fn_local_names,
+                getattr(self._cur_fn, "name", None))
+            if reason:
+                raise CodegenError(reason)
         # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
         # decision and its reasons are `model.dotted_struct_construction`, read
         # from the same three tables arm64 reads, and placed immediately after
@@ -10694,11 +11600,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `formal/monomorph.py::supplied_bracket_args`, so there is one answer
         # to "what does `f[a, b](x)` pass" rather than one per backend and one
         # per callee kind.
-        args = (monomorph.supplied_bracket_args(e) + list(e.args)
-                if through_value
-                else (list(e.args)
-                      if is_extern and self._callee_decl(name) is None
-                      else self._bind_call_args(name, e)))
+        dropped: list = []
+        if through_value:
+            args = monomorph.supplied_bracket_args(e) + list(e.args)
+        elif is_extern and self._callee_decl(name) is None:
+            # Unknown signature: kwargs have no slot on a raw call and are
+            # dropped, but their VALUES are still evaluated by CPython, so they
+            # are kept in `dropped` (the same rule `bind_call_arguments` applies
+            # to a variadic tail).
+            args = list(e.args)
+            dropped = [v for _k, v in (e.kwargs or [])]
+        else:
+            args, dropped = self._bind_call_args(name, e)
         if is_extern and self._callee_decl(name) is None:
             # …and the count is checked against what the MANIFEST publishes,
             # because "no declaration to read" must not mean "no contract to
@@ -10934,6 +11847,21 @@ ctor_field_value=self._ctor_field_value_for(name),
                                  + sret_site[1], Reg.RAX)
             _spill()
             reg_plan.append((len(args), "sret", len(reg_plan)))
+        # Arguments with NO register home — a variadic callee's positional tail
+        # and any keyword a `**kwargs` swallowed — are evaluated HERE, after
+        # every fixed argument (which is the source's own order) and before the
+        # registers are loaded, because CPython evaluates EVERY argument
+        # expression and their side effects are observable even though the
+        # callee cannot read the values. Dropping them silently built
+        # `def f(x, *rest): return x` called as `f(1, g())` into an image that
+        # never ran `g`. Every fixed argument is already spilled here, so a
+        # dropped expression that itself calls cannot disturb one. `*`/`**`
+        # markers are unwrapped exactly as the arm64 twin does.
+        for _d in dropped:
+            if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                self._emit_expr(_d.operand)
+            else:
+                self._emit_expr(_d)
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
         # caller-saved register, including the ones argument i belongs in.
@@ -11041,6 +11969,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             # narrow integer return is the same one AAPCS states — the low bits
             # are the answer and the rest is unspecified, so `0xFFFFFFFF` is -1
             # and not 4294967295 whatever the callee left in the top half.
+            #
+            # A name with NO prototype is refused rather than passed through, by
+            # the same shared sentence arm64 asks over the same six arguments,
+            # so the two backends cannot disagree about one call.
+            refusal = M.refuse_unprototyped_bare_c_call(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms)
+            if refusal:
+                raise CodegenError(refusal)
             self._emit_extern_return(M.bare_c_return_kind(
                 name, self._dylib_by_name, self._dylib_by_module,
                 self._dylib_forwarded, self._import_aliases, self._dylib_syms))
@@ -11184,8 +12121,14 @@ ctor_field_value=self._ctor_field_value_for(name),
                                     self._import_aliases, self._extern_decls,
                                     name)
 
-    def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
-        """`e`'s arguments in positional form, for a known callee.
+    def _bind_call_args(self, name: str, e: F.CallExpr) -> tuple:
+        """`(slots, dropped)` for `e`, for a known callee.
+
+        `slots` is `e`'s arguments in positional form; `dropped` is the ones
+        with no register home — a variadic callee's positional tail, and any
+        keyword a `**kwargs` swallowed — which the caller MUST still evaluate
+        for their side effects (`M.bind_call_arguments`'s own docstring states
+        why).
 
         A THIN CALL into `M.bind_call_arguments` — the same one arm64 calls,
         and the reason the two backends cannot disagree about which argument
@@ -11210,11 +12153,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 raise CodegenError(
                     f"keyword arguments are not supported "
                     f"({[k for k, _ in e.kwargs]})")
-            return list(e.args or [])
-        slots, err = M.bind_call_arguments(name, fdef, e.args, e.kwargs)
+            return list(e.args or []), []
+        slots, dropped, err = M.bind_call_arguments(
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
-        return slots
+        return slots, dropped
 
     # ── types and immediates ─────────────────────────────────────────
 
@@ -11354,7 +12298,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # too, `strlen` walking the bytes at address 10.
             if name in M.STRING_TYPE_CTORS:
                 refusal = M.string_conversion_refusal(
-                    name, operands[0], self._expr_str_kind(operands[0]))
+                    name, operands[0], self._expr_str_kind(operands[0]),
+                    pointer_intent=M.string_conversion_pointer_intent(e.kwargs))
                 if refusal:
                     raise CodegenError(refusal)
             return
@@ -11429,7 +12374,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # fresh zero word — wrong on this machine and on arm64, identically,
         # which is what kept it invisible.
         value, refusal = M.one_word_construction(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
@@ -11527,7 +12473,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         instruction: arm64 emits `LDR`/`STR Xt, [Xn, #8k]` for the same layout
         and this emits `mov` to and from `[RBP + 8k]`."""
         plan, refusal = M.struct_construction_plan(
-            st, e, self._structs, self._frame_candidates, self._return_types)
+            st, e, self._structs, self._frame_candidates, self._return_types,
+            self._spread_mappings)
         if refusal is not None:
             raise CodegenError(refusal)
         shape = plan[0]

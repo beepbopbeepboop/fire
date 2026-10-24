@@ -1,5 +1,59 @@
 # FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image: 20 of 78 functions, the largest cause in the proof-breadth census
 
+**Status 2026-10-08 (`work/formal184-docs`): the ONE-CALL-SITE case is now
+MASKED by a different, newer regression, and that is measured rather than
+argued — so do not read the paragraph below as "this works today".**  The
+stack-floor guard's `getrlimit` is an out-of-image `BL` in EVERY prologue since
+`bfeec991` (2026-10-05), and the arm64 walk halts at the first such call, so the
+callee of the doc's own working example is no longer a straight-line leaf.  The
+doc's `helper(n) = n * 2`, `main(x) = helper(x)` now refuses with
+
+    universal theorem: a call into the same image cannot be followed by this
+    walk, and the callee is not a straight-line leaf, because it calls OUT of
+    the image at 0x100000524
+
+(the `getrlimit` in `helper`'s prologue — `info['extern_calls']` for the image
+is `[getrlimit @ 0x10000041c, getrlimit @ 0x100000524]`, one per function), and
+the whole 93-file example corpus emits a reachability theorem and **0** value
+theorems.  That is the getrlimit subject of
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` on the merged tree (the branch's branch named
+the same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
+every_function.md`, owned by `formal163-docs`, whose branch `dfb40ce7` reads
+`RLIMIT_STACK` in the startup stub instead), and the doc's one-call case should
+return when it merges.
+**The two-call-site step below is therefore not measurable on this tree** until
+that fix lands; the doc is left here rather than edited because the missing
+mechanism is unchanged and the fix is a dependency, not this doc's.
+
+**RE-MEASURED 2026-10-12 (`work/formal290-docs`): the one-call-site proof below
+does not currently TYPECHECK, and it is a different document's fix that stands in
+front of it.** `test_formal_call_proof_gen.py::TestSameImageCallLean::
+test_the_followed_call_proves_with_no_admission` is RED on this tree (measured:
+`python3 tools/memslot.py --gb 8 --label t -- python3
+test_formal_call_proof_gen.py`, 9 failures, 105 s) with
+
+    same_image_leaf_proof.lean:3890:56: error: maximum recursion depth has been reached
+
+which is the class `mod_by_var` was measured in and attributed to the
+`arm64_ext_imm12` merge — closed for its own half by `f7bd05ea`, which
+discharges the block-start `runs_cons_seq` side condition with
+`first | (simp only [qT0, qS0] <;> done) | rfl` rather than a bare `rfl`. The
+generator still follows the call (it generates a proof, and the doc's §Status
+"what landed" is unchanged); what is not true on today's tree is the word
+"proved". So **step 1 (two call sites) and step 3 (recursion) below cannot be
+shown green until that fix lands**, and this note exists so the next worker does
+not read "rc=0, 5051 lines, 0 sorries" as the current state.
+
+**merged 2026-10-13 (merging `work/formal184-docs`): re-measured on the merged
+tree, the dependency has landed — `70b76755` (in HEAD) reads `RLIMIT_STACK`
+in the startup stub, so the `getrlimit` is no longer a prologue `BL`. The
+one-call-site case is back: `TestCallProofs::test_one_call_into_the_same_image_
+is_followed` is green here (the proof follows the same-image call), and the
+recursion family emits value theorems again (re-measured generation-only:
+`count`, `fact`, `pow2`, `sqsum`, `sum` all emit
+`f_compiles_correctly_universal`). The branch lands no code on the merged tree.
+
 **Status 2026-10-05 (`work/formal40-4-r2`): the ONE-CALL-SITE case is FIXED and
 proved, and the reduce is the whole limit — but the CENSUS was not re-run, so
 "20 of 78" is still the last measurement of how much this is worth.** Steps 1

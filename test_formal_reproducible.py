@@ -368,6 +368,48 @@ def _diff_runs(a: bytes, b: bytes) -> str:
     return f"{runs} differing runs, first at {first}"
 
 
+def _differing_runs(a: bytes, b: bytes) -> list:
+    """`[(start, end)]` for each maximal run of differing bytes, half-open."""
+    runs = []
+    i = 0
+    while i < min(len(a), len(b)):
+        if a[i] != b[i]:
+            j = i
+            while j < min(len(a), len(b)) and a[j] != b[j]:
+                j += 1
+            runs.append((i, j))
+            i = j
+        else:
+            i += 1
+    return runs
+
+
+def _path_and_digest_ranges(data: bytes) -> list:
+    """`[(start, end)]` a two-CAS-root build may legitimately change.
+
+    The load commands whose payload names a PATH (`LC_LOAD_DYLIB`,
+    `LC_ID_DYLIB`, `LC_RPATH`), the content digest `LC_UUID`, and the
+    `LC_CODE_SIGNATURE` blob — which signs everything, the path included. Every
+    other byte is a function of the source alone. `LC_SEGMENT*` payloads are NOT
+    included: a segment that moved because a path moved would be a real defect,
+    and it is the point of the case to catch one.
+    """
+    import struct
+    names = {0x0C: "LC_LOAD_DYLIB", 0x0D: "LC_ID_DYLIB", 0x1B: "LC_UUID",
+             0x1C: "LC_RPATH", 0x1D: "LC_CODE_SIGNATURE"}
+    ncmds, _ = struct.unpack_from("<II", data, 16)
+    out, o = [], 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, o)
+        if names.get(cmd) == "LC_CODE_SIGNATURE":
+            dataoff, datasize = struct.unpack_from("<II", data, o + 8)
+            out.append((dataoff, dataoff + datasize))
+        elif cmd in names:
+            out.append((o, o + cmdsize))
+        o += cmdsize
+    return out
+
+
 def test_two_names_in_one_process(tmp):
     """Case 3: the axis that WAS broken, in one process, two names."""
     import formal.build as FB
@@ -447,6 +489,64 @@ def test_a_program_that_imports_a_module(tmp):
         ok &= check(f"{arch}: its module dylib is reproducible",
                     libs[0] == libs[1],
                     f"{[f for f, _ in libs[0]]} vs {[f for f, _ in libs[1]]}")
+    return ok
+
+
+def test_two_cas_roots_differ_only_by_the_library_path(tmp):
+    """Case 9: two `GMOJO_HOME` roots — what moves is the PATH, and its digests.
+
+    `FORMAL_a_linked_library_path_is_in_the_image.md`: an image records the
+    library's real location in its `LC_LOAD_DYLIB`, so two CAS roots cannot
+    produce ONE image — that is the load contract and not an emitter defect.
+
+    The doc's own sentence for what moves ("Every differing byte is inside one
+    `LC_LOAD_DYLIB` name") is **stale on this tree**, and this case is where
+    that is measured rather than asserted: `LC_UUID` is a content digest (case 6)
+    and the ad-hoc signature signs the content, so both move with the path. What
+    is asserted here is the property that survives all three causes: every byte
+    that differs lies in a load command that NAMES A PATH or in a digest that is
+    a function of the image (the UUID and the signature). Nothing the PROGRAM
+    wrote moves, and the library's own content-addressed name does not either —
+    so the doc's conclusion (the library must live beside the executable for one
+    image to be a function of the source alone) is unchanged; only its byte
+    count is corrected.
+    """
+    ok = True
+    for arch in ("arm64", "x86_64"):
+        images, libnames = [], []
+        for side in (0, 1):
+            root = os.path.join(tmp, f"twocas-{arch}-{side}")
+            cas_home = os.path.join(tmp, f"twocas-cas-{arch}-{side}")
+            tmpdir = os.path.join(tmp, f"twocas-tmp-{arch}-{side}")
+            for d in (root, cas_home, tmpdir):
+                os.makedirs(d, exist_ok=True)
+            write(os.path.join(root, "libmod.mojo"), LIB_MODULE)
+            data, err = build_executable(
+                root, "prog", arch, cas_home, tmpdir, root, odd=bool(side),
+                source=LIB_PROGRAM)
+            if data is None:
+                ok = check(f"{arch}: the two two-CAS builds succeeded", False,
+                           err)
+                break
+            images.append(data)
+            libs_dir = os.path.join(cas_home, "cas", "formal-imports", arch)
+            libnames.append(sorted(f for f in os.listdir(libs_dir)
+                                   if f.endswith(".dylib")))
+        else:
+            ok &= check(f"{arch}: two CAS roots give one library NAME set",
+                        libnames[0] == libnames[1] and libnames[0],
+                        f"{libnames}")
+            ok &= check(f"{arch}: the two images are the same length",
+                        len(images[0]) == len(images[1]),
+                        f"{len(images[0])}/{len(images[1])}")
+            runs = _differing_runs(images[0], images[1])
+            allowed = _path_and_digest_ranges(images[0])
+            outside = [(s, e) for s, e in runs
+                       if not any(s >= a and e <= b for a, b in allowed)]
+            ok &= check(f"{arch}: every differing byte is a path or a digest "
+                        f"of the image", not outside,
+                        f"{len(runs)} run(s); outside a load command: "
+                        f"{outside[:4]}; allowed ranges {allowed}")
     return ok
 
 
@@ -593,6 +693,8 @@ def main():
          test_two_names_in_one_process),
         ("a program that imports a module",
          test_a_program_that_imports_a_module),
+        ("two CAS roots differ only by the library path",
+         test_two_cas_roots_differ_only_by_the_library_path),
         ("the dylib driver", test_the_dylib_driver),
         ("the LC_UUID is the content", test_the_uuid_is_the_content),
         ("the image still runs", test_the_image_still_runs),

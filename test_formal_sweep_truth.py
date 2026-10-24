@@ -37,6 +37,7 @@ import re
 import sys
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -737,16 +738,28 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 # point, and a genuinely new dead-import row now fails it instead of waiting for
 # somebody to remember to widen a tuple.
 #
-# `abc` is the one name that is in the derived set and is NOT expected to have a
-# reader, so it is named with its reason rather than left to look like a bug in
-# the derivation: `fire_compiler.py:62`'s `from abc import abstractmethod` is
-# read by nothing, because line 8401 emits the TEXT `@abstractmethod` into
-# GENERATED source. That dead import is the tree's only one and is deliberately
-# not fixed here — the file is the AST source of truth and deleting the line
-# belongs to whoever owns it, which `test_formal_host_import_shapes.py::
-# test_the_whole_tree_has_one_dead_host_import_and_it_is_named` already records
-# with the same reason.
-_ROWS_WITH_A_NAMED_DEAD_IMPORT = ("abc",)
+# **The exemption is EMPTY, and the mechanism stays so a future one is NAMED.**
+#
+# `abc` USED to be the one name in the derived set with no reader: the dead
+# `from abc import abstractmethod` in `fire_compiler.py`, which emitted the
+# TEXT `@abstractmethod` into GENERATED source (`fire_compiler.py:62`, read by
+# line 8401) and never used the name. So `abc` was a derived row whose only
+# files were dead imports, and it had to be exempted by name — which is what this
+# tuple is for.
+#
+# That import is GONE — deleted on 2026-10-08 with the tree's other dead host
+# imports (`73e03459`, "delete the tree's dead host imports"; the ratchet handed
+# off at `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
+# so `abc` is not in the derived census at all any more and the exemption became
+# a claim about a row that is no longer there, which is exactly what
+# `test_a_named_dead_import_is_still_named` catches; that anti-rot row is what
+# emptied this tuple rather than a person noticing. The tree now has no dead host
+# import at all, which `test_formal_host_import_shapes.py::
+# test_the_whole_tree_has_no_dead_host_import` asserts from the other side.
+#
+# The tuple is KEPT, empty, so a future dead import still has to be named with its
+# reason rather than silently excused.
+_ROWS_WITH_A_NAMED_DEAD_IMPORT = ()
 
 _SKIP_DIRS = {".git", "build", "bugs", "cas", ".tmp", "stage1", "stage2",
               "stage3", "formal_sweep_cache", "__pycache__"}
@@ -3327,6 +3340,49 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertIn("x86_set_reg_narrow", applied)
         self.assertIn("x86_set_flag4", applied)
 
+    def test_every_wrapper_projection_the_read_names_is_a_library_theorem(self):
+        """A name in the closing read's `simp only` set must be a theorem.
+
+        `x86_shift_post` is a wrapper whose `if k = 0` cannot reduce while the
+        count is symbolic, so `.rip`, `.rsp` and `.rbp` projections out of it
+        stop unless the library states them.  `_WRAPPER_PROJECTIONS` is that set
+        and `_unfold` puts it in every closing read; a name there that is not a
+        theorem is an elaboration error in every generated file with a shift on
+        its path, which is the same failure `_MEM_LEMMAS`' own check exists for.
+
+        The rsp/rbp side conditions are asserted too, and they are the
+        load-bearing half: `shl rsp, 1` is a legal encoding, so the
+        unconditional statement is FALSE.  A rename or a dropped hypothesis
+        would leave a fact that looks present and is not provable.
+        """
+        import formal.x86_64_endtoend_test as E
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "lib", "X86.lean")) as f:
+            src = f.read()
+        for name in E._WRAPPER_PROJECTIONS:
+            self.assertIn("theorem %s " % name, src,
+                          "%s is in the closing read's simp set and is not a "
+                          "theorem in lib/X86.lean" % name)
+        for name, excluded in (("x86_shift_post_rsp", "4"),
+                               ("x86_shift_post_rbp", "5")):
+            i = src.find("theorem %s " % name)
+            self.assertGreaterEqual(i, 0, name)
+            statement = src[i:src.find(":=", i)]
+            self.assertIn("(h : i ≠ %s)" % excluded, statement,
+                          "%s must exclude register %s: that register is a "
+                          "legal destination for a shift, and without the "
+                          "hypothesis the fact is false" % (name, excluded))
+
+    def test_the_closing_read_names_every_wrapper_projection(self):
+        """`_unfold` is what the closing read actually runs, not the table."""
+        import formal.x86_64_endtoend_test as E
+        got = E._unfold(("hs1", "hs2"))
+        for name in E._WRAPPER_PROJECTIONS:
+            self.assertIn(name, got,
+                          "%s is in `_WRAPPER_PROJECTIONS` but not in the "
+                          "`simp only` set `_unfold` builds, so the fact the "
+                          "table names is never available to the read" % name)
+
     def test_every_rex_byte_a_path_uses_has_a_named_decoding(self):
         """`simp only` does not use the default simp set, so the sixteen `[simp]`
         REX decodings in `lib/X86.lean` have to be NAMED — and a REX byte the
@@ -4584,10 +4640,10 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
         emit():  emitted 0, refused 49, plan-failed 1
         every one of the 49 names `call_rel32`
 
-    `bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_image.md`
-    says the same thing from the other side ("before the guard it covered 7 of
-    43") and asks for the guard's branches to be DECIDED rather than walked.
-    What was missing is anything that notices when that happens: `emit()` refusing
+    The other side of the same fact is that before the guard existed the value
+    theorem covered 7 of 43 examples; the guard's own branches must be DECIDED
+    rather than walked before it will again. What was missing is anything that
+    notices when that happens: `emit()` refusing
     every example reads exactly like a corpus of programs no straight-line
     theorem is possible for, which is a different claim and a wrong one.
 
@@ -4648,6 +4704,14 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: are unchanged and still assert what they asserted) and what moved is how
     #: many programs the total is taken over.
     #:
+    #: **Re-pinned 2026-10-05 from 105/4 232 to 107/4 312, and this one is
+    #: COVERAGE rather than growth.** `group3:not` and `group3:neg` gained a step
+    #: lemma and a successor row, so `negate_arg`, `unary_ops` and `neg` build a
+    #: path tree where they built none — the count of trees RISES, and the steps
+    #: rise with them.  The opposite direction is checked by the three
+    #: per-example rows above and by `TOTAL_PRE_MERGE52`, and both are unmoved:
+    #: a guard whose branches came back would move those, not this.
+    #:
     #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
     #: examples on THIS tree rather than remembered: the TOTAL above moves
     #: whenever an example is added, and this one is what says whether the
@@ -4656,8 +4720,13 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
     #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
     #: so the corpus walks four more steps. The trees are unchanged at 105.
-    TOTAL = (105, 3697)
-    TOTAL_PRE_MERGE52 = (69, 2368)
+    #: **Re-pinned from 105 / 3 697 to 107 / 3 767 by the bulk merge of the
+    #: formal-worker branches** (two more leaves and seventy more steps, measured
+    #: on the merged tree; the 67 trees are the same ones).
+    TOTAL = (107, 3767)
+    #: Re-pinned from (69, 2368) by the bulk merge of the formal-worker
+    #: branches: one more leaf and fifteen more steps on the same 52 examples.
+    TOTAL_PRE_MERGE52 = (70, 2383)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

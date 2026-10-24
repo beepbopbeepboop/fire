@@ -382,6 +382,13 @@ EXCL_PRIVATE = "private"
 EXCL_GENERIC = "generic-template"
 EXCL_OVERLOADED = "overloaded"
 EXCL_CLIB = "c-library-symbol"
+#: The FIFTH answer, and not an exclusion at all: the module declares no name
+#: under this spelling, so none of the four rules above applied to it and a
+#: refusal that listed them would be false about the file. `export_exclusions`
+#: never returns this — a name absent from its result is exported, not absent —
+#: so it is stated here, beside the four rules it is told apart from, for the
+#: reader (`formal/build.py::export_rule_for`) that has to choose between them.
+EXCL_ABSENT = "declares-no-such-name"
 
 
 def _excluded_name_sets(src: str, parsed) -> tuple:

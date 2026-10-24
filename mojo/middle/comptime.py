@@ -200,6 +200,26 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, StringLiteral): return node.value
+    # PART 6 (2026-10-23, family S): the string-wrapping CONSTRUCTOR over a
+    # single foldable argument — `StringSlice("x")`, `StaticString("x")`,
+    # `String("x")`, `StringSpan("x")`. In every backend of this tree the
+    # wrapped value IS the string itself (the gimple path's char* model, the
+    # arm64 path's text value), so the constructor is transparent to
+    # folding. Measured need: test/collections/string/test_iterators's
+    # module-level `comptime EVERY_CODEPOINT_LENGTH_STR =
+    # StringSlice("...")` — without this the constructor folded to None,
+    # the module-level ComptimeVarStmt dropped the name, and every read
+    # inside a function emitted the `(int64_t)0  /* ct param or undeclared
+    # */` placeholder (probe f_global: `var s = E; s.byte_length()` read the
+    # zero stub on the word receiver). Before this, such a guard in a
+    # comptime `if` was UNRESOLVABLE (the documented first-branch-wins
+    # fallback); folding it answers the measured value — strictly more
+    # precise, the same direction as this file's own sys.platform fold.
+    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+            and len(node.args) == 1 and not node.kwargs
+            and node.func.name in ('String', 'StringSlice', 'StaticString',
+                                   'StringSpan')):
+        return eval_const(node.args[0], bindings, platform)
     if isinstance(node, IdentExpr):
         return bindings.get(node.name)
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
@@ -251,8 +271,33 @@ def eval_const(node, bindings: dict, platform: str = None):
     # `if sys.platform == 'X': def f(): ...` conditional-toplevel-def idiom is
     # really being resolved for).
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and node.obj.name == 'sys' and node.member == 'platform'):
-        return platform
+            and node.obj.name == 'sys'):
+        if node.member == 'platform':
+            return platform
+        if node.member == 'byteorder':
+            # `sys.byteorder` is a host constant in exactly the sense the
+            # `sys.platform` fold above is one: CPython's value is fixed for
+            # the machine the binary runs on, and this path resolves with no
+            # target attached, so the plain-`import sys` fallback is the same
+            # (the unaliased import must stay unaliased — see this
+            # function's docstring). Measured need (row 10, ctypes/_endian):
+            # its `if sys.byteorder == "little":` / `elif "big":`
+            # conditional-toplevel shape unfolded to BOTH branches, and the
+            # dead branch's plain `BigEndianStructure = Structure` assignment
+            # references a module global the live branch's `class
+            # BigEndianStructure` never registers as a lookable member —
+            # `struct _ctypes__endian_toplev has no member named
+            # 'BigEndianStructure'; did you mean 'Little...'` at _endian.py
+            # :63:27 and :70:27. Folding picks the host's branch exactly as
+            # the runtime would, and removes the other one. The
+            # AttributeError guard keeps the self-host route byte-identical
+            # to the pre-fold behavior: there the unaliased `import sys`
+            # binds the compiled stdlib's sys, which exposes no byteorder,
+            # so the fold declines and both branches emit, as before.
+            try:
+                return sys.byteorder
+            except AttributeError:
+                return None
     return None
 
 

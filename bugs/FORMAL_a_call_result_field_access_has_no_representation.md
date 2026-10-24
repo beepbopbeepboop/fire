@@ -5,12 +5,67 @@ through a value whose binding the image cannot see, `formal/build.py`'s export
 rule, and `formal/imports.py`'s host-module tiers as the queue's input).
 **Status: the ranking is DONE and it says the task's "next 4-6 modules by files
 blocked" does not exist; three rows are CLOSED (17 sweep files); the capability
-this file is about is NOT built and §5 says what building it takes.**
+this file is about is NOT built and §5 says what building it takes. The dead
+host-import ratchet §3 hands off is now CLEAN (2026-10-08) — every dead host
+import the tree had is deleted, and the importlib.util row it exposed is named
+in full.**
+
+**Update 2026-10-08 (`work/formal224-docs`): the LOCAL half of §5 item 1 now
+lowers.** A local bound from a call whose declared `-> T` names a one-field
+struct of THIS IMAGE reads its sole field, where before only a construction
+did — `r = make(41); r.n` was refused ("'r.n' is a field access through 'r'")
+while `r = make(41); r.get()` lowered, because the method lift reads the
+declared return type and the field read had no reader for it.  The reader is
+`formal/build.py::_one_word_return_structs`, asked by `_one_word_field_map` and
+`_one_word_constructor_bindings`; a call-result one-field struct whose sole
+field is itself a FRAME stays excluded, because its block was reserved in the
+CALLEE's frame and the escape analysis does not track a one-word struct.
+Pinned by `test_formal_value_model.py`'s
+`a_call_result_bound_to_a_local_reads_its_sole_field`.
+
+**It does NOT touch the rows §5 is about, and cannot.** Those are HOST-MODULE
+returns whose model hands back one word (`os.stat`, `resource.getrusage`,
+`pwd.getpwnam`): the struct is not in the importing image at all, so there is no
+`-> T` for this reader to find, and §5's accessor-re-spelling direction stands
+unchanged for them.
 
 Written on `work/formal36-hostmods-wave5`, 2026-10-05, asked to rank the
 remaining host-import files from `bugs/sweeps/sweep-arm-13.txt` and model the
 next 4-6 of them. The ranking is the deliverable and it is negative; §4 is the
 arithmetic and §5 is the next step.
+
+## What landed 2026-10-08: the `--dead` ratchet caught two more, and the row's third name
+
+The `--dead` walk (§3's second half) is the set the sweep's ranking CANNOT see,
+and `test_formal_host_import_shapes.py`'s
+`test_the_whole_tree_has_one_dead_host_import_and_it_is_named` is its ratchet. It
+was **RED with three entries, not one**:
+
+* **`tools/formal_doc_index.py`'s `import subprocess`** — dead since the tool was
+  rewritten to generate `OPEN_WORK.md`'s formal section (`57aa166d`); nothing in
+  the file reads it. Deleted.
+* **`tools/formal_metamorph.py`'s `import subprocess`** — it carried a
+  `# noqa: F401 — re-exported for callers that shim this module`, and **the
+  comment names no caller**: `test_formal_metamorph.py` (the module's only
+  importer) imports its own `subprocess`, and no file in the tree reads
+  `formal_metamorph.subprocess`. Deleted.
+* **`fire_compiler.py`'s `from abc import abstractmethod`** — **left, on purpose,
+  exactly as §3 says**: it is the AST source of truth, line 8401 emits
+  `@abstractmethod` into GENERATED source, and deleting it belongs to whoever
+  owns that file.
+
+The test's other half is the `importlib.util` row, and it now pins a **third
+name**: `importlib.util.find_spec` joined the row when `test_formal_imports.py`
+grew a precondition that asks CPython itself which names have a spec on this host
+(`f4aca5cd`). All three — `spec_from_file_location`, `module_from_spec`,
+`find_spec` — are `FIELD` reads of a name `importlib.util` publishes and none is
+`DEAD`, so the row is unchanged in meaning: an embedded CPython, tiered
+`unreachable`.
+
+**Worth, in this document's units: two files off the wall for nothing.** Both are
+`tools/` files, so neither was in the sweep's 220 host-import lines and the
+ranked table does not move — which is exactly why the `--dead` column exists
+(§3). `test_formal_host_import_shapes.py` is **26 tests, OK** (was 2 failures).
 
 ## 0. What is here, in one table
 
@@ -31,7 +86,7 @@ the shapes are defined in the tool's docstring and pinned by
 | `copy` | modelled | 13 | 4 | `WORD` | `copy.copy`, `copy.deepcopy` |
 | `random` | unclassified, model written | 8 | 8 | `WORD` | `Random`, `randrange`, `seed` |
 | `types` | modelled | 6 | 5 | `BARE` `MODULE` `WORD` | `ModuleType`, `SimpleNamespace` |
-| `importlib.util` | unreachable | 5 | 5 | `FIELD` `WORD` | `spec_from_file_location`, `module_from_spec` — load a module BY PATH |
+| `importlib.util` | unreachable | 6 | 6 | `FIELD` `WORD` | `find_spec`, `spec_from_file_location`, `module_from_spec` — find/load a module BY PATH |
 | `inspect` | modelled | 5 | 5 | `FIELD` `WORD` | `getsource`, `getsourcelines`, `signature` |
 | `builtins` | unreachable | 3 | 3 | `MODULE` | `dir(builtins)` — the module AS A VALUE |
 | `datetime` | modelled | 2 | **0** | — | **CLOSED** |
@@ -136,13 +191,43 @@ answered:
 `jit/arm64.py` (`ctypes`) — none of which the ranking could see, because all four
 import a module that HAS a `formal/hostmods/` model and so is not on the wall at
 all. `tools/formal_host_import_shapes.py --dead` is the mode that walks the
-tree instead of the sweep's 220 files, and `test_formal_host_import_shapes.py`
-ratchets its output to **exactly one file**: `fire_compiler.py`'s dead
-`from abc import abstractmethod`. That one is deliberately not fixed here —
-`fire_compiler.py` is the AST source of truth and every formal change's blast
-radius passes through it, and its line 8401 emits `@abstractmethod` into GENERATED
-source, so a reader of that import would reasonably conclude the node classes are
-declared abstract. **The next step for it is one line in the file that owns it.**
+tree instead of the sweep's 220 files. **The ratchet this paragraph handed off is
+now clean (2026-10-08): the tree has NO dead host import, and `--dead` returns
+`{}`.** The one it named — `fire_compiler.py`'s dead
+`from abc import abstractmethod` — is deleted: the name `abstractmethod` was
+never used (the `@abstractmethod` its generated-source line 8401 emits is a
+STRING, not the import), so the import only made a reader conclude the AST node
+classes are declared abstract. Deleting it exposed two more the stale ratchet
+(`expected == {fire_compiler.py: …}`) had been hiding, both dead
+`import subprocess`: `tools/formal_doc_index.py` and
+`tools/formal_metamorph.py` (whose `# noqa: F401 — re-exported for callers that
+shim this module` named no caller; `test_formal_metamorph.py` imports its own
+`subprocess`). Both are deleted, and
+`test_formal_host_import_shapes.py::test_the_whole_tree_has_no_dead_host_import`
+now asserts `{}` so the state can only shrink.
+
+The same file's `importlib.util` row is also corrected: the corpus now spells a
+THIRD name out of the module — `importlib.util.find_spec(name)` in
+`test_formal_imports.py` and `test_formal_link_accounting.py` — beside
+`spec_from_file_location` and `module_from_spec`, so the row is pinned to the
+three names that ask an embedded CPython to place a module, not to "two".
+
+**2026-10-13: two more dead `subprocess` imports had appeared and the ratchet was
+RED, not one file.** `tools/formal_doc_index.py` imported `subprocess` and read
+nothing through it — an unused survivor of the tool's authoring — and
+`tools/formal_metamorph.py` carried `import subprocess  # noqa: F401 — re-exported
+for callers that shim this module`, whose comment is measured FALSE: the shim it
+describes lives in `test_module_cache.py` and patches `monomorphize`'s
+`subprocess` (`import monomorphize as mm; mm.subprocess = …`), and nothing in the
+tree reads `formal_metamorph.subprocess`. Both imports are deleted, so
+`--dead`'s ratchet is back to the single `fire_compiler.py` file above and
+`test_the_whole_tree_has_one_dead_host_import_and_it_is_named` is green. The same
+walk also found a **third `importlib.util` name**: `test_formal_imports.py`
+spells `find_spec` (added 2026-10-07 by the commit that claimed the five stdlib
+names it decides), which §0's row and
+`test_a_row_that_wants_the_MODULE_reads_as_such` now record alongside
+`spec_from_file_location`/`module_from_spec` — it is the same search the row is
+about, one step before the load.
 
 The `collections` half is the same shape of finding as the `copy` half and was
 found by the same instrument: **`DEAD` is a column, not an absence.** Neither
@@ -222,9 +307,11 @@ Twenty-two rows. Against them:
 
 **Nothing is left in the "write a `.mojo` module" column.** The task's "next
 4-6 modules by files blocked" does not exist as stated, and this is the second
-wave to measure that
-(`bugs/FORMAL_the_host_import_rows_after_glob_ranked_by_what_they_actually_spell.md`
-§2 said it and had no column to say it with; §0 is the column).
+wave to measure that (the first measured it too and had no column to say it
+with; §0 is the column). The first wave's ranking document is deleted now that
+its whole queue has closed — `glob`, `shlex.quote` and `random` all landed — and
+its conclusion is folded into
+`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`'s Status.
 
 ### 4.1 Nine of those files want CPython ON PURPOSE, and that is a third answer
 
@@ -292,3 +379,39 @@ lowers and the read does not" looks like from the outside.
 permanent facts about the target — most of them are not, and §4 says which are.
 It claims they are not reachable by writing a `formal/hostmods/` module, which
 is a much narrower claim and the one that decides what to work on next.
+
+## 6. 2026-10-13: the `--dead` ratchet and the `importlib.util` row were RED, and both are restored
+
+`test_formal_host_import_shapes.py` was **red on master**, on the two cases that
+read the tree as it is now rather than a snapshot of a number — so §3's claim
+that the `--dead` walk "ratches its output to exactly one file" was, for a
+while, false, and the row it pins had grown a name. Both are instrument facts
+rather than corpus questions, and each had a measured cause:
+
+* **`--dead` had grown from one file to three.** Two `.py` files imported a
+  host module and read nothing through it:
+  `tools/formal_doc_index.py`'s `import subprocess` (added with the doc index
+  itself and used by nothing in it) and `tools/formal_metamorph.py`'s
+  `import subprocess  # noqa: F401 — re-exported for callers that shim this
+  module`, whose comment was false: nothing in the tree shims that attribute
+  (`grep` for `metamorph.subprocess`, `M.subprocess` and every `.subprocess =`
+  in the tree finds only `test_module_cache.py`'s `mm`, which is
+  `monomorphize`, and `test_formal_sweep.py`'s own class attribute). Both
+  imports are deleted, which is the repair the ratchet's own message
+  ("Delete the import, or say here why it stays") names, and the walk is back
+  to the one justified file — `fire_compiler.py`'s dead
+  `from abc import abstractmethod`, which stays for the reason §3 gives.
+* **the `importlib.util` row gained `importlib.util.find_spec`.** It is a real
+  use: `test_formal_imports.py`'s
+  `test_the_find_spec_decided_names_are_unreachable` asks CPython's own
+  `find_spec` which stdlib modules are unreachable, and that file is in the
+  sweep. So the row is now blocked on the three names that make up the
+  path-loading API (`find_spec`, `module_from_spec`, `spec_from_file_location`)
+  rather than two, and the case is updated to say so rather than the use being
+  removed — the test is the corpus's reader and the corpus moved, which is the
+  one direction a reader's pin is allowed to move.
+
+**Neither is the capability this doc is about, and both are the same instrument
+rotting**, which is the failure `CLAUDE.md` calls a hole in coverage: the file
+is registered in NO bucket, so no gate ran it and both went red unobserved. §5's
+next step is unchanged.

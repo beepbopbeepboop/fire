@@ -1,14 +1,49 @@
 # `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on
 
+**Status 2026-10-08 (`work/formal181-docs`; the same redirect was recorded
+independently by `work/formal175-docs` on 2026-10-07 and
+`work/formal191-docs` on 2026-10-08): the REPRESENTATION this
+document asks for LANDED 2026-10-05, so its "NOT FIXED" headline is no longer
+true — read `bugs/FORMAL_optional_needs_a_niche.md`, which is the live document.
+`None` is a NICHE word per payload type (`formal/model.py::optional_none_word`),
+and `x is None`, `x == None`, `or_else`, `value_or`, `or`, `unsafe_value` and
+`bool(x)` all lower to a compare against an immediate plus a conditional, on
+both backends. What remains is the TWO-WORD form for a payload with no niche —
+`Optional[Int]`, which is exactly `builtin_slice.mojo`'s field — and an
+unstated payload; both are §2 and §3 of that doc, and neither is this row's
+work — the row's terminal cause is now the bare `FormatStruct` call,
+`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable`'s row.
+**The chain analysis below is kept as the HISTORY that priced the
+two-word form**: it is why the niche was chosen first and what the tagged form
+still costs. A reader who wants the current state should read the niche doc, not
+this one.**
+
+
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
-Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
-value-model decision, and it is the last thing between the `builtin_slice` row
-and 13 files.** Its own dependency chain has since moved TWICE and is now
+Found 2026-10-01 on `work/formal2-re-and-slice`. Its own dependency chain has
+since moved TWICE and is now
 blocked one layer EARLIER than either revision of it below says: see
 "Re-measured 2026-10-03" at the end, whose first arrow is a frame-identity
 question in somebody else's area (a one-word struct whose only field is a nested frame, whose `__init__` was read as returning a frame — the doc that filed it was deleted with the fix, and its subject is now `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`).
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
+
+**Status 2026-10-08 (`work/formal217-docs`): the SUBJECT is answered, and the
+headline above is stale.** `Optional[T]` has a NICHE representation now — an
+`Optional[T]` value is the payload word and `None` is a word `T` cannot produce
+(`formal/model.py::optional_none_word`, `formal/build.py::apply_optional_none_
+representation`, both backends and the Lean mirror) — and it landed under this
+doc's successor, `bugs/FORMAL_optional_needs_a_niche.md`, whose Status says of
+this file exactly that: *"its 'NOT FIXED' headline is wrong as of this commit."*
+What is still open here is only the payloads with **no** niche —
+`Optional[Int]` and the rest of the full-word family — which need the tagged
+TWO-WORD value; that is `FORMAL_optional_needs_a_niche.md` §2's row, and it is
+not the `builtin_slice` row's terminal cause any more (that moved to
+`FormatStruct`, a bare call to a generic template —
+`FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`). The
+three chain revisions below are kept as history; a reader picking this up should
+read the successor's Status first and measure the arrow §"Re-measured
+2026-10-03" names, not the `__mlir_op` one this doc's first revision put first.
 
 This doc exists to say what the frame-holder document — deleted 2026-10-05,
 consolidated, because every arm of it was closed and the row it measured had
@@ -16,6 +51,53 @@ moved three refusals deeper — left open, with the measurement that settles the
 question of which wall it is.  What it left behind is in
 `test_formal_method_param_field.py`'s "a struct-typed FIELD, initialised from a
 constructor ARGUMENT" case and in `formal/model.py::struct_field_names`.
+
+## Re-measured 2026-10-12 (`work/formal313-docs`): the FIRST arrow has moved a
+## FOURTH time, and it is now a bare-template-inference gap ABOVE every arrow below
+
+Both revisions below put the chain's first arrow at a frame-identity question
+(`StridedSlice___init__`/`Slice.write_to` self-assignment and returned-frame
+handoff). **That is no longer where the chain starts**, and the new arrow is two
+layers ABOVE the value-model question this doc owns. Measured, generation only,
+byte-identical text on both architectures:
+
+```console
+$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label t -- \
+      python3 fire.py build --formal --no-prove --backend=$a -o .tmp/bsl \
+      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: Slice.write_to: `FormatStruct` is called, and it is imported from
+`std.format._utils`, so the call has to bind a symbol `std.format._utils`
+exports. That module does not export it, and the reason is `doc/ABI.md`'s export
+rule applied to the DECLARATION: a generic template is not one symbol but one per
+instantiation … **If the call names no type argument at all, the SOURCE is right
+and this path is short**: Mojo infers a template call's type arguments, so
+`FormatStruct(…)` with no bracket is correct code … and this path does not infer
+them yet.
+```
+
+`std/utils/variant.mojo` reports the same arm, through its own import of
+`std.builtin.rebind` (`Allocation.write_to`), so the two subjects this doc
+tracks now meet at ONE wall that is neither a frame nor a value-model question.
+The chain reads:
+
+    a bare template call with inferrable type arguments (`FormatStruct(…)`)
+      ->  `std/builtin/builtin_slice.mojo` builds
+        ->  the 2026-10-03 arrow (self-assignment / returned-frame handoff)
+          ->  the 2026-10-01 arrow (`comptime` class attribute of a computed value)
+            ->  `Variant.get_discriminant`'s `__mlir_op`
+              ->  `Optional.or_else`
+                ->  the 13 files reach their own next refusal
+
+**So option 2 still cannot be started here, and the new first arrow belongs to
+`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`**
+(123 measured files, per that doc's own header) — which is `formal/monomorph.py`'s
+demand pipeline, not this doc's value model. This is the fourth time the first
+arrow has moved, and the third time it has moved onto a construct this doc does
+not cover; the pattern is why the instruction at the end of the 2026-10-03
+section below ("measure the first refusal before starting any of it") still
+stands. **Nothing else in this doc changes:** `Optional`'s representation
+question, option 2's two halves, and the 13-file accounting are exactly as
+recorded, and no measurement here moves any of them.
 
 ## What the frame-holder doc measured, and what was behind it
 

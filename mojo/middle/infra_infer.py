@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
 import regex_compile
 import mlir
 import ownership_destruct
@@ -116,7 +116,28 @@ def _resolve_type(gen, ann: str | None) -> str:
         elem_ann = gen._c_kw_struct_renames.get(ann[1:].strip(), ann[1:].strip())
         if elem_ann in gen.struct_field_types and elem_ann not in gimple_ctypes._TYPE_MAP:
             return f"{elem_ann} *"
-    return gimple_ctypes._mojo_type(ann)
+    _ct = gimple_ctypes._mojo_type(ann)
+    # A Python-mode module (a `.py` file — the self-hosted compiler's own
+    # source) carries RUNTIME tuples: a `tuple[...]` value is a
+    # mark_as_tuple'd container, never the synthesized by-value struct the
+    # stdlib's `Tuple[...]` mechanism builds (part 4 — that mechanism needs
+    # a `var x: Tuple[...]` struct construction, which `.py` has no spelling
+    # for). Erasing the annotation to the struct is what broke the selfhost
+    # TU (measured 2026-10-22: elaborate.py's
+    # `_find_block_end(lines: list[str], depths: tuple[int, ...], ...)`:
+    # the param erased to `MojoTuple_419c82de427b` — no typedef in the TU,
+    # `len(depths)` stubbed to 0, and the callsite coerced the real
+    # `MojoList *` tuple to the struct — three gcc rejections from one
+    # annotation). The container spelling is exactly what every use wants:
+    # `len()` -> mojo_list_len, `t[i]` -> mojo_list_get, unpack reads the
+    # list-backed tuple (see `_body_builds_struct_tuple`'s note on the
+    # bounds() family building RUNTIME tuples).
+    if (_ct.startswith('MojoTuple_') and not _ct.endswith('*')
+            and isinstance(ann, str)
+            and ann.strip().split('[', 1)[0].strip() in ('Tuple', 'tuple')
+            and (getattr(gen, '_current_filename', '') or '').endswith('.py')):
+        return 'MojoList *'
+    return _ct
 
 
 def _definitely_bytes_expr(e, bytes_vars: set, fn_ret_types: dict) -> bool:
@@ -1520,6 +1541,60 @@ def _seed_addressed_locals(gen, body: list):
         for _ki in range(len(_kw)):
             _kp = _kw[_ki]
             if _as_str(_kp[0]) == 'to' and isinstance(_kp[1], IdentExpr):
+                gen._addressed_locals.add(_as_str(_as_ident_node(_kp[1]).name))
+    # PART 6 (2026-10-23, family D piece 2): a ref-scalar CONSTRUCTOR argument
+    # is a second class of address-taker — `_Product2(TestCopyIterator(
+    # copy_a), ...)` passes `&copy_a` (the callee param lowered to a scalar
+    # pointer by funcs_shared._param_ctype's ref-scalar branch), so `copy_a`
+    # needs the same WHOLE-FUNCTION protection as the `to=` targets above:
+    # its later reads (`assert_equal(copy_a, 0)`) must materialize through a
+    # fresh temp or -fgimple rejects the function. The candidate resolution
+    # here is the SAME one the emit-side arg builder uses (module_gen's
+    # Pass-2b-bis table), so the pre-scan and the emit cannot disagree about
+    # which argument is addressed; every lookup is self-host-safe (boxed
+    # reads no-op to "not addressed", the pre-subpath behavior).
+    from mojo.middle.calls_shared import _ref_scalar_param_ctype
+    _sft = getattr(gen, 'struct_field_types', None) or {}
+    _sms = getattr(gen, '_struct_method_signatures', None) or {}
+    for node in _nodes:
+        if not isinstance(node, CallExpr):
+            continue
+        _cn = _as_callexpr_node(node)
+        if not isinstance(_cn.func, IdentExpr):
+            continue
+        _bname = _as_str(_as_ident_node(_cn.func).name)
+        if _bname not in _sft:
+            continue
+        _cands = _sms.get(_sms_key(_bname, '__init__'))
+        if not _cands:
+            continue
+        try:
+            _chosen = gen._resolve_overload(_cands, _cn.args,
+                                            getattr(_cn, 'kwargs', None) or [])
+        except Exception:
+            continue
+        if _chosen is None:
+            continue
+        for _pi in range(len(_cn.args or [])):
+            if _ref_scalar_param_ctype(_chosen, _pi) is None:
+                continue
+            if isinstance((_cn.args or [])[_pi], IdentExpr):
+                gen._addressed_locals.add(_as_str(
+                    _as_ident_node((_cn.args or [])[_pi]).name))
+        for _ki in range(len(getattr(_cn, 'kwargs', None) or [])):
+            _kp = (getattr(_cn, 'kwargs', None) or [])[_ki]
+            _pname = _as_str(_kp[0])
+            _pidx = None
+            _pn2 = _chosen.get('param_names') or []
+            for _ni in range(len(_pn2)):
+                if _as_str(_pn2[_ni]) == _pname:
+                    _pidx = _ni
+                    break
+            if _pidx is None:
+                continue
+            if _ref_scalar_param_ctype(_chosen, _pidx) is None:
+                continue
+            if isinstance(_kp[1], IdentExpr):
                 gen._addressed_locals.add(_as_str(_as_ident_node(_kp[1]).name))
 
 def _generator_value_ctype_for_next(gen, arg):

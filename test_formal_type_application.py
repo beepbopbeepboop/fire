@@ -183,7 +183,7 @@ BOUNDARY_REFUSALS = [
      "    var y = xs[0](5)\n"
      "    printf(\"y=%d\", y)\n"
      "    return 0\n",
-     "is called as a FUNCTION and the source says it holds"),
+     "is called as a FUNCTION and the source says it holds a container"),
     # …and the type's own ARGUMENT is compile-time by construction, so it is
     # exempt as part of the bracket rather than as a value. `Self.T` inside
     # `List[Self.T]()` is a MemberExpr, not an IdentExpr, and `Subscript` names

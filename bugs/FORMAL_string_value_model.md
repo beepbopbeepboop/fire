@@ -586,6 +586,33 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   whose positionals bind parameters this does not enumerate. `*args` / `**kwargs`
   at the call site.
 
+  **The first of those is CLOSED (2026-10-05, `work/formal29-4`), and the
+  mechanism is the one this paragraph named as the wrong one.** The reader is
+  still `parameter_kinds_by_call_site` (it was renamed when it grew the container
+  row, as the bullet above records), but a bare-name argument is now a REFERENCE
+  to that name in the caller, resolved by a MEMOISED FIXPOINT over the image's
+  `(function, name)` pairs — the caller's own call sites, its declared annotation,
+  or the statements that bind it (`_binding_values`), agreed by the same
+  unanimity rule and with the same veto. Two consequences, and both are the
+  reasons this is the same fix rather than a new one:
+
+    * **It is not the per-caller `ValueKinds` this paragraph ruled out**, and the
+      difference is the whole of it: a fixpoint over the image's names has no
+      order, so `printf("%s", s)` decides the same way whichever function the
+      emitter reached first. The recursion the paragraph feared is a cycle, and a
+      cycle is an answer (`active`), as it already is in `func_kind`.
+    * **The disagreement rule did not move.** One parameter handed a `char *` at
+      one call site and a word at another is still a word and still prints `1` for
+      `if s:` where CPython prints `0` — pinned as
+      `test_formal_run.py`'s `refuse_parameter_kind_where_two_call_sites_disagree`,
+      with `printf_percent_s_of_a_parameter_reached_through_a_name` pinning the
+      direction this paragraph said would be decided wrongly.
+
+  The other three rows are unchanged and are still decisions: a specialized call
+  shifts every position by the comptime parameters, a mixed call binds
+  positionals to parameters this does not enumerate, and `*args` has no shape to
+  read.
+
   Verified not to move anything: `test_formal_run.py` PASS=702 FAIL=0, and a
   252-file stdlib sweep on x86-64 reports "unchanged: 252" — 18 pass, 13 codegen,
   219 codegen/dependency, identical family counts. It is a wrong-answer fix with
@@ -1069,18 +1096,17 @@ divergence, recorded there and not fixed here. For a non-ASCII string it gave a
 byte from the MIDDLE of a multi-byte sequence, which is a wrong VALUE, and that
 is refused by name.
 
-## The next step, which is not in this document's subject
+## The front-end escape fix, which was not in this document's subject
 
-**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes are not decoded by any engine
-in this repository**, so `len("\u00e9")` is 6 here and 1 in CPython, on the
-interpreter, the compiled path and both formal backends alike. That is
-`fire_compiler.decode_c_escapes` and it is a FRONT-END defect, not a
-string-value-model one: `bugs/LEXER_unicode_escapes_are_not_decoded.md`, with the
-four-row measurement and the reason "an unknown escape keeps its backslash" and
-"a known escape is missing" are the same behaviour here and opposite behaviours
-in CPython. It is worth knowing that the encoding block above makes the formal
-half of that fix free: `len("\u00e9")` is 1 on both backends the moment the
-decoder knows the escape, because the fold reads the decoded text.
+**`\uXXXX`, `\UXXXXXXXX`, `\N{…}` and octal escapes WERE not decoded by any
+engine in this repository** (`len("\u00e9")` was 6 where CPython makes 1); that
+was `fire_compiler.decode_c_escapes`, a FRONT-END defect, and it is FIXED as of
+2026-10-07 — the one shared decoder now knows all four spellings. It was worth
+knowing that the encoding block above made the formal half of that fix free:
+`len("\u00e9")` is 1 on both backends the moment the decoder knows the escape,
+because the fold reads the decoded text. What remains is the compiled path's
+`len` counting BYTES for non-ASCII text where this path and the interpreter count
+code points.
 
 ## `ord`, `chr` and `hash` were not an encoding question at all
 

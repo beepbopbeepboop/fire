@@ -82,6 +82,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1028,6 +1029,105 @@ def run_end_to_end(verbose):
     return True, ""
 
 
+def check_escape_decoding(verbose):
+    """`fire_compiler.decode_c_escapes` against CPython's own literal value.
+
+    The decoder is the ONE front end all four engines read, so its table is the
+    place the escapes it gets WRONG are pinned. The oracle is CPython's `eval`
+    of the same literal rather than a transcribed constant — the whole defect
+    was that `"\\N{LATIN SMALL LETTER E WITH ACUTE}"` was thirty-five characters
+    where CPython makes one, and a person transcribing the expected strings gets
+    a digit wrong. `\\uXXXX`, `\\UXXXXXXXX`, `\\N{…}` and a multi-digit octal
+    run are the four that were missing; `\\xHH`, the C simple escapes, an
+    unknown escape, a SHORT `\\x`/`\\u` run, a lone SURROGATE, an out-of-range
+    `\\U`, and an empty or unclosed `\\N{}` are the permissive controls.
+    """
+    # (name, the literal BODY handed to the decoder, a CPython source literal
+    # whose eval() is the expected value). The body is spelled RAW so the test
+    # source itself does not pre-decode it.
+    rows = [
+        ("u_4_hex",        r'\u00e9',   r'"\u00e9"'),
+        ("U_8_hex",        r'\U0001F600', r'"\U0001F600"'),
+        ("N_braced",       r'\N{LATIN SMALL LETTER E WITH ACUTE}',
+                           r'"\N{LATIN SMALL LETTER E WITH ACUTE}"'),
+        ("octal_101",      r'\101',     r'"\101"'),
+        ("octal_bare_0",   r'\0',       r'"\0"'),
+        ("octal_stops_at_8", r'\08',    r'"\08"'),
+        ("octal_three",    r'\777',     r'"\777"'),
+        ("mixed",          r'a\u00e9b\101', r'"a\u00e9b\101"'),
+        ("hex_two",        r'\x41',     r'"\x41"'),
+        # Multi-byte hex/escape and the short octal runs: the same four
+        # missing escapes, spelled to exercise the byte width of the answer.
+        ("hex_two_multibyte", r'\xe9',  r'"\xe9"'),
+        ("u_snowman",         r'\u2603', r'"\u2603"'),
+        ("octal_two",         r'\12',   r'"\12"'),
+        ("octal_one",         r'\7',    r'"\7"'),
+        ("unknown_stays",  r'\q',       r'"\q"'),
+        ("simple_n",       r'\n',       r'"\n"'),
+        ("simple_t",       r'\t',       r'"\t"'),
+        ("trailing_lone_backslash", 'a\\', r'"a\\"'),
+    ]
+    # A SHORT `\x`/`\u` run is a SyntaxError in CPython 3.14, so it has no value
+    # to be the oracle for. This decoder is a decoder and not a validator: it
+    # leaves the run verbatim rather than refusing, which is the same permissive
+    # rule an unknown escape gets. Pinned as "left alone", not against CPython.
+    permissive = [
+        ("hex_short_stays", r'\x4'),
+        ("u_short_stays",   r'\u12'),
+        ("u_short_3",       r'\u123'),
+        ("U_short_7",       r'\U0001F60'),
+        ("dollar_stays",    r'\$'),
+        # An empty or an UNCLOSED brace is the permissive arm: there is no
+        # name to look up, so there is no error to report.
+        ("N_empty_braces",  r'\N{}'),
+        ("N_unclosed",      r'\N{unclosed'),
+        # A lone SURROGATE and an out-of-range `\U` fall to the same arm, for a
+        # reason CPython does not have: one character of a surrogate has no
+        # UTF-8 encoding, and every consumer here writes the decoded text as
+        # UTF-8, so decoding it turns a doc comment (`formal/hostmods/json.mojo`
+        # spells `\ud800` while explaining why it refuses exactly that code
+        # point) into a UnicodeEncodeError from the intern. The path cannot
+        # represent it, so keeping the backslash is the answer.
+        ("u_lone_surrogate", r'\ud800'),
+        ("U_lone_surrogate", r'\U0000D800'),
+        ("U_out_of_range",   r'\U00110000'),
+    ]
+    failures = []
+    for name, body, cpy_lit in rows:
+        got = F.decode_c_escapes(body)
+        # `eval` of a literal with `\777`/`\q` raises CPython's own
+        # SyntaxWarning; the oracle value is what is wanted, not the warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', SyntaxWarning)
+            want = eval(cpy_lit)      # noqa: S307 - the CPython oracle
+        if got != want:
+            failures.append(
+                f"escape {name}: decode_c_escapes({body!r}) == {got!r} "
+                f"({len(got)} chars), CPython makes {want!r} ({len(want)} chars)")
+        elif verbose:
+            print(f"  escape       {name:22s} {got!r}")
+    for name, body in permissive:
+        got = F.decode_c_escapes(body)
+        if got != body:
+            failures.append(
+                f"escape {name}: decode_c_escapes({body!r}) == {got!r}, but "
+                f"this spelling must be left verbatim")
+        elif verbose:
+            print(f"  escape       {name:22s} {got!r}  (left verbatim)")
+    # A name CPython does not know must NOT be invented: CPython refuses the
+    # source, and the decoder raises a `SyntaxError` naming the name; a decoder
+    # that returned something plausible would be the same wrong-answer class
+    # this table exists to catch.
+    try:
+        F.decode_c_escapes(r'\N{NOT A REAL UNICODE NAME}')
+        failures.append("escape N_unknown: an unknown name did not raise")
+    except SyntaxError:
+        pass
+    if failures:
+        return False, "; ".join(failures)
+    return True, ""
+
+
 def main(argv):
     verbose = "-v" in argv
     failures = []
@@ -1050,6 +1150,9 @@ def main(argv):
     ok, why = check_refusal_message(verbose)
     if not ok:
         failures.append(why)
+    ok, why = check_escape_decoding(verbose)
+    if not ok:
+        failures.append(why)
     ok, why = check_interpolated_flag(verbose)
     if not ok:
         failures.append(why)
@@ -1060,7 +1163,7 @@ def main(argv):
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 6
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 7
     print()
     if failures:
         for f in failures:

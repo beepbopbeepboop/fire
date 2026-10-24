@@ -210,6 +210,11 @@ PROGRAMS = [
      "def main() -> Int32:\n"
      "    print(f(2))\n"
      "    return 0\n"),
+    ("product_operands", "def main() -> Int32:\n"
+     "    u1 = 3\n"
+     "    u2 = 7\n"
+     "    print(u1 * 1 + u2 * 2)\n"
+     "    return 0\n"),
 ]
 
 #: transform -> (corpus label, index) pairs it MUST apply to.  A row is a claim
@@ -222,7 +227,7 @@ MUST_APPLY = {
     "extra_param": [("single_return_helper", 0)],
     "noop_loop": [("adjacent_independent", 0)],
     "if_true": [("adjacent_independent", 0)],
-    "swap_add": [("chain_of_bindings", 0)],
+    "swap_add": [("chain_of_bindings", 0), ("product_operands", 0)],
     "extract": [("chain_of_bindings", 0)],
     "reorder": [("adjacent_independent", 0)],
     "def_order": [("single_return_helper", 0)],
@@ -419,9 +424,10 @@ class ScopeResolution(unittest.TestCase):
 
     These are the load-bearing answers: `rename` rewrites an occurrence only
     when `bind_of` names the scope it is rewriting, and `swap_add` swaps only
-    operands `int_only` contains.  Both were wrong during development in ways
-    CPython caught, so they are pinned here where the failure is a unit test
-    rather than a 40-program sweep.
+    operands `is_int_expr` proves are integers (which is `int_only` for a bare
+    name and the analysis's own `_int_expr` for anything else).  Both were wrong
+    during development in ways CPython caught, so they are pinned here where the
+    failure is a unit test rather than a 40-program sweep.
     """
 
     def _an(self, source):
@@ -718,6 +724,34 @@ class ScopeResolution(unittest.TestCase):
                       "    return 0\n")
         self.assertNotIn("n", an.int_only)
 
+    def test_an_expression_operand_is_an_int_when_its_leaves_are(self):
+        """An operand of a commutative `+` need not be a bare name.
+
+        `_operand_ok` accepted only an int literal or a name in `int_only`, so
+        every `+` the corpus writes as an EXPRESSION was declined — `unpack`'s
+        `u1 * 1 + u2 * 2` is the shape, and neither operand is a name.  The
+        predicate is now `Analysis.is_int_expr`, the analysis's own answer to
+        "is this an integer", so the question is asked once.  Pinned both ways:
+        the product is accepted, and a STRING `+` is not, because `'a' + 'b'`
+        and `[1] + [2]` are exactly the values that make the transform unsound.
+        """
+        an = self._an("def main() -> Int32:\n"
+                      "    u1 = 3\n"
+                      "    u2 = 7\n"
+                      "    s = 'x'\n"
+                      "    print(u1 * 1 + u2 * 2)\n"
+                      "    return 0\n")
+        self.assertIn("u1", an.int_only)
+        self.assertTrue(an.is_int_expr(ast.parse("u1 * 1", mode="eval").body),
+                        "a product of an int name and a literal is an integer")
+        self.assertTrue(an.is_int_expr(ast.parse("u2", mode="eval").body))
+        self.assertFalse(an.is_int_expr(ast.parse("'a' + 'b'",
+                                                  mode="eval").body),
+                         "a string `+` is not an integer expression, so "
+                         "`swap_add` must not touch it")
+        self.assertFalse(an.is_int_expr(ast.parse("s", mode="eval").body),
+                         "a name whose store is a string is not in `int_only`")
+
 
 class ReorderAliasing(unittest.TestCase):
     """Two names bound to ONE object are one name to `reorder`'s test.
@@ -809,6 +843,11 @@ class TheDriver(unittest.TestCase):
         prog = {"text": "def main() -> Int32:\n    return 0\n",
                 "verbatim": None, "driver_args": "", "test_input": None,
                 "notes": (), "reason": None}
+        # `oracle_answer`/`has_oracle` accept only an `OracleAnswer`, so a bare
+        # `(exit, stdout)` tuple reads as "CPython produced no answer" and every
+        # verdict below came back `not-answerable` — a stub that was right about
+        # the VALUES and wrong about the TYPE is exactly the stale mock the
+        # accessor exists to make impossible.
         with mock.patch.object(F, "cpython_answer",
                                return_value=(F.OracleAnswer(0, ""), "")), \
              mock.patch.object(M.F, "run_on",
@@ -1133,11 +1172,16 @@ class Normalising(unittest.TestCase):
         ("def f(n):\n    var a = 1\n    return a + n\n",
          ("var ",), ("a = 1",)),
         ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
-        # One rule firing is not enough to make a file parseable, and the file is
-        # still REPORTED rather than half-rewritten: the `struct` case is the
-        # reason this tool cannot measure `wide_recv.mojo`, so it is a row here
-        # rather than a sentence in a docstring.
-        ("struct Point:\n    var x: Int\n", ("var ",), ("struct Point:",)),
+        # A `struct` is a DECISION rather than a removal of syntax (a Python
+        # `class` of bare annotations has no attributes): the decision made in
+        # `bugs/FORMAL_metamorphic_ledger.md` §6 item 1 is to translate a
+        # struct whose every field reads `0` on this path, so `var x: Int`
+        # becomes a `__init__` that assigns it.  All three struct examples are
+        # driven, which is why `wide_recv.mojo` is no longer the reason this
+        # tool cannot measure something.
+        ("struct Point:\n    var x: Int\n",
+         ("var ", "struct "),
+         ("class Point:", "def __init__(self):", "self.x = 0")),
     )
 
     def test_each_rule_removes_only_its_own_spelling(self):
@@ -1206,12 +1250,24 @@ class Normalising(unittest.TestCase):
         self.assertEqual(notes, ())
 
     def test_a_rule_that_cannot_finish_names_the_construct(self):
-        text, notes, why = M.normalise_mojo("struct Point:\n    var x: Int\n")
+        # The shape the struct DECISION declines: a field whose type is not an
+        # integer alias is a value this tool will not guess at, so the file
+        # stays unmeasured and names `struct` rather than being translated with
+        # an invented initialiser.
+        text, notes, why = M.normalise_mojo(
+            "struct Point:\n    var x: String\n")
         self.assertIsNone(text)
         self.assertIn("struct", why)
         self.assertIn("var declaration x1", notes,
                       "the rule that DID fire was not reported, so the reason "
                       "reads as though nothing was tried")
+        # ... and so is a struct with an explicit constructor body: the
+        # construction is its own construct, and this tool does not model it.
+        text, notes, why = M.normalise_mojo(
+            "struct S:\n    var v: Int\n"
+            "    def __init__(self):\n        self.v = 1\n")
+        self.assertIsNone(text)
+        self.assertIn("struct", why)
 
     # ── the gate ──
     #
@@ -1321,16 +1377,18 @@ class Normalising(unittest.TestCase):
     def test_the_examples_corpus_is_mostly_measured(self):
         """The coverage number this file exists to keep honest.
 
-        Every example must be measured EXCEPT the ones unmeasured for the ONE
-        documented reason, and that reason is a decision rather than a spelling:
-        a `struct` body is not removable syntax (a Python `class` of bare
-        annotations has no attributes, so the translation would manufacture a
-        disagreement with CPython rather than find one).  Asserting the exact
-        reason rather than a floor is what makes a NEW unmeasured example a
-        failure here instead of a coverage number that quietly fell — the
-        `@refines` decorator group is the precedent: eleven examples were
-        refused with CPython's "invalid syntax" until `PROOF_DECORATORS` learned
-        the spelling, and a floor would have hidden them.
+        Every example must be measured.  The one former exception was the
+        `struct` decision — a `struct` body is not removable syntax, so it
+        needed the DECISION `bugs/FORMAL_metamorphic_ledger.md` §6 item 1
+        records — and it was made: a struct whose every field is an integer
+        type is translated to a Python class whose fields read the `0` this
+        path's construction gives them, so `wide_recv`, `struct_point` and
+        `struct_method` are all driven.  Asserting that NOTHING is unmeasured
+        is what makes a NEW unmeasured example a failure here instead of a
+        coverage number that quietly fell — the `@refines` decorator group is
+        the precedent: eleven examples were refused with CPython's "invalid
+        syntax" until `PROOF_DECORATORS` learned the spelling, and a floor
+        would have hidden them.
         """
         if not os.path.isdir(EXAMPLES):
             self.skipTest("formal/examples is not present")
@@ -1341,12 +1399,11 @@ class Normalising(unittest.TestCase):
                 prog = M.example_program(f.read())
             if prog["text"] is None:
                 undriven.append((stem, prog["reason"]))
-        wrong = [(s, why) for s, why in undriven
-                 if "does not remove: 'struct'" not in (why or "")]
         self.assertEqual(
-            wrong, [],
-            f"{len(wrong)} of {len(stems)} examples are not measured for a "
-            f"reason other than the documented `struct` decision: {wrong[:5]}")
+            undriven, [],
+            f"{len(undriven)} examples are unmeasured: {undriven[:5]} — a "
+            f"struct the translation declines, or a construct no rule removes, "
+            f"is a coverage hole to decide, not a number to leave")
 
     def test_list_transforms_names_every_transformation(self):
         proc = subprocess.run(

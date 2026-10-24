@@ -1,5 +1,58 @@
 # FORMAL_arm64_x30_is_reloaded_from_the_frame: the dec1 recursion family cannot be proved because the generator asserts x30 is unchanged and the code generator now RELOADS it
 
+**Status 2026-10-08 (`work/formal184-docs`): MEASURED, and the fix is LARGER than
+"one more binder on the universal theorem" — this doc's own step 0 needs a
+`lib/Refine.lean` signature change, not only a generator one.  Two findings, both
+new here.**
+
+**(1) The five programs no longer reach this goal, so the doc's measurement is
+masked.**  On this tree `count`, `pow2`, `sqsum`, `sum` and `fact` all emit a
+REACHABILITY theorem (`f_reaches_call_at_…`) and **no**
+`f_compiles_correctly_universal`, because the stack-floor guard's `getrlimit`
+(`bfeec991`, 2026-10-05) is an out-of-image `BL` in every prologue and the walk
+halts at it.  Measured generation-only:
+
+    formal/examples/pow2.mojo   NO VALUE THEOREM reach
+
+That is the getrlimit subject of
+`bugs/FORMAL_arm64_the_compiler_trap_recording_is_lost_and_the_stack_guards_
+getrlimit_is_a_program_call.md` on the merged tree (the branch's branch named
+the same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
+every_function.md`, owned by `formal163-docs`, branch `dfb40ce7`), and the
+`hx30fr_N` obligation this doc is about should reappear when that merges.  Until
+then the five are not testable.
+
+**(2) The premise is NOT preserved by a fixed lower bound, which is why step 0 is
+a `Refine.lean` change and not a theorem binder.**  The recursive call's state is
+`call_state.sp = st.sp - _P` (`formal/arm64_proof_gen.py`'s `hsp_{n}`/`hcur`,
+emitted at the recursion step), where `_P` is the per-level stack cost.  So a
+premise of the fixed form `<floor> + C ≤ st.sp` is FALSE for the callee the IH is
+applied to whenever `st.sp - _P < floor + C`.  The premise has to be RELATIVE to
+the frame bound the induction already carries — e.g.
+`floor + C + stride * (arg.toNat + 1) ≤ st.sp.toNat`, which descends by one
+application of `frameBound_descend_le` exactly as `FrameBound` does — and that
+means `contract_sound` and `contract_sound_tree` (`lib/Refine.lean:745`/`:792`)
+gain a hypothesis threaded through `hbase`/`hstep`/the IH, and the generator's
+`{name}_contract` header and `refine contract_sound …` call move with them.
+`lib/Refine.lean` builds in 1.2 GB (affordable), so this is not the ProofLib
+wall — it is the design decision this doc's §"What this costs the fix" item 1
+called "the smaller and more honest one" and it is bigger than it reads: three
+signatures, the induction, and every generated contract.  The `sp` fact the
+`hx30fr` peel needs (`mem_read_after_write_u64_ne` for the stack-floor store) is
+then `omega` from that relative premise.
+
+**merged 2026-10-13 (merging `work/formal184-docs`): finding (1) is a
+branch-tree fact, and the merged tree has moved past it — re-measured
+generation-only here, all five programs (`count`, `fact`, `pow2`, `sqsum`,
+`sum`) emit the value theorem (`f_compiles_correctly_universal`); the
+`getrlimit` is no longer a prologue `BL` (`70b76755` reads `RLIMIT_STACK` in
+the startup stub), and the `hx30fr` obligation has reappeared in the
+generated proofs — discharged, per the 164 section below (neither
+`hx30fr_12` nor `hx30fr_17` is in `count`'s error list). Finding (2), the
+`Refine.lean` relative-premise design, is this section's unique record and
+stands as written: the merged `lib/Refine.lean` is byte-identical to the
+branch's. The branch lands no code on the merged tree.
+
 **Area:** FORMAL (the arm64 proof generator's per-instruction value flow).
 **Status: OPEN. Re-measured 2026-10-03 on this tree, and the DIAGNOSIS IS
 CORRECTED: the obligation is not merely unproved, it is FALSE as the theorem is
@@ -10,33 +63,97 @@ what has to be added first. Everything else in this file — the two error sites
 the measurement table, the five affected examples, the peel machinery that
 exists — was re-confirmed on this tree and still stands.
 
+**RE-MEASURED 2026-10-08 (`work/formal164-docs`): the examples now GENERATE,
+and the `hx30fr` obligation this file is about is no longer among their errors,
+so the FALSE-theorem correction below is MOOT on this tree rather than fixed in
+place.** Three things moved under it since the 2026-10-05 measurement:
+
+* the reached-walk masking is gone (`caa3d1a7`: `_reached_without_a_condition`
+  asks about the halt's own path, not about any conditional anywhere), so
+  `count`/`fact`/`pow2`/`sqsum`/`sum` reach a proof file again;
+* a NEW blocker stood in front of `hx30fr` — the step-RESULT emitter's
+  sign-extend `hb` read bit 13 of the WORD instead of the 14-bit immediate's own
+  bit 18, so `count.mojo`'s `tbz x4, #6, +9228` (word `0x36312064`) emitted
+  `have hb : ¬ (0 = 0)` and `native_decide` refused the step lemma. **Fixed this
+  branch** (`formal/arm64_proof_gen.py`, pinned by `test_formal_call_proof_gen.
+  py::TestBitTestBranches::test_the_sign_extend_decision_reads_the_immediate_s_
+  own_sign_bit`);
+* with that closed, `count`'s proof's error list is five errors — `3600` (max
+  recursion depth), `5904`/`5909`/`5935` (the followed call's value flow and the
+  halt-avoidance obligation), `6435` (the Lean kernel's own `-M` ceiling) — and
+  **neither `hx30fr_12` nor `hx30fr_17` is among them**. The absolute
+  `stack_floor_address` store the correction rests on is gone from the chain
+  (the guard now reads `RLIMIT_STACK` in the startup stub and issues no call,
+  `70b76755`), which is why the emitted `(…).x30 = st.x30` is now true.
+
+So the defect this file NAMES is not reachable on this tree, and the five
+examples are red for the same-image/halt obligations owned by
+`FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
+and `FORMAL the stack guards getrlimit is counted as a program call`, not for
+this one. The file stays because those examples are still red and the peel
+machinery they will need is written down here; a Lean run is what would confirm
+the obligation closes for all five, and it is not affordable from a bounded
+worker.
+
 **RE-MEASURED 2026-10-05 (`work/formal42-2`) on this tree: five diagnostics,
 all five goals quoted, and the next step is now PRICED — this one is NOT behind
 the `ProofLib` build wall, so it is the cheapest of the arm64 model work left.**
 
-**RE-MEASURED 2026-10-07 (`work/formal108-docs`): the five named examples no
-longer reach this obligation, so the doc's subject is currently MASKED rather
-than fixed.** `count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
+**RE-MEASURED 2026-10-12 (`work/formal290-docs`): the "masked at generation"
+paragraph below is STALE — the five examples GENERATE again, so the subject is
+LIVE — but none of them can be shown GREEN on this tree, because their proofs
+now carry several error sites besides the `hx30fr` one and the first of them
+belongs to another document.** `2b7e5ec8` (the conditional-halt refusal) was
+followed by `14af4cbe` ("a source conditional is a barrier for the halt-address
+question, not a global refusal"), which landed after it and relaxed exactly the
+refusal the paragraph below describes. Measured:
+`formal.build.compile_formal('formal/examples/<stem>.mojo', arch='arm64',
+prove=True, check=False)` returns a proof path for all five of `count`, `pow2`,
+`fact`, `sqsum`, `sum` — no generation-time refusal. Checking `count`'s proof
+through `formal/lean.py::check_proof_cached` reports **six** error sites, not the
+two this doc's §"What is broken" describes, and the first is
+
+    x_count_proof.lean:4305:58: error: maximum recursion depth has been reached
+
+inside a `rw [runs_cons_seq …]` over a `sp ± 131072` step — the same shape
+(`maximum recursion depth` on a `sp`-arithmetic step in a run proof) that
+`mod_by_var` and `same_image_leaf` were both measured in and attributed to the
+`arm64_ext_imm12` merge (`f7bd05ea` discharges a block-start `runs_cons_seq`
+side condition with `first | (simp only [qT0, qS0] <;> done) | rfl` rather than
+a bare `rfl`). **So steps 0–2 below are still the right work and still generator-only,
+but no dec1 example can be shown to typecheck until that separate fix lands**,
+and a proof that has not typechecked is not a fix. The `FrameOk` and `hx30fr`
+sites this doc names are still among the six (`…:4564:16` is the frame window's
+`rfl`), so the diagnosis stands; only the "masked" premise is gone.
+
+## (superseded) 2026-10-07: the five named examples no longer reach this obligation
+
+`count`, `fact`, `pow2`, `sqsum` and `sum` all now REFUSE at
 GENERATION, before a proof is emitted, with the conditional-halt refusal added
 by `2b7e5ec8` (`formal/arm64_proof_gen.py::_reached_without_a_condition`):
 
-```
-$ python3 -c "…formal.build.compile_formal(…, prove=True, check=False)…"   # all five
-NotImplementedError: universal theorem: the call at 0x10000041c -> 0x10000086c
-is the halt address, and it is behind a CONDITIONAL, so whether the run reaches
-it is a fact about the test input rather than about the CFG. …
-```
+* **the `hx30fr_N` `rfl` this file is named for no longer errors.** The emitted
+  `FrameOk`-window facts (`hfrf_{n}_{K}`, `hfrwinup_{n}`, built from
+  `FrameOk_window_reindex`/`_up` off the threading `hfrwin_{n}`) discharge it, so
+  the x30-from-the-frame reload is no longer the site that fails.
+* **what fails now, identically in all five**, is the `runs-ret-frame-ok-window`
+  leaf's final `all_goals rfl`: its goal carries writes at `st.sp - 131120` and
+  `st.sp - 131112` (the recursive call's argument spills) that the emitted peel
+  set — drawn from `ctx["stores"]`, which here is the prologue's
+  `[16, 8, 32, 24, 80, 72]` — never names — **plus** the source conditional's
+  `rewrite` (`arm64_matches_condition 1 … ↔ ¬n = 0`: the emitted `rw` pattern
+  names a frame slot at `s_0.sp - 32 - 16` while the goal's store sits at
+  `s_0.sp - 131072 - 16`, so the pattern does not match). `count` and `pow2` are declared in
+  `test_formal.py`'s `EXPECTED_FAILURES` with this gap as the reason; `fact`,
+  `sqsum` and `sum` are NOT, so on this tree those three are UNDECLARED reds.
 
-So the `hx30fr_N` `rfl` this doc quotes is no longer reached by any corpus
-example, and the generator defect it describes — the emitted theorem
-`(…).x30 = st.x30` is FALSE for the `st.sp` this doc computes — is unchanged
-and latent, not repaired. It will be reachable again the moment a call on a
-conditional path can be followed (`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_
-call_on_a_conditional_path.md`, whose step 1 is a set-valued exit in
-`lib/ProofLib.lean`). The "cheapest of the arm64 model work left" ordering in
-the paragraph above should now be read through that dependency: this fix cannot
-be verified on today's tree, because the programs that exercise it never get as
-far as the proof.
+The generator defect this file describes — the emitted theorem
+`(…).x30 = st.x30` being FALSE for the arbitrary `st.sp` of §"The correction" —
+is unchanged: the proof failing on the window clause is what an unprovable goal
+looks like, and nothing emitted states the frame/data-page separation that would
+make it true. So the ordering below still holds and the next step is unchanged:
+**step 0 (the `sp` premise) first**, then the frame-invariant discharge of
+`hx30fr_N` and the per-conjunct tactics of step 2.
 
 ```
 $ python3 tools/memslot.py --gb 8 --label lean -- python3 -c "…check_proof_cached…"
@@ -68,10 +185,9 @@ puts the address in the chain, and the frame's deepest slot is what
 
 **Why it is cheap here and is not behind the build wall.** §"What this costs the
 fix" offers `FrameBound`'s sibling in `lib/Refine.lean`, and that is the right
-place for the MEMORY form
-(`FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` §"The
-next step: a MEMORY hypothesis, not a constant" is the same fact and wants the
-same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
+place for the MEMORY form (the unconstrained-`st.mem` fact that a
+`runs-cbz-condition` leaf admitting over `mem_read_u64 (frame stores) A = 0`
+records is the same fact and wants the same home). `lib/Refine.lean` builds in **2.8 s / 1.2 GB** — measured on this
 tree at `5e547907`, same `ensure_library` call, same minute, against
 `lib/ProofLib.lean`'s `memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%)` at the
 tree's own `-j 4`; method and control in

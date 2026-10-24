@@ -3,16 +3,94 @@
 
 **Area:** FORMAL (the multi-element subscript classifier,
 `formal/model.py::multi_index_refusal`'s `MULTI_INDEX_COMPTIME_PARAMS` arm, over
-`../new-modular/Mojo/stdlib/std/sys/arg.mojo:51`). **Status: PARTIAL, and §5 is
-what landed 2026-10-05 — the SENTENCE half, in BOTH branches. The refusal is
-CORRECT and stays; what is still not fixed is LINK 1, which is
-`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`'s area and
-not this doc's.** Read §5 before the rest: this document's own recommendation
-("a name in the sentence, not a new rule") has landed, and **§5 also records the
-measurement that shows the recommendation CANNOT reach the case it was written
-for**, which is why this doc is not deleted.
+`../new-modular/Mojo/stdlib/std/sys/arg.mojo:51`). **Status: PARTIAL — the
+SENTENCE half is FIXED (§5, landed 2026-10-05 in BOTH branches) and §6 landed the
+other half of the sentence clause (`StaticString` becoming resolvable,
+2026-10-05, `work/formal40-1-r2`), which is what makes the MIXED branch fire for
+`arg.mojo` and name the culprit. The refusal is CORRECT and stays; what is still
+NOT fixed is LINK 1, which is the MLIR dialect construct's area and not this
+doc's.** Read §5 before the rest: this document's own recommendation ("a name in
+the sentence, not a new rule") has landed, and **§5 also records the measurement
+that shows the recommendation CANNOT reach the case it was written for**, which is
+why this doc is not deleted. **Link 1 — `std/origin/__init__.mojo`'s `comptime`
+alias whose value is an MLIR attribute template — is still open and is claimed by
+another lane.** So this document stays, for link 1 and because §6's fix is a
+message improvement rather than a build.
 
-## 5. What landed 2026-10-05, and the measurement that limits it
+## 6. What landed 2026-10-05: `StaticString` is a TYPE this image knows, so the
+## contrast fires and the reader is told which element to go and look at
+
+**§5's closing paragraph said the remaining half "needs `StaticString` to be
+resolvable, which is a fact about a module this repository does not own". That
+was half right, and the half that was wrong is the whole fix: `StaticString` is
+not in another module at all, it is a language BUILTIN, so there is no
+declaration to reach and none of the four tables could ever have found one.**
+
+```console
+$ grep -rn "StaticString" ../new-modular/Mojo/stdlib/std --include=*.mojo | wc -l
+56            # files that spell it, as an ANNOTATION
+$ grep -rn "^struct StaticString\|StaticString =" ../new-modular/Mojo/stdlib/std --include=*.mojo
+(no match)   # nothing DECLARES it
+```
+
+56 files use it and no file declares it, which is what a builtin looks like —
+and it is why §5's own measurement (220 reachable struct declarations,
+`StaticString` in none of them) read as "not reachable" rather than as "there is
+nothing to reach for". `type_constructor_kind`'s documented `None` means "not a
+type constructor AT ALL", so the bracket element classified as a bare name this
+image cannot resolve — **false about the language**, and a fact about a table
+read as a fact about the target. `myinterpreter.py` already knows it
+(`myinterpreter.py:2519` lists `StaticString` among the borrowed-string-view
+types), so the two halves of this compiler disagreed about whether it is a type.
+
+**The fix is one name in the table whose job is exactly this** —
+`UNREPRESENTABLE_TYPE_CTORS`, "real types with NO representation on this path" —
+because that is what `StaticString` is here for the ordinary reason: a
+compile-time string is not a `char *`, so one 64-bit word does not carry it.
+Being in that tuple is also what routes a bare `StaticString(…)` call to the
+honest refusal instead of a `BL StaticString` dangling extern, which is the same
+improvement the tuple's own comment records for `bytearray`/`bytes`.
+
+**Measured, `std/sys/arg.mojo`, byte-identical refusal on both architectures
+before and after** — the verdict does not move, only which element it names:
+
+> Of its 2 element(s): element 1 `StaticString` is a type this image knows; and
+> element 2 `ImmStaticOrigin` is a bare name this image cannot resolve to a
+> declaration. **That is where the missing word is.**
+
+**So the doc's own §3 proposal is landed, and §3's diagnosis of WHY the reader
+was stuck was the thing that had to be wrong for it to be possible**: it said the
+sentence "is FALSE for the other bracket in the same corpus that this arm
+refuses (`size_of[type, target]`, where both elements are types…)", and named
+the missing distinction as a message-level one. It was a table-level one.
+
+### The two tests, and what each is load-bearing for
+
+Three rows in `test_formal_run.py`, and the first two are CHANGED rather than
+added — the expectation moved because the classifier moved, and both had
+`StaticString` as their stand-in for "a name this image cannot resolve":
+
+* `sub_multi_index_comptime_params_with_nothing_resolvable_says_so` and
+  `…_names_the_two_shapes` now spell their two elements `ImmOrigin,
+  ImmStaticOrigin` — both `comptime` origin ALIASES, both in no table — so the
+  **all-names branch stays reachable and stays pinned**. Re-spelling them was
+  forced, not tidier: with `StaticString` a type, that branch is unreachable for
+  that spelling, and leaving the rows as they were would have deleted the only
+  coverage of a branch that still exists.
+* `sub_multi_index_comptime_params_names_the_culprit_when_a_builtin_type_is_
+  spelled` is new, on `StaticString, ImmStaticOrigin`, with the needle the
+  CULPRIT SPELLING and the clause "That is where the missing word is" — because
+  the whole difference from the all-names branch is which element is named.
+
+`test_formal_run.py` is **1126 pass / 0 fail** (1125 before this change, +1 row).
+`test_formal_monomorph.py` 27/0 — its census reads the `Self.o` mention off the
+declaration SOURCE and is unaffected — and `test_formal_int_semantics.py`
+162/162. `test_formal_type_application.py` has one failure
+(`a_subscripted_value_called_is_not_a_type_application`) and it is
+**pre-existing**: measured with and without this change, `PASS=5 FAIL=1` both
+ways.
+
+## 5. What landed 2026-10-05 (the sentence clause), and the measurement §6 corrects
 
 **The two-shapes clause is now in BOTH branches of
 `_comptime_param_element_sentence`, and it was in only one.** It used to be
@@ -27,12 +105,13 @@ there is one sentence about it rather than two that can drift. Pinned by
 `test_formal_run.py`'s
 `sub_multi_index_comptime_params_with_nothing_resolvable_names_the_two_shapes`.
 
-**And the reason that fix cannot do what §3 wanted is measured here, because it
-is why this doc stays.** §3's proposal was to distinguish
-`Span[StaticString, ImmStaticOrigin]` from `size_of[type, target]` by classifying
-`StaticString` as the type it is, so the contrast would fire and the message
-would name `ImmStaticOrigin` alone. **`StaticString` cannot be classified, on this
-tree, by any table this call holds.** Run over `std/sys/arg.mojo`:
+**And the reason that fix could not do what §3 wanted is measured here, and §6
+shows the measurement was right about the numbers and wrong about the cause.**
+§3's proposal was to distinguish `Span[StaticString, ImmStaticOrigin]` from
+`size_of[type, target]` by classifying `StaticString` as the type it is, so the
+contrast would fire and the message would name `ImmStaticOrigin` alone. On the
+tree of the day, **`StaticString` was in none of the four tables this call
+holds.** Run over `std/sys/arg.mojo`:
 
 ```
 $ python3 -c "… I.imported_struct_defs('…/std/sys/arg.mojo', stmts, root) …"
@@ -41,20 +120,16 @@ StaticString in it: False
 ImmStaticOrigin in it: False
 ```
 
-220 reachable struct declarations and `StaticString` is not one of them — it is
-neither in `type_constructor_kind`'s table, nor in `POINTER_TYPE_CTORS`, nor in
-the struct table this unit compiles, nor in the imported set. So the
-`Span[StaticString, ImmStaticOrigin]` case lands in the **all-names** branch and
-the sentence that reaches a reader of `arg.mojo` is the all-names one. That is
-why the fix had to go there rather than in the mixed branch, and why it is worth
-having at all.
+So the `Span[StaticString, ImmStaticOrigin]` case landed in the **all-names**
+branch and the sentence that reached a reader of `arg.mojo` was the all-names
+one. That is why the clause had to go there rather than in the mixed branch, and
+why it is worth having at all.
 
-**What §3's other half still wants** — the reader being told *which* of the two is
-the interesting one — needs `StaticString` to be resolvable, which is a fact
-about a module this repository does not own (`std/builtin/static_string.mojo` is
-not reachable from `arg.mojo`'s import closure through
-`formal/imports.py`'s walk). That is an import-reachability question and it is
-**not measured here** beyond the 220 above.
+**§6 corrects the last two sentences of that.** The 220 are right and
+`ImmStaticOrigin` in none of them is right; what was wrong was reading "not among
+the reachable DECLARATIONS" as "not a type". `StaticString` is a builtin, so
+there is no declaration to be among — the fix was one table entry and no
+import-reachability work at all.
 
 **What this does NOT do.** It changes no lowering and no refusal: the same
 programs are refused on both architectures with the same verdict, and
@@ -65,8 +140,8 @@ row is the load-bearing half: a change that appended the clause everywhere would
 pass the four positive rows and fail it.
 
 Filed 2026-10-04 on `work/formal25-5` because two bug docs said this construct had
-no doc of its own — `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md`
-§3 ("Link 2 has NO bug doc and no claim … it is filed nowhere of its own, and 4
+no doc of its own — the round-2 `std-os-io` scope audit's §3 ("Link 2 has NO bug
+doc and no claim … it is filed nowhere of its own, and 4
 files of this scope sit behind it, so it is worth a doc rather than a mention")
 and `bugs/FORMAL_std_builtin_sys_time_slice_2026-10-04.md` §3 row 12, which
 filed it under monomorphisation. **Both of those attributions are wrong, and this
@@ -135,8 +210,8 @@ ImmStaticOrigin              a name with no WORD to bind
 Span[StaticString, ImmStaticOrigin]()      ← link 2, the refusal as reported
 ```
 
-Link 1 is `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops`'s
-area (`formal19-4`), and it is the same wall the chain walk measures at its
+Link 1 is the MLIR dialect construct's area (`formal19-4`), and it is the same
+wall the chain walk measures at its
 eighth link on the same scope (`reflect.mojo: the module-level comptime binding
 '_field_types_of' is initialized from an MLIR attribute template`). **Link 2 is
 this doc's, and it is not a monomorphisation question**: the instantiation
@@ -162,8 +237,10 @@ list has nothing to bind for it" — which is the sentence a reader of `arg.mojo
 needs, and it is FALSE for the other bracket in the same corpus that this arm
 refuses (`size_of[type, target]`, where both elements are types and the sentence
 above is the right one). The two need distinguishing because they are two
-different walls; today they are one sentence. **§5 says how far this landed and
-why the reader of `arg.mojo` gets the ALL-NAMES branch rather than this one.**
+different walls; today they are one sentence. **§6 is the distinction landing**:
+`arg.mojo` now takes the MIXED branch and is told which element to look at, and
+`size_of[type, target]` keeps the plain sentence — which is the whole of what
+this paragraph asked for.
 
 **What it is worth:** 4 files of one scope, and the honest number for the corpus
 is not measured here. Take it from a sweep rather than from this doc.

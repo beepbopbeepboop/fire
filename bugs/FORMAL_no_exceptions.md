@@ -1,5 +1,13 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
+**Status 2026-10-12 (`work/formal281-docs`): the rule stands and items 1 and 2
+are untouched; the only stale figure is the suite size.** `test_formal_exceptions.py`
+is **315 checks, green** (both architectures) — the two Status entries below quote
+**285**, the count at `formal126-docs`; the file has grown by the `raise`/`finally`
+rows that landed since. Every claim about the RULE below (a `raise` evaluates its
+expression, runs the enclosing `finally`, and terminates; a handler arm with a
+body is refused by name; the three host-module conventions) is unchanged.
+
 **Status 2026-10-07 (`formal126-docs`): item 3 of "The next step" is DONE, and
 the claim below that "there is no test in the tree that raises on this path" is
 no longer true.** `test_formal_exceptions.py` landed 2026-10-05 and is 285
@@ -13,18 +21,48 @@ below (one discoverable convention; an EH runtime or not) are unchanged design
 projects, and item 1's cost is three host modules' worth of churn, which is not
 this document's to spend.
 
+**Status 2026-10-08 (`work/formal193-docs`): the 10-07 records above are
+re-verified, and the 2026-09-30 measurements under "What I ran" are corrected
+where they have gone stale.** Read the rest of this file as the record of
+2026-09-30, with the corrections below.
+
+- **(c) the same `try`/`except` with a body is refused whether or not anything
+  is raised**, so the program that measured "`try` is lowered and works" under
+  "What I ran" no longer runs; the positive half survives in
+  `test_formal_exceptions.py` as `an_except_pass_arm_still_builds` and
+  `else_runs_when_the_body_completed`.
+- **(d) the arm64 flush divergence is GONE** — a `raise 7` after a `printf` now
+  prints `before@@` and exits 1 on arm64 as it always did on x86-64, measured
+  that session on both backends; the 10-07 sections above already record the
+  fix and the deletion of the divergence's own document.
+- The handler-arm refusal the 10-07 sections record is confirmed by name on
+  both backends; the three refusal rows it stands on are
+  `an_except_arm_with_a_print_is_refused_by_name`,
+  `an_except_as_binding_is_refused_by_name` and
+  `a_bare_except_with_a_body_is_refused_by_name`.
+
+Next step 3 remains DONE exactly as the 10-07 sections and the "The next
+step" item below record it; steps 1 and 2 (one discoverable convention; an
+EH runtime) are unchanged design projects and are not this update's.
+
 **Status:** open, and it is a LIMIT OF THE TARGET rather than a defect — but it
 is load-bearing for every module under `formal/hostmods/`, and until it had a
 document `formal/hostmods/json.mojo` cited a file that did not exist. Found
 2026-09-30 while auditing the cross-references of the second host-module wave;
 the measurement below is new, the behaviour is old.
 
-**Status 2026-10-07 (`formal112-docs`): the RULE is unchanged, next step 3 is
+**Status 2026-10-07 (`formal112-docs`; `work/formal160-docs` recorded the same
+state independently): the RULE is unchanged, next step 3 is
 DONE, and case (a) below is STALE.** The uncaught half of the contract now has
 its own suite — `test_formal_exceptions.py`, **285 checks, green**, both
-architectures — so "there is no test in the tree that raises on this path" (next
-step 3) is no longer true and the `arm64` flush divergence it says sat unnoticed
-has its own document and its own rows. And case (a)'s shape is no longer a
+architectures — it runs each program under `python3` and the image and
+compares stdout AND exit status, which is the observable the exit-0-only
+`test_formal_run.py` runner could not express — so "there is no test in the tree
+that raises on this path" (next step 3) is no longer true and the `arm64` flush
+divergence it says sat unnoticed has its own rows
+(`test_formal_link_accounting.py::test_raise_flushes_stdout` and the parity
+file's `printed_output_survives_a_raise`; the divergence's own document was
+deleted with the fix). And case (a)'s shape is no longer a
 build-and-die: `try: raise …` with an `except:` arm that has a BODY is now
 REFUSED by name ("… is a handler arm with a body this path cannot put in the
 image"), which is the honest form of the same fact — the arm could never run, so
@@ -33,8 +71,8 @@ states is exactly what makes that refusal correct, and the measured table in
 "what a `raise` actually lowers to" still holds for a `raise` the image DOES
 build: evaluate the expression, run the enclosing `finally`, terminate. Next
 steps 1 (one convention for the host modules) and 2 (an EH runtime, or not) are
-untouched.
-
+untouched and open — item 2 is the reason this stays a limit-of-the-target
+document.
 **Why a document rather than a line in a module docstring.** Four modules now
 answer the same question differently because of this, and each had to invent its
 own wording: `os.makedirs` is CPython's `makedirs(path, exist_ok=True)` with no
@@ -130,11 +168,21 @@ $ echo $?
 
 No output at all, and exit 1. `before` was printed (see the control below), so
 the `except` arm did not run and `after` did not either. **The lost `before` was
-a separate defect** — on arm64 a `raise` left through an inline `svc`, a raw
-Darwin `SYS_exit` that skips libc's `exit` and its stdout flush — and it is why
-this program's output was empty rather than `before`. It is fixed: every exit
-goes through `_emit_exit`, which flushes, and it is pinned by
-`test_formal_x86_64_parity.py`'s `printed_output_survives_a_raise`.
+a separate defect** — the arm64 `raise` left through a raw Darwin `SYS_exit`
+that skips libc's `exit` and its stdout flush — and it is why this program's
+output was empty rather than `before`. It is fixed: `_emit_exit` flushes
+through `fflush(NULL)` before the trap and every error stop shares it; the
+gate-resident pin is `test_formal_link_accounting.py::test_raise_flushes_stdout`,
+and the class `test_formal_x86_64_parity.py`'s `FAILING_CASES` carries the same
+shape (`printed_output_survives_a_raise`).
+
+**STALE 2026-10-08: this program no longer builds at all.**  A `try` whose
+`except` arm has a body is refused by name on both backends (the arm's effects
+would be silently absent from the image that runs), so (a) and (c) below are
+historical readings and not the current answers.  The flush half of the reading
+is separately fixed — the control (b) and the bare raise (d) both print the line
+now — and the live subject for the `try` half is
+`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`.
 
 **(b) the control — the same program with `return 1`, no raise:**
 
@@ -197,7 +245,10 @@ $ echo $?
 
 Identical control flow — terminate with status 1, no unwinder — and the two
 backends differ in whether the buffered output survives, which is the flush
-document's bug and not this one.
+document's bug and not this one.  **Both backends now print `before@@` (measured
+2026-10-08): `_emit_exit` flushes before the raw `svc`, so the divergence this
+paragraph records is closed and the output above is the historical reading.**
+The arm64 line printed nothing when this was written; it prints the line now.
 
 ## The rule, stated once
 
@@ -246,9 +297,12 @@ Ordered by what unblocks the most:
 3. **Pin the behaviour so a backend change cannot quietly alter it.** There was
    no test in the tree that raises on this path, which is why the arm64 flush
    divergence (a `raise` leaving through an inline `svc` that skips libc's
-   `exit`) sat unnoticed through both backends and both host-module waves. It is
-   now pinned by `test_formal_x86_64_parity.py`'s `printed_output_survives_a_raise`.
-   A three-case group —
-   raise under a handler, `try` with nothing raised, and `return 1` — is enough,
-   and it belongs beside `test_formal_link_accounting.py`, which is the
-   gate-resident file that already owns "does the thing this claim names exist".
+   `exit`) sat unnoticed through both backends and both host-module waves.
+   **It is DONE:** that pin now exists — `test_formal_link_accounting.py::test_raise_flushes_stdout`
+   builds `printf` then `raise`, the same source with `return 1`, and asserts
+   both keep their stdout and exit 1 on both backends — the gate-resident file
+   that already owns "does the thing this claim names exist" — and the class
+   `test_formal_x86_64_parity.py`'s `FAILING_CASES` (`printed_output_survives_a_raise`)
+   carries the same shape for the file that is in no bucket. The suite itself,
+   `test_formal_exceptions.py`, is also not in a `tools/suite.py` bucket;
+   registering it is a separate decision this document does not make.

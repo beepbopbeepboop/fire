@@ -28,6 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node,
+    for_target_is_tuple, for_target_names,
     _as_comptimevar_node, _as_intlit_node, _as_boollit_node,
 )
 import ast_rewriter
@@ -61,6 +62,7 @@ from mojo.middle.funcs_shared import (
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
+from mojo.middle.types import _body_builds_struct_tuple
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # The body that OWNS this nested `def`'s environment — read ONCE, here,
@@ -518,6 +520,15 @@ def _gen_stmt_FromImportStmt(gen, node):
                 }
             ret = _fi_info.get('c_return_type', 'int64_t')
             if symbol_name not in gen.func_return_types:
+                if isinstance(ret, str) and ret.startswith('MojoTuple_'):
+                    # Same part 4 decision as `register_imported_symbol`
+                    # (see there): the scanned `Tuple[...]` return annotation
+                    # answers the synthesized struct; the runtime-literal
+                    # shape is `MojoList *`.
+                    _home_ret = gen._func_return_type_for_call(
+                        symbol_name, None)
+                    if not (_home_ret and _home_ret.startswith('MojoTuple_')):
+                        ret = _home_ret if _home_ret else 'MojoList *'
                 gen.func_return_types[symbol_name] = ret
             if _fi_qual:
                 # Same mode-dependent qualifier rule as the top-level
@@ -816,6 +827,8 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
     _ct_node = _as_comptimevar_node(node)
     val = gen._eval_const(_ct_node.value)
     if val is not None:
+        if isinstance(val, str):
+            gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
     if isinstance(_ct_node.value, gimple_ctypes.ListExpr):
         gen._comptime_list_asts[_ct_target] = _ct_node.value
@@ -890,6 +903,85 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     gen.gen_stmt(s)
                 i += step
             return
+    elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
+            and isinstance(node.iterable.func, gimple_ctypes.IdentExpr)
+            and node.iterable.func.name == 'product'):
+        # PART 6 (2026-10-23, family B): `comptime for i, j in product(range(2),
+        # range(2))` — the test_product._param family (ladder idx 4/10/16).
+        # Real Mojo runs a comptime loop in the COMPILER: the 4/8/16 body
+        # executions happen at compile time, so the runtime assert sees the
+        # accumulated trip_count. Before this branch every non-`range`
+        # iterable fell through to the `if not unrolled: pass` drop below —
+        # the body never emitted, trip_count stayed 0, and the ladder's idx
+        # 4/10/16 asserted 0 against 4/8/16 (measured: `FAIL assert_equal:
+        # words 0 / 42949673xx` + abort rc=134, the same signature D2 carried
+        # for all three). Unroll the Cartesian product when EVERY argument is
+        # a const-int `range(...)` — per axis, the same three arities the
+        # range branch above evaluates — and emit the body once per
+        # combination with each target bound to its concrete value, rightmost
+        # axis varying fastest (the product order test_product4_order pins:
+        # "Rightmost iterator varies fastest"). Every body statement lowers
+        # through the ordinary runtime path; the emitted statements are the
+        # same shapes as test_product4's green RUNTIME loop body, measured in
+        # the D2-era C (tuple-literal MojoList construction,
+        # mojo_list_contains_int membership, std_testing___init___assert_true,
+        # the trip_count AugAssign) — only the loop mechanics differ.
+        #
+        # The gate stays narrow on purpose: multi-target only, and at least
+        # two iterables — a 1-iterable `product(...)` would bind each target
+        # a 1-tuple in real Mojo, a shape no measured test uses, and guessing
+        # its scalar-vs-tuple semantics here would be the speculative-green
+        # this branch exists to avoid. Any gate miss (non-range argument,
+        # non-const argument, target/argument arity mismatch) falls through
+        # to the pre-branch drop, exactly today's behaviour. The cap only
+        # ever makes the branch MORE conservative — beyond it the loop drops
+        # red with a named reason, never a false green: the Cartesian product
+        # is multiplicatively explosive in a way the single-axis range
+        # unroll is not, while the measured tests use ≤ 16 combinations.
+        _ranges = []
+        for _a in node.iterable.args:
+            if not (isinstance(_a, gimple_ctypes.CallExpr)
+                    and isinstance(_a.func, gimple_ctypes.IdentExpr)
+                    and _a.func.name == 'range'):
+                _ranges = None
+                break
+            _ivals = [gen._eval_const_int(x) for x in _a.args]
+            if len(_ivals) == 1 and _ivals[0] is not None:
+                _ranges.append((0, _ivals[0], 1))
+            elif len(_ivals) == 2 and all(v is not None for v in _ivals):
+                _ranges.append((_ivals[0], _ivals[1], 1))
+            elif len(_ivals) == 3 and all(v is not None for v in _ivals):
+                _ranges.append((_ivals[0], _ivals[1], _ivals[2]))
+            else:
+                _ranges = None
+                break
+        if (_ranges is not None and len(_ranges) >= 2
+                and for_target_is_tuple(node.target)):
+            _axes = []
+            for _s, _e, _st in _ranges:
+                _vals = []
+                _i = _s
+                while (_st > 0 and _i < _e) or (_st < 0 and _i > _e):
+                    _vals.append(_i)
+                    _i += _st
+                _axes.append(_vals)
+            _names = for_target_names(node.target)
+            if len(_names) == len(_ranges):
+                _combs = [()]
+                for _ax in _axes:
+                    _combs = [_c + (_v,) for _c in _combs for _v in _ax]
+                if len(_combs) <= 256:
+                    for _t in _names:
+                        if _t not in gen.var_types:
+                            gen._declare_var(_t, 'int64_t')
+                    for _combo in _combs:
+                        for _t, _v in zip(_names, _combo):
+                            _dst = gen.var_types.get(_t) or 'int64_t'
+                            gen._safe_coerce_emit(
+                                'int', _dst, str(_v), _t)
+                        for s in node.body:
+                            gen.gen_stmt(s)
+                    return
     if not unrolled:
         pass
 
@@ -2701,6 +2793,20 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Determine return type: annotation takes priority; infer if absent.
     if node.return_type is not None:
         ret_type = gen._resolve_type(node.return_type)
+        # The SAME body-sensitive decision the struct-method definition
+        # pass makes below (`_gen_struct_method`): a `-> Tuple[...]` return
+        # whose body builds the tuple as a RUNTIME (list-backed) tuple
+        # literal returns `MojoList *`, not the synthesized by-value
+        # struct — without this this definition pass overwrites the
+        # signature pass's `MojoList *` back into func_return_types, the
+        # prototype declares a struct return, and the typedef is never
+        # emitted (`unknown type name 'MojoTuple_...'`; measured 2026-10-21
+        # part 4 integration on `split`'s `-> Tuple[String, String]`).
+        if (isinstance(ret_type, str)
+                and ret_type.startswith('MojoTuple_')
+                and not _body_builds_struct_tuple(
+                        getattr(node, 'body', None))):
+            ret_type = 'MojoList *'
     else:
         # Seed any local holding a closure VALUE (`var f = inner`) so
         # `return f` infers the closure's real MojoBoundMethod*/void*
@@ -2848,10 +2954,27 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
     # feature; this file only ever calls in at these two points.
-    gen._begin_function(node)
-    for stmt in node.body:
-        gen.gen_stmt(stmt)
-    gen._emit_fallthrough_frees(node)
+    #
+    # `_emitting_plain_func` marks the body of a TOP-LEVEL function — the
+    # ONE emission context whose C is never `__GIMPLE`-tagged (this
+    # function's signature line above has no tag; struct methods and
+    # lifted closures are tagged unless their body used setjmp).
+    # emit_calls._lower_immpointer_ctor reads it to pick the ImmPointer
+    # `to=` storage shape: only HERE may it take the address of a
+    # function-scoped `static` (the strict -fgimple dialect rejects `&`
+    # of ordinary variables inside a `__GIMPLE`-tagged function —
+    # measured 2026-10-21 on std/python/python.mojo's `Python.__init__`:
+    # "expected expression before '&' token"). Every other context gets
+    # the heap shape, which is valid in both worlds. Set/restore spans
+    # exactly the body lowering, where the call sites are emitted.
+    gen._emitting_plain_func = True
+    try:
+        gen._begin_function(node)
+        for stmt in node.body:
+            gen.gen_stmt(stmt)
+        gen._emit_fallthrough_frees(node)
+    finally:
+        gen._emitting_plain_func = False
 
     # Add implicit return 0 for main if it returns int but has no explicit
     # return. Deliberately NOT `gen.body_lines[-1:]`/`gen.body_lines[-1]`
@@ -3908,6 +4031,23 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = f"{struct_name} *"
         else:
             ret_type = gen._resolve_type(node.return_type)
+            # Part 4: a `Tuple[...]` return needs the SAME body-sensitive
+            # decision the signature pass made — the `bounds()` family
+            # builds its tuple as a runtime (list-backed) tuple literal
+            # (value a `MojoList *`; returning the synthesized struct
+            # would cast a list pointer — invalid C), and only a body
+            # that declares a `var <x>: Tuple[...]` local (zip's
+            # `__next__`) hands the struct back by value. Without this,
+            # this definition pass would overwrite the signature pass's
+            # `MojoList *` back into `func_return_types` with the raw
+            # `_resolve_type` answer, and the prototype (which reads
+            # that table) would declare a struct return whose typedef
+            # is no longer emitted (`unknown type name 'MojoTuple_...'`).
+            if (isinstance(ret_type, str)
+                    and ret_type.startswith('MojoTuple_')
+                    and not _body_builds_struct_tuple(
+                            getattr(node, 'body', None))):
+                ret_type = 'MojoList *'
     else:
         # Seed inferred LOCAL var types so `return <local>` where the
         # local holds a pointer value (e.g. a bytes accumulator built

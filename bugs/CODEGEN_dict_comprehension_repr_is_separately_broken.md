@@ -12,6 +12,17 @@ are single-clause-reproducible, none is about how many `for` clauses the
 comprehension has, and fixing them needs a different mechanism (the dict's
 per-slot kind table) than that fix did.
 
+**2026-10-19 (`work/mimo-cgen3b-1`): STILL OPEN, but the 2026-10-02 Status is
+now partly out of date and the last section supersedes it.** The fix was
+designed, prototyped, measured (six of eight measured shapes became
+byte-identical to CPython) and then REVERTED, because its new runtime entry
+point forces an ABI-count update inside `formal/` — see that section for the
+full account, the measured before/after table, and the order the next worker
+should land it in. Two corrections worth having even if you read nothing else:
+the **interpreter is already correct on every one of these shapes** (this is a
+compiled-path-only defect, not a data-model rewrite), and `{True: 1}` prints
+`{1: 1}` rather than the `{'True': 1}` this doc recorded.
+
 ## What I ran and what I saw
 
 Three separate programs, each on its own, all `python3 fire.py --jit`-style
@@ -226,3 +237,140 @@ So this doc stays open, narrowed to those two, and the next step is now the
 *domain*, not the repr: one `_DictSlot.keykind` value for "a container's
 content text" (and one for a float/bool key) turns both into the same change
 to the repr's one `if`.
+
+## Status (2026-10-19, `work/mimo-cgen3b-1`) — still OPEN; the fix was designed, prototyped, measured, and then NOT landed for two named reasons
+
+This worker took the doc's own "next step" (one `_DictSlot.keykind` change),
+built it, measured it, and reverted it. Everything below is measured on this
+tree, not recalled.
+
+### The measured state, which supersedes the tables above
+
+One program, all eight shapes, compiled (`fire.py --jit`) against CPython and
+against this repo's own interpreter (`fire.py run`):
+
+| source | CPython | interpreter | compiled |
+|---|---|---|---|
+| `{10: "a"}` | `{10: 'a'}` | `{10: 'a'}` | `{'10': 'a'}` |
+| `{"10": "a"}` | `{'10': 'a'}` | `{'10': 'a'}` | `{'10': 'a'}` |
+| `{1.5: "x"}` | `{1.5: 'x'}` | `{1.5: 'x'}` | `{'1.5': 'x'}` |
+| `{True: 1}` | `{True: 1}` | `{True: 1}` | `{'1': 1}` |
+| `{i: 1 for i in range(3)}` | `{0: 1, 1: 1, 2: 1}` | same | `{'0': 1, '1': 1, '2': 1}` |
+| `d[10] = "a"; print(d)` | `{10: 'a'}` | `{10: 'a'}` | `{'10': 'a'}` |
+| `d["10"] = "a"; print(d)` | `{'10': 'a'}` | `{'10': 'a'}` | `{'10': 'a'}` |
+| `d[1.5] = "x"; print(d)` | `{1.5: 'x'}` | `{1.5: 'x'}` | `{'1.5': 'x'}` |
+
+Two corrections to what this doc and its sibling recorded:
+
+1. **The interpreter is already right on every line above.** The 2026-10-02
+   Status treats the missing keykind as a RUNTIME limitation. It is not: the
+   interpreter answers `{10: 'a'}` for `{10: "a"}` today. The defect is
+   compiled-path-only, which makes this a codegen question and not a data-model
+   rewrite.
+2. **`{True: 1}` prints `{1: 1}`, not `{'True': 1}`** — the bool is lowered to
+   the integer 1 before it reaches the dict, so it is an integer-key problem
+   and not a float/bool-text one. The sibling doc's measured `{'True': 1}` is
+   stale.
+
+### And a third thing neither doc recorded: `d[5]` and `d["5"]` are ONE entry here and TWO in Python
+
+    d = {}; d[5] = "int"; d["5"] = "str"; print(d); print(len(d))
+
+| | CPython | interpreter | compiled |
+|---|---|---|---|
+| | `{5: 'int', '5': 'str'}` | `{5: 'int', '5': 'str'}` | `{'5': 'str'}` |
+| `len` | 2 | 2 | 1 |
+
+`_canon_int` promotes a canonical-decimal STR key into an INTEGER slot
+(`keykind == 2`) however it arrived, and `_dict_find_k`/`_dict_lookup_k` route
+a canonical-decimal text key to `_dict_find_ik`/`_dict_lookup_ik`. That merge
+is the same fact as the repr bug, seen from the other side: **the slot cannot
+say whether the source wrote `5` or `"5"`, so `_mojo_repr_dict` cannot answer
+"was this an integer?" and its own comment declines the arm.** Note the
+comment at `test_runtime_diff.py`'s `dict_repr_zero_value_is_not_the_
+none_sentinel` asserts CPython merges them too; it does not (measured, both
+spellings, `len(d)` and all).
+
+### The design that was built and measured, and what it did
+
+No new mechanism: a leading marker byte on a rendered integer key, which is
+exactly the trick `MOJO_KEY_TUPLE 3` already uses to keep a container's content
+key apart from an ordinary str key spelling the same characters.
+
+- a runtime `mojo_intkey_str_transient(int64_t)` returning `'\x02'` + decimal
+  from the same transient pool `mojo_int_str_transient` uses (`_INT_STR_BLOCK`
+  is 32 and a decimal is at most 20 characters plus NUL, so it fits);
+- `_intkey_marked()` stripping that prefix in `_dict_set_raw_seq_kind_k`,
+  `_dict_find_k` and `_dict_lookup_k` (the marker is a prefix, so the text
+  handed to `_str_hash`/`strcmp` is simply `key + 1` — already NUL-terminated,
+  no copy);
+- `_canon_int`'s promotion and its two lookup redirects REMOVED, so a genuine
+  str key stays a text slot;
+- the two codegen sites that render a typed integer dict key
+  (`_emit_dict_pair_store`'s `int`/`int64_t`/`_Bool` arm, and
+  `_char_to_cstr`'s `_int_word_vals` branch — the ONE conversion every
+  subscript get/set/augmented-assign/`in`/`del`/`pop`/`setdefault`/
+  comprehension key goes through) emitting the marked form;
+- `_mojo_repr_dict` gaining the arm it declines: `keykind == 2` prints
+  `mojo_dict_slot_key` (already the DECIMAL for an integer slot) UNQUOTED.
+
+Result, measured before reverting — six of the eight rows above became
+byte-identical to CPython, and the `d[5]`/`d["5"]` case became
+`{5: 'int', '5': 'str'}` / `len(d) == 2`, also byte-identical to CPython.
+`test_gimple.py` stayed 396/396 and `test_runtime_diff.py` 63/63.
+
+The two rows still wrong afterwards, and NOT part of that change:
+`{1.5: "x"}` still `{'1.5': 'x'}` (a float key is rendered to text by
+`_char_to_cstr`'s `double` arm and has no marker of its own), and `{True: 1}`
+still `{1: 1}` (a bool is already an integer by the time it is a key).
+
+### Why it was reverted: two blockers, one hard and one a spec change
+
+1. **HARD, and outside this worker's remit.** The new runtime entry point goes
+   in `runtime/fire_runtime.h`, and `test_runtime_header_scan.py` enforces that
+   every quoted ABI count in the tree matches `runtime_abi()`. Adding one
+   header entry moves `fire_runtime_h` 581 -> 582 and the total 684 -> 685,
+   which fails 25 checks across `FORMAL.md`, `bugs/FORMAL_known_limits.md`,
+   `build_stdlib_dylib.py`, `fire_runtime.h`, `formal/build.py` and
+   `formal/model.py`. Two of those six live in `formal/`, which this worker is
+   instructed not to touch. There is no way to add the marker's producer
+   without a header entry, so this cannot be landed from here.
+   (The obvious shortcut — routing a typed integer key through the EXISTING
+   `mojo_dict_set_int_kw`/`_kw` family, which already makes a `keykind == 2`
+   slot and needs no new function — is unsafe and is why
+   `gimple_dict_key_above_2gb_is_an_integer` exists: `_kw_kind` classifies with
+   `mojo_boxed_is_str`, a range test that calls every positive int64 in
+   [2^31, 2^47) a pointer, so `d[3000000000] = 1` becomes a `strcmp` of
+   address 3000000000 and SIGSEGVs. That is exactly why `_char_to_cstr`'s
+   `_int_word_vals` branch renders a decimal instead.)
+2. **A deliberate spec change, which this worker declined to fold into a repr
+   fix.** Separating `d[5]` from `d["5"]` requires updating two groups in
+   `test_ptr_registry.py` that pin the old merge as the contract:
+   `dict_int_keys` ("int and string spellings of a key are ONE entry, in both
+   directions", asserted at four points including `d->used == 2` and the
+   `keys()` order list) and `dict_set_inline` (`mojo_dict_contains(cp,
+   "103")` finding an integer slot). Both breaks are CORRECT — CPython misses
+   on a text read of an integer key, and this repo's own interpreter misses
+   too — but rewriting the runtime's spec is a bigger claim than "the repr
+   quotes an integer key", and belongs in the change that makes it, with the
+   interpreter's agreement cited rather than assumed.
+
+The prototype was reverted rather than left half-landed: `git diff` against
+`master` is clean for `runtime/`, `mojo/backend_gimple/{module_gen,emit_exprs,
+emit_infra}.py` and `runtime/fire_runtime.h`, and
+`test_runtime_header_scan.py` (72/72), `test_ptr_registry.py` (28/28) and
+`test_runtime_diff.py` (63/63) are back to green.
+
+### What the next worker should do, in order
+
+1. Land the `_canon_int` promotion removal + the two lookup redirects' removal
+   FIRST, alone, updating `test_ptr_registry.py`'s two groups in the same
+   commit and citing the interpreter's measured agreement. Nothing else in the
+   tree depends on the merge.
+2. Then the marked key (the runtime entry, the header ABI counts including the
+   two `formal/` files, and the two codegen sites) — one commit, one doc.
+3. Then `_mojo_repr_dict`'s arm, which is then a one-line change with no
+   guessing in it.
+4. Float and bool keys are a SEPARATE change on top: a float key needs its own
+   marker and its own keykind, because `_canon_int` cannot read `"1.5"` either,
+   and a bool key needs the codegen to stop lowering it to the integer 1.

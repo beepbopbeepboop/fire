@@ -15,6 +15,7 @@ owned it, and a reader could not tell which half was settled:
 | modelling `CSEL` turns a NAMED OBLIGATION into a build failure, and it is not a budget question | §2 below |
 | the `hprior_*` cost centre and the certificate's Lean bound | **`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`** (live claim) |
 | the `CSEL` model row itself | **`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`** (live claim) |
+| the last export's unprovable `_semantics_total` (the two red rows below, §1.4) | **`FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`** (live, 2026-10-13) |
 | the loop-fuel obligation (`OPUS-4`) | **`FORMAL_dylib_export_loops_and_frame_bounds.md`** (live claim) |
 
 The two documents it replaces were the dylib block-layer doc (deleted in f40f9eaf)
@@ -27,6 +28,32 @@ was deleted in the same commit and `OPUS.md`'s pointer to it was repointed.
 the two open subjects are named rather than restated, because both are held by
 live claims and a second copy of either is a document that will be right until
 the claim lands and then wrong.
+
+**Update 2026-10-08 (`work/formal227-docs`): §1's pins were RED on `master`, and
+the cause was a step-lemma bug that is now fixed; what they still report is the
+hole COUNT, which is a separate OPEN regression this doc does not own.**
+`test_formal_dylib.py::a conditional value is not a branch` and
+`test_several_exports_and_no_derivable_spec` both failed with Lean REJECTING the
+emitted contract ("lean rejected a contract for a block whose steps choose
+values"), not with a wrong hole count. The cause was
+`formal/arm64_proof_gen.py::_gen_step_result_lemmas`'s TBZ/TBNZ sign-extend
+decision: `hb`'s polarity was taken from `w & 0x2000` — bit 13 of the word —
+while its `lhs` isolates bit 13 of `w >>> 5`, which is bit 18 of the word, so
+`hb` was FALSE for `csetval.mojo`'s TBZ (`0x36312064`: bit 13 set, bit 18 clear)
+and its `native_decide` could not fire. Fixed to `0x00040000`, the mask the
+19-bit family already uses, and pinned by
+`test_formal_call_proof_gen.py::TestBitTestBranches::
+test_the_sign_decision_reads_the_immediate_s_own_bit` (commit `a6d7d416`). Lean
+now ACCEPTS both proofs, so §1's block-layer fix stands.
+
+**The hole COUNT both tests still report is `bfeec991`'s regression, not this
+emitter's:** a branched export (`branched`, `pick`) whose prologue carries the
+stack-floor guard's `bl getrlimit` is refused by `_gen_universal_e2e_cfg`'s
+fixed-fuel `any bl` check, so its `_semantics_total` is a `sorry` and the counts
+are 2 and 1 against this doc's 1 and 0. That is
+`FORMAL arm64 stack floor getrlimit is the opaque call for every function`'s
+subject; the counts move when that call leaves the walked path, and nothing here
+substitutes for it.
 
 ---
 
@@ -131,18 +158,61 @@ and two cases in `test_formal_call_proof_gen.py`'s `TestBitTestBranches` pin it
 (a TBZ and a CBZ whose two bits disagree).
 
 **That fix is necessary for this document's test but not sufficient for it
-today**, and the rest is not this document's: with the step lemmas compiling,
-the two tests now fail one assertion later, on a HOLE COUNT — `dylib_export_N_
-…_semantics_total` is emitted as a `sorry` because the export's CFG contains a
-`bl`. That `bl` is the arm64 stack-floor guard's `getrlimit` call in every
-prologue, which is exactly the regression
-`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md` measures and owns
-(its own text: "with the call in the prologue, `test_formal_call_proof_gen.py`
-goes from 21 failures to 42 failures and 15 errors"); the fix it names is to
-move the read into the startup stub. So the block layer's half of this document
-is landed and pinned, and the test goes green when that claimed regression is
-fixed — not before.
+today**, and the rest is not this document's. With the step lemmas compiling,
+the two tests now fail one assertion later, on a HOLE COUNT. **That attribution
+was measured WRONG on 2026-10-13 (`work/formal404-docs`), and the correction is
+the useful part:** the extra hole is the LAST export's `dylib_export_N_…
+_semantics_total`, and its cause is not a `bl` at all — the regression the
+earlier reading named (`FORMAL_arm64_startup_stub_extern_call_lands_past_text.md`)
+has since been FIXED and its doc deleted,
+`TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath` passes, and there is no `bl`
+in the last export's extent. The real cause is that the last export's
+`DylibExport.exportEnd` is `base + codeSize`, and `code` carries the image's
+interned strings past the last function's `RET`, so the constant-fuel CFG walk
+decodes string bytes, finds a spurious back edge, and declines. It is measured and
+filed in full — with the test to reproduce it and the only two honest fixes — as
+`bugs/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`.
+So the block layer's half of THIS document is landed and pinned; the two red
+rows are a separate, now-named defect that reaches into `lib/ProofLib.lean`'s
+export-table fold and is not this document's to close.
 
+**A 2026-10-17 correction to this section, measured, because the reading it
+replaces is what a reader finds first.** An earlier §1.5 on this file recorded
+the defect as FIXED — "`formal/arm64_proof_gen.py`'s new `_export_body_end` gives
+the walk/`Block` its own range (past the export's last `RET`) …
+`_dylib_contract_proof` gained an explicit `exit_pc` … `test_formal_dylib.py` is
+**27 PASS / 0 FAIL**" — and none of that is in the tree:
+
+```console
+$ grep -c _export_body_end formal/arm64_proof_gen.py
+0
+$ grep -n 'def _export_extent' -A9 formal/arm64_proof_gen.py
+12964: def _export_extent(exports, entry, base, code_size):
+          The end of one export's OWN code: the next export's entry, or the end of
+          the image for the last one.
+12978:     later = sorted(e["entry"] for e in exports if e["entry"] > entry)
+12979:     return later[0] if later else base + code_size
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_dylib.py
+  PASS  the last export's walk ignores the image tail
+  …
+formal dylib: PASS=28 FAIL=1
+```
+
+`_dylib_contract_proof`'s `exit_pc` DID land, so the half that went missing is
+`_export_body_end` and whichever call site read it: the prose and the fix went in
+separately and a bulk merge kept one. `test_the_last_exports_walk_ignores_the_
+image_tail` passes, but for a reason this section does not give — the walk judges
+only blocks REACHABLE from the export's entry, so the image tail is not read at
+all. That is a different fix and it leaves the `semantics_total` hole open. The
+row that shows it is `a conditional value is not a branch`, and until 2026-10-17
+it was ERRORing rather than failing, on an unrelated half-applied rename in
+`formal/arm64_proof_gen.py::_step_rhs` (its CMP-immediate arm interpolated a name
+nothing binds); that rename is corrected in this merge's commit, so the row now
+fails for the reason stated here rather than for a `NameError`.
+
+So: the `_export_body_end` fix is NOT on the tree, and
+`bugs/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md`
+is the live record of the defect.
 ---
 
 ## 2. Modelling `CSEL` turns a NAMED OBLIGATION into a BUILD FAILURE
@@ -240,7 +310,14 @@ cross-path sharing would be unsound: `s_{pb}` is REBOUND per path, so a fact
 about `s_8` proved on one path is about that path's `s_8`.
 `test_formal_call_proof_gen.py`'s `TestNestedConditionFactSharing` holds the memo
 to that — one check fails if a fact is proved twice in a scope, one if a fact is
-USED where it was not proved, one if the growth goes above ×2.2 again.
+USED where it was not proved, one if the growth goes above ×2.2 again. **That
+third check was red on master on 2026-10-13 and is fixed**: it bounded the *total*
+fact count's ratio, which for the test's programs is `3·(2^k − 1)` (3 / 9 / 21 /
+45) and whose ratio is 3.00 / 2.33 / 2.14 — the additive `−3` reads as
+super-linear growth at two conditions even though the count is exactly linear in
+the path count. It now measures the per-condition **increment** (6 / 12 / 24,
+×2.0 exactly; ×2.67 with the memo disabled), which is the quantity the layout
+does not shift and the one the memo fixes.
 
 **So the open question is exactly one sentence, and it is a measurement nobody
 has taken:** *does the sharing let a three-branch export build a proof at all?*

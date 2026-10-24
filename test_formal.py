@@ -239,17 +239,62 @@ EXPECTED_FAILURES = {
     # the frame slot, and the frame-address machinery that owns it is claimed
     # (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
     # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
-    # the declaration, not the fix.  `pow2` is the same goal: same address, same
-    # two error sites, and its example is the multiplication rather than the
-    # bare tail call.
-    "count": "tree recursion whose return frame reads x30 back through an "
-             "ADRP/ADD-materialised address, so the read is at a literal rather "
-             "than at sp - K and mem_read_after_write_u64_slot cannot peel it; "
-             "the address is sp - 1984 and nothing emitted says so",
-    "pow2": "the same return-frame read as count, on the multiplication's "
-            "example: the epilogue reads x30 from a slot whose address was "
-            "materialised by adrp/add, so the read is at a literal rather than "
-            "at sp - K and the slot peel cannot match it",
+    # the declaration, not the fix.
+    #
+    # **Update 2026-10-12 (`work/formal270-docs-r2`):** the sp-tracker fix in
+    # `formal/arm64_proof_gen.py` (`_imm12_scaled`, the ADD/SUB immediate's `sh`
+    # bit — four readers dropped it) moved BOTH of these again, and differently:
+    #
+    #   * `count` is still a hard red but at a NEW site.  The proof now reaches
+    #     `count_proof.lean:4305:58: error: maximum recursion depth has been
+    #     reached`, the same `arm64_ext_imm12`/`work_step_add_imm64` kernel
+    #     reduction `mod_by_var` hits — `f7bd05ea`'s `first | simp <;> done |
+    #     rfl` at a block start, in place of the bare `rfl`.  It
+    #     also admits ONE `sorry`, at the x30 CFG leaf this comment describes,
+    #     which the corrected frame address now lets Lean reach instead of
+    #     stopping at the `rfl` below.
+    #   * `pow2` is NO LONGER a hard red: it TYPECHECKS with one admitted `sorry`
+    #     at the same x30 leaf, so it is out of this table and `test_formal.py`
+    #     reports its hole through `SORRY_CENSUS`.  The two markers'
+    #     `test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughA_
+    #     MaterialisedAddress` still reads the x30 read and the adrp
+    #     materialisation off both generated proofs.
+    "count": "still red after the 2026-10-12 sp-tracker fix, but at a new site: "
+             "`maximum recursion depth` at count_proof.lean:4305:58, the same "
+             "`arm64_ext_imm12`/`work_step_add_imm64` reduction `mod_by_var` "
+             "hits (bugs/FORMAL_call_proofgen_reds_after_the_arm64_model_merge"
+             ".md); the proof also ADMITS ONE `sorry` at the epilogue x30 leaf "
+             "this entry used to stop at (the ADRP/ADD-materialised read at "
+             "sp - 1984 that nothing emitted says is sp - K)",
+
+    # `fact`, `sum` and `sqsum` are the other three members of the dec1
+    # recursion family, and they were UNDECLARED reds of the `formal` job until
+    # 2026-10-12: nothing in either table named them, so a whole-corpus run
+    # reported three of the corpus's recursive examples as FAILURES with no
+    # document anywhere saying why.  That is `known_proof_gaps`' own argument --
+    # a gap outside this table is a failure -- and this is the entry it asks
+    # for.
+    #
+    # **What they hit is NOT what that doc recorded.**  It said they failed on
+    # the dec1 return frame's x30 read, which is `count`/`pow2`'s entry above.
+    # Measured on this tree (one Lean run each, through
+    # `formal.build.compile_formal(prove=True, check=True)`): all three GENERATE
+    # a proof carrying `_compiles_correctly_universal`, and Lean rejects it at
+    # `rfl` inside the `runs-ret-frame-ok-window` leaf -- the `FrameOk` WINDOW
+    # read at `st.sp + j`, whose left-hand side is a chain of the callee's frame
+    # stores that `rfl` cannot see through (`mem_read_u64 (… (st.sp + j) …)
+    # (st.sp + j)` is not definitionally equal to `mem_read_u64 st.mem
+    # (st.sp + j)`).  That is `fib`'s gap one shape over, and `fib`'s entry above
+    # names the fix.
+    "fact": "tree recursion whose FrameOk WINDOW read at `st.sp + j` sits over "
+            "the callee's frame stores, so `rfl` cannot see through the chain "
+            "(measured `fact_proof.lean:4858:16`, leaf "
+            "`runs-ret-frame-ok-window`) -- `fib`'s gap, and the fix is teaching "
+            "`mem_read_write_below` the split form",
+    "sum": "the same FrameOk window read as `fact`, on the sum example "
+           "(measured `sum_proof.lean:4858:16`)",
+    "sqsum": "the same FrameOk window read as `fact`, on the sum-of-squares "
+             "example (measured `sqsum_proof.lean:5227:16`)",
 
     # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
     #
@@ -345,14 +390,19 @@ EXPECTED_FAILURES = {
                     "call SITES on one path -- more than the walk can follow, "
                     "and the model refuses the inner callee first",
 
-    # (5) A division helper is an OPAQUE call, which is the same walk refusal
-    # seen from the other side and is the family `udivmod` and `floordiv` are
+    # (5) A division helper is an OPAQUE call, which was the same walk refusal
+    # seen from the other side and was the family `udivmod` and `floordiv` were
     # already in (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_
-    # seven_are_declared.md` §#10, #11).
-    "augassign_floordiv": "`//=` and `%=` call the division helper, which is an "
-                          "opaque call site, and two of them on one path is "
-                          "more than the CFG walk's single halt address can "
-                          "discharge -- the same refusal as `udivmod`",
+    # seven_are_declared.md` §#10, #11).  CORRECTED 2026-10-18: that refusal no
+    # longer fires for any of the three — measured, generation only, all three
+    # now reach a `*_compiles_correctly_universal` carrying the walk terminal,
+    # and all three still admit `sorry`, which is the Lean half these rows
+    # cover.
+    "augassign_floordiv": "`//=` and `%=` call the division helper; the "
+                          "generator now reaches the universal theorem and "
+                          "writes a proof file carrying it, but that file "
+                          "admits `sorry` — same as `floordiv` and `udivmod`, "
+                          "whose two-call-site refusal stopped firing",
 
     # (6) Two single gates, each its own sentence.
     "printf_int": "`printf` with TWO arguments has no faithful AST: "
@@ -441,17 +491,29 @@ EXPECTED_FAILURES = {
     # into_the_same_image.md`'s next step, the largest single family in that
     # census.  The image itself is fine: `--no-prove` builds and both spellings
     # run, so nothing here is a codegen or a value-model fact.
-    "floordiv": "the arm64 proof GENERATOR refuses before a proof exists: the "
-                "universal theorem's call walk cannot follow two call sites of "
-                "one callee, because `//` and `%` each lower to a call to the "
-                "same helper and ONE halt address cannot discharge them, so no "
-                "proof file is written and there is no Lean residual. See "
+    #
+    # CORRECTED 2026-10-18: these two no longer stop at GENERATION.  The
+    # two-call-site refusal ("ONE halt address cannot discharge them") no longer
+    # fires, and both stems now reach a `*_compiles_correctly_universal` carrying
+    # the walk terminal -- measured through `compile_formal(prove=True,
+    # check=False)`, generation only, and pinned by
+    # `test_formal_call_proof_gen.py::TestTheDivisionExamplesHaveNoProofToCheck::
+    # test_both_now_reach_the_universal_theorem`.  What these rows now cover is
+    # the half that measurement cannot settle from a light worker: both emitted
+    # files still admit `sorry`, so whether the theorem TYPECHECKS is the
+    # whole-corpus Lean run, and that is what the marker is for.
+    "floordiv": "the arm64 proof GENERATOR reaches the universal theorem again: "
+                "the two call sites of the divide-and-correct helper no longer "
+                "stop the walk, so a proof file IS written and it carries "
+                "`floordiv_compiles_correctly_universal` with the walk terminal "
+                "-- but it still admits `sorry`, and whether that theorem "
+                "typechecks is the Lean half this row covers. See "
                 "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
                 "into_the_same_image.md",
-    "udivmod": "the same GENERATION-time refusal as `floordiv`, for `/` and "
-               "`%`: two call sites of one callee and ONE halt address. The "
-               "image builds and runs with --no-prove, so this is not a "
-               "division fact. See "
+    "udivmod": "the same as `floordiv`, for `/` and `%`: the generator reaches "
+               "the universal theorem and writes a proof file, and the file "
+               "admits `sorry`. The image builds and runs with --no-prove, so "
+               "this is not a division fact. See "
                "bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_"
                "into_the_same_image.md",
 

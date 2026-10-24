@@ -326,12 +326,17 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
 
         `importlib.util` is the same capability reached one step in:
         `importlib.util.spec_from_file_location(path)` and
-        `module_from_spec(spec)` load a module BY PATH, so the row is a
+        `module_from_spec(spec)` load a module BY PATH, and
+        `find_spec(name)` asks the interpreter to resolve one, so the row is a
         `FIELD` read of a module-level name rather than a `DEAD` one. An
         earlier version of this test asserted `DEAD` for both and was wrong,
         because the reader it was checking had `import a.b` binding `a.b` — a
         false `DEAD` about a live file, which is the one answer this tool must
-        never give.
+        never give. `find_spec` joined the row later (it is what
+        `test_formal_imports.py` and `test_formal_link_accounting.py` now
+        spell), and naming it here rather than asserting "two" is the point:
+        the row is pinned to the NAMES, and a third that asks the embedded
+        interpreter the same question belongs in it.
         """
         builtins = next((r for r in self.rows if r["name"] == "builtins"), None)
         if builtins is None:
@@ -347,17 +352,18 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         self.assertTrue(loader["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(loader["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is blocked on two names, and "
-                         "they are the two that load a module by PATH — an "
-                         "embedded CPython, which is why the row is tiered "
-                         "`unreachable` and not `modelled`")
+                         "the importlib.util row is blocked on the names that "
+                         "ask the embedded CPython to place a module — by "
+                         "search, by path, or from a spec — which is why the "
+                         "row is tiered `unreachable` and not `modelled`")
 
-    def test_the_whole_tree_has_one_dead_host_import_and_it_is_named(self):
+    def test_the_whole_tree_has_no_dead_host_import(self):
         """`--dead` is the set the ranking CANNOT see, so its ratchet is the
-        count, and the one file it names is named here so that a reader who
-        wants it fixed knows which.
+        count, and the count is now ZERO — the one file it used to name was
+        fixed rather than explained.
 
         A dead host import blocks its file for exactly the reason an absent
         module does, and whether the sweep got as far as naming the module is
@@ -367,18 +373,17 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         walk (`bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
         §3); this is what stops a fifth.
 
-        `fire_compiler.py`'s is NOT fixed here and the reason is worth having
-        written down: it is a dead `from abc import abstractmethod`, and this
-        file's own line 8401 emits `@abstractmethod` into GENERATED source, so a
+        `fire_compiler.py`'s dead `from abc import abstractmethod` was the last
+        one, and it is GONE. It was dead as an IMPORT and not as a subject: this
+        file emits the string `@abstractmethod` into GENERATED source, so a
         reader of `fire_compiler.py` would reasonably conclude the AST node
-        classes are declared abstract. `fire_compiler.py` is the AST source of
-        truth and every formal change's blast radius passes through it, so
-        deleting the line belongs to whoever owns that file; the next step is
-        §"the next step" of the bug doc.
+        classes are declared abstract, while the name `abstractmethod` was
+        never used. Deleting the line makes the file say what it means, and
+        this ratchet now fails if any dead host import comes back.
         """
         found = dict(S.dead_host_imports(HERE))
         self.assertEqual(
-            found, {"fire_compiler.py": ["abc.abstractmethod"]},
+            found, {},
             "the tree's dead host imports changed:\n    "
             + "\n    ".join(f"{p}: {n}" for p, n in sorted(found.items()))
             + "\nA dead host import blocks its file for exactly the reason an "

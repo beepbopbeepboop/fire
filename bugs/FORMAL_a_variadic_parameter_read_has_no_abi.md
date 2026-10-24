@@ -1,14 +1,41 @@
 # FORMAL_a_variadic_parameter_read_has_no_abi: the row was unowned, and the refusal in it is CORRECT
 
-**Status: NOT FIXED, and correctly so at the width it is written at.** The
-refusal is right and the ABI decision is still unmade — but the CORPUS half is
-now done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py` can emit a `*rest`
-DEFINITION and a call site for it, so the day the ABI lands, a `--mix limits`
-sweep measures it instead of being unable to produce the construct at all. That
-was §5 step 5 and it was measured ABSENT; the measurement and what it now shows
-are in §5 below. Everything else on this list is untouched, and the reason is
-the doc's own: the emitters and `lib/ProofLib.lean` have to move together and
-the latter's 27 MB `.olean` peaks at 7.82 GB to rebuild.
+**Status: the READ half is NOT FIXED; the CALLER-SIDE half had a real wrong
+answer and is FIXED (2026-10-08, `work/formal137-docs`); and step 1 of §5, the
+ABI decision, is DONE (2026-10-05, `work/formal59-docs`).** The read refusal is
+right and the implementation it needs is step 2, which is untouched. But
+§"Why the refusal is RIGHT" claimed "the caller side is already correct and
+needs no change", and that was FALSE: the extra arguments were dropped WITHOUT
+BEING EVALUATED, so a side effect in one was lost. CPython evaluates every
+argument expression before the call, so `def f(x, *rest): return x` called as
+`f(1, g())` (where `g` prints) printed only `x` here — `g` never ran — against
+CPython's `g-called / 1`. The same held for a keyword a `**kwargs` swallowed.
+`formal/model.py::bind_call_arguments` now returns the dropped argument NODES
+(`dropped`) and both emitters evaluate them for effect after the fixed
+arguments; `test_formal_cross_module.py`'s
+`test_a_dropped_variadic_argument_is_still_evaluated` compares the WHOLE stdout
+with CPython on the one backend the file runs on (arm64), and the fix was
+measured on both (`.tmp/ep/pv_side`: arm64 and x86-64 via Rosetta both print
+`g-called / 1`).
+
+**The ABI decision this doc says must be written down before any emitter moves
+is now made (2026-10-05, `work/formal59-docs`): a `*rest` parameter becomes a
+FIXED-ARY SPECIALIZATION per call site**, carried across the dylib boundary by
+the demand mechanism `doc/ABI.md`'s *Generics* section already uses for a type
+argument, so it needs no calling-convention change, no `lib/ProofLib.lean`
+change and therefore no ABI break. The decision and its five load-bearing
+properties are in `doc/ABI.md` under *Functions and methods*; the one step 2 has
+to carry is that the BODY is rewritten, not just re-declared. **The
+implementation is step 2 and is untouched.**
+
+The CORPUS half is also done (2026-10-04, `formal21-2`): `tools/formal_fuzz.py`
+can emit a `*rest` DEFINITION and a call site for it, so the day the ABI lands,
+a `--mix limits` sweep measures it instead of being unable to produce the
+construct at all. That was §5 step 5 and it was measured ABSENT; the measurement
+and what it now shows are in §5 below. The remaining work is the READ/ABI
+implementation (step 2), and the reason it is untouched is the doc's own: the
+emitters and `lib/ProofLib.lean` have to move together and the latter's 27 MB
+`.olean` peaks at 7.82 GB to rebuild.
 
 **Area:** `formal/build.py::_refuse_variadic_reads` /
 `formal/model.py::variadic_read_refusal` (the refusal), and for the fix
@@ -65,8 +92,10 @@ Both backends, byte-identical apart from nothing (`test_formal_run.py::build_for
 
 This is the part worth writing down, because the obvious next step is a miscompile.
 
-**The caller side already drops the extra arguments**, and `variadic_read_refusal`'s own
-docstring says so: `_bind_call_args` passes the fixed parameters and truncates the rest. So it
+**The caller side gives the extra arguments no home**, and `variadic_read_refusal`'s own
+docstring says so: `_bind_call_args` passes the fixed parameters and the rest are `dropped`.
+(**It does not EVALUATE them — that was a real wrong answer and is now fixed; see the Status.
+The value is still unobservable, so the argument below is unchanged.**) So it
 is tempting to conclude that a variadic parameter's value is *the empty sequence* — every extra
 argument is discarded, therefore the read sees nothing — and to lower it as a constant of length
 0. **That is a wrong-but-exit-0 answer, and it is measurably wrong:**
@@ -92,8 +121,19 @@ receiver's frame or a folded constant — none of which is "a count of words".
 
 ## What a fix is, in order
 
-1. **Decide the variadic ABI, in writing, in `doc/ABI.md`, before any emitter moves.** The three
-   shapes that fit a one-word value model, and what each costs:
+1. ~~**Decide the variadic ABI, in writing, in `doc/ABI.md`, before any emitter moves.**~~
+   **DONE 2026-10-05 (`work/formal59-docs`): the per-instantiation fixed arity,
+   written into `doc/ABI.md`'s *Functions and methods* section** — the second
+   shape below, chosen because `Generics` already carries a specialization key
+   across the dylib boundary in `build_module_dylib`'s `demands`, already keys
+   the artifact's identity on it, and already forbids exporting a
+   specialization under its base name. So an arity is one more key on
+   machinery that exists, and the specialization is an ordinary function to
+   both emitters, the frame analysis and the value-flow model — no
+   `lib/ProofLib.lean` change and no ABI break. Its five load-bearing
+   properties are in `doc/ABI.md`; the one this doc's step 2 has to carry is
+   that the BODY is rewritten, not just re-declared. The three shapes, and what
+   each costs:
    * **a packed heap block the callee owns** — the callee needs a pointer to a count and a base,
      which is two words and a free/entry discipline at every `return`, and `lib/ProofLib.lean`
      would need the block's layout in the value model (`sdiv64`'s comment about the source model
@@ -119,10 +159,11 @@ receiver's frame or a folded constant — none of which is "a count of words".
 4. **The 7 files, re-measured** the way `…_b10.md` §5.2 measures a fix:
    `python3 tools/formal_sweep.py --min 3` over exactly those 7 paths, and the row's ceiling.
    **Expect the 5 `tile.mojo` files to land on `tile.mojo`'s own next row, not on a pass** — the
-   row behind this one is `std/algorithm`'s bracketed specialization
-   (`FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`, claimed), which is
-   `FILES BLOCKED IS AN UPPER BOUND` doing what §2.4 of the b10 map measured it doing to the
-   43-file Optional row.
+   row behind this one is the `Optional` representation in
+   `FORMAL_stdlib_optional_needs_a_representation.md`. The bracketed specialization this row
+   used to sit behind is **LOWERED** (`work/formal18-tile-specialization`), so it is no longer
+   in the chain, which is `FILES BLOCKED IS AN UPPER BOUND` doing what §2.4 of the b10 map
+   measured it doing to the 43-file Optional row.
 5. ~~**Add a `*args` DEFINITION and READ to `tools/formal_fuzz.py`'s pools —
    measured absent.**~~ **DONE 2026-10-04 (`formal21-2`).** `variadic_define`
    and `variadic_call` are in the `limits` mix. Three properties, each of which

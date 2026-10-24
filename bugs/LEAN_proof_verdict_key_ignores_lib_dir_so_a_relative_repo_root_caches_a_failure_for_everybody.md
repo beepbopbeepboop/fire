@@ -1,10 +1,29 @@
 # LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody: one careless `repo_root` poisons the CAS for every other caller
 
-**Area:** `formal/lean.py` (the proof-verdict cache). **Status: OPEN, measured,
-and the failure mode is the one this project treats as its worst — a WRONG
-verdict served from the cache, silently, to a caller that did nothing wrong.**
-Found 2026-10-03 on `work/formal16-8` while trying to Lean-check one generated
-proof, and it had already cost this machine **44** cached verdicts.
+**Area:** `formal/lean.py` (the proof-verdict cache). **Status: MOSTLY FIXED —
+steps 1, 4 and 5 of the list below landed in `3cfdf0ad`; step 2 was superseded
+by step 4's content digest (see the note there); step 3 (do not publish a
+launcher failure) is the one still open.**
+
+**2026-10-07 — what the landed commit does.** `_run_lean` now builds `LEAN_PATH`
+with `os.path.abspath(lib_dir)` (`:2194`), so a relative `repo_root` can no
+longer resolve `lib` against the proof's own directory — step 1, the one that
+stops the bleeding. `_VERDICT_VERSION` is `v5` and `proof_verdict_key` appends
+`_proof_search_digest(proof_path)`, a CONTENT digest of the proof's own
+directory (names + bytes, never the path), so one directory's verdict cannot
+replay for another's — steps 4 and 5, and the version bump retires the poisoned
+entries without a sweep of the machine-wide CAS. `test_formal_sweep_truth.py`
+pins all three directions of the key. **Step 3 is not done**: `proof_census`
+still publishes any non-breach run (`:1871`), so a launcher/search-path failure
+is still written as a verdict. It is now much harder to reach — step 1 removes
+the known trigger — but the guard the doc asks for is not in the code, and this
+sentence is what keeps that honest.
+
+**Original status (kept).** OPEN, measured, and the failure mode is the one this
+project treats as its worst — a WRONG verdict served from the cache, silently,
+to a caller that did nothing wrong. Found 2026-10-03 on `work/formal16-8` while
+trying to Lean-check one generated proof, and it had already cost this machine
+**44** cached verdicts.
 
 ## The two facts
 
@@ -92,7 +111,15 @@ replaced added**, and they are not the same fix — see the note under the list.
    instead of correct for callers that pass an absolute path.
 2. **`proof_verdict_key` should hash `os.path.abspath(lib_dir)`**, so two callers
    that resolved the library differently cannot share a key. Cheap, and it makes
-   the cache's stated contract true.
+   the cache's stated contract true. **SUPERSEDED by step 4, and deliberately
+   not done: hashing the library's absolute PATH would give two worktrees with
+   identical libraries two keys and defeat the machine-wide CAS that step 4's
+   `_proof_search_digest` was written to preserve by hashing CONTENT instead
+   (see that function's own "CONTENT, and never the directory's path"). The
+   library's `.olean` digests the key already appends are the content half, and
+   a `lib_dir` that resolves to different files already yields different
+   digests, so the "two callers share a key" hole step 2 named is closed by the
+   digests plus step 1's absolute `LEAN_PATH`.**
 3. **A launcher failure should not be published as a verdict.** The module
    already has the distinction — `Census.exceeded` / `detail` and the comment at
    `:1494` say "a bound is a function of the MACHINE … so caching it turns one

@@ -235,8 +235,15 @@ _ARM64_WRITES = [
     (0xFFE0FC00, 0x13003C00, ("rd",)),
     (0xFFE0FC00, 0x93407C00, ("rd",)),
     (0xFFC0FC00, 0x92401C00, ("rd",)),
-    (0xFFC0FC00, 0x92403C00, ("rd",)),
     (0xFFC0FC00, 0x92407C00, ("rd",)),
+    # …and `LSRV`, which `_ARM64_READS` lists between its two siblings and
+    # which this table was missing. A read row with no write row is not
+    # "writes nothing", it is UNKNOWN, and `writes_arm64` answers unknown with
+    # every register — the direction that makes a rewrite FIRE. Restored with
+    # the mask its two siblings carry; the branch version of this row came in
+    # with a comment naming a different class (`AND (immediate)`) and a merge
+    # dropped it while re-pinning the bit-test branches' masks above.
+    (0xFFC0FC00, 0x92403C00, ("rd",)),
     (0xFFE0FC00, 0x9AC00800, ("rd",)),
     (0xFFC0FC00, 0x9AC00C00, ("rd",)),
     (0xFFC0FC00, 0x9AC02000, ("rd",)),
@@ -260,6 +267,19 @@ _ARM64_WRITES = [
     (0xFFE00000, 0xAB000000, ("rd",)),
     (0xFFE00000, 0xEA000000, ("rd",)),
     (0xFFE00C00, 0xF8000000, ()),
+    # The six rows below close `_ARM64_READS`' side: every class the read table
+    # decodes also needs a write row, even the ones that write NOTHING (a
+    # `CMP`, a store), because a missing row is not "writes nothing" — it is
+    # "unknown", and unknown is `writes_arm64`'s UNSOUND direction. Measured
+    # before this change, over `formal/examples`: `SUB Xd, Xn, #imm` (the typo
+    # above), `AND`, `EOR`, `SUBS`/`CMP` and `CMP Xn, #imm` each answered
+    # "writes all 31 registers", which is the answer that makes a rewrite fire.
+    (0xFFE00000, 0x8A000000, ("rd",)),        # AND Xd, Xn, Xm
+    (0xFFE00000, 0xCA000000, ("rd",)),        # EOR Xd, Xn, Xm
+    (0xFFE00000, 0xEB000000, ("rd",)),        # SUBS/CMP Xn, Xm (Rd = 31 → ∅)
+    (0xFF800000, 0xF1000000, ()),            # CMP Xn, #imm
+    (0xFFE00000, 0xB9000000, ()),            # STR Wt, [Xn, #imm]
+    (0xFFE00000, 0x2A00FA00, ("rd",)),
     # Control flow writes NO register: a branch only moves the pc, and `ret`
     # reads X30. Listed explicitly because a word no row covers is taken to
     # write EVERYTHING, which would make every register live across every
@@ -278,7 +298,7 @@ _ARM64_WRITES = [
 
 def _fields(word, table):
     """The register numbers `table`'s first matching row names, or `None` for
-    a word no row covers — which every caller reads as "assume everything"."""
+    a word no row covers."""
     for mask, value, fields in table:
         if (word & mask) != value:
             continue
@@ -394,6 +414,68 @@ _ARM64_BRANCHES = [
     (0x7F000000, 0x37000000, 0x003FFF, 5, 0xFFF8001F),      # TBNZ (W or X)
 ]
 
+#: `BL`, as a re-patchable row rather than a branch. It is NOT in
+#: `_ARM64_BRANCHES` because it has no CFG edge: `arm64_control` answers
+#: `"call"` for it and `arm64_branch_target` answers `None`, because the callee
+#: is another function's region this pass does not walk into, so a call
+#: contributes only its fall-through. Its DISPLACEMENT is a real PC-relative
+#: field all the same, and a deletion above it invalidates it like any other's —
+#: `sqsum.mojo`'s recursion is one `BL`, and it was the whole of that program's
+#: wrong answer.
+#:
+#: **The row has `_ARM64_BRANCHES`'s five-field shape, `keep` included.** It
+#: used to end in the string `"call"` where every other row ends in the mask of
+#: everything that is not the displacement, which made the two rows the same
+#: tuple with two meanings and cost a `TypeError` the first time `BL` actually
+#: reached `_repatch_branch`. "call" was documentation for a reader who gets it
+#: from `arm64_control`, which is where the CFG reads it from.
+_ARM64_BL_ROW = (0xFC000000, 0x94000000, 0x03FFFFFF, 0, 0xFC000000)
+
+
+def _arm64_branch(word: int, index: int):
+    """`(row, target_index)` for a word that is a PC-relative branch, else `None`.
+
+    The pair `_successors` needs to build an edge and `_repatch_branches` needs
+    to re-encode a displacement, from ONE decode. Recorded on `Entry.branch` at
+    decode time because the assembler's `relocs` table is empty by then (see
+    `Entry.branch`), so this is the only place the fact survives.
+
+    `BL` is recorded too, and for the RE-PATCH alone: as a call it has only the
+    fallthrough as a successor (control returns), but its displacement is a
+    real PC-relative field that a deletion above it invalidates like any other
+    branch, and `sqsum.mojo`'s recursion is one `BL` — it was the whole of that
+    program's wrong answer.
+    """
+    row = _arm64_branch_row(word)
+    if row is None:
+        if (word & 0xFC000000) == 0x94000000:            # BL
+            return _ARM64_BL_ROW, index + _imm26(word)
+        return None
+    mask, _value, field, shift, _kind = row
+    raw = (word >> shift) & field
+    sign = 1 << (field.bit_length() - 1)
+    disp = raw - (1 << field.bit_length()) if raw & sign else raw
+    return row, index + disp
+
+
+def _imm26(word: int) -> int:
+    """A sign-extended `imm26` — `B` and `BL` share the layout and the shift."""
+    raw = word & 0x03FFFFFF
+    return raw - (1 << 26) if raw & (1 << 25) else raw
+
+
+def _arm64_branch_row(word: int):
+    """The `_ARM64_BRANCHES` row this word is, or `None`.
+
+    Both consumers ask this rather than re-deriving the class: the CFG needs the
+    `kind` and the displacement re-patch needs `field`/`shift`, and two
+    hand-written tests of "is this a branch" is how they came to disagree.
+    """
+    for row in _ARM64_BRANCHES:
+        if (word & row[0]) == row[1]:
+            return row
+    return None
+
 
 def _branch_slot(word: int):
     """The `_ARM64_BRANCHES` row `word` is, or `None`.
@@ -435,7 +517,7 @@ def arm64_branch_target(word: int, index: int):
     return index + disp
 
 
-def _repatch_branch(word: int, disp: int) -> int:
+def _repatch_branch(word: int, disp: int, row=None) -> int:
     """`word` with its PC-relative displacement replaced by `disp`.
 
     The inverse of `arm64_branch_target` over the same table row, and it
@@ -443,20 +525,30 @@ def _repatch_branch(word: int, disp: int) -> int:
     a `CBZ`, the BIT NUMBER of a `TBZ` — through `keep`, because a branch that
     jumps to the right place and tests the wrong thing is a wrong answer with a
     correct-looking displacement.
+
+    **`row` is the caller's ALREADY-DECODED row, and it is how a `BL` gets
+    here.** `_ARM64_BRANCHES` does not list `BL` because `BL` has no CFG edge
+    (`arm64_control` calls it a `call`, and `arm64_branch_target` answers `None`
+    for it), but its displacement is a real field that a deletion invalidates
+    like any other's — `sqsum.mojo`'s recursion is one `BL`, and it was the
+    whole of that program's wrong answer. Left out, the row is read back out of
+    `word` through `_arm64_branch`, the same decode everything else uses.
     """
-    slot = _branch_slot(word)
-    if slot is None:
-        raise CodegenError(
-            f"the peephole pass asked to re-displace {word:#010x}, which is "
-            "not a PC-relative branch")
-    field, lsb, keep = slot
+    if row is None:
+        decoded = _arm64_branch(word, 0)
+        if decoded is None:
+            raise CodegenError(
+                f"the peephole pass asked to re-displace {word:#010x}, which is "
+                "not a PC-relative branch or call")
+        row = decoded[0]
+    _mask, _value, field, shift, _keep = row
     width = field.bit_length()
     if not -(1 << (width - 1)) <= disp < (1 << (width - 1)):
         raise CodegenError(
             f"a branch displacement of {disp} instructions does not fit this "
             f"instruction's {width}-bit field ({word:#010x}); the image grew "
             "past what its branches can address")
-    return (word & keep) | ((disp & field) << lsb)
+    return (word & _keep) | ((disp & field) << shift)
 
 
 def arm64_control(word: int) -> str:
@@ -676,14 +768,20 @@ def _x_mem_pair(window, ctx):
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
-    if a.form == "mov_rm64_r64" and b.form == "mov_rm64_r64":
-        if (a.mem_base, a.mem_disp, a.rm) == (b.mem_base, b.mem_disp, b.rm):
+    da, db = a.dec, b.dec
+    if da is None or db is None:
+        return None
+    if da.form == "mov_rm64_r64" and db.form == "mov_rm64_r64":
+        if (da.mem_base, da.mem_disp, da.rm) == (db.mem_base, db.mem_disp,
+                                                db.rm):
             return b"", 1
-    if a.form == "mov_rm64_imm32" and b.form == "mov_rm64_imm32":
-        if (a.mem_base, a.mem_disp, a.imm) == (b.mem_base, b.mem_disp, b.imm):
+    if da.form == "mov_rm64_imm32" and db.form == "mov_rm64_imm32":
+        if (da.mem_base, da.mem_disp, da.imm) == (db.mem_base, db.mem_disp,
+                                                  db.imm):
             return b"", 1
-    if a.form == "mov_r64_rm64" and b.form == "mov_r64_rm64":
-        if (a.reg, a.mem_base, a.mem_disp) == (b.reg, b.mem_base, b.mem_disp):
+    if da.form == "mov_r64_rm64" and db.form == "mov_r64_rm64":
+        if (da.reg, da.mem_base, da.mem_disp) == (db.reg, db.mem_base,
+                                                  db.mem_disp):
             return b"", 1
     return None
 
@@ -693,21 +791,45 @@ def _x_store_load(window, ctx):
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
-    if a.form != "mov_rm64_r64" or b.form != "mov_r64_rm64":
+    da, db = a.dec, b.dec
+    if da is None or db is None:
         return None
-    if (a.rm, a.mem_base, a.mem_disp) != (b.reg, b.mem_base, b.mem_disp):
+    if da.form != "mov_rm64_r64" or db.form != "mov_r64_rm64":
+        return None
+    if (da.rm, da.mem_base, da.mem_disp) != (db.reg, db.mem_base,
+                                             db.mem_disp):
         return None
     return b"", 1
 
 
 def _x_mov_self(window, ctx):
-    """`mov r, r` — a register copied into itself."""
+    """`mov r, r` — a register copied into itself (REX.W `89 /r`, mod=3).
+
+    The form `mov_rm64_r64` and the fields read comes from the ENTRY's decoded
+    instruction (`a.dec`), which is where every other x86 matcher must read
+    them too — an x86 `Entry` does not carry the fields the arm64 ones sit on
+    (`a.form`/`a.reg`/`a.rm`), and reading them off the entry would be an
+    `AttributeError` on the first match. The opcode `0x89` (store direction)
+    is the one the emitters produce and the only 0x89-encoded self-copy with a
+    theorem: the `0x8b` spelling (`mov r, r/m`, `48 8b c0`) would need its own
+    `peephole_x86_mov_self_rev`, and the decoder only ever sees the `89` form
+    here — the four observed self-moves across the 93 examples are all
+    `48 89 c0`. The theorem's side conditions discharge one-for-one: `h_mod`
+    is `d.mod = 3` (a register operand, so the "write" cannot be a store with
+    an addressing side effect), and the REX-extended `reg == rm` is exactly
+    `h_same`'s `rm + x86_rex_b rex = reg + x86_rex_r rex` (`rm`/`reg` here are
+    the decoder's extended 0-15 indices, and each extended index equals its
+    raw 0-7 field plus its REX extension bit). `(b"", 1)` CONSUMES the
+    instruction — a deletion returning `(b"", 0)` removes nothing and makes
+    the pass spin on a window that never shrinks (`_a_mov_self` returns
+    `(b"", 1)` for the same reason)."""
     if len(window) < 1:
         return None
     a = window[0]
-    if a.form == "mov_r64_rm64" and a.reg == a.rm and a.mem_base is None:
-        return b"", 0
-    return None
+    d = a.dec
+    if d is None or d.form != "mov_rm64_r64" or d.mod != 3 or d.reg != d.rm:
+        return None
+    return b"", 1
 
 
 def _x_imm_zero(window, ctx):
@@ -727,24 +849,28 @@ def _x_imm_zero(window, ctx):
     if len(window) < 1:
         return None
     a = window[0]
-    if a.form not in ("alu_ri32:add", "alu_ri32:sub") or a.imm != 0:
+    d = a.dec
+    if d is None or d.form not in ("alu_ri32:add", "alu_ri32:sub") or \
+            d.imm != 0:
         return None
-    if a.op & 0x04:                 # the direction bit: a memory operand
+    if d.mod != 3:          # a memory operand — the instruction is a store
         return None
     if not ctx.flags_dead_after(a.index + 1):
         return None
-    return b"", 0
+    return b"", 1
 
 
-#: No x86-64 rule is enabled yet, and that is a fact about the PROOFS rather
-#: than about the decoder: `x86_step`'s arms for the forms these rules need
-#: (`mov r/m, r`, `mov r, r/m`, `alu r/m, imm32`) sit below about thirty other
-#: tests, and each rule's Lean theorem has to discharge every one of them before
-#: it can say the form is the one it rewrites. `bugs/FORMAL_peephole_rules_without_proofs.md`
-#: records the measurement and the exact lemma each one is waiting on, which is
-#: why this is a comment on an empty table rather than a rule with a `sorry`
-#: beside it.
-X86_RULES: list = []
+#: Every x86-64 rule the pass may run, each one naming its theorem in
+#: `lib/Peephole.lean`. `x86_64/mov_self` is the one measured by the bug doc
+#: and the only one with a theorem that discharges its whole window; the rest
+#: of the table's candidates are recorded (with the exact lemma each is
+#: waiting on) in `bugs/FORMAL_peephole_rules_without_proofs.md` §3.
+X86_RULES: list = [
+    Rule("x86_64/mov_self", "x86_64", "peephole_x86_mov_self",
+         ("mod == 3", "reg == rm", "rm < 16"),
+         _x_mov_self,
+         "a register copied into itself"),
+]
 
 #: Rules whose theorem is proved but whose MATCHER is not yet sound, kept out
 #: of `ARM64_RULES` and named here so the gap is visible and testable rather
@@ -813,6 +939,21 @@ class Entry:
     writes: frozenset
     flag_read: bool
     index: int = 0
+    #: The `(branch-row, displacement)` this instruction's word encodes, as
+    #: `(row, disp)` where `disp` is the ORIGINAL index it branched to. `None`
+    #: for everything that is not a PC-relative branch with a decoded field.
+    #:
+    #: **It exists because `Assembler.resolve()` clears `relocs`, so by the time
+    #: this pass runs the assembler's relocation table is empty and there is
+    #: nothing left that says which word was a branch to where.** Measured on
+    #: `formal/examples/sqsum.mojo` with `copy_chain` on: the image's
+    #: `b.ne`/`b.hs`/`cbz` all kept their pre-deletion displacements, so `b.ne`
+    #: at index 29 branched to 36 when the instruction it had named had moved to
+    #: 35 — and the program answered 109 for 129. The label table alone cannot
+    #: repair this, because it holds no record of WHICH instruction carried
+    #: which displacement; `_Remap` moves labels and stubs, and a branch
+    #: displacement is neither.
+    branch: tuple | None = None
     #: Where this instruction WAS, as a byte offset into the section. Carried
     #: rather than recomputed, because once the pass deletes something the
     #: survivors are no longer contiguous and an accumulating cursor is one
@@ -872,7 +1013,8 @@ def _decode_region(asm, text, arch):
                                  dec=decode_arm64(word),
                                  reads=reads_arm64(word),
                                  writes=writes_arm64(word),
-                                 flag_read=False, orig=off))
+                                 flag_read=False, orig=off,
+                                 branch=_arm64_branch(word, len(entries))))
     else:
         from formal import x86_64_decode as DEC
         off = 0
@@ -1027,6 +1169,17 @@ class _Ctx:
             return False
         return self.predecessors()[second.index] <= {first.index}
 
+    def _predecessors(self):
+        """index -> the indices that can reach it, as a flat list."""
+        if getattr(self, "_preds", None) is None:
+            n = len(self.entries)
+            preds = [[] for _ in range(n)]
+            for i in range(n):
+                for s in self.successors[i]:
+                    preds[s].append(i)
+            self._preds = preds
+        return self._preds
+
     def after_adrp_add(self, entry) -> bool:
         """Is this instruction the `ADD` half of a resolved ADRP+ADD pair?
 
@@ -1152,6 +1305,15 @@ def _run(asm, arch, rules, stats=None) -> int:
                     "<I", new_bytes, 0)[0])
                 entries[i].writes = writes_arm64(struct.unpack_from(
                     "<I", new_bytes, 0)[0])
+                # The replaced instruction may be a branch the old one was not,
+                # and `Entry.branch` is what `_repatch_branches` reads — so it
+                # is re-decoded with the word it now carries, at the ORIGINAL
+                # index the entry still holds (`orig // 4`: a deletion above it
+                # means its position in `entries` is no longer its original
+                # one, and the record is in original coordinates).
+                entries[i].branch = _arm64_branch(
+                    struct.unpack_from("<I", new_bytes, 0)[0],
+                    entries[i].orig // 4)
                 del entries[i + consumed:i + len(window)]
                 removed += len(window) - consumed
             else:
@@ -1168,11 +1330,42 @@ def _run(asm, arch, rules, stats=None) -> int:
             break
     if not counts:
         return 0
+    # **No second `_repatch_branches` here, and the absence is the point.**
+    # Every mutation is followed immediately by one, and `entries` is not
+    # touched after the last of them — the loop's exits are all "no rule
+    # fired", which mutates nothing — so the layout the in-loop call used IS
+    # the final layout. A second call was harmless once the target came from
+    # `Entry.branch` and was silently WRONG before that, because it re-read the
+    # displacement the first call had just written and translated it again.
     new_text, at = _rebuild(text, entries, code_end)
-    _repatch_branches(entries, at, arch)
     _Remap(asm, at).apply()
     asm.sections["text"] = bytearray(new_text)
     return removed
+
+
+def _x86_relative_slot(dec):
+    """The displacement at the TAIL of an x86-64 relative reference, or None.
+
+    x86-64 encodes every relative reference the emitters make — the two
+    rel32 jumps, the rel32 call, the RIP-relative LEA, and the rel8 jumps the
+    decoder still knows — with its displacement in the LAST bytes of the
+    instruction and measured from the NEXT instruction. That is the whole
+    reason this arm exists: a displacement in the MIDDLE of an instruction is
+    not re-derivable from the entry's own `raw`, and these are the only forms
+    where deletion changes a number the assembler already resolved.
+
+    Returns `(old_disp, disp_size)` or `None`. A memory-operand `lea` or a
+    `call r64`/`jmp r64` through a register is not relative and must not be
+    touched.
+    """
+    form = dec.form
+    if form == "lea_r64_rip" or form == "call_rm64" or form == "jmp_rm64":
+        return dec.rip_rel, 4
+    if form == "call_rel32" or form == "jmp_rel32" or form == "jcc_rel32":
+        return dec.imm, 4
+    if form == "jcc_rel8" or form == "jmp_rel8":
+        return dec.imm, 1
+    return None
 
 
 def _repatch_branches(entries, at: list, arch: str) -> None:
@@ -1198,28 +1391,66 @@ def _repatch_branches(entries, at: list, arch: str) -> None:
     `arm64_successors` reads the branch words to build the CFG the next rule
     asks about: a target that has moved and a displacement that has not is a
     control-flow graph with an edge into the middle of an instruction, which
-    `window_dead`'s second condition would then believe. Nothing
-    on x86-64 is touched — no rule is enabled there and a variable-length
-    instruction's displacement is not the 32-bit field this writes.
+    `window_dead`'s second condition would then believe.
+
+    x86-64 is the same rule under a different ruler: the relative references
+    (jcc/jmp/call rel32, the rel8 jumps, and the RIP-relative LEA that the
+    string-literals pool needs) carry their displacement in the LAST bytes and
+    measure from the NEXT instruction, so `at_here` is `at[orig + length]`
+    rather than `at[orig]`, and the rewritten displacement is written back
+    into the entry's own tail. A branch whose target is an instruction the pass
+    deleted lands where the deletion collapsed to, which is what `at` answers
+    for it just as on arm64.
     """
-    if arch != "arm64":
+    if arch == "arm64":
+        for e in entries:
+            if e.branch is None or len(e.raw) != 4:
+                continue
+            row, target = e.branch
+            # **The target is read from the RECORD, not from the word.** The
+            # word's displacement may already have been rewritten by an earlier
+            # call — this runs again after the next deletion, and a target read
+            # back out of an already-translated word is compared against
+            # `at`, which is indexed by ORIGINAL offsets: two coordinate systems
+            # in one expression. Measured: with a target read from the word, a
+            # branch below TWO deletions came out one word SHORT of its target,
+            # because the first call's translation was translated a second time.
+            # `Entry.branch` is recorded once, at decode time, in original
+            # coordinates and is never moved.
+            old_target = target * 4
+            if not (0 <= old_target < len(at) and 0 <= e.orig < len(at)):
+                # A target outside the ORIGINAL image is left alone: the branch
+                # left the decoded region, and inventing a displacement for it
+                # would be a miscompiled image rather than a refusal.
+                continue
+            word = struct.unpack_from("<I", e.raw, 0)[0]
+            # `at` is the ONE authority for "where did an old offset go", and it
+            # is the same table a LABEL naming a deleted instruction lands
+            # through, so a branch and a label cannot disagree about where a
+            # deleted byte went: `at` fills the deleted range with where the
+            # deletion collapsed to.
+            new = _repatch_branch(word, (at[old_target] - at[e.orig]) // 4, row)
+            if new != word:
+                e.raw = struct.pack("<I", new)
         return
     for e in entries:
-        if len(e.raw) != 4:
+        if e.dec is None:
             continue
-        word = struct.unpack_from("<I", e.raw, 0)[0]
-        slot = _branch_slot(word)
+        slot = _x86_relative_slot(e.dec)
         if slot is None:
             continue
-        field, lsb, _keep = slot
-        at_here = at[e.orig]
-        # The word's displacement is the OLD offset of its target, because that
-        # is the only target it can still name. `at` maps it forward.
-        old_target = e.orig + _sign_extend((word >> lsb) & field,
-                                           field.bit_length()) * 4
-        new = _repatch_branch(word, (at[old_target] - at_here) // 4)
-        if new != word:
-            e.raw = struct.pack("<I", new)
+        rel, size = slot
+        here = e.orig + e.dec.length
+        old_target = here + rel
+        if old_target < 0 or old_target >= len(at):
+            continue
+        new = at[old_target] - at[here]
+        if new == rel:
+            continue
+        if size == 4:
+            e.raw = e.raw[:len(e.raw) - 4] + struct.pack("<i", new)
+        else:
+            e.raw = e.raw[:len(e.raw) - 1] + bytes([new & 0xff])
 
 
 def _redecode(raw: bytes, arch):

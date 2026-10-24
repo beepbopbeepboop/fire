@@ -45,6 +45,7 @@ baseline's business; this file is what keeps that job honest.
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -927,6 +928,73 @@ class TestCacheReport(unittest.TestCase):
                          f"the report would be reporting the wrong thing")
         for stem in stale:
             self.assertIn(stem, L.LIBRARY_MODULES)
+
+
+class TestABreachIsNeverPublished(unittest.TestCase):
+    """A bound breach is a fact about the MACHINE, and the verdict cache's key
+    deliberately says nothing about the machine.
+
+    `proof_verdict_key` folds the proof bytes, the toolchain and the `.olean`
+    digests — a pure function of the proof — so anything written under it is
+    replayed by every later run on every worktree. `_run_lean` used to return a
+    `subprocess.TimeoutExpired` as `(False, "lean timed out", 0)`, and
+    `proof_census` published that as an ordinary `fail`: one slow run on one
+    busy box became a permanent red no re-run could clear. The fix is the
+    fourth element of `_run_lean`'s answer — a breach is reported and NOT
+    published — and this pins both directions, with Lean faked out because the
+    claim is about what the cache does with an answer, not about the answer.
+    """
+
+    def setUp(self):
+        from formal import lean as L
+        self.L = L
+        self.saved = {name: getattr(L, name) for name in (
+            "find_lean", "ensure_library", "library_census",
+            "proof_verdict_key", "cas_lookup_verdict", "_run_lean",
+            "_publish_verdict")}
+        self.tmp = tempfile.mkdtemp()
+        self.proof = os.path.join(self.tmp, "p.lean")
+        with open(self.proof, "w") as f:
+            f.write("theorem t : True := by trivial\n")
+        L.find_lean = lambda root=None: "/fake/lean"
+        L.ensure_library = lambda lean, lib_dir: None
+        L.library_census = lambda lean, lib_dir: {}
+        L.proof_verdict_key = lambda proof_path, lib_dir, lean: "proof/fixed"
+        # A cold cache, so the run below is the measurement rather than a replay.
+        L.cas_lookup_verdict = lambda key: None
+
+    def tearDown(self):
+        for name, fn in self.saved.items():
+            setattr(self.L, name, fn)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_breach_is_reported_and_never_published(self):
+        published = []
+        self.L._publish_verdict = lambda *a, **k: published.append(a)
+        self.L._run_lean = lambda *a, **k: (
+            False, "lean exceeded 1500s wall — killed, and this is NOT a "
+                   "verdict on the proof", None,
+            "lean exceeded 1500s wall — killed, and this is NOT a verdict on "
+            "the proof")
+        c = self.L.proof_census(self.proof, repo_root=self.tmp)
+        self.assertFalse(c.ok)
+        self.assertIsNone(c.n_sorries,
+                          "a killed run's hole count is a prefix, not zero")
+        self.assertFalse(c.cached)
+        self.assertEqual(published, [],
+                         "a bound breach was written to the content-addressed "
+                         "verdict cache; it is a property of the machine")
+        self.assertIn("exceeded", c.detail)
+
+    def test_a_finished_run_is_published(self):
+        published = []
+        self.L._publish_verdict = lambda *a, **k: published.append(a)
+        self.L._run_lean = lambda *a, **k: (True, "", 0, None)
+        c = self.L.proof_census(self.proof, repo_root=self.tmp)
+        self.assertTrue(c.ok)
+        self.assertEqual(len(published), 1,
+                         "a completed verdict must still be cached")
+        self.assertTrue(published[0][1])
 
 
 class TestEntryPoint(unittest.TestCase):

@@ -21,7 +21,7 @@ those 47:
 | site | leaves reached | admits (measured by stripping the fallback and reading Lean) |
 |---|---|---|
 | `walk-terminal` | 324 | 0, over `identity` (4), `udivmod`/`threevar`/`bitops` (4 each), `ifonly` (8), `absval` (8), `sign` (12) |
-| `runs-cbz-condition` | 36 | **2 of 6 in `count`** — `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md` |
+| `runs-cbz-condition` | 36 | **2 of 6 in `count`** — a branch whose tested register is a spill read whose frame address the SP trackers under-counted by the `sh` bit of the 128 KiB frame (`formal/arm64_proof_gen.py::_addsub_imm_bytes`, now fixed; `fact`/`sum`/`sqsum`/`pow2` are green and `count` still admits for the `x30` return-frame read it is declared on) |
 | `runs-ret-x0`, `runs-ret-x30`, `runs-ret-frame-ok-window` | 12 each | 0 in `count` |
 | `runs-bl-step` | 7 | 0 in `count` |
 | `dec-while-back-edge-decrement`, `-frame-slot` | 12 each | 0 in `wdiff` |

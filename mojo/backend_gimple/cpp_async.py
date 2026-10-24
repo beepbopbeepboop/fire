@@ -40,6 +40,7 @@ from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -2456,6 +2457,7 @@ def _resolve_kwargs_for_known_async_call(gen, call) -> None:
         return  # a leftover, unrecognized kwarg name -- leave untouched
     call.args = new_args
     call.kwargs = []
+    _walk_ast_invalidate(call)
 
 
 def _normalize_await_kwargs(gen, body: list) -> None:
@@ -2604,6 +2606,7 @@ def _inline_single_use_task_composition(gen, body: list) -> list:
                     # same logic.
                     gen._resolve_kwargs_for_known_async_call(inner)
                     await_refs[0].value = inner
+                    _walk_ast_invalidate(await_refs[0])
                     i += 1
                     continue
         result.append(s)

@@ -582,40 +582,103 @@ def test_manifest_round_trips():
           "and the bind spelling is the C name, not the Mach-O one")
 
 
-# ── 4b. a cold runtime build leaves no staging directory ────────────────────
+# ── 4b. a cold build leaves no staging directory ────────────────────────────
 
 def test_a_cold_runtime_build_leaves_no_staging_directory():
-    """`runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
+    """All three staging-directory sites in `build_stdlib_dylib.py` clean up.
+
+    `runtime_dylib` stages its objects and generated C in a `mojo_rt_*`
     directory under `$TMPDIR`, links the dylib there and moves ONLY the dylib
     out; the directory has to go with the build. Same shape in
-    `_driver_targets`, which stages its arch probe in `mojo_archprobe_*`.
+    `_driver_targets`, which stages its arch probe in `mojo_archprobe_*`, and
+    in `build`, whose `mojostdlib_*` work directory holds every module object,
+    the reflection table and the staged dylib of a whole-stdlib build.
 
     Measured on a COLD cas, because a warm one returns before any staging
     directory exists at all — so this builds in a subprocess with its own
     `GMOJO_HOME` and `TMPDIR`, which is also what keeps it from perturbing the
-    shared cas the other groups use. Both leaks are per cold build and cost
-    half a megabyte each; the whole stdlib build's `mojostdlib_*` workdir is
-    the third instance of the same shape and is filed rather than asserted here
-    (`bugs/FORMAL_the_stdlib_build_leaves_its_workdir.md`).
+shared cas the other groups use. All three leaks are per cold build; the
+    runtime ones cost half a megabyte and the stdlib one ~324 kB for ONE
+    module (a full build is 664 modules plus the runtime and the reflection
+    table, so tens to hundreds of MB), and `build()` creates its work
+    directory unconditionally at the top even on a cache hit. All three are now
+    one reader of the shape — `build_stdlib_dylib._staging_dir` — so the stdlib
+    workdir has its own case below as well, at 4c.
     """
     for arch in ('arm64', 'x86_64'):
         home = tempfile.mkdtemp(prefix='rtstage_home_')
         tmp = tempfile.mkdtemp(prefix='rtstage_tmp_')
+        out = os.path.join(home, 'onemod.dylib')
         env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
-        code = ('from build_stdlib_dylib import runtime_dylib\n'
-                f'print(runtime_dylib(arch={arch!r}))\n')
+        # One module, the smallest non-package stdlib file, so the `build()`
+        # half is a real cold compile rather than a stub: the directory is
+        # created before any object is made, so a return without the cleanup
+        # leaves it regardless of what the module contains.
+        code = ('import os\n'
+                'from build_stdlib_dylib import runtime_dylib, build, stdlib_modules\n'
+                f'print(runtime_dylib(arch={arch!r}))\n'
+                'mods = [m for m in stdlib_modules() if not m.endswith("__init__.mojo")]\n'
+                'm = min(mods, key=os.path.getsize)\n'
+                f'print(build([m], {out!r}, use_cache=False, link_runtime=False,\n'
+                f'            jobs=1, track_local_deps=False, arch={arch!r}))\n')
         proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
                               capture_output=True, text=True)
         check(proc.returncode == 0,
-              f'{arch}: a cold runtime dylib build succeeds',
+              f'{arch}: a cold runtime + one-module stdlib build succeeds',
               (proc.stderr or proc.stdout)[-400:])
         check('.dylib' in proc.stdout,
               f'{arch}: …and it produced a dylib', proc.stdout[-200:])
+        check(os.path.exists(out),
+              f'{arch}: …and the one-module stdlib dylib is on disk', out)
         left = sorted(os.path.basename(p) for p in
                       glob.glob(os.path.join(tmp, 'mojo_rt_*')) +
-                      glob.glob(os.path.join(tmp, 'mojo_archprobe_*')))
+                      glob.glob(os.path.join(tmp, 'mojo_archprobe_*')) +
+                      glob.glob(os.path.join(tmp, 'mojostdlib_*')))
         check(not left,
               f'{arch}: no staging directory is left behind in $TMPDIR',
+              str(left))
+
+
+# ── 4c. a cold stdlib build leaves no work directory ────────────────────────
+
+def test_a_cold_stdlib_build_leaves_no_work_directory():
+    """`build()` stages every module's generated C and object in a
+    `mojostdlib_*` work directory under `$TMPDIR` (created unconditionally at
+    the top, whatever the CAS does) and links the dylib inside it; the
+    directory has to go with the build, on every exit path including a
+    refusal or a failed link.
+
+    Measured on a COLD cas with its own `GMOJO_HOME` and `TMPDIR` — the same
+    reason as the case above: a warm build still runs the pre-pass and the
+    link tail, so it is the cold path that makes the leak observable and the
+    isolated `TMPDIR` that keeps this from perturbing the shared cas. A
+    one-module build is ~0.3 MB of `mojostdlib_*`, so the assertion is `absent`
+    rather than a size. The whole-stdlib build is 664 modules plus the
+    reflection table; this pins the cleanup for one module, which is the same
+    `_staging_dir` block.
+    """
+    for arch in ('arm64', 'x86_64'):
+        home = tempfile.mkdtemp(prefix='stdlibstage_home_')
+        tmp = tempfile.mkdtemp(prefix='stdlibstage_tmp_')
+        env = dict(os.environ, GMOJO_HOME=home, TMPDIR=tmp)
+        out = os.path.join(tmp, 'one.dylib')
+        code = ('from build_stdlib_dylib import build, stdlib_modules\n'
+                "mods = [x for x in stdlib_modules() if x.endswith('floatable.mojo')]\n"
+                "assert mods, 'floatable.mojo is not in the stdlib scope'\n"
+                f'build([mods[0]], {out!r}, use_cache=False, link_runtime=False,\n'
+                f'      jobs=1, track_local_deps=False, arch={arch!r})\n'
+                "print('built')\n")
+        proc = subprocess.run([sys.executable, '-c', code], cwd=HERE, env=env,
+                              capture_output=True, text=True)
+        check(proc.returncode == 0,
+              f'{arch}: a cold one-module stdlib build succeeds',
+              (proc.stderr or proc.stdout)[-400:])
+        check('built' in proc.stdout,
+              f'{arch}: …and it produced the dylib', proc.stdout[-200:])
+        left = sorted(os.path.basename(p)
+                      for p in glob.glob(os.path.join(tmp, 'mojostdlib_*')))
+        check(not left,
+              f'{arch}: no work directory is left behind in $TMPDIR',
               str(left))
 
 
@@ -1026,6 +1089,7 @@ def main():
     test_link_line_is_the_dylibs_exports()
     test_manifest_round_trips()
     test_a_cold_runtime_build_leaves_no_staging_directory()
+    test_a_cold_stdlib_build_leaves_no_work_directory()
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()

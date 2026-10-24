@@ -1007,7 +1007,451 @@ def test_transitive_struct_method_is_not_variadic_stubbed() -> bool:
     return ok
 
 
+def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
+    """A failed imported-module attempt must not poison a later import of
+    the same file under a different spelling.
+
+    Measured 2026-10-23 in the c_analyzer/c_parser cluster (non-formal
+    campaign, bugs/BUGFIX_ROADMAP.md rows 13-16): building
+    `Tools/c-analyzer/c_parser/parser/__init__.py` on master, the failed
+    `..info` attempt left (a) its guard entries in `_compiling_file_paths`
+    (the set is add-only, and the attempt's OWN nested import of
+    `c_parser/parser/_regexes.py` planted that file's path), and (b) stale
+    spelling-CLAIM knowledge published under the attempt's corpse spelling.
+    A later import of `_regexes.py` under the sibling spelling was then
+    guard-REFUSED and compiled "with nothing", so `_common.py:50` emitted
+    its call under the corpse suffix `parser__regexes__ind_15d274`
+    ((int64_t,int64_t,char*)) while the real definition is
+    `parser__regexes__ind_0f1876` — implicit declaration plus seven
+    dangling toplevels in the generated C (the fixed tree unifies all 35
+    `_ind` references on 0f1876; see build/remes/r16fix3.log and
+    bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
+
+    The fix (mojo/backend_gimple/emit_resolve.py, `_compile_imported_module`
+    except handler) snapshots the attempt's guard entries, its
+    `_sub_toplevels` tail, and the three spelling-CLAIM registries, and
+    discards the attempt's additions on failure. The SIGNATURE registries
+    are deliberately NOT rolled back: their values are spelling-isolated,
+    and rolling them back measured a NEW error — `conflicting types for
+    'info_get_default_storage_9f63a2'` on r13 — because the survivor
+    spelling's forward declaration then fell back to int64 instead of the
+    char* the failed attempt had inferred.
+
+    This fixture is the minimal mirror. `t/poison.py`'s
+    `bad(items: list)` carries the measured `.iterutil` refusal shape
+    (`items = iter(items); next(items)` on a receiver typed `MojoList *`
+    has no lowering in this codegen) — a DETERMINISTIC content refusal, so
+    the attempt fails identically on master and on the fixed tree, and the
+    only thing the fix changes is what the failure LEAVES BEHIND.
+    `from .shared import S` plants the guard entry on `t/shared.py`
+    during the attempt. `t/sub/mod.py` takes S THROUGH poison
+    (`from ..poison import S` — a used name is what makes link mode
+    attempt the import at all; S still resolves after the failure because
+    its home is `t/shared.py`, which compiles fresh under the sibling
+    spelling) and `s` from shared under that sibling spelling `..shared`.
+
+    On master the leftover guard entry REFUSES `..shared`, so mod's
+    `s("x")` call site emits `implicit declaration of 'shared_s_...'`
+    plus `assignment to 'char *' from 'int'` and the build fails with no
+    binary. On the fixed tree the attempt rolls its state back, `..shared`
+    compiles for real, and the binary prints `s X!` like CPython.
+    """
+    pkg = {
+        't/__init__.py': '',
+        't/sub/__init__.py': '',
+        't/shared.py': (
+            'S = "s"\n'
+            '\n'
+            '\n'
+            'def s(text):\n'
+            '    return text.upper() + "!"\n'
+        ),
+        't/poison.py': (
+            'from .shared import S\n'
+            '\n'
+            '\n'
+            'def bad(items: list):\n'
+            '    items = iter(items)\n'
+            '    return next(items)\n'
+        ),
+        't/sub/mod.py': (
+            'from ..poison import S\n'
+            'from ..shared import s\n'
+            '\n'
+            '\n'
+            'def run():\n'
+            '    print(S, s("x"))\n'
+        ),
+        't/__main__.py': (
+            'from .sub.mod import run\n'
+            '\n'
+            '\n'
+            'run()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 't/__main__.py', td)
+        py_rc, py_stdout = _cpython_run(td, 't/__main__.py', as_module=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout == 's X!\n')
+    if not ok:
+        print(f"  ✗ failed_import_attempt_does_not_poison_later_spelling: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_byteorder_conditional_toplevel_emits_only_the_host_branch() -> bool:
+    """A top-level `if sys.byteorder == ...:` conditional whose branches
+    SWAP a class definition and a plain assignment over the same two names
+    (the `ctypes/_endian.py` shape) must resolve to the host's branch at
+    emission — neither branch may be left to run time.
+
+    Pre-fix, two defects stacked on this shape. (1) `comptime.eval_const`
+    folded `sys.platform` but not `sys.byteorder`, so the top-level
+    conditional was unresolvable and BOTH branches emitted; the dead
+    branch's plain assignment (`BigEndianStructure = Structure` at
+    _endian.py:63) referenced a module global the live branch's `class
+    BigEndianStructure` never registers as a lookable member — one gcc
+    error on this minimal shape (`'struct _root_toplev' has no member
+    named 'BE'; did you mean 'LE'`), the pair at _endian.py:63:27/:70:27
+    on the real file (build/remes/r10repro_prefix_765117ff.log,
+    build/remes/r10.log). (2) The fold alone was not enough: the emission
+    loop then ran the IfStmt as a RUNTIME branch — re-evaluating
+    `sys.byteorder` at run time (`_mojo_dispatch_getattr(sys,
+    "byteorder")`, an AttributeError: the compiled stdlib's sys has no
+    such attribute), degrading the class refs to `(int64_t)0` zero stubs
+    and dropping the class defs as `/* TODO: StructDef */` — a hard gcc
+    error before the fold, a SILENT miscompile after it. The emission
+    loop now runs over the same `_flatten_resolved_conditionals(stmts)`
+    the Phase-1.7 scan uses (module_gen.py): the taken branch's
+    statements dispatch as top-level statements, the other branch never
+    emits, and an unresolved condition still falls through to the
+    runtime-branch path unchanged.
+
+    The asserts pin the REAL value, host-conditional: the live branch's
+    `answer = 7` inlines as a genuine top-level global that `f()` reads
+    back, so the binary prints `7` where CPython on the same text prints
+    `7` (on a big-endianness host the live branch is the `answer = 8`
+    one, and both the CPython run and the expected literal track the
+    host's own `sys.byteorder`). Every regression route through the two
+    pre-fix defects changes the observable: a fold regression re-emits
+    BOTH branches and the later `answer = 8` wins (prints `8`); an
+    emission-flatten regression leaves the IfStmt as a RUNTIME branch,
+    which re-evaluates `sys.byteorder` at run time (`_mojo_dispatch_
+    getattr(sys, "byteorder")` — AttributeError, the compiled stdlib's
+    sys has no such attribute) and dies before printing anything. Pre-fix
+    the tree cannot build this file at all (the single gcc error above;
+    build/remes/r10d1_prefix_765117ff.log), so `rc == 0` is itself part of
+    the pin and `stdout == py_stdout` is the outer one. The value is
+    deliberately read off a PLAIN global rather than off the branch
+    class: a plain assignment in the DEAD branch whose target is the live
+    branch's class is what trips the pre-fix error, and on the fixed tree
+    that same assignment claims the class's name as a value global in the
+    name-claim view, diverting a static class-attribute read off that
+    name to a dispatch on a NULL receiver (measured: `AttributeError: v`,
+    isolated to that single element by four one-element probes). The class
+    name used as a VALUE is a separate, documented, feature-sized
+    zero-stub gap (this doc's own 2026-08-26 entry: `class ref X as value`
+    → `(int64_t)0`) and is not pinned here."""
+    pkg = {
+        'main.py': (
+            'import sys\n'
+            '\n'
+            '\n'
+            'class Base:\n'
+            '    pass\n'
+            '\n'
+            '\n'
+            'if sys.byteorder == "little":\n'
+            '    class BE(Base):\n'
+            '        v = 1\n'
+            '\n'
+            '    answer = 7\n'
+            '\n'
+            'elif sys.byteorder == "big":\n'
+            '    BE = Base\n'
+            '\n'
+            '    answer = 8\n'
+            '\n'
+            '\n'
+            'def f():\n'
+            '    return answer\n'
+            '\n'
+            '\n'
+            'r = f()\n'
+            '\n'
+            '\n'
+            'print(r)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    exp = '7' if sys.byteorder == 'little' else '8'
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == exp)
+    if not ok:
+        print(f"  ✗ byteorder_conditional_toplevel_emits_only_the_host_branch: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_class_redefinition_does_not_crash_class_attr_emission() -> bool:
+    """A SAME-HOME class redefinition whose LATER copy drops the class
+    attribute must not crash the class-attr emission loop.
+
+    `class Box:` defined twice in one module (Python: the second binding
+    replaces the first), the first carrying `tag = 1`, the second bare. In
+    gen_module_impl's struct-identity pass the second Box is a same-home
+    redefinition, NOT a cross-module collision, so it gets no
+    `_struct_cname_by_id` entry and keeps the bare name `Box`. The class-
+    attr registration keys `tag` under the owner's (first Box's) name. The
+    LATER class-attr EMISSION loop then walks the second, field-less Box
+    with that same non-empty `_class_attrs['Box']` map:
+    `_own_class_field_index([], 'tag') == -1`, and the old
+    `range(-1, 0)` read `fields[-1]` on the empty list — a hard
+    `IndexError: list index out of range` that killed the whole build.
+
+    Measured: on BOTH `566ba1c9` (master) and `8c48013c` (the row-16 fix),
+    this exact single-file shape died with `IndexError: list index out of
+    range` at the emission's `field = _as_list(s.fields)[_pick]`, before
+    producing any binary. The row-16 fix (failed-import rollback) did not
+    introduce the bug — it un-poisoned the self-import guard so that whole-
+    program closures (e.g. `Lib/importlib/resources/readers.py`) carried
+    same-named class pairs into the shared stmt mirror and reached this loop
+    77+ times, one per affected module; the minimal single-file shape above
+    is the same crash with the closure stripped away.
+
+    The fix is a `continue` when `_own_idx < 0`: a struct object that does
+    not declare `aname` in its own `.fields` emits nothing for it (the
+    owner, which does declare it, emits it once). This is the non-empty-
+    `fields` no-op the old code already performed implicitly, minus the
+    empty-list index. Asserting `1` (not just a clean build) pins the REAL
+    value: `Box.tag` is read from the first Box's emitted class attribute
+    before the redefinition replaces the binding — a vacuous pass would
+    print `0` if the attribute were dropped."""
+    pkg = {
+        'main.py': (
+            'class Box:\n'
+            '    tag = 1\n'
+            '\n'
+            '\n'
+            'def f():\n'
+            '    return Box.tag\n'
+            '\n'
+            '\n'
+            'r = f()\n'
+            '\n'
+            '\n'
+            'class Box:\n'
+            '    """redefinition, no class attributes"""\n'
+            '\n'
+            '\n'
+            'print(r)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '1')
+    if not ok:
+        print(f"  ✗ class_redefinition_does_not_crash_class_attr_emission: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_set_ctor_walks_boxed_global_container() -> bool:
+    """A `set(...)` / `frozenset(...)` whose argument is a module-GLOBAL
+    container must walk the container, not the boxed pointer word it is
+    stored in. Globals are stored at C level as int64_t (boxed pointers);
+    the read side hands the caller a raw int64_t temp with the real kind
+    only recoverable via `_actual_types`. Every consumer of such a read
+    must resolve the actual type and cast — `len()` had the arm
+    (the `_actual_types` + `_coerce_to_type` block in
+    `_lower_builtin_len`), but the set-constructor lowering
+    (`_lower_ctor_from_iterable`'s `kind == 'set'` arm) substituted the
+    ALREADY-lowered boxed temp as a plain name while registering
+    `var_types[name] = <pointer type>` over int64_t storage: the
+    comprehension's own cast block (the `_get_actual_type` one that fires
+    when recorded type != actual type) never fired, because recorded ==
+    actual, and the walk passed the word raw. Measured (2026-10-24,
+    `fb774c7a`): `s = frozenset(names)` with a top-level
+    `names = ['a', 'b']` died at gcc — `passing argument 1 of
+    'mojo_list_len' makes pointer from integer` (build/remes/
+    kw63_minprefix_fb774c7a.log); the real shape, `iskeyword =
+    frozenset(kwlist).__contains__` in Lib/keyword.py:63, is the exact
+    same pair (build/remes/kw63_keyword_prefix_fb774c7a.log — the new
+    first gcc error on rows 6/22/24/25). The two siblings died in the same
+    class: `set(<global dict>)` at `mojo_dict_iter_new` (build/remes/
+    kw63_dictprefix_fb774c7a.log) and `frozenset(<global set>)` at
+    `mojo_set_copy` (build/remes/kw63_setprefix_fb774c7a.log).
+
+    The asserts pin the REAL values on all three arms of the fix, and the
+    CPython comparison on the same text is the outer pin: `frozenset` of
+    the 2-element list global, `set` of the 2-key dict global (Python
+    iterates the KEYS), and `frozenset` of the set global (the slot-copy
+    arm) all read back 2. Pre-fix the file cannot build at all (the gcc
+    error above on the first boxed-global walk), so `rc == 0` is part of
+    the pin; the no-false-green hazard here is a walk that COMPILES but
+    iterates zero or garbage slots (the pre-R5 opaque fallback emitted an
+    empty container) — the three lengths against CPython close that."""
+    pkg = {
+        'main.py': (
+            'names = ["a", "b"]\n'
+            '\n'
+            '\n'
+            'd = {"k1": 1, "k2": 2}\n'
+            '\n'
+            '\n'
+            's0 = frozenset([9, 8])\n'
+            '\n'
+            '\n'
+            'ks = frozenset(names)\n'
+            '\n'
+            '\n'
+            'dk = set(d)\n'
+            '\n'
+            '\n'
+            'cp = frozenset(s0)\n'
+            '\n'
+            '\n'
+            'print(len(ks), len(dk), len(cp))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '2 2 2')
+    if not ok:
+        print(f"  ✗ set_ctor_walks_boxed_global_container: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_nested_def_is_not_a_module_level_fn_export() -> bool:
+    """A nested `def` (a closure inside a function body) must not be
+    registered as a module-level function export by the importer's
+    text scan. Measured 2026-10-24 as the `os_fsdecode`/`os_fsencode`
+    0-arg-stub class on rows 10/24/25: in Lib/os.py, `fsencode`/
+    `fsdecode` are nested defs inside a factory (`def _fscodec(): ...
+    def fsdecode(filename): ...`), bound at module level by
+    `fsencode, fsdecode = _fscodec()`; the scan's stripped-line `def `
+    match used to register the nested def as a top-level export, and —
+    because its parameter extraction keeps only ANNOTATED params
+    (`if ':' in param`) while stdlib's nested defs are unannotated —
+    the entry came out `int64_t fsdecode (void)`. The importer then
+    emitted `extern int64_t os_fsdecode (void);` for `os.fsdecode(x)`:
+    gcc's `too many arguments ... expected 0, have 1` at
+    Lib/ntpath.py:317/373/387/461 and Lib/posixpath.py:266/278/325
+    (11 lines in build/remes/r24post_kwfix.log; the pre-fix dump in
+    build/remes/fsdec_ntpath_prefix_6b80a973.ci) — and the prototype
+    was doubly wrong: the C function a nested def compiles to is named
+    after the ENCLOSING function (closure_lifted_name: `outer_inner`),
+    so the `module_name` symbol the extern names does not exist at
+    all. The module-level binding is a VALUE, and its cross-module
+    call belongs to the dynamic dispatch path, which refuses loudly.
+    The fix is the indent block stack in module_loader's
+    `_scan_source`: a `def`/`fn` whose innermost open block is a
+    function is a nested closure and is skipped; module-level defs
+    inside module-level control flow and class methods (innermost
+    block 'other') register exactly as before, and the overload-
+    COUNTING pre-pass deliberately still sees nested defs, so a
+    module-level def that merely shares a name with a nested one keeps
+    its measured variadic treatment byte for byte.
+
+    The asserts: (1) the mechanism — the scan of the exact os.py shape
+    must not export the nested `f`, and must still export the
+    module-level factory `_mk`, a def under module-level control flow
+    (`ctrl` under `if True:`), and a class method (`C.m`) — pre-fix
+    the entry was `int64_t f (void)` (measured on os.py itself: the
+    61-entry scan carried `fsdecode`/`fsencode` as `(void)`; the
+    fixed scan is 55 entries). (2) The build-level same-name shadow —
+    the exact os.py shape — builds (the binary exists) and its runtime
+    is the SEPARATELY measured shadowing class, pinned as MEASURED
+    behavior: the enclosing `return f` resolves to the module GLOBAL
+    `f` (its own still-zero global — the emitted C shows `_mk`
+    reading `_root_globals.f`) and the call dies on SIGSEGV with no
+    output (rc == -11, stdout empty). Pre-fix the build itself died at
+    gcc with `too many arguments to function 'a_os_f'; expected 0,
+    have 1` (build/remes/fsdec_osname_prefix_765117ff.log). This pin
+    marks a known-bad loud outcome the way the suite's EXPECTED
+    markers do: the shadowing class is named in the rows' next
+    blocker, and the moment the shape stops crashing the pin must be
+    re-measured against CPython (42) before it is believed. (3) The
+    non-shadow shape (`g = _mk()`, the call `a_ns.g(41)`) must stay on
+    the loud dispatch refusal — exit 1, stdout empty, stderr
+    `Unhandled exception: NotImplementedError: ... not compiled into
+    this binary` — and never on a silent numeric answer (CPython
+    prints 42; a fix that compiled this shape to a quiet 0 would be
+    the row-10-fold false-green this class is named for)."""
+    shadow_src = (
+        'def _mk():\n'
+        '    def f(x):\n'
+        '        return x + 1\n'
+        '    return f\n'
+        'f = _mk()\n'
+    )
+    scan_src = (
+        'def _mk():\n'
+        '    def f(x):\n'
+        '        return x + 1\n'
+        '    return f\n'
+        'f = _mk()\n'
+        'if True:\n'
+        '    def ctrl(x):\n'
+        '        return x\n'
+        'class C:\n'
+        '    def m(self):\n'
+        '        return 1\n'
+    )
+    exports = {}
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'a_os.py')
+        with open(path, 'w') as fh:
+            fh.write(scan_src)
+        import module_loader
+        exports = module_loader.load_module_from_path(path)
+    nested_ok = (exports.get('f') is None and exports.get('_mk') is not None
+                 and exports.get('ctrl') is not None
+                 and exports.get('m') is not None)
+    pkg = {'a_os.py': shadow_src,
+           'main.py': 'import a_os\nprint(a_os.f(41))\n'}
+    binary_exists = False
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        binary_exists = os.path.exists(os.path.join(td, 'prog'))
+    build_ok = rc == -11 and stdout.strip() == '' and binary_exists
+    pkg_ns = {'a_ns.py': shadow_src.replace('f = _mk()', 'g = _mk()'),
+              'main_ns.py': 'import a_ns\nprint(a_ns.g(41))\n'}
+    err_ns = ''
+    with tempfile.TemporaryDirectory() as td:
+        rc_ns, stdout_ns = _build_and_run(pkg_ns, 'main_ns.py', td)
+        result = subprocess.run([os.path.join(td, 'prog')],
+                                capture_output=True, text=True,
+                                timeout=60, cwd=td)
+        err_ns = result.stderr
+    refusal_ok = (rc_ns == 1 and stdout_ns.strip() == ''
+                  and err_ns.startswith(
+                      'Unhandled exception: NotImplementedError:'))
+    ok = nested_ok and build_ok and refusal_ok
+    if not ok:
+        print(f"  ✗ nested_def_is_not_a_module_level_fn_export: "
+              f"scan f={exports.get('f')!r} "
+              f"_mk={'present' if exports.get('_mk') else 'MISSING'} "
+              f"ctrl={'present' if exports.get('ctrl') else 'MISSING'} "
+              f"m={'present' if exports.get('m') else 'MISSING'}; "
+              f"shadow: rc={rc} stdout={stdout!r} binary={binary_exists}; "
+              f"noshadow: rc={rc_ns} stdout={stdout_ns!r} "
+              f"stderr={err_ns[:60]!r}")
+    return ok
+
+
 CASES = [
+    test_nested_def_is_not_a_module_level_fn_export,
+    test_set_ctor_walks_boxed_global_container,
+    test_byteorder_conditional_toplevel_emits_only_the_host_branch,
+    test_class_redefinition_does_not_crash_class_attr_emission,
     test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
@@ -1025,6 +1469,7 @@ CASES = [
     test_dotted_sibling_import_qualifier_agrees,
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
     test_unannotated_param_with_disagreeing_call_sites,
+    test_failed_import_attempt_does_not_poison_later_spelling,
 ]
 
 

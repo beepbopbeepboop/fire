@@ -224,7 +224,16 @@ def _check_no_value_shadow(src: str, type_params) -> None:
     fail loudly rather than emit wrong code."""
     for tp in type_params:
         e = re.escape(tp)
-        if re.search(rf'\b(?:var|for)\s+{e}\b', src) or \
+        # The `var`/`for` match must not be a MEMBER ACCESS: the function
+        # type parameter's owned-parameter convention (`def(var
+        # InnerIteratorType.Element) thin -> OutputType` in std/iter's
+        # _MapIterator, measured 2026-10-21 (further)) spells `var
+        # <Type>.Element` in an ANNOTATION — a type position, not a binding —
+        # and the bare-word substitution rewrites it to `var
+        # <inner>.Element`, which is exactly what the substituted annotation
+        # should read. A real statement-level `var T` / `for T` is followed
+        # by `=`, `in`, or end-of-line, never `.`.
+        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
            re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "
@@ -320,7 +329,270 @@ def _sub_outside_spans(pattern: str, repl: str, src: str, spans: list) -> str:
     return ''.join(out)
 
 
-def monomorphize_source(template_src: str, type_args: dict) -> tuple:
+def _sub_variadic(src: str, tp: str, items: list, element_map: dict = None,
+                  self_element: str = None) -> str:
+    """Substitute a VARIADIC type parameter (`*Ts`, measured 2026-10-21,
+    part 4: `_ChainedIterator[*Ts: Iterator]` / `_ZipIterator[origin, *Ts]`,
+    the `chain`/`zip` out-parameter factories' wrappers) for a LIST of
+    concrete inner types.
+
+    The body spells the parameter WITHOUT the star (`Self.Ts`), so the
+    plain `Self.<param>` / bare-word passes (keyed on `*Ts`) never touch
+    it — and a bare `Ts -> a, b` rewrite would corrupt every context
+    (`Self.Ts[0].Element` -> `Self.a, b[0].Element`). The measured forms
+    in the two wrapper families, each handled in turn:
+
+    1. `*Self.Ts` / `*Ts` — the variadic UNPACK inside a bracket list
+       (`Tuple[*Self.Ts]`, the where-clause `conforms_to(Tuple[*Ts], ...)`)
+       -> the comma-joined inners.
+    2. `Self.Ts[0]` / `Ts[0]` — INDEXED access on the inners tuple
+       (`comptime Element = Self.Ts[0].Element`) -> the N-th inner.
+    3. the zip `Element` expression — `Tuple[*TypeList[Trait=Iterator,
+       Self.Ts.values]().map[Self._mapper]()]` where `_mapper[T] = T.
+       Element` — the ELEMENTS of the inners, as the unpacked list.
+    4. `comptime for <i> in range(Self.<M>.__len__()):` where `<M>` is a
+       comptime member `= Tuple[*Self.Ts]` (after pass 1 its RHS is the
+       concrete inners) — UNROLLED: the loop variable is a compile-time
+       index into a FIXED FIELD tuple (the C representation is a struct
+       with one field per inner — a runtime index has no lowering), so the
+       header is replaced by N copies of the body with `<i>` bound to the
+       literal 0..N-1 at the body's own indentation.
+    5. `Self.<M>` — the remaining comptime-MEMBER references in TYPE
+       positions (`var _iterators: Self._Iterators`, `-> Self.Element`)
+       -> the member's (already-substituted) RHS.
+    6. `<inner>.Element` -> that inner's ELEMENT mention, from
+       `element_map` (the out-res seed knows each inner's element: the
+       first container's element for `Self.Element = Self.Ts[0].Element`).
+
+    Refusal, not guessing: an unrolled comptime-for whose range argument is
+    not the measured `<Self.<M>.__len__()` shape, or a `Self.<M>` reference
+    to a member with no single-line `comptime <M> = <RHS>` definition, is
+    raised as ValueError — the caller (`_materialize`) turns that into a
+    named refusal, the standard discipline for this area."""
+    bare = tp[1:]
+    join = ', '.join(items)
+    # 1. the unpack
+    src = re.sub(rf'\*\s*Self\.{re.escape(bare)}\b', join, src)
+    src = re.sub(rf'\*\s*(?<![\w.])' + re.escape(bare) + r'\b', join, src)
+
+    def _idx(m):
+        k = int(m.group(1))
+        if k >= len(items):
+            raise ValueError(
+                f'variadic {tp!r}: index {k} beyond its {len(items)} bindings')
+        return items[k]
+
+    # 2. the indexed access
+    src = re.sub(rf'Self\.{re.escape(bare)}\[(\d+)\]',
+                 lambda m: _idx(m), src)
+    src = re.sub(rf'(?<![\w.]){re.escape(bare)}\[(\d+)\]',
+                 lambda m: _idx(m), src)
+
+    # 3. the zip Element expression (the TypeList over the inners, mapped
+    # through the wrapper's own `_mapper` = `.Element`): `*TypeList[...]`
+    # is the UNPACK of the element list — the leading star is consumed
+    # (it is the unpack, not a pointer — `*Self.Ts` in pass 1 is the same
+    # idiom in the inners position)
+    src = re.sub(
+        r'\*?\s*TypeList\[Trait=Iterator,\s*Self\.' + re.escape(bare) +
+        r'\.values\]\(\)\.map\[Self\._mapper\]\(\)',
+        ', '.join(f'{it}.Element' for it in items), src)
+
+    # 4. the comptime-for unroll (before member expansion: the range
+    # argument names the member, the body references the loop variable).
+    # The body is captured by INDENT SCAN, not one greedy regex: the loop
+    # body may CONTAIN sibling statements of the enclosing block (zip's
+    # `__next__` nests its second comptime-for inside the try/except whose
+    # OUTLINE sits at the same indent as the first loop's body), and a
+    # `.*\n`-per-line capture swallows those, duplicating the whole
+    # except-clause into every copy.
+    members = dict(re.findall(
+        r'comptime (\w+) = ([^\n]+)', src))
+    lines = src.splitlines(keepends=True)
+    out = []
+    _i = 0
+    _hdr_re = re.compile(
+        r'^([ \t]*)comptime for (\w+) in range\(Self\.(\w+)\.__len__\(\)\):[ \t]*$')
+    while _i < len(lines):
+        m = _hdr_re.match(lines[_i])
+        if not m:
+            out.append(lines[_i])
+            _i += 1
+            continue
+        _ind = len(m.group(1))
+        var, member = m.group(2), m.group(3)
+        rhs = members.get(member)
+        if rhs is None or not re.match(r'Tuple\[', rhs.strip()):
+            raise ValueError(
+                f'variadic {tp!r}: comptime-for over {member}.__len__() '
+                'whose member is not a single-line Tuple[...] definition')
+        # TOP-LEVEL element count of the unpacked member RHS (after pass 1
+        # it is the comma-joined concrete inners): a naive `split(',')`
+        # miscounts when an inner's own bracket arguments carry commas —
+        # measured 2026-10-22, gimplerunner `zip([0, 1], [2, 3])`: the
+        # borrowed inners are `_ListIter[False, Int, ImmOrigin, True]`
+        # (three nested commas each), so two inners read as eight and the
+        # unroll refused, while the stdlib files' 1-argument owned inners
+        # (`_ListIterOwned[String]`) read correctly and the 610 sweep never
+        # saw the shape.
+        _inner = rhs.strip()
+        if _inner.startswith('Tuple['):
+            _inner = _inner[len('Tuple['):]
+        _inner = _inner.strip()
+        while _inner.endswith(']'):
+            _inner = _inner[:-1].rstrip()
+        n, _depth = (1 if _inner.strip() else 0), 0
+        for _ch in _inner:
+            if _ch in '[(':
+                _depth += 1
+            elif _ch in '])':
+                _depth -= 1
+            elif _ch == ',' and _depth == 0:
+                n += 1
+        if n != len(items):
+            raise ValueError(
+                f'variadic {tp!r}: {member} has {n} elements, the call '
+                f'binds {len(items)}')
+        # Body: the run of lines indented STRICTLY deeper than the header
+        # (blank lines ride along; the run ends at the first line whose
+        # indent is back at or above the header's).
+        body_lines = []
+        _j = _i + 1
+        while _j < len(lines):
+            _ln = lines[_j].rstrip('\n')
+            if _ln.strip() == '':
+                body_lines.append(lines[_j])
+                _j += 1
+                continue
+            if len(_ln) - len(_ln.lstrip(' ')) <= _ind:
+                break
+            body_lines.append(lines[_j])
+            _j += 1
+        while body_lines and body_lines[-1].strip() == '':
+            body_lines.pop()
+        # Every copy keeps the header's indentation level: the loop BODY
+        # sat one level deeper than the header, and with the header gone
+        # the copies take the header's place — the body text is de-
+        # indented by that one level (its first statement's indent minus
+        # the header's). A `continue` left behind by the unroll has no
+        # loop to continue: the measured spelling (chain `bounds()`'s
+        # `if self._idx > i: continue`, the guard at the SAME indent as
+        # the rest of the body) means "SKIP this copy's rest when the
+        # condition holds" — so the copy becomes `if not (<cond>):` +
+        # the rest of the copy indented one level UNDER the guard.
+        # Anything a `continue` could mean that this shape does not
+        # cover is a refusal, not a guess.
+        _body = ''.join(body_lines)
+        _delta = 0
+        for _b0 in body_lines:
+            if _b0.strip():
+                _delta = len(_b0) - len(_b0.lstrip(' ')) - _ind
+                break
+        if _delta > 0:
+            _body = '\n'.join(
+                _b[_delta:] if _b.strip() else _b
+                for _b in body_lines) + ('\n' if body_lines and
+                                         body_lines[-1].endswith('\n') else '')
+        for _k in range(n):
+            _c = re.sub(rf'(?<![\w.]){re.escape(var)}\b', str(_k), _body)
+            _cl = _c.splitlines(keepends=True)
+            # bottom-up: an outer transform's +4 must land on top of an
+            # inner one already applied (nested guards nest correctly)
+            for _li in [i for i, ln in enumerate(_cl)
+                        if re.match(r'^[ \t]*continue[ \t]*$', ln)][::-1]:
+                _ci = len(_cl[_li]) - len(_cl[_li].lstrip(' '))
+                _dj = _li - 1
+                _found = None
+                while _dj >= 0:
+                    _dl = _cl[_dj].rstrip('\n')
+                    if _dl.strip() == '':
+                        _dj -= 1
+                        continue
+                    _di = len(_dl) - len(_dl.lstrip(' '))
+                    if _di <= _ci:
+                        _mm = re.match(
+                            r'^[ \t]*if ([^\n:]+):[ \t]*$', _cl[_dj])
+                        if _mm:
+                            _found = _dj
+                    break
+                if _found is None:
+                    raise ValueError(
+                        f'variadic {tp!r}: the unrolled body carries a '
+                        '`continue` whose nearest non-deeper statement '
+                        'is not an `if` guard')
+                _cl[_found] = re.sub(
+                    r'if ([^\n:]+):$', r'if not (\1):', _cl[_found])
+                del _cl[_li]
+                for _j2 in range(_li, len(_cl)):
+                    if _cl[_j2].strip():
+                        _cl[_j2] = '    ' + _cl[_j2]
+            out.append(''.join(_cl))
+        _i = _j
+    src = ''.join(out)
+
+    # 5. the remaining comptime-member references in type positions.
+    # GATED on the RHS being a balanced, single-line, type-like mention:
+    # the zip `Element` definition spans LINES (`Tuple[\n ... \n]`), and
+    # the single-line capture would splice a dangling `Tuple[` into every
+    # `Self.Element` use — a broken signature, not a substitution. An
+    # unbalanced RHS is left for the `self_element` override (the out-res
+    # seed computes the element mention explicitly) or for the honest
+    # int64_t erasure, never a corrupted signature.
+    if self_element is not None:
+        src = re.sub(r'\bSelf\.Element\b', self_element, src)
+    for mn, rhs in members.items():
+        r = rhs.strip()
+        if not re.match(r'^[A-Za-z_][\w .*,\[\]()\-]*$', r) or \
+                r.count('[') != r.count(']'):
+            continue
+        src = re.sub(rf'\bSelf\.{re.escape(mn)}\b', r, src)
+
+    # 6. the inner -> element mentions
+    if element_map:
+        for it, elem in element_map.items():
+            src = re.sub(rf'\b{re.escape(it)}\.Element\b', elem, src)
+
+    # 7. the unsafe-write / mlir-op / rebind / forget splices — the zip
+    # `__next__`'s measured spelling after the unroll above — to the
+    # lowerable forms: a plain subscript assignment (the tuple field's
+    # constant-index lowering), a `pass` where the runtime action is a
+    # no-op in this C representation (a by-value word/pointer slot has
+    # nothing to deinit; the in-TU protocol's documented leak class), the
+    # identity for `rebind_var[T](x)`, and a comment-out for the raw-MLIR
+    # op and the `std.memory` forget (no lowering, nothing to do for a
+    # by-value tuple local).
+    def _unwrite(m):
+        # the two indices are the same loop variable (the unroll bound
+        # both to the same literal); if a future spelling disagrees,
+        # leave the text for the honest downstream refusal
+        if m.group(1) != m.group(2):
+            return m.group(0)
+        return f'res[{m.group(1)}] = next(self._values[{m.group(1)}])'
+
+    src = re.sub(
+        r'Pointer\(to=res\[(\d+)\]\)\.unsafe_write\(\s*'
+        r'rebind_var\[type_of\(res\[\1\]\)\]\('
+        r'next\(self\._values\[(\d+)\]\)\)\s*\)',
+        _unwrite, src, flags=re.S)
+    src = re.sub(r'Pointer\(to=res\[\d+\]\)\.unsafe_deinit_pointee\(\)',
+                 'pass', src)
+    src = re.sub(r'rebind_var\[[^\]]*\]\(((?:[^()]|\([^()]*\))*)\)', r'\1',
+                 src)
+
+    def _stmt_pass(m):
+        pad = m.group(0)[:len(m.group(0)) - len(m.group(0).lstrip())]
+        return pad + 'pass'
+
+    for _pat in (r'^[ \t]*__mlir_op\.[^\n]*$',
+                 r'^[ \t]*std\.memory\.forget_deinit\([^\n]*$',
+                 r'^[ \t]*comptime assert [^\n]*$'):
+        src = re.sub(_pat, _stmt_pass, src, flags=re.M)
+    return src
+
+
+def monomorphize_source(template_src: str, type_args: dict,
+                        element_map: dict = None,
+                        self_element: str = None) -> tuple:
     """Specialize a single `fn` OR `struct` generic template for concrete type
     args. Returns (mangled_name, concrete_source). Textual substitution: drop the
     `[params]` block, rename the definition, and replace each type-param
@@ -346,6 +618,64 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     Substituting the qualified form first also keeps the bare pass from
     double-substituting it — by then no `Self.<param>` text survives."""
+
+    # CONSTANT FOLDING (part 4, measured 2026-10-21): the spliced wrapper
+    # bodies reference `Int.MAX` (`_ZipIterator.bounds`: `var res_lower =
+    # Int.MAX` / `res_upper.or_else(Int.MAX)`; `_ChainedIterator.bounds`:
+    # `Int.MAX - final_lb`). In real Mojo those are COMPILE-TIME constants;
+    # this codegen's class-ref fallback instead boxes the class as a NULL
+    # object and dispatches a runtime getattr on it —
+    # `_mojo_dispatch_getattr(0, "MAX")` — and the runtime has no class-
+    # attribute table, so it raises `AttributeError: MAX` (measured on the
+    # `test_zip_bounds` ladder: `Unhandled exception: AttributeError:
+    # MAX`). The spliced bodies are new code emitted only by this path, so
+    # folding the measured constant to its definitional literal here
+    # (`Int.MAX` is 2**63-1) keeps the fix inside the out-res subpath —
+    # the emitted C of every non-spliced file is untouched (their
+    # `Int.MAX` still takes the class-ref path, byte-identical to a clean
+    # master). `(?<![\w.])` keeps `UInt.MAX` (should one ever appear) out
+    # of scope: a bare `str.replace` would corrupt it into
+    # `U9223372036854775807`.
+    template_src = re.sub(
+        r'(?<![\w.])Int\.MAX\b', '9223372036854775807', template_src)
+
+    # CONSTANT FOLDING (part 6, measured 2026-10-22, family C): the spliced
+    # `_Product2.bounds` (std/itertools/itertools.mojo:169 — the ONE
+    # `not X[1]` in the stdlib; `_Product3`/`_Product4.bounds` delegate to
+    # an inner `_Product2`) guards the upper-bound formula with
+    # `if not a_bounds[1] or not initial_b_bounds[1]` — a None-ness test on
+    # the `Optional[Int]` slot 1 of the `*_bounds` tuples. This backend has
+    # no value-level Optional representation: slot 1 flows as a raw int64
+    # word through the runtime tuple, so the guard lowers to `word == 0` and
+    # misreads an exhausted iterator's Some(0) count as None (measured on
+    # the `test_product_bounds` ladder: at i=1 the a-iterator is exhausted,
+    # a_bounds[1] = Some(0) = word 0, the guard fires, bounds() returns
+    # (lower, None), and the test's `bounds()[1].value()` reads 0 where 1 is
+    # expected — the exact emitted C: `_t23 = mojo_list_get_int (a_bounds,
+    # 1); _t24 = _t23 == 0LL;`).
+    #
+    # The guard is dead for every measured instantiation: both `*_bounds`
+    # values come from `_ListIter.bounds` (the product instantiations in the
+    # sweep take List/Range/CopyableOwnedIter args, all list iterators),
+    # which wraps a non-negative count in slot 1 UNCONDITIONALLY (`return
+    # (iter_len, {iter_len})`) — it never emits a None there, so `not
+    # Some(count)` is a compile-time false. Fold the guard to `if False:`
+    # (the upper formula then runs unconditionally and is value-correct:
+    # slot-1 words are the counts, and `or_else(0)` under this codegen's
+    # None=0 word encoding is the identity — exactly or_else(0)).
+    #
+    # NOT a sentinel: INT64_MIN is not expressible as a `__GIMPLE`-safe C
+    # literal — `_signed_int64_c_literal`'s own INT64_MIN form
+    # `(-0x7FFFFFFFFFFFFFFFLL - 1)` is a hard gimple-frontend error
+    # ("expected expression before '(' token") inside `__GIMPLE` functions,
+    # and `bounds()` is one (measured minlit_test.c, 2026-10-22). A non-list
+    # iterator arg (e.g. `_CountIterator`, whose default bounds() could put
+    # a None in slot 1) would need a true value-level Optional
+    # representation — the staged next mechanism.
+    template_src = template_src.replace(
+        "if not a_bounds[1] or not initial_b_bounds[1]:",
+        "if False:",
+    )
     m = head_match(template_src)
     if not m:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
@@ -358,15 +688,50 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
 
     # Drop the [type-params] block and rename the definition (fn or struct).
     src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]
+    # A type parameter that is ITSELF spelled like a receiver convention
+    # (`_ListIter[mut: Bool, ...]` — `mut` is both the parameter name and the
+    # receiver convention): the bare-word pass must not rewrite the `mut` of a
+    # receiver marker (`def __next__(mut self)`), or the marker is destroyed
+    # and the method compiles with an EXTRA parameter glued to the receiver —
+    # the C signature takes 2 args where the caller's `next(<struct>)`
+    # dispatch passes 1, a hard gcc "too few arguments" error. The receiver
+    # position is exactly `<modifier> self` (the modifier may sit on its own
+    # line, as stdlib spells it), and only that occurrence is excluded.
+    # (The parameter's other mentions — its own declaration block, docstring,
+    # annotation use — are still substituted; the docstring rewrite is
+    # cosmetic and codegen-irrelevant.)
     # Substitute each type parameter with its concrete type (whole-word),
     # skipping any nested scope that shadows this specific name. The
     # `Self.<param>` pass runs FIRST and consumes those occurrences whole.
+    # A LIST value is a VARIADIC binding (`*Ts` -> every remaining call
+    # argument) and takes the dedicated pass instead: the body spells the
+    # parameter without the star, so the plain passes would never reach it.
     for tp, concrete in type_args.items():
+        if isinstance(concrete, (list, tuple)):
+            src = _sub_variadic(src, tp, list(concrete), element_map,
+                                self_element)
+            continue
         spans = _shadowed_spans(src, tp)
+        if tp in _RECEIVER_MODS:
+            spans = spans + [
+                (m.start(), m.end())
+                for m in re.finditer(rf'\b{re.escape(tp)}\s+(?=\bself\b)', src)
+            ]
         src = _sub_outside_spans(rf'\bSelf\.{re.escape(tp)}\b', str(concrete),
                                  src, spans)
         src = _sub_outside_spans(rf'\b{re.escape(tp)}\b', str(concrete), src, spans)
     return mangled, src
+
+
+# Receiver-convention spellings a type parameter may be named after (the
+# parser's ownership vocabulary, fire_compiler's `_CONV_*` sets plus the
+# transfer/move spellings). `monomorphize_source` must protect a
+# `<param> self` receiver marker when the parameter is spelled like one of
+# these, and `instantiate` folds that guard into the CAS key (a pre-guard
+# cache entry for such a template carries the corrupted `True self` form).
+_RECEIVER_MODS = frozenset(
+    {'mut', 'inout', 'out', 'var', 'owned', 'read', 'ref', 'imm',
+     'borrowed', 'borrow', 'delete'})
 
 
 def compile_fn(fn_src: str, gcc: str = None) -> tuple:
@@ -401,12 +766,22 @@ ELAB_DEPTH: list = [0]
 
 
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
-                gcc: str = None) -> tuple:
+                gcc: str = None, nested_defs: list = None,
+                renames: list = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
     return convention: an artifact path, not its bytes), matching the
     existing `object_path_or_None` contract exactly.
+
+    `nested_defs` / `renames` splice nested-struct definitions into the
+    translation unit (see the note at the splice site below): each entry of
+    `nested_defs` is a monomorphized, mangled-named struct definition to
+    place AHEAD of the template, and each `(raw, mangled)` pair of `renames`
+    is rewritten throughout the template (and the nested defs) so a by-value
+    nested field resolves to the real layout. Both fold into the CAS key, so
+    a nested instantiation never collides with the plain one of the same
+    (template, type_args).
 
     `cpp_object_path` is non-None exactly when the instantiated template
     contains a nested `async def`/generator this codegen compiles to a real
@@ -436,7 +811,52 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     silently_wrong.md's test_tracing.mojo analysis)."""
     gcc = gcc or find_gcc()
     mangled, concrete = monomorphize_source(template_src, type_args)
-    key = cas.instantiation_key(template_src, type_args, comptime_args, gcc, _OBJ_FLAGS)
+    # A nested generic-struct TYPE ARGUMENT (a mention like `_ListIter[True,
+    # Int, ...]` substituted for the template's parameter) does not resolve in
+    # the isolated translation unit: a fresh GimpleGen has no registration for
+    # it, so a BY-VALUE field `var _inner: _ListIter[...]` erases to int64_t —
+    # one word where the layout is three — and every method the wrapper calls
+    # on it (`next(self._inner)`) falls into the `next`-on-unresolvable-
+    # receiver refusal. `nested_defs` splices the nested struct's own
+    # monomorphized DEFINITION (fields + methods, already renamed to its
+    # mangled name by monomorphize_source) ahead of the template, and
+    # `renames` rewrites each nested mention in the template body to that
+    # mangled name, so the by-value field gets the real layout and the method
+    # calls resolve against the definition in the same TU. (The
+    # explicit-bracket path's established behaviour — the mangled nested name
+    # erases to int64_t/pointer inside the isolated body — stands for
+    # pointer-only uses, which are ABI-harmless; this splice is what a by-
+    # value use needs. See Elaborator.elaborate_generic_struct's `nested`.)
+    # CAS-key guard for the receiver-marker fix in monomorphize_source: a
+    # template whose parameter list is named after a receiver convention
+    # (`_ListIter[mut: Bool, ...]`) monomorphizes to DIFFERENT text than it
+    # did before that fix (the `<param> self` marker is preserved instead of
+    # rewritten to the concrete value) — but the pre-fix output is keyed on
+    # the SAME (template, type_args) content. Any such entry cached before
+    # the fix (a `True self`-corrupted `__next__` with an extra parameter)
+    # would be served to this build and link as the wrong signature. The
+    # guard is a deterministic function of (template, type_args), so folding
+    # it into the key material reroutes ONLY the affected instantiations to a
+    # fresh entry; every other plain instantiation keeps its exact v1 key and
+    # its cached object.
+    _recv_guard = any(_tp in _RECEIVER_MODS for _tp in (type_args or {}))
+    _nested_extra = None
+    if nested_defs or renames or _recv_guard:
+        # Longest mention first: a nested mention CONTAINS its deeper
+        # mentions verbatim, so replacing the inner one first would break the
+        # outer match (`A[B[C]]` — rename `B[C]` first and `A[B[C]]` no
+        # longer matches as a whole).
+        for _raw, _repl in sorted(renames or [], key=lambda r: -len(r[0])):
+            concrete = concrete.replace(_raw, _repl)
+        _defs = []
+        for _d in (nested_defs or []):
+            for _raw, _repl in sorted(renames or [], key=lambda r: -len(r[0])):
+                _d = _d.replace(_raw, _repl)
+            _defs.append(_d)
+        concrete = '\n'.join(_defs) + '\n' + concrete
+        _nested_extra = (tuple(renames or []), tuple(_defs), _recv_guard)
+    key = cas.instantiation_key(template_src, type_args, comptime_args, gcc,
+                                _OBJ_FLAGS, extra=_nested_extra)
 
     _log = os.environ.get('MOJO_ELAB_LOG')
     if _log:

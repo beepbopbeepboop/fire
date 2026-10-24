@@ -605,11 +605,24 @@ def _store_want():
 # to contain.  Every one of these is a case where the store's WIDTH would be a
 # choice rather than a fact, so they are the standing statement that the
 # capability did not become a way to emit a store at any width: no pointee at
-# all, a pointee whose width this model does not establish (a float, a blob), a
-# struct (there is nothing at the address to store into), an offset this path
-# cannot establish as an integer (so it will not scale it), an offset it WILL
-# scale by the wrong element's width, and a receiver whose bytes are the image's
-# read-only text.
+# all, a pointee whose width this model does not establish (a blob), a struct
+# (there is nothing at the address to store into), an offset this path cannot
+# establish as an integer (so it will not scale it), an offset it WILL scale by
+# the wrong element's width, and a receiver whose bytes are the image's read-only
+# text.
+#
+# **The `float` row is here for a different reason than the rest and its needle
+# moved on 2026-10-05.** A `Float64` pointee is no longer refused for want of
+# a WIDTH — eight bytes is the width and `POINTEE_WIDTHS` says so — because the
+# pointee's KIND now flows out of the dereference (`pointee_kind`). The store
+# is still refused, and for the reason a store has always needed one: the
+# stored value's kind has to agree with the pointee's, and `1` does not agree
+# with `Float64`. So this row is now the statement that a float pointee is a
+# place a rule runs rather than a wall, and its needle is the new sentence —
+# "the pointee is `Float64` and this store writes into a `Float64` pointee" —
+# which is what says the refusal is about the VALUE. A needle that stopped
+# matching would have been the signal; it is checked on both backends, so a
+# reword fails here rather than quietly moving a column.
 #
 # The needles are the model's own sentences, so a needle that stops matching is
 # a message that moved — and both backends are asked for the same one, which is
@@ -629,7 +642,12 @@ def f(p) -> int:
 def f(p: Pointer[Float64]) -> int:
   p.value() = 1
   return 0
-""", "the pointee is Float64"),
+""", "the pointee is `Float64` and this store writes into a `Float64` pointee"),
+    ("float_into_an_integer_pointee", """\
+def f(p: Pointer[Int64]) -> int:
+  p.value() = 2.5
+  return 0
+""", "the pointee is `Int64` and this store writes into a `Int64` pointee"),
     ("blob", """\
 def f(p: Pointer[List[Int]]) -> int:
   p.value() = 1

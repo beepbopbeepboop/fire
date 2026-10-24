@@ -18,6 +18,7 @@ import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas)
 from gimple_codegen import _mojo_type
+from mojo.middle.types import _body_builds_struct_tuple
 
 
 class ConformanceError(Exception):
@@ -296,6 +297,64 @@ def type_param_defaults(template_src: str):
     return out
 
 
+#: Bracket-parameter annotations that name a compile-time VALUE rather than a
+#: type.  The classification a bare literal bracket argument turns on: `[T]`
+#: and `[T: AnyType]` are types, `[origin: Int]` and `[n: Bool]` are values.
+#:
+#: Deliberately an ALLOW-LIST of the scalar value types this path spells, not
+#: "annotated and not `AnyType`": a trait-bounded type parameter (`[T: Movable]`,
+#: `[T: Copyable]`) is annotated too, and reading one of those as a value would
+#: let a bare literal bind a TYPE parameter and substitute `0` for `T` in the
+#: body — the fabricated-answer outcome every refusal in this area exists to
+#: prevent.  A value-typed parameter whose annotation is not in this set (an
+#: `AddressSpace`, an `Origin[…]`) is left classified as a type, which refuses a
+#: bare literal for it rather than guessing a substitution.
+_VALUE_BRACKET_ANNOTATIONS = frozenset((
+    "Int", "UInt", "Int8", "Int16", "Int32", "Int64",
+    "UInt8", "UInt16", "UInt32", "UInt64",
+    "Bool", "String", "StringLiteral", "IntLiteral", "FloatLiteral",
+    "Float16", "Float32", "Float64",
+))
+
+
+def type_param_kinds(template_src: str):
+    """`['type' | 'value', …]` per bracket parameter, in declaration order.
+
+    The one question a bare literal bracket argument turns on, and the reason
+    `type_param_names` (which strips the annotation and answers only names) is
+    not enough for it: `Tagged[T, origin: Int]` is `['type', 'value']`, so a
+    literal supplied for `origin` is a comptime VALUE argument, while
+    `Pair[T]` is `['type']` and a literal supplied for `T` is a value in a
+    type's position — `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_
+    value.md` is the wall this exists to tell apart.
+
+    A parameter with NO annotation (`[T]`) is a type, and one annotated with a
+    scalar value type (`origin: Int`, `n: Bool`) is a value.  See
+    `_VALUE_BRACKET_ANNOTATIONS` for why the value half is an allow-list rather
+    than the complement of `AnyType`.
+
+    Same reader (`mm.head_match`, `split_top_level_commas`, `_is_param_marker`)
+    as `type_param_names`/`type_param_defaults`, so the three cannot disagree
+    about which entries are parameters or how many there are.
+    """
+    m = mm.head_match(template_src)
+    if not m:
+        return []
+    out = []
+    for p in split_top_level_commas(m.params):
+        p = p.strip()
+        if not p or _is_param_marker(p):
+            continue
+        head = p.split('=', 1)[0].strip()
+        _name, sep, annot = head.partition(':')
+        # The annotation's own head: `List[T]` -> `List`, `Origin[mut=x]` ->
+        # `Origin`, `Movable where …` -> `Movable`.
+        base = annot.strip().split('[', 1)[0].split('where', 1)[0].strip()
+        out.append("value" if sep and base in _VALUE_BRACKET_ANNOTATIONS
+                   else "type")
+    return out
+
+
 _DEFAULT_INT = re.compile(r'^-?\d+$')
 _DEFAULT_TYPE_ROOT = re.compile(r'^([A-Z]\w*)\s*(?:\.|$)')
 
@@ -339,16 +398,34 @@ def bind_type_args(template_src: str, type_args):
     Supplied arguments are taken POSITIONALLY — the same `zip` the caller
     already used — and only the trailing ones can come from a default, because
     only a trailing parameter can be omitted without changing the meaning of the
-    ones before it."""
+    ones before it.
+
+    A TRAILING variadic parameter (`*Ts` — measured 2026-10-21, part 4:
+    `_ChainedIterator[*Ts: Iterator]`, the `chain`/`zip` out-parameter
+    factories' wrappers) consumes EVERY remaining supplied argument as a
+    list — `len(supplied) > len(params)` is the variadic case, not an
+    overflow to truncate (the pre-variadic truncation would have silently
+    dropped all inners but the first)."""
     params = type_param_names(template_src)
     if not params:
         return None
     supplied = list(type_args or ())
-    if len(supplied) > len(params):
-        supplied = supplied[:len(params)]
+    if not any(p.startswith('*') for p in params):
+        if len(supplied) > len(params):
+            supplied = supplied[:len(params)]
     defaults = type_param_defaults(template_src) if len(supplied) < len(params) else {}
     targs = {}
     for i, p in enumerate(params):
+        if p.startswith('*'):
+            # Variadic: all remaining supplied args bind to this ONE
+            # parameter, as a list. It must be trailing (Mojo's variadic
+            # position), and it needs at least one argument (an empty
+            # `chain()` has no measured lifting shape — the seed's
+            # container gate already requires >= 1 argument).
+            if len(supplied) <= i:
+                return None
+            targs[p] = list(supplied[i:])
+            break
         if i < len(supplied):
             targs[p] = supplied[i]
             continue
@@ -639,6 +716,33 @@ def erased_only_params(template_src: str, params) -> set:
     return out
 
 
+def phantom_type_params(template_src: str, params) -> set:
+    """The subset of `params` that occurs NOWHERE outside the generic head.
+
+    A phantom parameter is a type parameter the declaration names but never
+    mentions again — not in a field's type, not in a method's signature, not in
+    a method body, not in a `comptime` alias.  It is a strictly stronger
+    condition than `erased_only_params`' "only in positions `_mojo_type`
+    discards": a phantom parameter has no occurrence to discard, and
+    `erased_only_params` deliberately requires `occ` to be non-empty, so it
+    returns the EMPTY set for one.  That gap is why this is a second predicate
+    rather than a reuse: `struct Marker[T: AnyType]: var v: Int` is exactly the
+    shape `erased_only_params` declines and `formal/monomorph.py`'s
+    `without_template_bodies` needs the answer for (it decides whether such a
+    template's declaration is already a concrete one and must not be dropped).
+
+    COUNTED over `_code_only`, which removes the head's own `[...]`, every
+    docstring and every comment — so the declared name in the head and prose
+    about the parameter are not uses of it, exactly as for
+    `erased_only_params`."""
+    src = _code_only(template_src)
+    out = set()
+    for p in params:
+        if not re.search(rf'\b{re.escape(p)}\b', src):
+            out.add(p)
+    return out
+
+
 def _fill_erased_params(template_src, params, binding) -> dict:
     """`binding` plus `ERASED_TYPE_ARG` for every still-unbound parameter that
     `erased_only_params` proves is discarded. An unbound parameter that is NOT
@@ -682,7 +786,8 @@ def infer_type_args(template_src: str, arg_ctypes):
     return [binding[p] for p in params]
 
 
-def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
+def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
+                           fill_defaults: bool = False):
     """Type args for a `Struct(...)` CONSTRUCTOR call from that call's argument
     C types, or None if they cannot all be bound.
 
@@ -724,6 +829,20 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
                  if m.name == '__init__' or m.name.startswith('__init__')]
         break
     resolved = []
+    # PART 6 (2026-10-23, family D piece 2): `fill_defaults` fills the
+    # still-unbound bracket parameters from their OWN provable defaults
+    # (`_default_type_arg` — a literal or a leading-uppercase type name),
+    # not only the erased-only ones `_fill_erased_params` covers. Measured
+    # on test_utils' `CopyCounter(1)`: its `trivial_copy: Bool = False`
+    # VALUE parameter occurs in a comptime field (not an erased span), so
+    # the erased-only fill leaves it unbound and EVERY overload that binds
+    # `T` from the argument is refused — the call reaches the generated C
+    # as a declared-never-defined mangled factory (the zero-stub hazard
+    # class). The elab_intu seed passes True; the `.o` route's caller keeps
+    # the default False (its strict refusal is what elab_intu's in-TU
+    # materialization exists to take over, and widening it here would
+    # double-define what the seed already owns).
+    _d2_defaults = (type_param_defaults(tmpl) if fill_defaults else {})
     for ctor in ctors:
         anns = [ann for pn, ann in ctor.params
                 if pn != 'self' and not pn.startswith('*')]
@@ -733,7 +852,26 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes):
         for ann, ct in zip(anns, arg_ctypes):
             for k, v in _unify_param_ann(ann, params, ct).items():
                 binding.setdefault(k, v)
+        # A fill_defaults-mode constructor earns a VOTE only when it bound at
+        # least one parameter FROM THE CALL itself. CopyCounter's copy ctor
+        # (`copy: Self`) unifies nothing; default-fill would bind T to its
+        # `= NoneType` default and trivial_copy to `False`, voting
+        # ['NoneType', 'False'] against the value ctor's argument-derived
+        # ['Int', 'False'] — the agreement rule then refuses the whole call
+        # as ambiguous, even though no ambiguity exists: a constructor that
+        # inferred nothing from the argument is not an inference. Strict
+        # mode (fill_defaults off) never reaches the fill loop, so its votes
+        # are unchanged.
+        _unify_bound = len(binding)
+        if _d2_defaults and _unify_bound == 0:
+            continue
         binding = _fill_erased_params(tmpl, params, binding)
+        if _d2_defaults:
+            for _p in params:
+                if _p not in binding:
+                    _d = _default_type_arg(_d2_defaults.get(_p, ''))
+                    if _d is not None:
+                        binding[_p] = _d
         if any(p not in binding for p in params):
             continue
         resolved.append([binding[p] for p in params])
@@ -797,6 +935,19 @@ def _elab_signature(concrete_src: str, name: str):
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
             ret = _mojo_type(s.return_type) if s.return_type else 'void'
+            if (isinstance(ret, str) and ret.startswith('MojoTuple_')
+                    and not _body_builds_struct_tuple(
+                            getattr(s, 'body', None))):
+                # The SAME body-sensitive decision the defining unit's own
+                # resolution makes (module_gen's all-functions loop and
+                # emit_funcs' free-function path): a `-> Tuple[...]` return
+                # whose body builds the tuple as a RUNTIME (list-backed)
+                # tuple literal returns `MojoList *`, not the synthesized
+                # by-value struct — without this the CALLER's extern and
+                # call-site temps disagree with the instance TU's own
+                # `MojoList *` prototype (measured 2026-10-21 part 4
+                # integration on `split`'s `-> Tuple[String, String]`).
+                ret = 'MojoList *'
             return ret, [_mojo_type(t) for _, t in s.params]
     return 'int64_t', []
 
@@ -882,11 +1033,24 @@ class Elaborator:
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
-    def elaborate_generic_struct(self, module_src: str, struct_name: str, type_args):
+    def elaborate_generic_struct(self, module_src: str, struct_name: str,
+                                 type_args, nested=None):
         """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
         the struct + its methods for the type args (CAS-cached), and report the
         concrete name, field layout, method signatures, and object so the codegen
-        can materialize the type, construct it, and call its methods."""
+        can materialize the type, construct it, and call its methods.
+
+        `nested` handles a type argument that is itself a generic-struct mention
+        (e.g. `_PeekableIterator[_ListIter[True, Int, ImmOrigin, True]]`): a list
+        of `(mention, module_src, struct_name, type_args)`, where `mention` is
+        the exact string the caller passed as that nested argument in
+        `type_args` and the other three locate the struct's definition. Each
+        nested struct is bound-checked and monomorphized here, and its definition
+        is spliced into the wrapper's translation unit, so a by-value nested
+        field keeps its real layout — the isolated TU resolves the mangled name
+        against the definition in the same TU instead of erasing the mention to
+        int64_t (see monomorphize.instantiate's splice note for the failure this
+        fixes: the wrapper's own `next(self._inner)` refusal)."""
         tmpl = extract_struct_source(module_src, struct_name)
         if tmpl is None:
             return None
@@ -896,7 +1060,24 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        nested_defs, renames = [], []
+        for mention, n_src, n_name, n_args in (nested or []):
+            if mention not in type_args:
+                return None
+            n_tmpl = extract_struct_source(n_src, n_name)
+            if n_tmpl is None:
+                return None
+            n_targs = bind_type_args(n_tmpl, n_args)
+            if n_targs is None:
+                return None
+            check_bounds(n_src, n_tmpl, n_targs)
+            n_mangled, n_concrete = mm.monomorphize_source(n_tmpl, n_targs)
+            nested_defs.append(n_concrete)
+            renames.append((mention, n_mangled))
+
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
+                                                     nested_defs=nested_defs,
+                                                     renames=renames)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers

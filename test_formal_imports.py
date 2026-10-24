@@ -2050,6 +2050,189 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           f"{consumers[:10]}")
 
 
+# The 216-name queue of `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+# is closed here by a RULE rather than by 216 remembered entries, and these two
+# tests are the rule's whole specification. Both are checked over EVERY name
+# CPython ships rather than over a list, so a rule that stopped firing fails
+# instead of quietly lengthening the queue.
+ABSENT_NAMES = ("_winapi", "_overlapped", "_wmi", "_tkinter", "_gdbm")
+
+# Private name -> (public sibling, what the public one's own answer is). Two of
+# these are the CASES the rule exists to get right and they are the reason the
+# rule reads the tables rather than the interpreter: `_hashlib` links
+# `libcrypto.3.dylib` and `_decimal` links `libmpdec.4.dylib`, neither of which
+# is in libSystem, so any rule that read CPython's dynamic dependencies would
+# call both `unreachable` — while `hashlib` is answered here by
+# `formal/hostmods/hashlib.mojo` and `decimal` is `HOST_MODELLED`. A library
+# outside libSystem is a fact about CPython's packaging; an object the target
+# does not have is a fact about the target, and only the second is a tier.
+CAPABILITY_SIBLINGS = {
+    "_hashlib": ("hashlib", "modelled"),      # binds libcrypto.3.dylib
+    "_decimal": ("decimal", "modelled"),      # binds libmpdec.4.dylib
+    "_socket": ("socket", "unreachable"),
+    "_warnings": ("warnings", "unreachable"),
+    "_locale": ("locale", "unreachable"),
+    "_asyncio": ("asyncio", "unreachable"),
+    "_bisect": ("bisect", "modelled"),
+    "_ctypes": ("ctypes", "modelled"),        # `admitted` -> reachable, not absent
+}
+
+
+def test_the_five_names_this_host_cannot_provide_are_unreachable(
+        tmpdir, _shared):
+    """The `find_spec` rule, over every name CPython ships, and its five names.
+
+    §0.3 of the doc said the oracle for the rest of the queue is
+    `importlib.util.find_spec`, and that half is right: a target is a SUBSET of
+    the host, so a name this host's own CPython cannot provide is a name nothing
+    here could have implemented, whatever the backend does. `msvcrt`, `winreg`,
+    `winsound` and `nt` were placed that way on 2026-10-05 and this is the same
+    reading run over the whole list, which finds five more: `_winapi` and
+    `_overlapped` are the Windows kernel32 entry points, `_wmi` is Windows'
+    management interface, `_tkinter` is the Tk binding `tkinter` above needs,
+    and `_gdbm` is the GNU dbm binding.
+
+    **Asserted as the RULE and over every name**, not as five membership rows:
+    anything this host's CPython cannot find must answer `unreachable`. That is
+    what makes it a tripwire rather than a list — CPython dropping a name makes
+    an entry harmless, and CPython shipping one fails here instead of producing
+    a name whose diagnostic says no tier says whether it is reachable.
+    """
+    import importlib.util
+    import sys as _sys
+    import formal.imports as I
+    names = sorted(getattr(_sys, "stdlib_module_names", ()) or ())
+    check(len(names) > 100,
+          f"only {len(names)} names read from sys.stdlib_module_names, so this "
+          "is not the list the rule was stated over")
+    absent = []
+    for name in names:
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:  # noqa: BLE001 — find_spec raising IS "not here"
+            spec = None
+        if spec is None:
+            absent.append(name)
+            check(I.host_module_tier(name) == "unreachable",
+                  f"{name}: CPython cannot provide it on this host either "
+                  f"(find_spec -> no spec), and host_module_tier answers "
+                  f"{I.host_module_tier(name)!r}. A target is a subset of this "
+                  f"host, so the object is missing from it too and the name is "
+                  f"HOST_UNREACHABLE by the rule at the top of "
+                  f"formal/imports.py")
+    for name in ABSENT_NAMES:
+        check(name in absent,
+              f"precondition: {name} no longer has no spec on this host, so it "
+              f"is not one of the five and this table is stale")
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is placed by a measurement rather than by membership, "
+              f"so it belongs in HOST_UNREACHABLE with its reason; it is not "
+              f"there, and every other name in that set has one")
+    # …and the four the 2026-10-05 pass placed the same way are still placed,
+    # which is the direction that catches a table edit that removed one.
+    for name in ("msvcrt", "winreg", "winsound", "nt"):
+        check(I.host_module_tier(name) == "unreachable",
+              f"{name} was placed by the same find_spec measurement on "
+              f"2026-10-05 and now answers "
+              f"{I.host_module_tier(name)!r}")
+
+
+def test_a_private_accelerator_answers_with_its_public_module_tier(
+        tmpdir, _shared):
+    """`capability_sibling_tier`, over every name, on the eight pairs that pin it.
+
+    CPython splits a capability across a public module and a private accelerator
+    for it, so implementing the private one is implementing the public one's
+    capability and the tier that answers for the public name answers for the
+    private one. That is 30 of the queue decided by a rule instead of a memory,
+    and it is the only part of the queue decidable from THIS repository.
+
+    Four properties, each of which a version of the rule that was merely
+    plausible would get wrong:
+
+    * **the PUBLIC name never derives.** A rule that could hand `socket` the
+      answer of `socket`'s own sibling would be answering a question with the
+      question, so a public name is asked for nothing.
+    * **`admitted` becomes `modelled`, never itself.** `HOST_ADMITTED`'s own
+      membership rule is "there is a `formal/hostmods/` source", asserted in
+      both directions against the filesystem by
+      `test_formal_link_accounting.py`, and `_ctypes` has no source — so
+      returning `admitted` would claim a file that is not there, and the
+      capability is REACHABLE, which is `modelled`.
+    * **the rule cannot contradict a hand-kept tier.** It is asked after all
+      four tables, and for every name with a public sibling that is classified
+      it must answer that sibling's claim tier.
+    * **a name in no tier and with no classified sibling still answers `''`.**
+      This is the property that keeps the queue honest: the rule shortens it
+      and never fills it with a guess.
+    """
+    import sys as _sys
+    import formal.imports as I
+    for name, (public, tier) in sorted(CAPABILITY_SIBLINGS.items()):
+        check(name in getattr(_sys, "stdlib_module_names", ()),
+              f"precondition: {name} is not a CPython standard-library module, "
+              f"so the pair this row pins is not a real pair")
+        check(name.lstrip("_") == public,
+              f"precondition: {name}'s public sibling is {public!r} and the "
+              f"rule strips leading underscores, so the pair only holds while "
+              f"the naming is mechanical")
+        check(I.host_module_tier(name) == tier,
+              f"host_module_tier({name!r}) is "
+              f"{I.host_module_tier(name)!r}, not {tier!r}: its public sibling "
+              f"{public!r} answers "
+              f"{I._hand_kept_tier(public) or I.host_module_tier(public)!r} and "
+              f"the capability is the same one")
+        check(I.capability_sibling_tier(name) == tier,
+              f"capability_sibling_tier({name!r}) disagrees with "
+              f"host_module_tier({name!r}), so one of the two is not reading "
+              f"the rule — the accessor is the one every caller uses, so a "
+              f"disagreement here means the rule is not wired in")
+        check(I.capability_sibling_tier(public) == "",
+              f"a PUBLIC name derived something ({public!r} -> "
+              f"{I.capability_sibling_tier(public)!r}). The rule is about a "
+              f"private accelerator's public sibling and nothing else; a rule "
+              f"that fires on public names is answering a question with itself")
+        check(I._is_host_module(name),
+              f"{name} answers a tier but _is_host_module says it is not "
+              f"classified, so unresolvable_import_error would tell a reader "
+              f"that no tier says whether it is reachable — which is then false "
+              f"of a name the accessor answers")
+    decided = []
+    for name in sorted(getattr(_sys, "stdlib_module_names", ()) or ()):
+        if not name.startswith("_"):
+            continue
+        public = name.lstrip("_")
+        if not public or public == name:
+            continue
+        src = I._hand_kept_tier(public)
+        if src in I.CLAIM_TIERS or src == "admitted" \
+                or I.resolve_module_path(public):
+            decided.append(name)
+            check(I.capability_sibling_tier(name) == "modelled"
+                  if src not in I.CLAIM_TIERS else
+                  I.capability_sibling_tier(name) == src,
+                  f"{name}: its public sibling {public} is classified as "
+                  f"{src or 'written'!r} and the rule did not carry that over")
+            check(I.host_module_tier(name),
+                  f"{name} is decided by the sibling rule over every name and "
+                  f"still answers no tier, so the rule is not wired into "
+                  f"host_module_tier")
+    check(len(decided) >= 25,
+          f"only {len(decided)} private names are decided by the rule, so the "
+          f"queue it is supposed to shorten is much shorter than the "
+          f"measurement recorded; re-measure before trusting this row")
+    # The queue itself: names CPython ships, nothing here classifies. Read
+    # through `host_module_verdict` so a WRITTEN name (which leaves its tier)
+    # is not counted as a gap — the bug the doc's §0.2 records in the first
+    # version of its own census.
+    queue = [n for n in sorted(getattr(_sys, "stdlib_module_names", ()) or ())
+             if I.host_module_verdict(n)[0] == "unclassified"]
+    check(len(queue) < 216,
+          f"{len(queue)} names are in no tier, so the sibling rule and the "
+          f"five find_spec placements did not shorten the queue the doc "
+          f"measured at 216")
+
+
 def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         tmpdir, _shared):
     """`host_module_verdict`: the eight answers, one row each, and the partition.
@@ -2189,45 +2372,44 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
           "unclassified names only if there are many of them")
 
 
-def test_the_find_spec_decided_names_are_unreachable(tmpdir, _shared):
-    """The five names `find_spec` decides of the unclassified set are claimed.
+def test_the_five_find_spec_decided_names_are_unreachable(tmpdir, _shared):
+    """The first entries `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    §0.5 said a worker could add "with a measurement behind each".
 
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5 measured the
-    oracle and found it splits the unclassified set 5 and 200: `find_spec`
-    returns NO SPEC for `_gdbm`, `_overlapped`, `_tkinter`, `_winapi` and
-    `_wmi` on this host, which is the rule at the top of `formal/imports.py`
-    applied — the object is missing from the target, so they are
-    `unreachable` rather than a per-name judgement with no measurement behind
-    it. This pins the direction that §0.5 named as the next step: the oracle
-    decides a name's TIER, and the five it decides are claimed and not left in
-    no tier.
-
-    **The measurement is CPython's own and is host-specific, and that is the
-    point rather than a fragility** — a host that carries Tcl/Tk or gdbm would
-    answer a spec for `_tkinter`/`_gdbm`, and then the classification would be
-    wrong and this row is the right place to say so. All five are private, so
-    this moves the PUBLIC unclassified count by zero.
+    `importlib.util.find_spec` returns no spec for every one of them here, and
+    the object each is missing is one a freestanding image (libSystem and
+    nothing else) cannot have.  `_overlapped`/`_winapi`/`_wmi` are Windows-only,
+    so their no-spec measurement is host-independent; `_gdbm` needs libgdbm and
+    `_tkinter` needs Tk, both outside libSystem — a fact about the TARGET, so
+    the placement does not turn on this host having either.  All five are
+    private (a leading `_`), so classifying them moves the PUBLIC unclassified
+    count by zero: five per-name judgements done with an oracle, not a moved
+    row.
     """
     import importlib.util
-    five = ("_gdbm", "_overlapped", "_tkinter", "_winapi", "_wmi")
-    probe = os.path.join(HERE, "formal", "arm64.py")
-    for name in five:
+    import formal.imports as I
+    import sys as _sys
+    windows_only = ("_overlapped", "_winapi", "_wmi")
+    outside_libsystem = ("_gdbm", "_tkinter")
+    for name in windows_only + outside_libsystem:
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module")
         check(name in I.HOST_UNREACHABLE,
-              f"{name} is not in HOST_UNREACHABLE, so the five `find_spec` "
-              "decides are not claimed")
-        check(I.host_module_tier(name) == "unreachable",
-              f"host_module_tier({name!r}) answered "
-              f"{I.host_module_tier(name)!r}, want 'unreachable'")
-        answer, _detail = I.host_module_verdict(name, relative_to=probe,
-                                                project_root=probe)
+              f"{name} is not in HOST_UNREACHABLE, so the rule at the top of "
+              "formal/imports.py has not been applied to it")
+        answer, _detail = I.host_module_verdict(name)
         check(answer == "unreachable",
-              f"host_module_verdict({name!r}) answered {answer!r}")
-        check(name.startswith("_"),
-              f"{name} is not private, so this row moves the public count")
+              f"host_module_verdict({name!r}) answered {answer!r}, not "
+              "'unreachable'")
+    # The measurement itself, and only for the three whose absence is
+    # HOST-INDEPENDENT: `find_spec` cannot find them on any host, so this row
+    # does not go red on a machine that happens to ship Tk or gdbm.  For those
+    # two the placement rests on the object being outside libSystem, which is a
+    # fact about the TARGET and not about the interpreter running this test.
+    for name in windows_only:
         check(importlib.util.find_spec(name) is None,
-              f"find_spec found a spec for {name} on this host, which is the "
-              "measurement the tier rests on — the object is NOT missing from "
-              "the target and the entry is wrong")
+              f"importlib.util.find_spec({name!r}) found a spec here, so the "
+              "no-spec measurement this placement rests on does not hold")
 
 
 def test_mojo_source_beats_host_module(tmpdir, _shared):
@@ -2331,6 +2513,21 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     check("collections" in I.HOST_MODULE_ADVICE,
           "the `collections` advice was deleted; the five files that stop there "
           "are back to a message that names the module and nothing else")
+    # The `functools` advice named a missing capability that EXISTS. A function
+    # value is a CODE ADDRESS on this path, and `reduce`'s own shape builds and
+    # answers CPython on both architectures (test_formal_specialization.py's
+    # `functools.reduce's own shape runs, on both`), so "a callable this path has
+    # no representation for" sends a reader to add what is already there. The
+    # gate on the module is the DECORATOR half, which is a real and different
+    # defect — checked here because a message that names the wrong capability is
+    # the failure this whole table exists to avoid.
+    _ft = I.HOST_MODULE_ADVICE["functools"]
+    check("callable this path has no representation" not in _ft,
+          f"the `functools` advice claims a callable has no representation, "
+          f"which is false: {_ft!r}")
+    check("decorator" in _ft.lower(),
+          f"the `functools` advice does not name the decorator gate, which is "
+          f"what actually stops the module: {_ft!r}")
     # A dotted name asks for the same answer, which is the rule that makes a
     # per-spelling table wrong by omission.
     check(I.host_module_advice("collections.abc") ==
@@ -3813,6 +4010,86 @@ def test_the_refusal_says_a_module_declares_no_such_name(tmpdir, _shared):
           "an unreadable source must answer (None, None), not (None, False)")
 
 
+DECLARES_NOTHING_ELSE_MODULE = (
+    "def present() -> Int:\n  return 1\n")
+
+
+def test_a_callee_the_module_declares_nowhere_names_that(tmpdir, _shared):
+    """`from time import now` where `time` has no `now` is refused by name.
+
+    `imported_callee_refusal` used to enumerate the four `doc/ABI.md`
+    exclusions whatever the module actually contained, so a reader of
+    `runtime/stdlib_wrapper.mojo` (`from time import now, sleep`) was sent to
+    look for an underscore, a bracket, a second definition or a libSystem name
+    in `formal/hostmods/time.mojo`, which has none of them. The rule is now read
+    from the defining module's own source (`model.export_rule_for` →
+    `reflect.export_exclusions`), and a name the module declares nowhere gets
+    the one sentence that is true of it — and NOT the enumeration, which is the
+    half that sent the reader after three constructs the file does not contain.
+    """
+    root = os.path.join(tmpdir, "declares_nowhere")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": DECLARES_NOTHING_ELSE_MODULE,
+                      "prog.mojo": "from mylib import absent\n"
+                                   "def main() -> Int:\n  return absent()\n"})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a call to a name the module declares nowhere built successfully")
+    check("declares no function or struct named `absent`" in text,
+          f"the refusal does not say the module declares no such name, which is "
+          f"the fact that decides it: {text.strip()[-300:]}")
+    check("a name with a leading `_` is private" not in text
+          and "generic template is not one symbol" not in text,
+          f"the refusal still enumerates the four exclusions for a name none of "
+          f"them applies to: {text.strip()[-300:]}")
+
+
+def test_a_call_to_a_name_the_module_does_not_declare_says_so(tmpdir, _shared):
+    """A call to a name the defining module does not DECLARE is not blamed on
+    `doc/ABI.md`'s export rule.
+
+    `model.imported_callee_refusal` enumerated four candidate exclusions, and
+    for a module that simply has no such name none of them is true — so the
+    sentence was false about the file it named. The measured case is
+    `runtime/stdlib_wrapper.mojo`'s `from time import now`: every one of the four
+    rules was false about `formal/hostmods/time.mojo`, which declares no `now`.
+    The rule is now READ from the defining module's own source
+    (`formal/build.py::export_rule_for`, through `reflect.export_exclusions`),
+    and the fifth answer — the module declares no name under that spelling — is
+    stated as itself.
+    """
+    root = os.path.join(tmpdir, "undeclared")
+    os.makedirs(root)
+    write_tree(root, {
+        "lib.mojo": "def present() -> Int:\n  return 1\n",
+        "prog.mojo": ("from lib import absent\n"
+                      "\n"
+                      "def main():\n"
+                      "  print(absent())\n"
+                      "  return 0\n"),
+    })
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    text = result.stderr or result.stdout
+    check(result.returncode != 0,
+          "a call to a name the module does not declare built successfully")
+    check("does not DECLARE it" in text and "absent" in text,
+          f"the refusal did not say the module declares no such name, which is "
+          f"the fact that decides it: {text.strip()[-400:]}")
+    check("a name with a leading `_` is private" not in text
+          and "a generic template is not one symbol" not in text,
+          f"the refusal still blamed an export rule for a name the module does "
+          f"not declare at all: {text.strip()[-400:]}")
+    # …and the sentence must not be the empty-name shape either: it names the
+    # module and the spelling, which is what the reader acts on.
+    check("`lib`" in text and "`absent`" in text,
+          f"the refusal did not name the module and the missing name: "
+          f"{text.strip()[-400:]}")
+
+
+
 METHOD_CALL_MODULE = (
     "def widen[T: Intable](v: T) -> T:\n  return v\n")
 
@@ -4041,8 +4318,8 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     could add".
 
     The fourth message-accuracy guard on `no_public_api_reason`, and the one
-    `bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6 item 2
-    filed as a dead end: the branch's text ended "There is nothing an importer
+    the round-2 `std-os-io` scope audit filed as a dead end: the branch's text
+    ended "There is nothing an importer
     could bind, and nothing this backend could add." — and the second clause
     is **false**, which is why that document said of it "the sentence is a dead
     end for whoever reads the 6 files first".
@@ -4076,7 +4353,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
           "the refusal does not name the feature that would remove it, so the "
           f"6 files behind this row still have no next step: {reason}")
-    check("BACKEND" in reason,
+    check("a rule that a module nothing binds needs no library at all" in reason,
           "the refusal does not say the missing thing is a backend RULE "
           f"rather than work on the module, which is the part a reader acts "
           f"on: {reason}")
@@ -4090,7 +4367,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
         f.write("def _hidden() -> Int:\n  return 1\n")
     other = no_public_api_reason([priv])
     check("every declaration in it is private" in other
-          and "BACKEND" not in other,
+          and "needs no library at all" not in other,
           f"the constants-only wording leaked into the private branch, whose "
           f"reason is a different fact: {other}")
 
@@ -5260,6 +5537,10 @@ TESTS = [
      test_an_unclassified_stdlib_name_is_not_called_a_typo),
     ("no unclassified stdlib name is imported by anything",
      test_no_unclassified_stdlib_name_is_imported_by_anything),
+    ("the names this host cannot provide are unreachable",
+     test_the_five_names_this_host_cannot_provide_are_unreachable),
+    ("a private accelerator answers with its public module's tier",
+     test_a_private_accelerator_answers_with_its_public_module_tier),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
@@ -5316,6 +5597,8 @@ TESTS = [
      test_the_bare_call_refusal_names_the_method_the_call_is_in),
     ("the enclosing-scope reader names a trait method and a module store",
      test_the_enclosing_scope_reader_names_a_trait_method_and_a_module_store),
+    ("a callee the module declares nowhere is told so, not the four rules",
+     test_a_callee_the_module_declares_nowhere_names_that),
     ("a generic template is not exported under its base name",
      test_a_generic_template_is_not_exported_under_its_base_name),
     ("a constants-only module is not told nothing could be added",
@@ -5350,8 +5633,8 @@ TESTS = [
      test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
     ("every name has one named verdict, and no answer is an absence",
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
-    ("the names find_spec decides are unreachable, not unclassified",
-     test_the_find_spec_decided_names_are_unreachable),
+    ("the five find_spec-decided names are unreachable",
+     test_the_five_find_spec_decided_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",
