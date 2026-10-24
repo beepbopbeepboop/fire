@@ -1329,7 +1329,126 @@ def test_set_ctor_walks_boxed_global_container() -> bool:
     return ok
 
 
+def test_nested_def_is_not_a_module_level_fn_export() -> bool:
+    """A nested `def` (a closure inside a function body) must not be
+    registered as a module-level function export by the importer's
+    text scan. Measured 2026-10-24 as the `os_fsdecode`/`os_fsencode`
+    0-arg-stub class on rows 10/24/25: in Lib/os.py, `fsencode`/
+    `fsdecode` are nested defs inside a factory (`def _fscodec(): ...
+    def fsdecode(filename): ...`), bound at module level by
+    `fsencode, fsdecode = _fscodec()`; the scan's stripped-line `def `
+    match used to register the nested def as a top-level export, and —
+    because its parameter extraction keeps only ANNOTATED params
+    (`if ':' in param`) while stdlib's nested defs are unannotated —
+    the entry came out `int64_t fsdecode (void)`. The importer then
+    emitted `extern int64_t os_fsdecode (void);` for `os.fsdecode(x)`:
+    gcc's `too many arguments ... expected 0, have 1` at
+    Lib/ntpath.py:317/373/387/461 and Lib/posixpath.py:266/278/325
+    (11 lines in build/remes/r24post_kwfix.log; the pre-fix dump in
+    build/remes/fsdec_ntpath_prefix_6b80a973.ci) — and the prototype
+    was doubly wrong: the C function a nested def compiles to is named
+    after the ENCLOSING function (closure_lifted_name: `outer_inner`),
+    so the `module_name` symbol the extern names does not exist at
+    all. The module-level binding is a VALUE, and its cross-module
+    call belongs to the dynamic dispatch path, which refuses loudly.
+    The fix is the indent block stack in module_loader's
+    `_scan_source`: a `def`/`fn` whose innermost open block is a
+    function is a nested closure and is skipped; module-level defs
+    inside module-level control flow and class methods (innermost
+    block 'other') register exactly as before, and the overload-
+    COUNTING pre-pass deliberately still sees nested defs, so a
+    module-level def that merely shares a name with a nested one keeps
+    its measured variadic treatment byte for byte.
+
+    The asserts: (1) the mechanism — the scan of the exact os.py shape
+    must not export the nested `f`, and must still export the
+    module-level factory `_mk`, a def under module-level control flow
+    (`ctrl` under `if True:`), and a class method (`C.m`) — pre-fix
+    the entry was `int64_t f (void)` (measured on os.py itself: the
+    61-entry scan carried `fsdecode`/`fsencode` as `(void)`; the
+    fixed scan is 55 entries). (2) The build-level same-name shadow —
+    the exact os.py shape — builds (the binary exists) and its runtime
+    is the SEPARATELY measured shadowing class, pinned as MEASURED
+    behavior: the enclosing `return f` resolves to the module GLOBAL
+    `f` (its own still-zero global — the emitted C shows `_mk`
+    reading `_root_globals.f`) and the call dies on SIGSEGV with no
+    output (rc == -11, stdout empty). Pre-fix the build itself died at
+    gcc with `too many arguments to function 'a_os_f'; expected 0,
+    have 1` (build/remes/fsdec_osname_prefix_765117ff.log). This pin
+    marks a known-bad loud outcome the way the suite's EXPECTED
+    markers do: the shadowing class is named in the rows' next
+    blocker, and the moment the shape stops crashing the pin must be
+    re-measured against CPython (42) before it is believed. (3) The
+    non-shadow shape (`g = _mk()`, the call `a_ns.g(41)`) must stay on
+    the loud dispatch refusal — exit 1, stdout empty, stderr
+    `Unhandled exception: NotImplementedError: ... not compiled into
+    this binary` — and never on a silent numeric answer (CPython
+    prints 42; a fix that compiled this shape to a quiet 0 would be
+    the row-10-fold false-green this class is named for)."""
+    shadow_src = (
+        'def _mk():\n'
+        '    def f(x):\n'
+        '        return x + 1\n'
+        '    return f\n'
+        'f = _mk()\n'
+    )
+    scan_src = (
+        'def _mk():\n'
+        '    def f(x):\n'
+        '        return x + 1\n'
+        '    return f\n'
+        'f = _mk()\n'
+        'if True:\n'
+        '    def ctrl(x):\n'
+        '        return x\n'
+        'class C:\n'
+        '    def m(self):\n'
+        '        return 1\n'
+    )
+    exports = {}
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'a_os.py')
+        with open(path, 'w') as fh:
+            fh.write(scan_src)
+        import module_loader
+        exports = module_loader.load_module_from_path(path)
+    nested_ok = (exports.get('f') is None and exports.get('_mk') is not None
+                 and exports.get('ctrl') is not None
+                 and exports.get('m') is not None)
+    pkg = {'a_os.py': shadow_src,
+           'main.py': 'import a_os\nprint(a_os.f(41))\n'}
+    binary_exists = False
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        binary_exists = os.path.exists(os.path.join(td, 'prog'))
+    build_ok = rc == -11 and stdout.strip() == '' and binary_exists
+    pkg_ns = {'a_ns.py': shadow_src.replace('f = _mk()', 'g = _mk()'),
+              'main_ns.py': 'import a_ns\nprint(a_ns.g(41))\n'}
+    err_ns = ''
+    with tempfile.TemporaryDirectory() as td:
+        rc_ns, stdout_ns = _build_and_run(pkg_ns, 'main_ns.py', td)
+        result = subprocess.run([os.path.join(td, 'prog')],
+                                capture_output=True, text=True,
+                                timeout=60, cwd=td)
+        err_ns = result.stderr
+    refusal_ok = (rc_ns == 1 and stdout_ns.strip() == ''
+                  and err_ns.startswith(
+                      'Unhandled exception: NotImplementedError:'))
+    ok = nested_ok and build_ok and refusal_ok
+    if not ok:
+        print(f"  ✗ nested_def_is_not_a_module_level_fn_export: "
+              f"scan f={exports.get('f')!r} "
+              f"_mk={'present' if exports.get('_mk') else 'MISSING'} "
+              f"ctrl={'present' if exports.get('ctrl') else 'MISSING'} "
+              f"m={'present' if exports.get('m') else 'MISSING'}; "
+              f"shadow: rc={rc} stdout={stdout!r} binary={binary_exists}; "
+              f"noshadow: rc={rc_ns} stdout={stdout_ns!r} "
+              f"stderr={err_ns[:60]!r}")
+    return ok
+
+
 CASES = [
+    test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
     test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,

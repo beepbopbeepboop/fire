@@ -1,5 +1,81 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-10-24, post-fsdec — the `os_fsdecode`/`os_fsencode` 0-arg-stub class named in the entry below is GONE as a gcc class; this row's own blocker — the resource kill — is unchanged)
+
+The entry below named three downstream next blockers standing behind the
+resource kill: util.py:221's `shutil_which_15d274`, the `os_fsdecode`/
+`os_fsencode` 0-arg-stub class, and the ntpath implicit-declaration family.
+This session removed the middle one, as a gcc class.
+
+**What the class was (measured).** `fsencode`/`fsdecode` are nested defs inside
+a factory in `Lib/os.py` (`def _fscodec(): ... def fsdecode(filename): ...`),
+bound at module level by `fsencode, fsdecode = _fscodec()`. The importer's
+text scan (`module_loader._scan_source`) stripped every line before matching,
+so the nested def registered as a module-level fn export, and because the
+scan's parameter extraction keeps only ANNOTATED params (`if ':' in param`)
+while stdlib's nested defs are unannotated, the entry came out
+`int64_t fsdecode (void)`. The importer then emitted
+`extern int64_t os_fsdecode (void);` for `os.fsdecode(x)` in every TU that
+calls it (Lib/ntpath.py:317/373/387/461, Lib/posixpath.py:266/278/325) —
+gcc's `too many arguments to function 'os_fsdecode'; expected 0, have 1` —
+and the prototype was doubly wrong: the C function a nested def compiles to
+is named after the ENCLOSING function (`closure_lifted_name`: `outer_inner`),
+so the `module_name` symbol the extern names does not exist at all; the
+module-level binding is a VALUE, and its cross-module call belongs to the
+fallback path.
+
+**The fix.** The indent block stack in `_scan_source` (`module_loader.py`):
+a `def`/`fn` line whose innermost open block is a function body is a nested
+closure and is not registered as a module-level export. Module-level defs
+under module-level control flow and class methods (innermost block not a
+function) register exactly as before; the overload-COUNTING pre-pass is left
+byte-identical, so a module-level def that merely shares a name with a nested
+one keeps its measured variadic treatment. On `Lib/os.py` the scan went
+61 → 55 entries and the six removed are exactly the six indented defs
+(`fsdecode`, `fsencode`, `encode`, `decode`, `encodekey`, `check_str`; each
+verified indented in the source). No previously-working behavior is touched:
+a cross-module STATIC call to a nested def could never have linked pre-fix
+(the symbol does not exist under the name the scan advertised), so the
+affected population was already-broken code, now on the loud fallback.
+
+**Before/after pair (like-for-like single-file builds, 8 GB ceiling).**
+Row 24 (zipfile): first gcc error UNCHANGED at `ntpath.py:287:9` (implicit
+declaration of `abspath_9f63a2`); the fsdecode class 27 error lines (11
+`os_fsdecode` + 16 `os_fsencode`) → 0; gcc error lines 329 → 302; module
+rejections unchanged (62, first rejection byte-identical: the
+`_collections_abc` generator `.close()` class); 2.5 → 2.6 GB —
+`build/remes/r24post_kwfix.log` pre-fix, `r24post_fsdec.log` post-fix.
+Row 25 (mailbox): first gcc error UNCHANGED at `reprlib.py:71:7`; the class
+14 error lines (6 + 8) → 0; gcc error lines 273 → 259; the `calendar.py:663`
+persistence unchanged (9 lines); rejections unchanged (68); 3.0 → 3.5 GB —
+`r25post_kwfix.log` / `r25post_fsdec.log`. The standalone ntpath dump pair
+(`build/remes/fsdec_ntpath_prefix_6b80a973.ci` /
+`fsdec_ntpath_postfix_5ad80ae8.ci`) shows the class gone from the emitted C:
+25 `os_fs*` lines (the `(void)` externs plus all 13 call sites) → 0; the
+same 13 call sites now lower to the weak "unavailable in compiled mode" stub
+(`__attribute__((weak)) int64_t fsdecode (...)` — a per-call `mojo_print` +
+return 0). That fallback is LOUD, not a silent fold: every call prints
+`fsdecode: unavailable in compiled mode`, and this row dies at gcc (or the
+memory kill) long before the runtime is reached. The minimal 2-file shape
+pre-fix died at gcc (`too many arguments to function 'a_os_f'; expected 0,
+have 1`, `build/remes/fsdec_osname_prefix_765117ff.log`); post-fix it builds
+and its runtime is a SEPARATE measured class — the enclosing `return f`
+resolves to the module GLOBAL `f` (its own still-zero global; the emitted C
+shows `_mk` reading `_root_globals.f`) and the call segfaults — named as a
+next blocker, pinned as measured behavior in
+`test_link_mode.py::test_nested_def_is_not_a_module_level_fn_export`.
+
+**This row itself.** The like-for-like re-run (`build/remes/r10post_fsdec.log`
+vs `r10post.log`) is the SAME resource-kill class: 34 module rejections both
+runs, gcc never runs (0 error lines both), breach 9.6 → 8.2 GB (run-to-run
+load variance; both > 8.0). Nothing about this row's blocker moved; the named
+next blockers behind the kill are now: util.py:221's `shutil_which_15d274`,
+the ntpath implicit-declaration family, and — where the budget reaches runtime
+— the weak-stub fallback above.
+
+Status: OPEN — the row is still red, in the RESOURCE class, unchanged by this
+fix; the named downstream blockers are updated above.
+
 ## Status (2026-10-24, campaign row 10 — the `_endian` blocker is FIXED; the row moves to the RESOURCE class; doc stays open)
 
 Campaign re-measurement on master `566ba1c9` (`build/remes/r10.log`, 8 GB
