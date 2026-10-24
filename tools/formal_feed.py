@@ -59,6 +59,8 @@ def running_claims(tasks):
     for t in tasks.values():
         if C.state_of(t) == "running":
             held.update(t.get("claims", []))
+    for e in C.external().values():   # a Claude agent / local opencode registered with `control.py claim`
+        held.update(e["claims"])
     return held
 
 

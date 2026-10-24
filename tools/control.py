@@ -4,6 +4,9 @@
     control.py spawn NAME --claim KEY [--claim KEY ...] (--task TEXT | --task-file F)
     control.py status              # one line per task: state, commits, tree, last log line
     control.py claims              # every live claim (workers read this before starting)
+    control.py claim NAME --claim KEY ... [--who WHO] [--pid P | --hours H]   # register work done OUTSIDE control (a Claude
+                                   # agent, a hand-run opencode, a local model); exits 1 if a live claim conflicts
+    control.py release NAME        # drop such a claim
     control.py mark NAME STATE     # set a state by hand (abandoned, integrated, ...)
     control.py report              # regenerate the task table inside CONTROL.html
     control.py guard [--limit-gb 64]   # watchdog: kill any process in our trees past a memory limit
@@ -150,6 +153,9 @@ def cmd_spawn(a):
                 for oc in t["claims"]:
                     if conflicts(c, oc):
                         sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
+        ext = external_conflicts(a.claim)
+        if ext:
+            sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
         n = next_slot()
         wt, branch = os.path.join(PARENT, "work-%d" % n), "work/" + a.name
         git("worktree", "add", "-b", branch, wt, a.base)
@@ -220,10 +226,65 @@ def cmd_status(a):
                 print("      QUESTION: " + q)
 
 
+def external_path():
+    return os.path.join(ctl_dir(), "external.json")
+
+
+def external():
+    """Claims held by work this controller did not start (a Claude Code agent, a hand-run opencode, a local model):
+    {name: {claims, who, pid, until}}. An entry lapses when its pid is gone or its time is up, so a session that dies
+    without `release` does not hold a doc forever."""
+    try:
+        d = json.load(open(external_path()))
+    except (OSError, ValueError):
+        return {}
+    return {n: e for n, e in d.items() if (alive(e["pid"]) if e.get("pid") else e["until"] > time.time())}
+
+
+def norm_claim(c):
+    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
+    if ":" in c:
+        return c
+    m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
+    return "bug:" + m.group(1) if m else c
+
+
+def external_conflicts(claims, skip=None):
+    return [(n, c, oc) for n, e in external().items() if n != skip for c in claims for oc in e["claims"] if conflicts(c, oc)]
+
+
+def cmd_claim(a):
+    """Register claims for work started outside control, so control's workers (and the feeder) stay off it, and the
+    caller learns at once if a control worker or another outside session already holds it. Run it again to renew."""
+    claims = [norm_claim(c) for c in a.claim]
+    with registry() as tasks:
+        bad = [(n, c, oc) for n, t in tasks.items() if state_of(t) not in TERMINAL for c in claims for oc in t["claims"]
+               if conflicts(c, oc)] + external_conflicts(claims, skip=a.name)
+        if bad:
+            for n, c, oc in bad:
+                print("CONFLICT: %s is held by %s (%s)" % (c, n, oc))
+            sys.exit(1)
+        d = external()
+        d[a.name] = dict(claims=claims, who=a.who, pid=a.pid, started=time.strftime("%F %T"),
+                         until=time.time() + a.hours * 3600)
+        json.dump(d, open(external_path(), "w"), indent=1)
+    print("claimed for %s: %s (%s)" % (a.name, ", ".join(claims), "while pid %d lives" % a.pid if a.pid else "%g h" % a.hours))
+
+
+def cmd_release(a):
+    with registry():
+        d = external()
+        d.pop(a.name, None)
+        json.dump(d, open(external_path(), "w"), indent=1)
+    print("released", a.name)
+
+
 def cmd_claims(a):
     for name, t in sorted(load().items()):
         if state_of(t) not in TERMINAL:
             print("%-24s %s" % (name, ", ".join(t["claims"])))
+    for name, e in sorted(external().items()):
+        print("%-24s %s   [external: %s]" % (name, ", ".join(e["claims"]), e.get("who") or "?"))
 
 
 def cmd_mark(a):
@@ -846,6 +907,10 @@ def main():
     s.add_argument("--model", default=MODEL); s.set_defaults(f=cmd_spawn)
     s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
+    s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
+    s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
+    s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)
+    s = sub.add_parser("release"); s.add_argument("name"); s.set_defaults(f=cmd_release)
     s = sub.add_parser("mark"); s.add_argument("name"); s.add_argument("state"); s.set_defaults(f=cmd_mark)
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
