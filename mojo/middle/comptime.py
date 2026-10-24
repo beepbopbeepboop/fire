@@ -271,8 +271,33 @@ def eval_const(node, bindings: dict, platform: str = None):
     # `if sys.platform == 'X': def f(): ...` conditional-toplevel-def idiom is
     # really being resolved for).
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and node.obj.name == 'sys' and node.member == 'platform'):
-        return platform
+            and node.obj.name == 'sys'):
+        if node.member == 'platform':
+            return platform
+        if node.member == 'byteorder':
+            # `sys.byteorder` is a host constant in exactly the sense the
+            # `sys.platform` fold above is one: CPython's value is fixed for
+            # the machine the binary runs on, and this path resolves with no
+            # target attached, so the plain-`import sys` fallback is the same
+            # (the unaliased import must stay unaliased — see this
+            # function's docstring). Measured need (row 10, ctypes/_endian):
+            # its `if sys.byteorder == "little":` / `elif "big":`
+            # conditional-toplevel shape unfolded to BOTH branches, and the
+            # dead branch's plain `BigEndianStructure = Structure` assignment
+            # references a module global the live branch's `class
+            # BigEndianStructure` never registers as a lookable member —
+            # `struct _ctypes__endian_toplev has no member named
+            # 'BigEndianStructure'; did you mean 'Little...'` at _endian.py
+            # :63:27 and :70:27. Folding picks the host's branch exactly as
+            # the runtime would, and removes the other one. The
+            # AttributeError guard keeps the self-host route byte-identical
+            # to the pre-fold behavior: there the unaliased `import sys`
+            # binds the compiled stdlib's sys, which exposes no byteorder,
+            # so the fold declines and both branches emit, as before.
+            try:
+                return sys.byteorder
+            except AttributeError:
+                return None
     return None
 
 

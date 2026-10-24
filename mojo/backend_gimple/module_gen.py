@@ -4833,7 +4833,64 @@ def gen_module_impl(self, stmts):
         _k for _k in self.struct_field_types
         if _k not in getattr(self, '_intu_prereg_structs', ()))
 
-    all_struct_defs = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
+    # The struct passes that run over `all_struct_defs` below (field types,
+    # inheritance, identity/cname, class attrs, alloc-seed, struct emission)
+    # must see the SAME statement view the Phase-1.7 scan and the emission
+    # loop use: resolvable top-level conditionals inlined, unresolved ones
+    # kept. Before this, `all_struct_defs` was the RAW `stmts`, so a class
+    # defined inside a resolved top-level `if` (the `if sys.platform == ...:`
+    # / `if sys.byteorder == ...:` idiom — ctypes/_endian's whole class pair
+    # is one branch of the latter) registered NO fields, NO class attributes,
+    # and emitted as a `_dummy`-only stub: `BE.v` fell to the runtime
+    # `_mojo_dispatch_getattr` and died `AttributeError: v` on the fixed
+    # tree while the identical class at unconditional top level read back its
+    # real value (probe_intattr/probe_slots). The flatten is defined at its
+    # FIRST use — this line — and the later Phase-1.7/emit sites call the
+    # same local (the definition that used to live beside them moved up; it
+    # only closes over `self._eval_const_bool`, so the earlier position
+    # resolves identically — every site runs before the emission loop's
+    # module-level comptime registrations, the one write that could change
+    # a resolution verdict mid-function).
+    def _flatten_resolved_conditionals(_root_list):
+        _out = []
+        _stack = [(_root_list, 0)]
+        while _stack:
+            _frame_body, _frame_idx = _stack[-1]
+            if _frame_idx >= len(_frame_body):
+                _stack.pop()
+                continue
+            _frame_stmt = _frame_body[_frame_idx]
+            _stack[-1] = (_frame_body, _frame_idx + 1)
+            if isinstance(_frame_stmt, IfStmt):
+                _resolved = False
+                _resolved_body = []
+                _cond_val = self._eval_const_bool(_frame_stmt.condition)
+                if _cond_val is True:
+                    _resolved = True
+                    _resolved_body = _frame_stmt.then_body or []
+                elif _cond_val is False:
+                    _resolved = True
+                    for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                        _elif_val = self._eval_const_bool(_cond2)
+                        if _elif_val is True:
+                            _resolved_body = _elif_body2 or []
+                            break
+                        if _elif_val is None:
+                            _resolved = False
+                            break
+                    else:
+                        _resolved_body = _frame_stmt.else_body or []
+                if _resolved:
+                    _stack.append((_resolved_body, 0))
+                else:
+                    _out.append(_frame_stmt)
+            else:
+                _out.append(_frame_stmt)
+        return _out
+
+    all_struct_defs = (_flatten_resolved_conditionals(stmts)
+                       + (_flatten_resolved_conditionals(imported_stmts)
+                          if (self.do_imports or self.link_imports) else []))
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
                            for s in all_struct_defs if isinstance(s, StructDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
@@ -11185,43 +11242,6 @@ def gen_module_impl(self, stmts):
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
 
-    def _flatten_resolved_conditionals(_root_list):
-        _out = []
-        _stack = [(_root_list, 0)]
-        while _stack:
-            _frame_body, _frame_idx = _stack[-1]
-            if _frame_idx >= len(_frame_body):
-                _stack.pop()
-                continue
-            _frame_stmt = _frame_body[_frame_idx]
-            _stack[-1] = (_frame_body, _frame_idx + 1)
-            if isinstance(_frame_stmt, IfStmt):
-                _resolved = False
-                _resolved_body = []
-                _cond_val = self._eval_const_bool(_frame_stmt.condition)
-                if _cond_val is True:
-                    _resolved = True
-                    _resolved_body = _frame_stmt.then_body or []
-                elif _cond_val is False:
-                    _resolved = True
-                    for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
-                        _elif_val = self._eval_const_bool(_cond2)
-                        if _elif_val is True:
-                            _resolved_body = _elif_body2 or []
-                            break
-                        if _elif_val is None:
-                            _resolved = False
-                            break
-                    else:
-                        _resolved_body = _frame_stmt.else_body or []
-                if _resolved:
-                    _stack.append((_resolved_body, 0))
-                else:
-                    _out.append(_frame_stmt)
-            else:
-                _out.append(_frame_stmt)
-        return _out
-
     _pre_declared_globals = set()
     # Names whose module-level initialiser is the literal `None`. `None` is a
     # valid value of every pointer kind (it is the NULL pointer), so it carries
@@ -12060,7 +12080,25 @@ def gen_module_impl(self, stmts):
     # gen_func. Cheap when there are no device functions (the overwhelmingly
     # common case), and it only walks the AST for functions, never bodies.
 
-    for stmt in stmts:
+    # The EMISSION walk runs over the SAME resolution the Phase-1.7 scan used
+    # above (`_flatten_resolved_conditionals(stmts)`, the call that seeded
+    # `_phase17_own_stmts`): a top-level `if` whose condition is statically
+    # known (the `sys.platform` fold, and after comptime.py's `sys.byteorder`
+    # fold: ctypes/_endian's `if sys.byteorder == "little":`) is inlined here
+    # — its taken branch's statements are dispatched exactly as top-level
+    # statements, the other branch never emits. Before this the scan resolved
+    # the condition (registering the taken branch's names as globals) while
+    # this loop emitted the IfStmt as a RUNTIME branch: the condition
+    # re-evaluated at run time (`_mojo_dispatch_getattr(sys, "byteorder")` —
+    # an AttributeError, the compiled stdlib's sys has no byteorder), class
+    # refs as values degraded to `(int64_t)0` zero stubs, class defs dropped
+    # as `/* TODO: StructDef */`, and assignments to names the scan did not
+    # register became locals — the same shape that died pre-fold as a hard
+    # gcc error (`struct _ctypes__endian_toplev has no member named
+    # 'BigEndianStructure'`) and would have been a silent miscompile after
+    # it. An UNRESOLVABLE condition falls through unchanged (the flatten
+    # keeps the IfStmt and the runtime-branch path below emits it as before).
+    for stmt in _flatten_resolved_conditionals(stmts):
         if isinstance(stmt, FunctionDef):
             if (stmt.name in self._supported_generators or stmt.name in self._supported_async
                     or stmt.name in self._supported_async_gen):

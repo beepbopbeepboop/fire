@@ -1,5 +1,96 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-10-24, campaign row 10 — the `_endian` blocker is FIXED; the row moves to the RESOURCE class; doc stays open)
+
+Campaign re-measurement on master `566ba1c9` (`build/remes/r10.log`, 8 GB
+ceiling): exit 1, peak 2.2 GB, 67 gcc `error:` lines. By module:
+ctypes/__init__ 19, util 13, subprocess 9, ntpath 7, os 5, _aix_support 5,
+sysconfig 3, threading 2, **_endian 2**, selectors 1. The FIRST two are the
+ones this session fixed:
+
+```
+ctypes/_endian.py:63:27: error: 'struct _ctypes__endian_toplev' has no member named 'BigEndianStructure'
+ctypes/_endian.py:70:27: error: 'struct _ctypes__endian_toplev' has no member named 'BigEndianUnion'
+```
+
+**Root cause (measured).** `comptime.eval_const` folds `sys.platform` but
+not `sys.byteorder`, so _endian's top-level `if sys.byteorder == "little":`
+/ `elif "big":` conditional is unresolvable and BOTH branches emit. In the
+dead (big) branch the plain assignment `BigEndianStructure = Structure`
+references a module global that the live branch's `class BigEndianStructure`
+never registers as a lookable member. Minimal single-file shape (the branch
+pair with the class/assignment styles swapped, exactly as in _endian) dies
+with the same one error on master: `'struct _root_toplev' has no member
+named 'BE'; did you mean 'LE'` (`build/remes/r10repro_prefix_765117ff.log`,
+`build/remes/r10d1_prefix_765117ff.log`).
+
+**Two more defects stacked behind the fold (measured on the fixed tree).**
+(1) The EMISSION loop ran the IfStmt as a RUNTIME branch even once the
+condition was foldable: it re-evaluated `sys.byteorder` at run time
+(`_mojo_dispatch_getattr(sys, "byteorder")` — an AttributeError, the
+compiled stdlib's sys exposes no such attribute), degraded class refs to
+`(int64_t)0` zero stubs (so `LE == Base` "printed True" as `0 == 0`) and
+dropped the class defs as `/* TODO: StructDef */` — a hard gcc error before
+the fold, a silent miscompile after it. (2) The struct passes built
+`all_struct_defs` from the RAW statement list, so a class defined inside a
+resolved top-level branch registered no fields and no class attributes —
+a `_dummy`-only stub whose attribute reads fell to a dispatch on a NULL
+receiver (`AttributeError: v`).
+
+**The fix (three parts, one rule: a resolvable top-level conditional must
+resolve identically in every consumer).**
+- `mojo/middle/comptime.py::eval_const`: fold `sys.byteorder` — a host
+  constant in exactly the sense the `sys.platform` fold is one (CPython's
+  value is fixed for the machine the binary runs on), AttributeError-safe,
+  unaliased `import sys` (the self-host route declines the fold and emits
+  both branches, byte-identical to pre-fold; no compiler source file uses
+  the idiom, so self-host is unaffected either way).
+- `mojo/backend_gimple/module_gen.py` emission loop: iterate
+  `_flatten_resolved_conditionals(stmts)` — the same local the Phase-1.7
+  global scan uses — so the taken branch's statements dispatch as genuine
+  top-level statements, the other branch never emits, and an unresolved
+  condition still falls through to the runtime-branch path unchanged.
+- `module_gen.py` `all_struct_defs`: flattened for both the own and the
+  imported statement lists (the definition moved to its first use, ahead of
+  the struct passes); classes in a resolved branch now register fields and
+  class attributes like any top-level class.
+
+**Measured after the fix** (uniform `765117ff` + fix worktree):
+- Minimal shape builds and prints the REAL value: `7`, matching CPython on
+  the same text (`build/remes/r10d1_postfix.log`).
+- Regression: `test_link_mode.py::test_byteorder_conditional_toplevel_
+  emits_only_the_host_branch` — fails-before with the single gcc error
+  above on the unfixed tree, passes with the real value after; the value is
+  read off a plain live-branch global on purpose (a dead-branch assignment
+  whose target is the live branch's class is what trips the pre-fix error,
+  and on the fixed tree that same assignment claims the class's name as a
+  value global in the name-claim view, diverting a static class-attribute
+  read off that name to a NULL-receiver dispatch — measured
+  `AttributeError: v`, isolated to that single element by four one-element
+  probes; the class-name-as-VALUE zero-stub gap from the 2026-08-26 entry
+  is separate and not pinned here).
+- Real file (`Lib/ctypes/util.py`): the two `_endian` errors are GONE (zero
+  `_endian` lines) and the file now goes DEEPER — it dies at the 8 GB
+  ceiling in the import-closure phase (`memcap: BREACH 8.6 GB > 8.0 GB
+  (108%)`, rc=125, 34 module rejections logged, gcc never runs;
+  `build/remes/r10post_final.log`). The row therefore moves to the
+  RESOURCE class (rows 3/23 family): under the ceiling the build is killed
+  in closure processing BEFORE the pre-fix residual classes are ever
+  reached — util.py:221's `shutil_which_15d274` (this file's own recorded
+  next blocker from the 2026-10-02 entry), the `os_fsdecode`/`os_fsencode`
+  0-arg-stub class, and the ntpath implicit-declaration family all stand
+  downstream of the kill and remain the named next blockers when the
+  budget allows.
+- Non-regression: the two landed campaign regressions (the idxerr
+  class-attr-emission crash, the r16 failed-import poisoning) both pass on
+  the fixed tree. The 53-job gate is 53/53 green on the fixed tree
+  (2026-10-24; `doc-refs` and `suite-self-test` both re-run and passed after
+  the row-20 doc deletion below was reconciled with the citation ratchet).
+
+Status: OPEN — the file is still red, now in the RESOURCE class rather than
+the two `_endian` gcc errors. Per the no-forced-close rule the doc stays;
+the next blockers are named above.
+
 ## Status (2026-10-02 — this file's own errors are down to ONE, and that one is a filed bug in another claim's area)
 
 `python3 fire.py build -o .tmp/util /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`

@@ -1099,6 +1099,102 @@ def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
     return ok
 
 
+def test_byteorder_conditional_toplevel_emits_only_the_host_branch() -> bool:
+    """A top-level `if sys.byteorder == ...:` conditional whose branches
+    SWAP a class definition and a plain assignment over the same two names
+    (the `ctypes/_endian.py` shape) must resolve to the host's branch at
+    emission — neither branch may be left to run time.
+
+    Pre-fix, two defects stacked on this shape. (1) `comptime.eval_const`
+    folded `sys.platform` but not `sys.byteorder`, so the top-level
+    conditional was unresolvable and BOTH branches emitted; the dead
+    branch's plain assignment (`BigEndianStructure = Structure` at
+    _endian.py:63) referenced a module global the live branch's `class
+    BigEndianStructure` never registers as a lookable member — one gcc
+    error on this minimal shape (`'struct _root_toplev' has no member
+    named 'BE'; did you mean 'LE'`), the pair at _endian.py:63:27/:70:27
+    on the real file (build/remes/r10repro_prefix_765117ff.log,
+    build/remes/r10.log). (2) The fold alone was not enough: the emission
+    loop then ran the IfStmt as a RUNTIME branch — re-evaluating
+    `sys.byteorder` at run time (`_mojo_dispatch_getattr(sys,
+    "byteorder")`, an AttributeError: the compiled stdlib's sys has no
+    such attribute), degrading the class refs to `(int64_t)0` zero stubs
+    and dropping the class defs as `/* TODO: StructDef */` — a hard gcc
+    error before the fold, a SILENT miscompile after it. The emission
+    loop now runs over the same `_flatten_resolved_conditionals(stmts)`
+    the Phase-1.7 scan uses (module_gen.py): the taken branch's
+    statements dispatch as top-level statements, the other branch never
+    emits, and an unresolved condition still falls through to the
+    runtime-branch path unchanged.
+
+    The asserts pin the REAL value, host-conditional: the live branch's
+    `answer = 7` inlines as a genuine top-level global that `f()` reads
+    back, so the binary prints `7` where CPython on the same text prints
+    `7` (on a big-endianness host the live branch is the `answer = 8`
+    one, and both the CPython run and the expected literal track the
+    host's own `sys.byteorder`). Every regression route through the two
+    pre-fix defects changes the observable: a fold regression re-emits
+    BOTH branches and the later `answer = 8` wins (prints `8`); an
+    emission-flatten regression leaves the IfStmt as a RUNTIME branch,
+    which re-evaluates `sys.byteorder` at run time (`_mojo_dispatch_
+    getattr(sys, "byteorder")` — AttributeError, the compiled stdlib's
+    sys has no such attribute) and dies before printing anything. Pre-fix
+    the tree cannot build this file at all (the single gcc error above;
+    build/remes/r10d1_prefix_765117ff.log), so `rc == 0` is itself part of
+    the pin and `stdout == py_stdout` is the outer one. The value is
+    deliberately read off a PLAIN global rather than off the branch
+    class: a plain assignment in the DEAD branch whose target is the live
+    branch's class is what trips the pre-fix error, and on the fixed tree
+    that same assignment claims the class's name as a value global in the
+    name-claim view, diverting a static class-attribute read off that
+    name to a dispatch on a NULL receiver (measured: `AttributeError: v`,
+    isolated to that single element by four one-element probes). The class
+    name used as a VALUE is a separate, documented, feature-sized
+    zero-stub gap (this doc's own 2026-08-26 entry: `class ref X as value`
+    → `(int64_t)0`) and is not pinned here."""
+    pkg = {
+        'main.py': (
+            'import sys\n'
+            '\n'
+            '\n'
+            'class Base:\n'
+            '    pass\n'
+            '\n'
+            '\n'
+            'if sys.byteorder == "little":\n'
+            '    class BE(Base):\n'
+            '        v = 1\n'
+            '\n'
+            '    answer = 7\n'
+            '\n'
+            'elif sys.byteorder == "big":\n'
+            '    BE = Base\n'
+            '\n'
+            '    answer = 8\n'
+            '\n'
+            '\n'
+            'def f():\n'
+            '    return answer\n'
+            '\n'
+            '\n'
+            'r = f()\n'
+            '\n'
+            '\n'
+            'print(r)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    exp = '7' if sys.byteorder == 'little' else '8'
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == exp)
+    if not ok:
+        print(f"  ✗ byteorder_conditional_toplevel_emits_only_the_host_branch: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_class_redefinition_does_not_crash_class_attr_emission() -> bool:
     """A SAME-HOME class redefinition whose LATER copy drops the class
     attribute must not crash the class-attr emission loop.
@@ -1165,6 +1261,7 @@ def test_class_redefinition_does_not_crash_class_attr_emission() -> bool:
 
 
 CASES = [
+    test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,
     test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
