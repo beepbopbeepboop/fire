@@ -330,7 +330,7 @@ def cmd_enqueue(a):
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
-LIMIT_ERR = re.compile(r"usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
+LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
                        r"limit (exceeded|reached)|resets? (at|in) ", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
