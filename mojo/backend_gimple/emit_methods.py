@@ -4651,6 +4651,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 # on the string. Testing the string made every miss take the HIT
                 # branch and print `0` instead of the default.
                 cond = gen._ensure_bool_cond('int64_t', _pres_word)
+            elif result_type == 'char *':
+                # A STRING hit is tested for PRESENCE, not truth: an empty
+                # string is a real value, and `d.get(k, k)` over `{k: ''}`
+                # answered `k` -- the self-hosted compiler's
+                # `_inline_module_qualifiers.get('root', 'root')` turned the
+                # root module's '' qualifier into `root_` symbols nothing
+                # defines.
+                _has = gen._call_expr('int', f'mojo_dict_contains{_sfx}',
+                                      [('MojoDict *', ov), (key_type, key_val)])
+                cond = gen._new_val('_Bool', f'{_has} != 0')
             else:
                 cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)
