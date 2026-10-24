@@ -83,7 +83,7 @@ def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     _ann: str = _as_str(ann)
     if '[' not in _ann or _ann.startswith('['):
         return None
-    _inner = _ann.split('[', 1)[1].rstrip(']').strip()
+    _inner = _bracket_inner(_ann)
     if not _inner:
         return None
     _parts = gimple_ctypes._split_top_level_commas(_inner)
@@ -94,6 +94,20 @@ def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     except Exception:
         return None
     return _et if _et and _et != 'int64_t' else None
+
+def _bracket_inner(s: str) -> str:
+    """The text between `s`'s FIRST `[` and its final `]`. Not
+    `s.split('[', 1)[1].rstrip(']')`, which strips EVERY trailing bracket:
+    `dict[str,dict[str,tuple[str,int]]]` came apart as
+    `str,dict[str,tuple[str,int`, an unbalanced fragment the reference and
+    the self-hosted compiler resolved differently."""
+    _lb = s.find('[')
+    if _lb < 0:
+        return s
+    if s.endswith(']'):
+        return s[_lb + 1:len(s) - 1].strip()
+    return s[_lb + 1:].strip()
+
 
 def _annotation_dict_val_type(gen, ann) -> str | None:
     """`dict[K, V]` / `Dict[K, V]` annotation → the dict's VALUE C type,
@@ -106,7 +120,7 @@ def _annotation_dict_val_type(gen, ann) -> str | None:
     if isinstance(ann, str):
         s = ann.strip()
         if s.startswith('dict[') or s.startswith('Dict['):
-            inner = s.split('[', 1)[1].rstrip(']').strip()
+            inner = _bracket_inner(s)
             parts = gimple_ctypes._split_top_level_commas(inner)
             if len(parts) >= 2:
                 return gen._resolve_type(parts[1].strip())
@@ -121,19 +135,19 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
     if isinstance(ann, str):
         s = ann.strip()
         if s.startswith('dict[') or s.startswith('Dict['):
-            inner = s.split('[', 1)[1].rstrip(']').strip()
+            inner = _bracket_inner(s)
             parts = gimple_ctypes._split_top_level_commas(inner)
             if len(parts) >= 2:
                 v = parts[1].strip()
                 vbase = v.split('[', 1)[0].strip()
                 if vbase in ('dict', 'Dict') and '[' in v:
                     vparts = gimple_ctypes._split_top_level_commas(
-                        v.split('[', 1)[1].rstrip(']').strip())
+                        _bracket_inner(v))
                     if len(vparts) >= 2:
                         return gen._resolve_type(vparts[1].strip())
                 if vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in v:
                     eparts = gimple_ctypes._split_top_level_commas(
-                        v.split('[', 1)[1].rstrip(']').strip())
+                        _bracket_inner(v))
                     if len(eparts) == 1 and eparts[0].strip():
                         _e = gen._resolve_type(eparts[0].strip())
                         return _e if _e and _e != 'int64_t' else None
