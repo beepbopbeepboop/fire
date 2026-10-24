@@ -1260,7 +1260,77 @@ def test_class_redefinition_does_not_crash_class_attr_emission() -> bool:
     return ok
 
 
+def test_set_ctor_walks_boxed_global_container() -> bool:
+    """A `set(...)` / `frozenset(...)` whose argument is a module-GLOBAL
+    container must walk the container, not the boxed pointer word it is
+    stored in. Globals are stored at C level as int64_t (boxed pointers);
+    the read side hands the caller a raw int64_t temp with the real kind
+    only recoverable via `_actual_types`. Every consumer of such a read
+    must resolve the actual type and cast — `len()` had the arm
+    (the `_actual_types` + `_coerce_to_type` block in
+    `_lower_builtin_len`), but the set-constructor lowering
+    (`_lower_ctor_from_iterable`'s `kind == 'set'` arm) substituted the
+    ALREADY-lowered boxed temp as a plain name while registering
+    `var_types[name] = <pointer type>` over int64_t storage: the
+    comprehension's own cast block (the `_get_actual_type` one that fires
+    when recorded type != actual type) never fired, because recorded ==
+    actual, and the walk passed the word raw. Measured (2026-10-24,
+    `fb774c7a`): `s = frozenset(names)` with a top-level
+    `names = ['a', 'b']` died at gcc — `passing argument 1 of
+    'mojo_list_len' makes pointer from integer` (build/remes/
+    kw63_minprefix_fb774c7a.log); the real shape, `iskeyword =
+    frozenset(kwlist).__contains__` in Lib/keyword.py:63, is the exact
+    same pair (build/remes/kw63_keyword_prefix_fb774c7a.log — the new
+    first gcc error on rows 6/22/24/25). The two siblings died in the same
+    class: `set(<global dict>)` at `mojo_dict_iter_new` (build/remes/
+    kw63_dictprefix_fb774c7a.log) and `frozenset(<global set>)` at
+    `mojo_set_copy` (build/remes/kw63_setprefix_fb774c7a.log).
+
+    The asserts pin the REAL values on all three arms of the fix, and the
+    CPython comparison on the same text is the outer pin: `frozenset` of
+    the 2-element list global, `set` of the 2-key dict global (Python
+    iterates the KEYS), and `frozenset` of the set global (the slot-copy
+    arm) all read back 2. Pre-fix the file cannot build at all (the gcc
+    error above on the first boxed-global walk), so `rc == 0` is part of
+    the pin; the no-false-green hazard here is a walk that COMPILES but
+    iterates zero or garbage slots (the pre-R5 opaque fallback emitted an
+    empty container) — the three lengths against CPython close that."""
+    pkg = {
+        'main.py': (
+            'names = ["a", "b"]\n'
+            '\n'
+            '\n'
+            'd = {"k1": 1, "k2": 2}\n'
+            '\n'
+            '\n'
+            's0 = frozenset([9, 8])\n'
+            '\n'
+            '\n'
+            'ks = frozenset(names)\n'
+            '\n'
+            '\n'
+            'dk = set(d)\n'
+            '\n'
+            '\n'
+            'cp = frozenset(s0)\n'
+            '\n'
+            '\n'
+            'print(len(ks), len(dk), len(cp))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '2 2 2')
+    if not ok:
+        print(f"  ✗ set_ctor_walks_boxed_global_container: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
+    test_set_ctor_walks_boxed_global_container,
     test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,
     test_transitive_struct_method_is_not_variadic_stubbed,

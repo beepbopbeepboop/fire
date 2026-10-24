@@ -5136,18 +5136,60 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             return 'MojoList *', gen._call_expr(
                 'MojoList *', 'mojo_bytes_reversed_list', [('MojoBytes *', _riv)])
     if kind == 'set':
-        _at, _av = gen.lower_expr(_arg0)
-        _at = gen._get_actual_type(_at, _av) or _at
+        _st, _av = gen.lower_expr(_arg0)
+        _at = gen._get_actual_type(_st, _av) or _st
         if _at == 'MojoSet *':
+            if _st in ('int', 'int64_t'):
+                # A module-GLOBAL set reads back BOXED: the C storage is an
+                # int64_t word carrying the pointer, the real kind recoverable
+                # only via _actual_types (see _lower_IdentExpr's read side).
+                # Handing the raw word to mojo_set_copy was the measured
+                # failure — `s2 = frozenset(s)` with a top-level `s` died
+                # "mojo_set_copy ... makes pointer from integer" (2026-10-24)
+                # — so route the word through the coercion chokepoint first,
+                # the identical arm _lower_builtin_len uses for its boxed
+                # globals (a hand-written (MojoSet *) would also trip the R3
+                # container-cast guard, test_no_new_container_casts).
+                _av = gen._coerce_to_type(_st, 'MojoSet *', _av)
             t = gen._new_temp('MojoSet *')
             gen._emit_call('MojoSet *', t, 'mojo_set_copy', [('MojoSet *', _av)])
             return 'MojoSet *', t
-        # Not a set — hand the ALREADY-lowered value to the comprehension
-        # below as a plain name rather than re-lowering `node.args[0]` (which
-        # would emit its side effects twice). A name registered in
-        # `var_types` lowers straight back to itself with this ctype.
-        gen.var_types[_av] = _at
-        _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
+        if _st.endswith(' *'):
+            # A REAL pointer value (a local, a literal, a call with a known
+            # pointer return — `range` materializes to a list, `dict`/`str`
+            # results are their own pointers): hand the ALREADY-lowered value
+            # on as a plain name rather than re-lowering `node.args[0]` (which
+            # would emit its side effects twice). A name registered in
+            # `var_types` lowers straight back to itself with this ctype, so
+            # the comprehension's cast block neither needs nor fires.
+            gen.var_types[_av] = _st
+            _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
+        elif _at in _COMPREHENSION_ITER_TYPES:
+            # A BOXED word (static int64_t, real type a known iterable): this
+            # is exactly how a module-GLOBAL list/dict reads back. Stay with
+            # the ORIGINAL expression — _lower_comprehension re-lowers it into
+            # a fresh temp and inserts the int64_t -> pointer cast in its own
+            # _get_actual_type block (see the comment there: "it_val's
+            # C-declared storage is still int64_t ... cast it"), the identical
+            # arm the list arm leaves this case to. Substituting the raw
+            # boxed temp here while var_types claimed the pointer type over
+            # int64_t storage was the pre-fix bug: the comprehension's cast
+            # block never fired (recorded type == actual type) and the walk
+            # passed the word raw — `iskeyword =
+            # frozenset(kwlist).__contains__` at Lib/keyword.py:63 died
+            # "mojo_list_len ... makes pointer from integer" (2026-10-24: the
+            # new first gcc error on rows 6/22/24/25), and `set(<global dict>)`
+            # died the same class at mojo_dict_iter_new.
+            pass
+        else:
+            # An OPAQUE handle — neither a pointer nor a kind the
+            # comprehension can walk. Materialize a walkable list exactly as
+            # the list arm does (a dict materializes its KEYS, which is what
+            # Python yields for set(<dict>); an unregistered handle goes
+            # through the R5 runtime kind registries).
+            _ml = gen._materialize_as_list(_at, _av)
+            gen.var_types[_ml] = 'MojoList *'
+            _arg0 = gimple_ctypes.IdentExpr(_ml, node.line, node.col)
     # `list` and `tuple` both walk their argument through the comprehension
     # below, which dispatches on the argument's STATIC type and has no arm for
     # a value of unknowable kind — it emits `/* TODO: comprehension over
