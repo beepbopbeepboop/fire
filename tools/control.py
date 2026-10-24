@@ -332,6 +332,7 @@ def cmd_enqueue(a):
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
                        r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+FREE_BUCKET = re.compile(r"Free usage limit", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -419,6 +420,9 @@ def bounce(name, t):
     model = t.get("model")
     if model and limit_hit(t):
         mark_dead(model)
+        if "free" in model and FREE_BUCKET.search(open(os.path.join(wt, "work.log"), errors="replace").read()[-3000:]):
+            for m in FALLBACKS:   # "Free usage limit reached" is ONE bucket for every free model, not this model's
+                mark_dead(m)
         model = pick_model(None)   # None (all out) -> refill's own pick decides when one recovers
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
