@@ -429,7 +429,8 @@ def captures_only_locals(gen, node, enclosing: dict) -> bool:
     # the compiled compiler's intersection of two untyped sets came back
     # empty, so `_sig_pn = lambda pn: gen._cpp_kw_param_renames.get(pn, pn)`
     # -- the very repro above -- was inlined there and lifted here.
-    params = getattr(gen, '_cur_func_params', None) or ()
+    # A set either way (`set-or-()` joined to a list in the compiled compiler).
+    params: set = getattr(gen, '_cur_func_params', None) or set()
     _pset: set = set()
     for _p in params:
         _pset.add(_as_str(_p))
