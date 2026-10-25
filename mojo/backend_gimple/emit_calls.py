@@ -5037,14 +5037,31 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     gen._emit(f"  {pair} = mojo_list_new ();")
     gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', idx)])
     raw = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {pos})')
-    boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){raw}')
+    # `mojo_list_get_int` already hands back the element's stored word
+    # (a list boxes container pointers as int64), so the old double cast
+    # was value-identical to a copy — but it is a NESTED cast, and gcc
+    # -fgimple rejects nested casts in a conversion statement inside
+    # `__GIMPLE`-tagged functions (`expected expression before '(' token`
+    # at the inner cast; the tag rule is `'' if gen._func_used_setjmp
+    # else '__GIMPLE '`, so every no-setjmp method is affected). Measured
+    # 2026-10-25: Lib/mailbox.py:942/986/1432/1433 — four
+    # `_generate_toc`-family methods of the `dict(enumerate(zip(...)))`
+    # row — fail on exactly this line; the identity copy emits the same
+    # bits and parses as gimple.
+    boxed = gen._new_val('int64_t', raw)
     gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', boxed)])
     # The pair's SECOND slot holds the element, so record its type or a
     # consumer reads a string back as a raw integer.
     if elem and elem != 'int64_t':
         gen._elem_types[pair] = elem
-    gen._void_call('mojo_list_append_int',
-                   [('MojoList *', res), ('int64_t', f'(int64_t)(intptr_t){pair}')])
+    # The pair pointer rides out as a word; the cast is HOISTED into a
+    # pre-declared temp: gcc -fgimple rejects a cast sitting inside a
+    # call's argument list in `__GIMPLE`-tagged functions (single or
+    # nested — the argument-position twin of the nested-cast rejection
+    # above, same measured mailbox 942/986/1432/1433 hit). A single cast
+    # in a conversion statement parses, and appends the same word.
+    pword = gen._new_val('int64_t', f'(int64_t){pair}')
+    gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', pword)])
     # The increment is computed INSIDE the loop body on purpose: hoisting it
     # (what `gen._new_val` does at the point of writing) evaluates
     # `pos + 1` once before the loop, so `pos = <that pre-loop value>`
