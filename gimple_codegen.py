@@ -1105,6 +1105,22 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
+        # Module-GLOBAL analogue of `_generator_var_api`: global name -> the api
+        # of the generator/coroutine its toplevel store bound to it. A global
+        # lives in the `_<mod>_globals` struct, so reading it mints a FRESH
+        # temp that `_generator_var_api` has never heard of; without this table
+        # `.close()` and `next()` on a module-level generator were refused as
+        # "no known generator API" (`_collections_abc`'s `_coro.close()`).
+        # Written by `_note_global_generator_store`, read by `_lower_IdentExpr`'s
+        # global-read arm. An entry is a fact only while the name is not in
+        # `_global_generator_api_poisoned`.
+        self._global_generator_api: dict[str, dict] = {}
+        # Globals whose generator API is not ONE known fact: rebound to a
+        # different generator or to a non-generator, stored from inside a
+        # function body, or written through the generic `_write_dest` path.
+        # Such a name keeps the honest refusal rather than a guessed api —
+        # a wrong api calls another generator's resume/value ABI.
+        self._global_generator_api_poisoned: set = set()
         # A3 stack-switch lowered BODY function name -> `{param: generator
         # api}` for the SOURCE parameters whose declared default names one
         # of this module's generators (`def walk_tree(root, *,

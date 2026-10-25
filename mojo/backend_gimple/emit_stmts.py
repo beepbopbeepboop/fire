@@ -977,6 +977,55 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # loses them the same way. A call through `_root_globals.<name>` still
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
+    _note_global_generator_store(gen, tname, vtype, v)
+
+
+def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
+    """Record which compiled generator/coroutine a module global was bound to,
+    so a later read of the global can be driven as that generator.
+
+    The local path carries `_generator_var_api` from the call's SSA temp onto
+    the assigned variable's name (see the `g = counter(3)` carry in the
+    AssignStmt path). A global store returns before that carry, and reading a
+    global mints a fresh temp, so every consumer of a module-level generator
+    (`g.close()`, `next(g)`) found no api and refused — most visibly
+    `_collections_abc`'s `_coro = _coro(); _coro.close()`, which the bug
+    roadmap records as the first module rejection of 17 stdlib build rows.
+
+    A name is trusted only while its binding is ONE fact, because a wrong api
+    is not a refusal, it is another generator's resume/value ABI. So any of
+    these POISON the name, which then keeps the old refusal:
+
+    * a store from inside a function body. Every function body is emitted
+      before `_toplevel`, so this is always seen before the toplevel read it
+      would invalidate;
+    * a toplevel store of a different generator (different `base`), or of
+      anything with no known generator api, over a name already tracked.
+
+    A first store of `None`/an int is NOT a poison — `g = None` then
+    `g = gen()` is the lazy-init shape and the second store is the binding a
+    later read sees. The residual a static answer cannot close is a read that
+    PRECEDES a later toplevel rebinding to a different generator in a loop
+    body; it is the same trade the local path already makes.
+    """
+    if tname in gen._global_generator_api_poisoned:
+        return
+    if not gen._in_toplevel_gen:
+        gen._global_generator_api_poisoned.add(tname)
+        return
+    api = None
+    if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
+        api = gen._generator_var_api[v]
+    if api is None:
+        if tname in gen._global_generator_api:
+            gen._global_generator_api_poisoned.add(tname)
+        return
+    if tname in gen._global_generator_api:
+        known = gen._global_generator_api[tname]
+        if known['base'] != api['base']:
+            gen._global_generator_api_poisoned.add(tname)
+        return
+    gen._global_generator_api[tname] = api
 
 
 def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
