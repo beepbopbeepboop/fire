@@ -1368,23 +1368,43 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     61-entry scan carried `fsdecode`/`fsencode` as `(void)`; the
     fixed scan is 55 entries). (2) The build-level same-name shadow —
     the exact os.py shape — builds (the binary exists) and its runtime
-    is the SEPARATELY measured shadowing class, pinned as MEASURED
-    behavior: the enclosing `return f` resolves to the module GLOBAL
-    `f` (its own still-zero global — the emitted C shows `_mk`
-    reading `_root_globals.f`) and the call dies on SIGSEGV with no
-    output (rc == -11, stdout empty). Pre-fix the build itself died at
-    gcc with `too many arguments to function 'a_os_f'; expected 0,
-    have 1` (build/remes/fsdec_osname_prefix_765117ff.log). This pin
-    marks a known-bad loud outcome the way the suite's EXPECTED
-    markers do: the shadowing class is named in the rows' next
-    blocker, and the moment the shape stops crashing the pin must be
-    re-measured against CPython (42) before it is believed. (3) The
-    non-shadow shape (`g = _mk()`, the call `a_ns.g(41)`) must stay on
-    the loud dispatch refusal — exit 1, stdout empty, stderr
-    `Unhandled exception: NotImplementedError: ... not compiled into
-    this binary` — and never on a silent numeric answer (CPython
-    prints 42; a fix that compiled this shape to a quiet 0 would be
-    the row-10-fold false-green this class is named for)."""
+    is the MEASURED shadowing class, pinned as MEASURED behavior: the
+    call dies on SIGSEGV with no output (rc == -11, stdout empty).
+    Pre-fix the build itself died at gcc with `too many arguments to
+    function 'a_os_f'; expected 0, have 1` (build/remes/fsdec_
+    osname_prefix_765117ff.log). The module-side half of this class —
+    the enclosing `return f` resolving to the module GLOBAL `f` (the
+    emitted C showed `_mk` reading `_root_globals.f`) — is FIXED
+    2026-10-24 (assert (4) below; the C pair
+    build/remes/shadow_modulefix_{prefix,postfix}_d20e7984.ci shows the
+    body move from the global read to `_funcptr__mk_f`). Re-measured
+    with that fix in: the binary STILL segfaults with no output, and
+    the remaining defect is the ENTRY-side call site — `a_os.f(41)`
+    lowers to a NULL fnptr call (`_t2 = (int64_t)0; /* ct param or
+    undeclared: f */` then `mojo_fnptr_call_1(NULL, 41)`) — the
+    function-object-value call-site class (assert (3)'s cousin), not
+    the module's name resolution. This pin marks a known-bad loud
+    outcome the way the suite's EXPECTED markers do: the call-site
+    class is the named next blocker, and the moment the shape stops
+    crashing the pin must be re-measured against CPython (42) before
+    it is believed. (3) The non-shadow shape (`g = _mk()`, the call
+    `a_ns.g(41)`) must stay on the loud dispatch refusal — exit 1,
+    stdout empty, stderr `Unhandled exception: NotImplementedError:
+    ... not compiled into this binary` — and never on a silent
+    numeric answer (CPython prints 42; a fix that compiled this shape
+    to a quiet 0 would be the row-10-fold false-green this class is
+    named for). (4) The module-side name resolution — the standalone
+    compile of the shadow source's `_mk` body must read the LIFTED
+    CLOSURE (`_funcptr__mk_f`) and must NOT read the module global
+    (`_root_globals.f`): fixed 2026-10-24 in `module_shared.
+    bare_global_read_plan` (a name locally bound by a nested `def` in
+    the current function is local in real Python scoping; the global
+    read must not win the bare read — the nested def never enters
+    `var_types`, so the old local-shadowing escape could never see
+    it). Pre-fix this assert fails on the global read; post-fix the
+    body matches the non-shadow shape's (both resolve to the lifted
+    closure) and the CPython answer for the module-side half is the
+    function object itself — the value the lifted closure IS."""
     shadow_src = (
         'def _mk():\n'
         '    def f(x):\n'
@@ -1415,6 +1435,46 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     nested_ok = (exports.get('f') is None and exports.get('_mk') is not None
                  and exports.get('ctrl') is not None
                  and exports.get('m') is not None)
+    # (4) Module-side name resolution, fixed 2026-10-24 on tree d20e7984
+    # (this assert is NEW with that fix; (2) below still pins the runtime):
+    # a bare read of a name locally bound by a nested `def` in the
+    # ENCLOSING function itself must resolve to the nested def (its lifted
+    # closure), not to a same-named module global. Measured pre-fix: the
+    # `_mk` body emitted `_t1 = _root_globals.f;` (entry shape: `_a_os_
+    # globals.f` at build/remes/shadow_modulefix_prefix_d20e7984.ci:1055) —
+    # the global is still zero when `_mk` runs, so the value handed to the
+    # caller is NULL; post-fix the body emits `_t1 = _funcptr__mk_f;`
+    # (shadow_modulefix_postfix_d20e7984.ci:1057, the lifted closure
+    # `closure_lifted_name` `_mk_f` behind the `_funcptr_` static). Root
+    # cause, measured by a gen-table probe at the real call site (the
+    # Intercepting `_callable_value_symbol` in the fix commit message): in
+    # the shadow shape `bare_global_read_plan` answers gwins=True inside
+    # `_mk` while the non-shadow shape answers gwins=False — and in BOTH
+    # shapes `_callable_value_symbol` returns None and `_all_closures
+    # ['_mk']['f']` is the lifted name `_mk_f`. The nested def NEVER enters
+    # `var_types` (it is hoisted to its lifted C function; no C local is
+    # declared for it in the enclosing body), so `bare_global_read_plan`'s
+    # local-shadowing escape `(name in _func_declared_globals or name not in
+    # var_types)` could never see it, and the same-named module global won
+    # the bare read. The fix adds the one missing scope check: a name in
+    # `_all_closures[current_func_name]` (this function's own nested defs)
+    # is local in real Python scoping and the global read must not win —
+    # `wins=False` routes the read to the `_closure_info_for_ident` arm that
+    # already answers the non-shadow shape correctly (that arm is what
+    # emitted `_funcptr__mk_f` before the fix — the two shapes' tables are
+    # identical apart from the global's presence).
+    module_side_ok = False
+    mk_body = ''
+    try:
+        import gimple_codegen
+        code = gimple_codegen.compile_to_gimple(shadow_src, do_imports=False,
+                                                filename='a_os.py')
+        i = code.index('void * _mk (void)\n{')
+        mk_body = code[i:code.index('\n}', i)]
+        module_side_ok = ('_funcptr__mk_f' in mk_body
+                          and '_root_globals.f' not in mk_body)
+    except Exception as e:
+        mk_body = f'<exception {type(e).__name__}: {str(e)[:80]}>'
     pkg = {'a_os.py': shadow_src,
            'main.py': 'import a_os\nprint(a_os.f(41))\n'}
     binary_exists = False
@@ -1434,7 +1494,7 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     refusal_ok = (rc_ns == 1 and stdout_ns.strip() == ''
                   and err_ns.startswith(
                       'Unhandled exception: NotImplementedError:'))
-    ok = nested_ok and build_ok and refusal_ok
+    ok = nested_ok and build_ok and refusal_ok and module_side_ok
     if not ok:
         print(f"  ✗ nested_def_is_not_a_module_level_fn_export: "
               f"scan f={exports.get('f')!r} "
@@ -1443,7 +1503,8 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
               f"m={'present' if exports.get('m') else 'MISSING'}; "
               f"shadow: rc={rc} stdout={stdout!r} binary={binary_exists}; "
               f"noshadow: rc={rc_ns} stdout={stdout_ns!r} "
-              f"stderr={err_ns[:60]!r}")
+              f"stderr={err_ns[:60]!r}; "
+              f"module_side={module_side_ok} mk_body={mk_body[:120]!r}")
     return ok
 
 

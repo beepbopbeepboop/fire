@@ -1743,6 +1743,33 @@ def bare_global_read_plan(self, name):
                     and _imp_home not in self._module_globals
                     and _imp_fields is None
                     and self._global_var_types.get(name) in _BOXED_CONTAINER_CTYPES)
+    # A name locally bound by a nested `def` in THIS function is a LOCAL in
+    # real Python scoping (the def statement binds it in the enclosing
+    # function for the whole function), so the module global of the same
+    # name must not win the bare read. The nested def never enters
+    # `var_types` (it is hoisted to its lifted C function, no C local is
+    # declared for it in the enclosing body), so the `name not in
+    # self.var_types` half above cannot see it and the global gate used to
+    # fire — measured on the exact Lib/os.py shape (`def _mk(): def f(x):
+    # ...; return f` with a module-level `f = _mk()`): the read inside
+    # `_mk` emitted `_a_os_globals.f` (the global still zero at init time)
+    # and the call segfaulted, while the same shape with a non-clashing
+    # global (`g = _mk()`) correctly fell through to the `_closure_
+    # info_for_ident` arm (`_funcptr__mk_f`). Routing the read there is
+    # exactly what this return does: `wins=False` with the same evidence
+    # tuple, so `_lower_IdentExpr` reaches the closure arm that resolves
+    # the name to this scope's lifted closure. Sibling closures (a nested
+    # def referenced from ANOTHER nested function) are out of scope here:
+    # `_all_closures` is keyed by the function that OWNS the nested def, so
+    # a read in a sibling's body sees `_all_closures[sibling]` without the
+    # name and keeps today's behaviour — their capture path is a separate
+    # question `_closure_info_for_ident` answers from `_lambda_outer_
+    # closures`. At module top level `current_func_name` names no entry
+    # (nested defs are discovered per function only), so top-level reads
+    # are untouched.
+    if name in (self._all_closures.get(self.current_func_name) or {}):
+        return (False, _imp_home, _imp_field, _imp_fields, _imp_pending,
+                _global_owner_mod)
     _wins = ((_global_owner_mod is None
           or _as_str(_global_owner_mod) == _this_mod
           or _owned_here or _imp_fields is not None or _imp_pending)
