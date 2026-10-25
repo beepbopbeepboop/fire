@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
-    IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, StructDef,
-    TryStmt, VarDecl,
+    IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, ReturnStmt,
+    StructDef, TryStmt, VarDecl,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
@@ -627,6 +627,22 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     stmts_to_check.append(stmt.value)
                 elif isinstance(stmt, ExprStmt):
                     stmts_to_check.append(stmt.value)  # ExprStmt uses .value
+                elif isinstance(stmt, ReturnStmt):
+                    # `return re.sub(pattern, cb, string)` — the value sits
+                    # in .value exactly like ExprStmt. Before 2026-10-25
+                    # (row COMPILE_FAIL_zipfile___init__, class A) this shape
+                    # was never inspected: zipfile/_path/glob.py:101
+                    # `return re.sub(not_seps_pattern, handle_segment,
+                    # pattern)` registered the lifted closure (reference
+                    # pass, which needs no flag) but left the
+                    # is_re_sub_callback flag unset, so the prelude never
+                    # wrote the static-handle DECLARATION
+                    # `static void * _mojo_cb_<lifted> = (void *)<lifted>;`
+                    # and gcc failed at the reference with `'_mojo_cb_...'
+                    # undeclared` while the lifted fn also kept its
+                    # inferred (non-callback) param/return types.
+                    if stmt.value is not None:
+                        stmts_to_check.append(stmt.value)
                 elif hasattr(stmt, 'body'):
                     _find_re_sub_callbacks(getattr(stmt, 'body', []), context_outer)
                     for clause in ('orelse', 'handlers', 'finalbody'):

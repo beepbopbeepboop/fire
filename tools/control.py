@@ -4,6 +4,9 @@
     control.py spawn NAME --claim KEY [--claim KEY ...] (--task TEXT | --task-file F)
     control.py status              # one line per task: state, commits, tree, last log line
     control.py claims              # every live claim (workers read this before starting)
+    control.py claim NAME --claim KEY ... [--who WHO] [--pid P | --hours H]   # register work done OUTSIDE control (a Claude
+                                   # agent, a hand-run opencode, a local model); exits 1 if a live claim conflicts
+    control.py release NAME        # drop such a claim
     control.py mark NAME STATE     # set a state by hand (abandoned, integrated, ...)
     control.py report              # regenerate the task table inside CONTROL.html
     control.py guard [--limit-gb 64]   # watchdog: kill any process in our trees past a memory limit
@@ -13,7 +16,7 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
-    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running
+    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them)
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -150,6 +153,9 @@ def cmd_spawn(a):
                 for oc in t["claims"]:
                     if conflicts(c, oc):
                         sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
+        ext = external_conflicts(a.claim)
+        if ext:
+            sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
         n = next_slot()
         wt, branch = os.path.join(PARENT, "work-%d" % n), "work/" + a.name
         git("worktree", "add", "-b", branch, wt, a.base)
@@ -171,6 +177,7 @@ def cmd_spawn(a):
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # a pipe to the caller must not outlive spawn
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
                              model=a.model, pid=p.pid, started=time.strftime("%F %T"),
+                             base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -219,10 +226,65 @@ def cmd_status(a):
                 print("      QUESTION: " + q)
 
 
+def external_path():
+    return os.path.join(ctl_dir(), "external.json")
+
+
+def external():
+    """Claims held by work this controller did not start (a Claude Code agent, a hand-run opencode, a local model):
+    {name: {claims, who, pid, until}}. An entry lapses when its pid is gone or its time is up, so a session that dies
+    without `release` does not hold a doc forever."""
+    try:
+        d = json.load(open(external_path()))
+    except (OSError, ValueError):
+        return {}
+    return {n: e for n, e in d.items() if (alive(e["pid"]) if e.get("pid") else e["until"] > time.time())}
+
+
+def norm_claim(c):
+    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
+    if ":" in c:
+        return c
+    m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
+    return "bug:" + m.group(1) if m else c
+
+
+def external_conflicts(claims, skip=None):
+    return [(n, c, oc) for n, e in external().items() if n != skip for c in claims for oc in e["claims"] if conflicts(c, oc)]
+
+
+def cmd_claim(a):
+    """Register claims for work started outside control, so control's workers (and the feeder) stay off it, and the
+    caller learns at once if a control worker or another outside session already holds it. Run it again to renew."""
+    claims = [norm_claim(c) for c in a.claim]
+    with registry() as tasks:
+        bad = [(n, c, oc) for n, t in tasks.items() if state_of(t) not in TERMINAL for c in claims for oc in t["claims"]
+               if conflicts(c, oc)] + external_conflicts(claims, skip=a.name)
+        if bad:
+            for n, c, oc in bad:
+                print("CONFLICT: %s is held by %s (%s)" % (c, n, oc))
+            sys.exit(1)
+        d = external()
+        d[a.name] = dict(claims=claims, who=a.who, pid=a.pid, started=time.strftime("%F %T"),
+                         until=time.time() + a.hours * 3600)
+        json.dump(d, open(external_path(), "w"), indent=1)
+    print("claimed for %s: %s (%s)" % (a.name, ", ".join(claims), "while pid %d lives" % a.pid if a.pid else "%g h" % a.hours))
+
+
+def cmd_release(a):
+    with registry():
+        d = external()
+        d.pop(a.name, None)
+        json.dump(d, open(external_path(), "w"), indent=1)
+    print("released", a.name)
+
+
 def cmd_claims(a):
     for name, t in sorted(load().items()):
         if state_of(t) not in TERMINAL:
             print("%-24s %s" % (name, ", ".join(t["claims"])))
+    for name, e in sorted(external().items()):
+        print("%-24s %s   [external: %s]" % (name, ", ".join(e["claims"]), e.get("who") or "?"))
 
 
 def cmd_mark(a):
@@ -268,9 +330,132 @@ def cmd_enqueue(a):
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
+LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
+                       r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+FREE_BUCKET = re.compile(r"Free usage limit", re.I)
+BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
+
+
+def breaker_path():
+    return os.path.join(ctl_dir(), "breaker.json")
+
+
+def breaker_until():
+    try:
+        return json.load(open(breaker_path()))["until"]
+    except (OSError, ValueError, KeyError):
+        return 0
+
+
+# A usage limit is per MODEL and long: the paid "Go" plan takes a month to recover, a free model about a day. So a limit
+# is not a reason to wait 30 minutes and retry the same model (that is what minted 2,000 empty branches): it marks the
+# model dead for its recovery time and the work moves to the next model that is not.
+FALLBACKS = os.environ.get("CONTROL_FALLBACKS", "opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free,"
+                           "opencode/minimax-m3.1-flash-free,opencode/mimo-v2.6-flash-free,opencode/nemotron-3-ultra-free,"
+                           "opencode/beam-free,opencode/longcat-2.5-preview-free").split(",")
+
+
+def recovery_days(model):
+    return 1 if "free" in model else 15   # Go: the owner measured ~15 days to the next window (2026-10-24)
+
+
+def provider(model):
+    return model.split("/")[0] if "/" in model else model
+
+
+def dead_models():
+    try:
+        d = json.load(open(os.path.join(ctl_dir(), "dead_models.json")))
+    except (OSError, ValueError):
+        return {}
+    return {m: u for m, u in d.items() if u > time.time()}
+
+
+def mark_dead(model):
+    d = dead_models()
+    d[model] = time.time() + recovery_days(model) * 86400
+    json.dump(d, open(os.path.join(ctl_dir(), "dead_models.json"), "w"), indent=1)
+
+
+def pick_model(preferred):
+    """The first of PREFERRED then FALLBACKS whose limit has not been hit, or None when every one is out."""
+    dead = dead_models()
+    dead_providers = {provider(m) for m in dead if "free" not in m}   # a paid plan's limit covers all its models
+    for m in [preferred] + FALLBACKS:
+        if m and m not in dead and (provider(m) not in dead_providers or "free" in m):
+            return m
+    return None
+
+
+def limit_hit(t):
+    lp = os.path.join(t["worktree"], "work.log")
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]) if os.path.exists(lp) else ""
+    return bool(LIMIT_ERR.search(tail))
+
+
+def dead_on_arrival(t):
+    """A worker that never did anything: exited non-zero, no commits, no CONTROL-STATUS, and its log ends in a usage /
+    rate limit or an API connection failure. 2026-10-24: 'Go usage limit exceeded' killed every worker the second it
+    started, refill and formal_feed replaced each one, and the loop minted ~2,000 worktrees and `work/formalNNNN-docs`
+    branches (202 GB) holding no work at all."""
+    if state_of(t) != "exited-err" or verdict(t) or ahead(t):
+        return False
+    lp = os.path.join(t["worktree"], "work.log")
+    if not os.path.exists(lp):
+        return False
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
+    return bool(LIMIT_ERR.search(tail) or NET_ERR.search(tail))
+
+
+def bounce(name, t):
+    """Take a dead-on-arrival task back to the QUEUE, leaving no trace: drop its worktree and branch (only after proving
+    nothing in it is the worker's: no commits, and nothing beyond the files spawn itself wrote) and re-enqueue it under
+    the same name, so the claim, the doc list and the formal%d counter are unchanged. Returns False if it kept the tree."""
+    wt = t["worktree"]
+    mine = {"TASK.md", "work.log", "exitcode", ".tmp/"}
+    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True, cwd=wt).stdout
+    extra = [l[3:] for l in st.splitlines() if not (l[3:] in mine or l[3:].startswith(".tmp/"))]
+    if extra:
+        return False
+    model = t.get("model")
+    if model and limit_hit(t):
+        mark_dead(model)
+        if "free" in model and FREE_BUCKET.search(open(os.path.join(wt, "work.log"), errors="replace").read()[-3000:]):
+            for m in FALLBACKS:   # "Free usage limit reached" is ONE bucket for every free model, not this model's
+                mark_dead(m)
+        model = pick_model(None)   # None (all out) -> refill's own pick decides when one recovers
+    git("worktree", "remove", "--force", wt, check=False)
+    git("branch", "-D", t["branch"], check=False)
+    with registry() as reg:
+        reg.pop(name, None)
+    item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
+                files=t.get("files", []), needs=[], added=time.time(), model=model)
+    json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
+    return True
+
+
 def cmd_refill(a):
     """Keep --target workers running: start queued tasks, oldest first, while slots are free.
-    A task is skipped (stays queued) if a task it needs is not integrated yet, or its claims conflict."""
+    A task is skipped (stays queued) if a task it needs is not integrated yet, or its claims conflict.
+
+    Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
+    their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
+    loop into a worktree-and-branch factory."""
+    bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
+    if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
+        json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
+                  open(breaker_path(), "w"))
+        print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
+            time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
+    model = pick_model(MODEL)
+    if model is None:
+        print("%s refill: every model is out of quota (%s), starting nothing" % (
+            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F", time.localtime(u))) for m, u in dead_models().items())), flush=True)
+        return
+    if time.time() < breaker_until():
+        print("%s refill: breaker open for %.0f more min, starting nothing" % (
+            time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
+        return
     tasks = load()
     live = sum(1 for t in tasks.values() if state_of(t) == "running")
     items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
@@ -282,7 +467,7 @@ def cmd_refill(a):
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=it["model"] or MODEL)
+                                file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL))
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -490,8 +675,8 @@ def cmd_cleanup(a):
 
     2026-10-04: 403 worktrees held 257 GB. The removal is `git worktree remove` WITHOUT --force, so git
     itself refuses a tree with anything it would lose; unmerged work, dirty trees, running workers and
-    `integ` are listed and left alone. Branches are kept (they are merged, so they cost nothing, and the
-    registry and `control.py status` read them)."""
+    `integ` are listed and left alone. Merged work/* branches with no worktree are then deleted with
+    `git branch -d` (their commits are on master; `ahead()` reads a missing branch as 0 ahead)."""
     reg = load()
     byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
     wt, cur = [], {}
@@ -501,7 +686,7 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
-    safe, kept = [], []
+    cands, kept = [], []
     for w in wt:
         p = os.path.realpath(w["path"])
         if not os.path.basename(p).startswith("work-") or os.path.basename(p) == "work-integ":
@@ -511,9 +696,19 @@ def cmd_cleanup(a):
             kept.append((p, "running")); continue
         if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
             kept.append((p, "unmerged")); continue
-        if subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=p).stdout.strip():
-            kept.append((p, "dirty")); continue
-        safe.append(p)
+        cands.append(p)
+
+    # `git status` over a worker tree with a build/ in it is the slow step (~0.1-1 s each, 1900+ trees on
+    # 2026-10-23 made the sequential loop outlast a 2-minute command timeout), and it is I/O bound, so fan it out.
+    def is_dirty(p):
+        return bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True,
+                                   cwd=p).stdout.strip())
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=a.jobs) as ex:
+        dirty = list(ex.map(is_dirty, cands))
+    safe = []
+    for p, d in zip(cands, dirty):
+        (kept if d else safe).append((p, "dirty") if d else p)
     done = 0
     for p in safe:
         if a.dry_run:
@@ -525,6 +720,23 @@ def cmd_cleanup(a):
     from collections import Counter
     print("%s %d worktrees; left alone: %s" % ("would remove" if a.dry_run else "removed",
           len(safe) if a.dry_run else done, dict(Counter(r for _, r in kept))))
+
+    # A merged branch with no worktree left costs nothing in disk but 1900+ of them made every `git branch` /
+    # `for-each-ref` listing unreadable and every fetch announce each one as new. `git branch -d` (not -D)
+    # refuses anything not fully merged into HEAD, and refuses a branch still checked out in any worktree.
+    if a.branches:
+        names = subprocess.run(["git", "for-each-ref", "--merged", "master", "--format=%(refname:short)",
+                                "refs/heads/work/"], capture_output=True, text=True, cwd=MAIN).stdout.split()
+        checked_out = {l[len("branch refs/heads/"):] for l in subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], capture_output=True, text=True, cwd=MAIN
+        ).stdout.splitlines() if l.startswith("branch refs/heads/")}
+        gone = [n for n in names if n not in checked_out]
+        if a.dry_run:
+            print("would delete %d merged branches" % len(gone))
+        elif gone:
+            for i in range(0, len(gone), 200):
+                subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
+            print("deleted %d merged work/* branches" % len(gone))
 
 
 def cmd_memtrim(a):
@@ -699,10 +911,17 @@ def main():
     s.add_argument("--model", default=MODEL); s.set_defaults(f=cmd_spawn)
     s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
+    s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
+    s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
+    s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)
+    s = sub.add_parser("release"); s.add_argument("name"); s.set_defaults(f=cmd_release)
     s = sub.add_parser("mark"); s.add_argument("name"); s.add_argument("state"); s.set_defaults(f=cmd_mark)
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
-    s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_cleanup)
+    s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--no-branches", dest="branches", action="store_false", help="keep merged work/* branches")
+    s.add_argument("-j", "--jobs", type=int, default=16, help="parallel `git status` checks")
+    s.set_defaults(f=cmd_cleanup)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
     s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
     s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")

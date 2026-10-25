@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <stdarg.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -822,6 +823,30 @@ const char *mojo_list_get_kinds(MojoList *l)
 {
     _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
     return r ? r->kinds : NULL;
+}
+
+/* Update ONE slot's kind byte when a typed setter stores a value of a
+ * DIFFERENT kind than the list's description (2026-10-21, part 4, further,
+ * test_python_object: `ll[1] = "nomnomnom"` into the `[1, 2, 3, "food"]`
+ * literal — kinds "iiip" — after which `String(py=ll)` repr'd slot 1 as a
+ * pointer DECIMAL because its kind byte still said 'i' though it held a
+ * string). Copy-on-write: the kinds string may be a shared string-pool
+ * constant (two same-shaped literals share one pool entry), so the first
+ * kind-CHANGING write takes a private copy; same-kind writes (the common
+ * case) and undescribed lists touch nothing. The private copy is row-owned
+ * (never freed — the row is the table's). */
+static void _kinds_set_byte(MojoList *l, int64_t idx, char kind) {
+    if (!l || idx < 0) return;
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (!r || !r->kinds) return;
+    size_t li = (size_t)idx;
+    if (!r->kinds[li] || r->kinds[li] == kind) return;
+    size_t n = strlen(r->kinds) + 1;
+    char *priv = (char *)malloc(n);
+    if (!priv) return;
+    memcpy(priv, r->kinds, n);
+    priv[li] = kind;
+    r->kinds = priv;
 }
 
 static void _kinds_forget(uint64_t addr);
@@ -1879,7 +1904,9 @@ int64_t mojo_list_count_bytes(MojoList *l, MojoBytes *v)
 void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)
 {
     mojo_require_mutable_list(l, NULL);
-    l->data[_norm_idx(l, i)] = v;
+    int64_t idx = _norm_idx(l, i);
+    l->data[idx] = v;
+    _kinds_set_byte(l, idx, MOJO_KIND_INT);
 }
 
 void mojo_list_set_double(MojoList *l, int64_t i, double v)
@@ -1887,13 +1914,17 @@ void mojo_list_set_double(MojoList *l, int64_t i, double v)
     mojo_require_mutable_list(l, NULL);
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    l->data[_norm_idx(l, i)] = bits;
+    int64_t idx = _norm_idx(l, i);
+    l->data[idx] = bits;
+    _kinds_set_byte(l, idx, MOJO_KIND_DOUBLE);
 }
 
 void mojo_list_set_str(MojoList *l, int64_t i, char *v)
 {
     mojo_require_mutable_list(l, NULL);
-    l->data[_norm_idx(l, i)] = (int64_t)(uintptr_t)v;
+    int64_t idx = _norm_idx(l, i);
+    l->data[idx] = (int64_t)(uintptr_t)v;
+    _kinds_set_byte(l, idx, MOJO_KIND_STR);
 }
 
 /* list.insert(i, v): shift slots up from the tail, then store. Python
@@ -2077,6 +2108,38 @@ static int64_t _mojo_slice_len(int64_t start, int64_t stop, int64_t step)
     if (step > 0)
         return start < stop ? (stop - start - 1) / step + 1 : 0;
     return start > stop ? (start - stop - 1) / (-step) + 1 : 0;
+}
+
+/* Extended (WITH-STEP) list slice (2026-10-21 part 4, further,
+ * test_python_object's test_advanced_slicing): `data[-1::-2]` must
+ * answer [9, 7, 5, 3, 1] — mojo_list_slice is step-less and answered
+ * [9] (only the start). The index math reuses the exact helpers
+ * mojo_list_assign_step uses, so `lst[a:b:c]` and `lst[a:b:c] = ...`
+ * select the same slots. step == 0 exits with the ValueError message
+ * (the compiled runtime has no exception object — an honest loud
+ * failure, the same convention as mojo_list_assign_step). The codegen
+ * calls this when the slice LITERAL carries a step; step-less slices
+ * keep mojo_list_slice. */
+MojoList *mojo_list_slice_step(MojoList *l,
+                               int has_start, int64_t start,
+                               int has_stop,  int64_t stop,
+                               int64_t step)
+{
+    if (step == 0) {
+        fprintf(stderr, "ValueError: slice step cannot be zero\n");
+        exit(1);
+    }
+    int64_t s, e;
+    _mojo_slice_indices(l->len, step, has_start, start, has_stop, stop, &s, &e);
+    MojoList *r = mojo_list_new();
+    int64_t slen = _mojo_slice_len(s, e, step);
+    for (int64_t i = 0, idx = s; i < slen; i++) {
+        mojo_list_append_int(r, l->data[idx]);
+        idx += step;
+    }
+    mojo_list_inherit_kinds(r, l);
+    if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
+    return r;
 }
 
 /* `lst[start:stop:step] = repl` for step != 1 (an "extended slice"
@@ -4631,6 +4694,44 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
     for (int64_t i = 0; i < byte_offset; i++)
         if ((s[i] & 0xC0) != 0x80) count++;
     return count;
+}
+
+/* len(s) on a UTF-8 char * — Python's len counts CODE POINTS, and a char *
+ * here is a UTF-8 buffer, so strlen's byte count answers 2 for "é" and 4
+ * for a 4-byte emoji where CPython (and the interpreter, and the formal
+ * backends' len-from-decoded-text) say 1. Same non-continuation test
+ * (10xxxxxx) mojo_utf8_codepoint_index uses for the regex offsets, run over
+ * the whole buffer: exactly one lead byte per code point, so an ASCII string
+ * is unchanged and the answer is the code-point count. This is the len-only
+ * half of the string-model question on purpose: s[i]/find/slicing/printf
+ * width still read a char * as bytes, and choosing code points everywhere is
+ * the larger model change argued in FORMAL_string_value_model — so this is
+ * the ONE place len() is right rather than a generic "length" to reach for
+ * in the byte-indexed paths. MojoStr is wrapped, but its data is the same
+ * UTF-8 buffer (mojo_str_new builds it from one), so its len goes through
+ * here on s->data instead of on s->len, which the concat/char_at family
+ * still read as bytes. */
+int64_t mojo_str_codepoint_len(char *s) {
+    if (!s) return 0;
+    return mojo_utf8_codepoint_index(s, (int64_t)strlen(s));
+}
+
+/* PART 6 (2026-10-23, family S): decode the FIRST UTF-8 code point.
+ * `Codepoint.ord(<string>)` is the measured call this backs — codepoint.mojo's
+ * `def ord(string: StringSlice[_]) -> Codepoint` ("similar to the ord() free
+ * function"), and test_iterators asserts it EQUAL to the codepoints
+ * iterator's decoded `__next__` (so a byte read, 0xE0, cannot stand in for
+ * the code point 2295). The 1/2/3/4-byte branch mirrors the lead-byte
+ * classification `mojo_str_codepoint_len`'s counter uses, so the two helpers
+ * agree on what a code point IS. NUL / empty answers 0, like `mojo_ord`. */
+int64_t mojo_str_first_codepoint(char *s) {
+    if (!s || !s[0]) return 0;
+    unsigned char *u = (unsigned char *)s;
+    int64_t c0 = u[0];
+    if (c0 < 0x80) return c0;
+    if (c0 < 0xE0) return ((c0 & 0x1F) << 6) | (u[1] & 0x3F);
+    if (c0 < 0xF0) return ((c0 & 0x0F) << 12) | ((u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+    return ((c0 & 0x07) << 18) | ((u[1] & 0x3F) << 12) | ((u[2] & 0x3F) << 6) | (u[3] & 0x3F);
 }
 
 /* platform.system()/platform.machine(): resolved via preprocessor macros at
@@ -12913,4 +13014,347 @@ int64_t note_list_literal(void *v, void *val) {
 int64_t scan_expr(void *expr) {
     (void)expr;
     return 0;
+}
+
+/* ── PythonObject box primitives (2026-10-21, part 4, further) ──────────────
+ * This codegen represents a PythonObject as a plain int64_t word: a runtime
+ * container is its pointer, a str is its char *, a number is its raw word
+ * (a double's BITS — the float tests assert on the pattern, not the value).
+ * The stdlib's `PythonObject(...)` constructor and the `Python()`
+ * interpreter singleton have no deeper lowering, so the codegen emits them
+ * as bare variadic externs; these definitions are the runtime answer. The
+ * box is the IDENTITY: whatever word the call site hands over IS the box.
+ * The codegen widens integer LITERAL arguments to `(int64_t)` at the call
+ * site (emit_calls' `_lower_named_call` — a variadic int literal would
+ * otherwise occupy a 32-bit varargs slot with an unspecified upper half),
+ * and DOUBLE arguments through `mojo_double_to_bits` (fire_runtime.h) —
+ * a double VARG sits in the FP register/stack area while the
+ * `va_arg(v, long long)` read is a GP-area read, so the plain read is
+ * UNDEFINED for a double:
+ * with the zero-named spelling the arm64 driver's -O0 happened to spill
+ * the lone double VARG to the stack and the read answered the bits, but
+ * the named dummy (required by ISO C for the x86_64 driver) shifted the
+ * allocation to the VPR and the box came back a GP-register residue
+ * (measured 2026-10-22: `PythonObject (0.123456789121212)` answered
+ * 0x3fbf9add37bea984 in the single-VARG spelling and 0x200000000 with
+ * the dummy in the same test — the ladder's test_conversion_to_simd).
+ * `Python()` answers a null
+ * interpreter handle — every CPython-bound call site that uses it is
+ * already stubbed at the codegen level (`int64_t.cpython() stubbed`), so
+ * nothing in the measured tests dereferences it.
+ *
+ * The signatures carry a NAMED first parameter, which is load-bearing:
+ * ISO C requires a named parameter before `...`, and the drivers disagree
+ * on the zero-named spelling — the arm64 driver (Homebrew GCC-15) accepts
+ * `int64_t PythonObject(...)` with a warning, but the x86_64 driver
+ * (Apple clang, /usr/bin/gcc) fails it (measured 2026-10-22: the
+ * runtimedylib job's `-arch x86_64` compile of this file died with
+ * `error: ISO C requires a named parameter before '...'`, and the
+ * selfhost job's build hit the same two lines). So the box travels as a
+ * VARG behind a named dummy the runtime ignores — the dummy is the 64-bit
+ * `0` literal spelled at every call site (emit_calls), which the
+ * definition cannot confuse with the box. `int64_t_as_unsafe_any_origin`
+ * is called with exactly one word local at every measured site, so it
+ * takes a plain single parameter and needs no variadic at all. */
+int64_t PythonObject(int64_t _first, ...) {
+    (void)_first;
+    va_list v;
+    va_start(v, _first);
+    int64_t x = (int64_t)va_arg(v, long long);
+    va_end(v);
+    return x;
+}
+int64_t Python(void) {
+    return 0;
+}
+int64_t int64_t_as_unsafe_any_origin(int64_t v) {
+    return v;
+}
+
+/* `.__bool__()` on a boxed PythonObject (2026-10-21, part 4, further,
+ * test_python_object): the box is a plain word — a number (truthy when
+ * non-zero; a 32-bit-literal upper half is ignored, the same tolerance
+ * the assert driver applies), a char * (truthy only when NON-EMPTY:
+ * `bool("")` is False in Python, and the codegen's identity echo answers
+ * a non-NULL pointer true — measured: test_boolean_operations failed
+ * `assert_false(PythonObject("").__bool__())` on a heap word), or a
+ * registered container pointer (truthy only when its length is non-zero).
+ * 0 / None is always false. Pointer-range words that are none of the
+ * registered containers are answered by their string content — the only
+ * non-container pointer a measured box holds is a char *. */
+int mojo_pyobject_truthy(int64_t box) {
+    if (box == 0) return 0;
+    uint64_t u = (uint64_t)box;
+    if (u >= (1ULL << 32) && u < (1ULL << 48)) {
+        int reg = mojo_is_registered_list(box) ? 1
+                : mojo_is_registered_set(box) ? 2
+                : mojo_is_registered_dict(box) ? 3 : 0;
+        if (reg) {
+            int64_t n = reg == 1 ? mojo_list_len((MojoList *)box)
+                      : reg == 2 ? mojo_set_len((MojoSet *)box)
+                      : mojo_dict_len((MojoDict *)box);
+            return n != 0;
+        }
+        return strlen((char *)box) > 0;
+    }
+    return (int32_t)box != 0;
+}
+
+/* Shared class check for the boxed-object primitives below (part 4,
+ * further): a non-zero word is a container exactly when one of the three
+ * process-wide registries recognizes its pointer. */
+int mojo_pyobject_is_container(int64_t box) {
+    return mojo_is_registered_list(box) || mojo_is_registered_set(box)
+            || mojo_is_registered_dict(box);
+}
+
+/* `obj.__hash__()` on a boxed PythonObject (2026-10-21, part 4, further,
+ * test_python_object): a registered container is UNHASHABLE — real Python
+ * raises `TypeError: unhashable type: 'list'` (measured: test_hash's
+ * `with assert_raises(contains="unhashable type")`). A number hashes to
+ * itself (CPython's hash(n) == n for these small ints); a string/pointer
+ * box answers from the pointer (mixed with the high half) so same-object
+ * calls agree within a run while differing from any small int hash —
+ * test_hash asserts 42's hash != "hello"'s, never a specific value.
+ * 0/None answers 0: the stub answer, no measured test hashes it. */
+int64_t mojo_pyobject_hash(int64_t box) {
+    if (box && mojo_pyobject_is_container(box)) {
+        char *kind = mojo_is_registered_list(box) ? "list"
+                : mojo_is_registered_set(box) ? "set" : "dict";
+        char msg[64];
+        snprintf(msg, sizeof msg, "unhashable type: '%s'", kind);
+        mojo_raise_type_error(msg);
+    }
+    if (box == 0) return 0;
+    uint64_t u = (uint64_t)box;
+    if (u >= (1ULL << 32) && u < (1ULL << 48))
+        return (int64_t)(u ^ (u >> 17));
+    return box;
+}
+
+/* `String(py=<box>)` — the boxed value as a String (2026-10-21, part 4,
+ * further, test_python_object): by word class. A registered list reprs
+ * through its per-slot kinds — the same walker print uses, so
+ * `[1, 2, 3, "food"]` answers `[1, 2, 3, 'food']` exactly as the
+ * stdlib test asserts (test_setitem). Registered dict/set fall to the
+ * address placeholder: there is no full container-repr table here, and
+ * the file's dict tests are CPython-bound, never feeding a real dict
+ * box to this path. A string pointer is its CONTENT (String(py=s) is s);
+ * a number its decimal; 0/None the word None. */
+char *mojo_pyobject_str(int64_t box) {
+    if (box == 0) return strdup("None");
+    if (mojo_is_registered_list(box))
+        return mojo_repr_list_kinds((MojoList *)box,
+                                    mojo_list_get_kinds((MojoList *)box));
+    if (mojo_pyobject_is_container(box))
+        return mojo_repr_obj(box);
+    uint64_t u = (uint64_t)box;
+    if (u >= (1ULL << 32) && u < (1ULL << 48))
+        return strdup((char *)(intptr_t)box);
+    return mojo_repr_int(box);
+}
+
+/* `Float64(py=<box>)` where the box word is a double literal's BITS
+ * (2026-10-21, part 4, further, test_python_object): `var py_float =
+ * PythonObject(0.123456789121212)` stores the IEEE pattern, and the
+ * ctor must read it back as that value — a bitcast, because a numeric
+ * conversion would treat the pattern as a huge integer. The codegen
+ * knows which boxes these are statically (the ctor's own double-literal
+ * argument, or a local recorded at its declaration); this is that
+ * side's answer. */
+double mojo_pyobject_box_as_double(int64_t box) {
+    double d;
+    memcpy(&d, &box, 8);
+    return d;
+}
+
+/* ── Binary operations on boxed PythonObject values (2026-10-21, part 4,
+ * further, test_python_object). The box is a word whose class is a runtime
+ * fact: a number, a char *, or a registered container pointer. Raw C
+ * arithmetic on those words is wrong in general, measured across the file's
+ * dunder tests: `34 / 10` must answer the DOUBLE BITS of 3.4 (CPython
+ * true-division), `list_box * 2` is list REPEATION (raw C did pointer
+ * arithmetic and `String(py=...)` printed garbage), `1 + "two"` must RAISE
+ * TypeError (raw C added the pointer to the number). The codegen routes an
+ * op through these functions only when at least one operand STATICALLY
+ * produces a box (a `PythonObject(...)` call or a local recorded from one),
+ * so ordinary int64 arithmetic in every other file is byte-identical. */
+static int _pyobj_word_class(int64_t box) {
+    if (box == 0) return 0;                    /* None / CPython stub */
+    if (mojo_pyobject_is_container(box)) return 3;
+    uint64_t u = (uint64_t)box;
+    if (u >= (1ULL << 32) && u < (1ULL << 48)) return 2;  /* char * */
+    return 1;                                  /* numeric word */
+}
+/* A word whose IEEE-754 pattern is a FINITE double of magnitude < 2^20 —
+ * the range the file's double results live in (3.4, 1.7, ...). Used as the
+ * FALLBACK class signal for a box the codegen did not statically flag as
+ * double-bits (e.g. the result of `c = a / b` flowing into `c / 2`): a real
+ * small int is denormal-tiny as a pattern (exponent 0) and a huge integer
+ * has exponent > 1043, so only genuine small double patterns qualify. */
+static int _pyobj_double_like(int64_t box) {
+    uint64_t e = ((uint64_t)box >> 52) & 0x7FF;
+    return e >= 1 && e <= 1043;
+}
+static double _pyobj_as_double(int64_t box, int dbl) {
+    if (dbl) { double d; memcpy(&d, &box, 8); return d; }
+    return (double)box;
+}
+static const char *_pyobj_type_name(int64_t box) {
+    if (box == 0) return "NoneType";
+    if (mojo_is_registered_list(box)) return "list";
+    if (mojo_is_registered_set(box)) return "set";
+    if (mojo_is_registered_dict(box)) return "dict";
+    uint64_t u = (uint64_t)box;
+    if (u >= (1ULL << 32) && u < (1ULL << 48)) return "str";
+    return "int";
+}
+static void _pyobj_raise_mixed(const char *op, int64_t a, int64_t b) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "unsupported operand type(s) for %s: '%s' and '%s'",
+             op, _pyobj_type_name(a), _pyobj_type_name(b));
+    mojo_raise_type_error(msg);
+}
+static void _pyobj_raise_zero_div(void) {
+    char msg[64];
+    snprintf(msg, sizeof msg, "division by zero");
+    mojo_raise_type_error(msg);
+}
+/* `+ - * %` on boxes (the `/ // **` shapes have their own functions below).
+ * The `a_dbl`/`b_dbl` flags are the codegen's STATIC knowledge that a box
+ * holds a double literal's bits; the double-likelihood heuristic above is
+ * the fallback for results that flowed through an assignment. */
+int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl) {
+    int ca = _pyobj_word_class(a), cb = _pyobj_word_class(b);
+    if (ca == 3 && cb == 3) {
+        if (op == '+' && mojo_is_registered_list(a) && mojo_is_registered_list(b))
+            return (int64_t)(uintptr_t)mojo_list_concat(
+                (MojoList *)(uintptr_t)a, (MojoList *)(uintptr_t)b);
+        _pyobj_raise_mixed("op", a, b);
+    }
+    if (ca == 2 && cb == 2) {
+        if (op == '+')
+            return (int64_t)(uintptr_t)mojo_str_cat((char *)(uintptr_t)a,
+                                                    (char *)(uintptr_t)b);
+        _pyobj_raise_mixed("op", a, b);
+    }
+    if (op == '*') {
+        if ((ca == 2 && cb == 1) || (ca == 1 && cb == 2)) {
+            char *s; int64_t n;
+            if (ca == 2) { s = (char *)(uintptr_t)a; n = b; }
+            else         { s = (char *)(uintptr_t)b; n = a; }
+            return (int64_t)(uintptr_t)mojo_cstr_repeat(s, n);
+        }
+        if ((ca == 3 && cb == 1) || (ca == 1 && cb == 3)) {
+            int64_t li, ni;
+            if (ca == 3) { li = a; ni = b; } else { li = b; ni = a; }
+            if (mojo_is_registered_list(li))
+                return (int64_t)(uintptr_t)mojo_list_repeat(
+                    (MojoList *)(uintptr_t)li, ni);
+        }
+    }
+    if ((ca == 2 || cb == 2) || (ca == 3 || cb == 3))
+        _pyobj_raise_mixed("op", a, b);
+    if (a_dbl || b_dbl || _pyobj_double_like(a) || _pyobj_double_like(b)) {
+        double x = _pyobj_as_double(a, a_dbl);
+        double y = _pyobj_as_double(b, b_dbl);
+        if (op == '%' && y == 0.0) _pyobj_raise_zero_div();
+        double r = op == '+' ? x + y : op == '-' ? x - y
+                 : op == '%' ? fmod(x, y) : x * y;
+        int64_t bits; memcpy(&bits, &r, 8);
+        return bits;
+    }
+    if (op == '%' && b == 0) _pyobj_raise_zero_div();
+    if (op == '%') {
+        /* C truncates, Python floors toward the DIVISOR's sign. */
+        int64_t r = a % b;
+        if (r && (r > 0) != (b > 0)) r += b;
+        return r;
+    }
+    return op == '+' ? a + b : op == '-' ? a - b : a * b;
+}
+/* True division ALWAYS answers double bits (CPython: int / int is a float),
+ * and divides by zero RAISES (real Python: ZeroDivisionError — measured:
+ * test_error_handling's `with assert_raises(): _ = one / zero`). */
+int64_t mojo_pyobject_truediv(int64_t a, int64_t b, int a_dbl, int b_dbl) {
+    int ca = _pyobj_word_class(a), cb = _pyobj_word_class(b);
+    if (ca == 2 || cb == 2 || ca == 3 || cb == 3)
+        _pyobj_raise_mixed("/", a, b);
+    double x = _pyobj_as_double(a, a_dbl);
+    double y = _pyobj_as_double(b, b_dbl);
+    if (y == 0.0) _pyobj_raise_zero_div();
+    double r = x / y;
+    int64_t bits; memcpy(&bits, &r, 8);
+    return bits;
+}
+int64_t mojo_pyobject_floordiv(int64_t a, int64_t b, int a_dbl, int b_dbl) {
+    int ca = _pyobj_word_class(a), cb = _pyobj_word_class(b);
+    if (ca == 2 || cb == 2 || ca == 3 || cb == 3)
+        _pyobj_raise_mixed("//", a, b);
+    if (a_dbl || b_dbl || _pyobj_double_like(a) || _pyobj_double_like(b)) {
+        double x = _pyobj_as_double(a, a_dbl);
+        double y = _pyobj_as_double(b, b_dbl);
+        if (y == 0.0) _pyobj_raise_zero_div();
+        double r = floor(x / y);
+        int64_t bits; memcpy(&bits, &r, 8);
+        return bits;
+    }
+    if (b == 0) _pyobj_raise_zero_div();
+    int64_t q = a / b;
+    int64_t r = a % b;
+    if (r && (r > 0) != (b > 0)) q--;   /* C truncates, Python floors */
+    return q;
+}
+int64_t mojo_pyobject_pow(int64_t a, int64_t b, int a_dbl) {
+    int ca = _pyobj_word_class(a), cb = _pyobj_word_class(b);
+    if (ca == 2 || cb == 2 || ca == 3 || cb == 3)
+        _pyobj_raise_mixed("**", a, b);
+    if (a_dbl || _pyobj_double_like(a)) {
+        double x = _pyobj_as_double(a, a_dbl);
+        double r = pow(x, (double)b);
+        int64_t bits; memcpy(&bits, &r, 8);
+        return bits;
+    }
+    if (b < 0) {
+        double r = pow((double)a, (double)b);
+        int64_t bits; memcpy(&bits, &r, 8);
+        return bits;
+    }
+    int64_t res = 1;
+    for (int64_t i = 0; i < b; i++) res *= a;
+    return res;
+}
+/* Comparisons. `==`/`!=` (op codes 'E'/'N') never raise across types —
+ * CPython answers False/True; the ORDERING ops raise TypeError across
+ * types (measured: test_unsupported_operands' `1 < "two"`). */
+int mojo_pyobject_cmp(char op, int64_t a, int64_t b) {
+    int ca = _pyobj_word_class(a), cb = _pyobj_word_class(b);
+    if (op == 'E' || op == 'N') {
+        int eq;
+        if (ca == 1 && cb == 1) eq = (a == b);
+        else if (ca == 2 && cb == 2)
+            eq = (strcmp((char *)(uintptr_t)a, (char *)(uintptr_t)b) == 0);
+        else eq = (a == b);   /* same word: pointer identity (a list is == itself) */
+        return op == 'E' ? eq : !eq;
+    }
+    if (ca != cb) _pyobj_raise_mixed("<", a, b);
+    if (ca == 2) {
+        int c = strcmp((char *)(uintptr_t)a, (char *)(uintptr_t)b);
+        return op == '<' ? c < 0 : op == 'L' ? c <= 0
+             : op == '>' ? c > 0 : c >= 0;
+    }
+    /* class 0/1: words. class 3: containers compared by length — a
+     * documented approximation (no element-wise container-ordering table). */
+    if (ca == 3) {
+        int64_t la = mojo_is_registered_list(a) ? mojo_list_len((MojoList *)(uintptr_t)a)
+                         : mojo_is_registered_set(a) ? mojo_set_len((MojoSet *)(uintptr_t)a)
+                         : mojo_dict_len((MojoDict *)(uintptr_t)a);
+        int64_t lb = mojo_is_registered_list(b) ? mojo_list_len((MojoList *)(uintptr_t)b)
+                         : mojo_is_registered_set(b) ? mojo_set_len((MojoSet *)(uintptr_t)b)
+                         : mojo_dict_len((MojoDict *)(uintptr_t)b);
+        return op == '<' ? la < lb : op == 'L' ? la <= lb
+             : op == '>' ? la > lb : la >= lb;
+    }
+    return op == '<' ? a < b : op == 'L' ? a <= b
+         : op == '>' ? a > b : a >= b;
 }

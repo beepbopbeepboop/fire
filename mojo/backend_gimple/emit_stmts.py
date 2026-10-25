@@ -56,6 +56,7 @@ from mojo.middle.stmts_shared import (
 )
 from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
+from mojo.middle.calls_shared import _py_box_expr
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
 # re-raises, and `emit_loops` cannot be imported here (it goes through
@@ -365,6 +366,41 @@ def _record_bool_valued(gen, name: str, value) -> None:
 def _gen_stmt_VarDecl(gen, node):
     if node.value is not None and _try_bind_iter_cursor(gen, node.name, node.value):
         return
+    # A box-producing initializer (2026-10-21 part 4, further,
+    # test_python_object): `var py_float = PythonObject(0.123...)` stores
+    # the literal's BITS (recorded in _pybox_double_vars so a later
+    # `Float64(py=<local>)` ctor site bitcasts instead of value-converts),
+    # and every other box expression (`var x = PythonObject(34)`, `var c =
+    # a + b` with box operands) records the local in _pybox_vars so a
+    # later binary op on it routes to the runtime's boxed-word dispatch.
+    # Name-only tracking: the box word flows into exactly this one local
+    # per declaration.
+    if (isinstance(node.name, str) and ',' not in node.name
+            and node.value is not None):
+        _bx, _dbl = _py_box_expr(gen, node.value)
+        if _bx:
+            gen._pybox_vars.add(node.name)
+            if _dbl:
+                gen._pybox_double_vars.add(node.name)
+            else:
+                # A non-double box value REBINDS the local: drop a stale
+                # double-bits flag (`c = a / b; c = a % b; c %= 3` — the
+                # third op must not see c as double bits; measured:
+                # test_with_python_dunder_methods' `c %= 3` passed a_dbl=1
+                # and fmod(bitcast(4), 3) answered 4 instead of 1).
+                gen._pybox_double_vars.discard(node.name)
+        elif getattr(node, 'type_ann', None) == 'PythonObject':
+            # `var list_obj: PythonObject = [1, 2]` — an ANNOTATED box
+            # local initialized from a container/string/number literal:
+            # the value is not a PythonObject(...) call so _py_box_expr
+            # misses it, yet the codegen boxes it to the same int64 word.
+            # Without this the local's ops fall through to raw C (measured:
+            # the inplace helper's `list_obj *= 2` did pointer arithmetic
+            # and String(py=...) printed an empty string). Double-bits is
+            # deliberately NOT set: only the explicit PythonObject(<float
+            # literal>) ctor is measured to store bits.
+            gen._pybox_vars.add(node.name)
+            gen._pybox_double_vars.discard(node.name)
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
     # local_types's docstring): `_declare_var` already emitted the
@@ -437,6 +473,8 @@ def _gen_stmt_VarDecl(gen, node):
                     ctype = 'int64_t'
         else:
             ctype = gen._resolve_type(node.type_ann)
+            if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
+                gen._ensure_tuple_struct(node.type_ann)
         gen._declare_var(node.name, ctype)
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
@@ -583,6 +621,8 @@ def _gen_stmt_VarDecl(gen, node):
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
+        if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
+            gen._ensure_tuple_struct(node.type_ann)
         gen._declare_var(node.name, ctype)
         # BUG-2026-030: a default-constructed struct local (`var w: W`, no
         # initializer) used to leave `w` a bare, never-allocated `W *` --
@@ -937,9 +977,127 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # loses them the same way. A call through `_root_globals.<name>` still
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
+    _note_global_generator_store(gen, tname, vtype, v)
+
+
+def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
+    """Record which compiled generator/coroutine a module global was bound to,
+    so a later read of the global can be driven as that generator.
+
+    The local path carries `_generator_var_api` from the call's SSA temp onto
+    the assigned variable's name (see the `g = counter(3)` carry in the
+    AssignStmt path). A global store returns before that carry, and reading a
+    global mints a fresh temp, so every consumer of a module-level generator
+    (`g.close()`, `next(g)`) found no api and refused — most visibly
+    `_collections_abc`'s `_coro = _coro(); _coro.close()`, which the bug
+    roadmap records as the first module rejection of 17 stdlib build rows.
+
+    A name is trusted only while its binding is ONE fact, because a wrong api
+    is not a refusal, it is another generator's resume/value ABI. So any of
+    these POISON the name, which then keeps the old refusal:
+
+    * a store from inside a function body. Every function body is emitted
+      before `_toplevel`, so this is always seen before the toplevel read it
+      would invalidate;
+    * a toplevel store of a different generator (different `base`), or of
+      anything with no known generator api, over a name already tracked.
+
+    A first store of `None`/an int is NOT a poison — `g = None` then
+    `g = gen()` is the lazy-init shape and the second store is the binding a
+    later read sees. The residual a static answer cannot close is a read that
+    PRECEDES a later toplevel rebinding to a different generator in a loop
+    body; it is the same trade the local path already makes.
+    """
+    if tname in gen._global_generator_api_poisoned:
+        return
+    if not gen._in_toplevel_gen:
+        gen._global_generator_api_poisoned.add(tname)
+        return
+    api = None
+    if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
+        api = gen._generator_var_api[v]
+    if api is None:
+        if tname in gen._global_generator_api:
+            gen._global_generator_api_poisoned.add(tname)
+        return
+    if tname in gen._global_generator_api:
+        known = gen._global_generator_api[tname]
+        if known['base'] != api['base']:
+            gen._global_generator_api_poisoned.add(tname)
+        return
+    gen._global_generator_api[tname] = api
+
+
+def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
+                             struct_name, safe_field):
+    """PART 6 (2026-10-22, family C): the C expression for the `is_some`
+    side-band of a tagged-Optional field STORE. The word store already
+    happened; this answers the tag:
+      - a None RHS stores None -> '0';
+      - an `Optional[...]` constructor: a value arg wraps Some -> '1', an
+        empty call is None -> '0';
+      - a `.copy()` on a READ OF THE SAME TAGGED FIELD (the spliced copy
+        constructor `self._x = copy._x.copy()`) -> the bare source-field
+        expression (a raw-word `!= 0` would mis-tag Some(0));
+      - anything else is a value store (an element, `next(...)`, a
+        fieldwise-init parameter holding `Optional(element)`): always
+        Some -> '1'. A stored Optional-typed value word that is genuinely
+        None or Some(0) is the documented value-level boundary (the raw
+        word carries no tag across a call boundary); no measured spliced
+        body stores one.
+
+    The RETURN VALUE is consumed by the caller as a GIMPLE operand, so it
+    is either the single-digit constant '0'/'1' or a bare component-ref
+    expression — never parenthesized: a `__GIMPLE`-tagged function's body
+    must already BE valid raw GIMPLE, where a parenthesized expression is
+    a hard frontend error ("expected expression before '(' token") and a
+    cast may not sit directly on a component ref (see `_new_val`'s own
+    docstring for the measured negative-literal analogue). The caller
+    routes the value through a same-type `_Bool` temp before the plain
+    field store, the one shape gimple's verifier accepts."""
+    v = value_node
+    if isinstance(v, NoneLiteral):
+        return '0'
+    if isinstance(v, IdentExpr) and v.name == 'None':
+        return '0'
+    if isinstance(v, CallExpr):
+        _fn = v.func
+        _fn_name = None
+        if isinstance(_fn, IdentExpr):
+            _fn_name = _fn.name
+        elif isinstance(_fn, MemberExpr):
+            _fn_name = _as_str(_fn.member)
+        if _fn_name == 'Optional':
+            return '1' if getattr(v, 'args', None) else '0'
+        if (isinstance(_fn, MemberExpr) and _fn_name == 'copy'
+                and isinstance(_fn.obj, MemberExpr)
+                and _as_str(_fn.obj.member) == target_node.member):
+            # `copy.<field>.copy()` — copy the source field's side-band.
+            _st, _sv = gen.lower_expr(_fn.obj.obj)
+            _sf = gimple_ctypes._safe_field(_as_str(_fn.obj.member))
+            return f"{_sv}{op}{_sf}_is_some"
+    return '1'
 
 
 def _gen_stmt_AssignStmt(gen, node):
+    # Box tracking (part 4, further, test_python_object): a box-producing
+    # VALUE records its target local (`c = a / b` makes c a box — a
+    # truediv result, so a double-bits one too) for later binary-op
+    # dispatch. Purely a set write: no emission, no early return.
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None):
+        _bx, _dbl = _py_box_expr(gen, node.value)
+        if _bx:
+            gen._pybox_vars.add(node.target.name)
+            if _dbl:
+                gen._pybox_double_vars.add(node.target.name)
+            else:
+                gen._pybox_double_vars.discard(node.target.name)
+        elif (node.target.name in getattr(gen, '_pybox_vars', ())
+                and type(node.value).__name__ == 'IntLiteral'):
+            # A tracked box local rebound to a plain int literal holds a
+            # raw number word (never double bits) — clear a stale flag.
+            gen._pybox_double_vars.discard(node.target.name)
     if isinstance(node.target, gimple_ctypes.IdentExpr) \
             and getattr(node, 'value', None) is not None:
         _record_bool_valued(gen, node.target.name, node.value)
@@ -1232,6 +1390,20 @@ def _gen_stmt_AssignStmt(gen, node):
                                 and vtype.endswith(' *')
                                 and ctype != vtype
                                 and vtype[:-2] in getattr(gen, '_intu_prereg_structs', ())):
+                            ctype = vtype
+                        # A BY-VALUE struct value (part 4: zip's `__next__`
+                        # hands back the synthesized `MojoTuple_*` element
+                        # tuple, and `_ = it.__next__()` inside
+                        # `with assert_raises():` is the measured spelling)
+                        # cannot be boxed into the inferred `int64_t` box —
+                        # gcc: `aggregate value used where an integer was
+                        # expected` on `_ = (int64_t)_t46;`. The first
+                        # assignment gives the local the value's own struct
+                        # type, the by-value twin of the in-TU-struct-pointer
+                        # correction above.
+                        if (ctype in ('int', 'int64_t')
+                                and isinstance(vtype, str)
+                                and vtype in gen.struct_field_types):
                             ctype = vtype
                     else:
                         ctype = vtype
@@ -1739,6 +1911,31 @@ def _gen_stmt_AssignStmt(gen, node):
             if _reified is not None:
                 vtype, v = field_type, _reified
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
+            # PART 6 (2026-10-22, family C): the tagged-Optional side-band
+            # store — the word store above is the payload; the adjacent
+            # `_Bool <f>_is_some` records Some/None so a Some(0) payload is
+            # not misread as None by the boolean-context reads. Gated on the
+            # field having been marked tagged (in-TU struct, non-pointer
+            # scalar Optional payload), so no other store is touched.
+            if (struct_name in gen._tagged_optional_fields
+                    and node.target.member in gen._tagged_optional_fields[struct_name]):
+                _sf = gimple_ctypes._safe_field(node.target.member)
+                _some = _tagged_opt_is_some_expr(
+                    gen, node.value, node.target, ot, ov, op,
+                    struct_name, _sf)
+                # GIMPLE strict mode: the store's RHS must be a register —
+                # a constant, a cast, or a component ref all need their own
+                # same-type `_Bool` temp first (measured: `p->b = (0)`,
+                # `p->b = 0`, `p->b = (_Bool)0`, `p->b = (p->b)` are all
+                # hard gimple-frontend errors in a `__GIMPLE`-tagged fn;
+                # `t = ...; p->b = t;` is not — see `_new_val`'s docstring
+                # and the gimple_test6/8 matrix in the part-6 record).
+                if _some in ('0', '1'):
+                    _some_t = gen._new_val('_Bool', _some)
+                else:
+                    _some_t = gen._new_temp('_Bool')
+                    gen._emit(f'  {_some_t} = {_some};')
+                gen._emit(f'  {ov}{op}{_sf}_is_some = {_some_t};')
             # Propagate elem/dict-val types from value to field name so
             # later field loads (in _lower_MemberExpr) can recover the
             # element type for subscript/list-iter dispatch — without this,
@@ -1775,6 +1972,21 @@ def _gen_stmt_AssignStmt(gen, node):
             gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
         if _setitem_r is not None:
             return
+        # Constant-index write into a synthesized `Tuple[...]` value
+        # (part 4: the zip `__next__` body's `res[i] = next(...)` — the
+        # spliced body's canonical one-line subscript assignment): a
+        # member write with the element ctype straight off the registered
+        # field table, mirroring `_lower_subscript`'s read side. An
+        # augmented tuple subscript is a DIFFERENT statement
+        # (AugAssignStmt) and falls through to the old path unmeasured,
+        # as before.
+        if (isinstance(ot, str) and ot.startswith('MojoTuple_')
+                and isinstance(node.target.index, gimple_ctypes.IntLiteral)):
+            _tf = gen.struct_field_types.get(ot, {})
+            _ef = f'_{int(node.target.index.value)}'
+            if _ef in _tf:
+                gen._safe_coerce_emit(vtype, _tf[_ef], v, f'{obj_v}.{_ef}')
+                return
         if ot == 'MojoList *':
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2093,6 +2305,21 @@ def _gen_stmt_AssignStmt(gen, node):
 
 def _gen_stmt_AugAssignStmt(gen, node):
     base_op = node.op[:-1]
+    # Box tracking (part 4, further, test_python_object): `c += 100` on a
+    # box local lowers through the fake BinaryOp below, so the box
+    # expression check runs on that op — `c` stays a box (and a truediv
+    # keeps its double-bits flag through the rebind).
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and base_op in ('+', '-', '*', '/', '%', '**')):
+        _fake = gimple_ctypes.BinaryOp(op=base_op,
+                                       left=node.target, right=node.value)
+        _bx, _dbl = _py_box_expr(gen, _fake)
+        if _bx:
+            gen._pybox_vars.add(node.target.name)
+            if _dbl:
+                gen._pybox_double_vars.add(node.target.name)
+            else:
+                gen._pybox_double_vars.discard(node.target.name)
     # For augmented assignments, use lower_expr with a fake BinaryOp to get proper type handling
     # This includes string concatenation, list concatenation, etc.
     # '@' (matrix-multiply, `a @= b`) must go through this path too — it
@@ -2721,6 +2948,19 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {b} = {n} != 0;")
         return b
     if ctype == 'int64_t':
+        # PART 6 (2026-10-22, family C): a temp holding a READ of a tagged
+        # Optional field tests the is_some side-band, not the raw word —
+        # the whole point is that Some(0) (word 0) is truthy, where the
+        # generic `!= 0` below would read it as None.
+        _tag = gen._tagged_opt_read.get(val)
+        if _tag is not None:
+            _ov, _op, _sf = _tag
+            b = gen._new_temp('_Bool')
+            # Same-type component-ref read into the `_Bool` temp, NO
+            # parens: `t = (p->b)` is a gimple-frontend error in a
+            # `__GIMPLE`-tagged function, `t = p->b` is not (m4 shape).
+            gen._emit(f"  {b} = {_ov}{_op}{_sf}_is_some;")
+            return b
         zero = gen._new_temp('int64_t')
         b    = gen._new_temp('_Bool')
         gen._emit(f"  {zero} = (int64_t)0;")

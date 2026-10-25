@@ -8,6 +8,8 @@ there ARE startable tasks. Each pass:
      that has stopped must not block a queued task that names the same doc (its branch is landed by
      a merger, which does not need the claim);
   2. counts the queued tasks whose claims no RUNNING task holds (the startable ones);
+     (a worker that died on arrival -- usage limit, API outage -- is left for `control.py refill` to bounce back to the
+     queue with its worktree and branch removed; it did no work, so there is nothing to integrate);
   3. if fewer than --min-ready are startable, enqueues more, from two sources in order:
        a. FORMAL_*.md docs nobody holds (no running task, no queued task), --docs-per-task each;
        b. the project backlog tools/formal_projects.json (each key is enqueued once, ever; the used
@@ -57,6 +59,8 @@ def running_claims(tasks):
     for t in tasks.values():
         if C.state_of(t) == "running":
             held.update(t.get("claims", []))
+    for e in C.external().values():   # a Claude agent / local opencode registered with `control.py claim`
+        held.update(e["claims"])
     return held
 
 
@@ -74,6 +78,8 @@ def release_finished():
     n = 0
     for name, t in C.load().items():
         st = C.state_of(t)
+        if C.dead_on_arrival(t):
+            continue   # died of a limit/outage before doing anything: `refill` bounces it to the queue, it is not "integrated"
         if st in ("exited-ok", "exited-err") and _unlanded(t):
             continue   # its fix is on a branch master does not have yet: the doc is NOT free, or the next worker re-fixes it
         if st in ("exited-ok", "exited-err", "superseded"):

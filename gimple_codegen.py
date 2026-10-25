@@ -395,7 +395,7 @@ from mojo.middle.types import (
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
     _CPP_CALLABLE_CTYPE_1ARG,
     _compute_exc_descendants, _unpack_target_leaf_names, _declared_vars_body,
-    dispatch_table_global_ctype,
+    dispatch_table_global_ctype, _tuple_cname,
 )
 from mojo.middle.solvers import (
     _find_idents, _scan_for_escaping, _find_escaping, EscapeAnalyzer,
@@ -1123,6 +1123,22 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
+        # Module-GLOBAL analogue of `_generator_var_api`: global name -> the api
+        # of the generator/coroutine its toplevel store bound to it. A global
+        # lives in the `_<mod>_globals` struct, so reading it mints a FRESH
+        # temp that `_generator_var_api` has never heard of; without this table
+        # `.close()` and `next()` on a module-level generator were refused as
+        # "no known generator API" (`_collections_abc`'s `_coro.close()`).
+        # Written by `_note_global_generator_store`, read by `_lower_IdentExpr`'s
+        # global-read arm. An entry is a fact only while the name is not in
+        # `_global_generator_api_poisoned`.
+        self._global_generator_api: dict[str, dict] = {}
+        # Globals whose generator API is not ONE known fact: rebound to a
+        # different generator or to a non-generator, stored from inside a
+        # function body, or written through the generic `_write_dest` path.
+        # Such a name keeps the honest refusal rather than a guessed api —
+        # a wrong api calls another generator's resume/value ABI.
+        self._global_generator_api_poisoned: set = set()
         # A3 stack-switch lowered BODY function name -> `{param: generator
         # api}` for the SOURCE parameters whose declared default names one
         # of this module's generators (`def walk_tree(root, *,
@@ -1804,6 +1820,10 @@ class GimpleGen:
         # at compile time instead of needing a real runtime value for NAME —
         # see _gen_for_iter's materialize[...] special case.
         self._comptime_list_asts: dict = {}
+        # Names whose folded comptime value is a STRING (measured
+        # provenance for the read fallback's pointer-range window — see
+        # the `_comptime_str_names` check in emit_exprs's comptime read).
+        self._comptime_str_names: set = set()
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
         # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->
@@ -1862,6 +1882,27 @@ class GimpleGen:
         # repr() must still render them as "True"/"False" like real Python
         # bools instead of falling into the plain-int branch and printing 0/1.
         self.struct_bool_fields: dict[str, set[str]] = {}
+        # PART 6 (2026-10-22, family C): struct name -> the field names of
+        # IN-TU MATERIALIZED structs whose annotation is `Optional[...]`
+        # with a NON-POINTER scalar payload (Int/Int64/... — a zero payload
+        # value is a legitimate Some(0), so the raw-word None=0 convention
+        # misreads it; pointer payloads keep the raw word, None=NULL is
+        # already distinguishable). Each such field gets an adjacent
+        # `_Bool <f>_is_some` side-band in the C layout (measured blast
+        # radius over the 610-file sweep: 5 instantiations in 3 files —
+        # _Once[Int64]._inner, _PeekableIterator[_ListIterOwned[Int]]._next,
+        # _Product2[...]._inner_a_elem x3). Spliced-body writes store the
+        # side-band; boolean-context reads consult it; value reads
+        # (unsafe_value/unsafe_take/.copy()) keep the raw word.
+        self._tagged_optional_fields: dict[str, set[str]] = {}
+        # PART 6 (2026-10-22, family C): temp-name -> (obj_cname, op,
+        # safe_field) for a temp holding a READ of a tagged-Optional field.
+        # The boolean-context conversions (_ensure_bool_cond's int64 arm and
+        # _lower_UnaryOp's `not` int64 arm) consult it to test the is_some
+        # side-band instead of the raw word, so Some(0) reads back Some.
+        # Value-context reads (unsafe_value/.copy()) record but are never
+        # consulted. Reset per function with the other per-func tables.
+        self._tagged_opt_read: dict[str, tuple] = {}
         # struct name -> field names declared `object = None` (or bare
         # `object`, no default_factory) in the real dataclass but hardcoded
         # here to a concrete 'MojoList *'/'MojoDict *' ctype anyway (e.g.
@@ -2010,6 +2051,13 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
+        # PART 6 (2026-10-23, closing piece): set True by emit_calls when a
+        # bare `stat(<char*>)` C-ABI FFI call site is lowered in this TU;
+        # module_gen then emits the one C-ABI struct/prototype/helper block
+        # (gs_cstat + the materialized stat_8_PathLike_6_String). Per-TU:
+        # the block is static, so at most one definition per translation
+        # unit regardless of how many call sites fire the branch.
+        self._needs_cabi_stat: bool = False
         # Which per-translation-unit device-introspection definitions have been
         # emitted ('definitions' once the empty or full sidecar is out) -- shared
         # by reference with every nested temp_gen (emit_resolve), exactly like
@@ -5233,6 +5281,65 @@ class GimpleGen:
         return ginf._char_to_cstr(self, typ, val, transient, word_ok)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
+    def _ensure_tuple_struct(self, ann) -> str:
+        """Register the SYNTHESIZED by-value struct for a `Tuple[...]`
+        annotation (one field `_0`..`_N-1` per element — `_tuple_cname`'s
+        docstring has the measured origin, part 4: the chain/zip
+        out-parameter wrappers) in struct_field_types, and return its C
+        name. Idempotent: the element ctys are a pure function of the
+        annotation, so the struct-field pass, the local-var pass and the
+        method-return pass — every site that hands a `Tuple[...]` to
+        `_mojo_type` — register the identical struct.
+
+        An element mention naming a REGISTERED struct (an in-TU
+        materialized wrapper/inner, or an imported struct) is a POINTER
+        element: those structs are constructed through
+        `_lower_struct_constructor`, which always hands back a `NAME *`
+        (heap allocation or the reserved frame slot) — the tuple's slot
+        must hold that pointer, not a value copy. Everything else
+        resolves through `_mojo_type` (the scalar ctys the value tuples
+        carry — zip's element is a `Tuple[Int, String]` of words).
+
+        A non-`Tuple[...]` annotation returns its plain `_mojo_type`
+        ctype unchanged — the hook sites call this unconditionally and
+        branch on the `MojoTuple_` prefix."""
+        if not isinstance(ann, str) or not ann.strip():
+            return 'int64_t'
+        _base = ann.strip().split('[', 1)[0].strip()
+        if _base not in ('Tuple', 'tuple'):
+            return _mojo_type(ann)
+        # Python-mode gate (measured 2026-10-22, selfhost build): a `.py`
+        # module's `tuple[...]` annotation is a RUNTIME container, not the
+        # synthesized by-value struct — registering the struct here would
+        # feed the same `unknown type name 'MojoTuple_...'` failure that
+        # `_resolve_type`'s sibling gate refuses (see its note).
+        if (getattr(self, '_current_filename', '') or '').endswith('.py'):
+            return 'MojoList *'
+        name = _tuple_cname(ann.split('[', 1)[1].rstrip(']').strip())
+        if name in self.struct_field_types:
+            return name
+        fields = {}
+        for i, _e in enumerate(_split_top_level_commas(
+                ann.split('[', 1)[1].rstrip(']').strip())):
+            _e = ' '.join(_e.split())
+            if (_e in self.struct_field_types
+                    or _e in getattr(self, '_intu_structs', {})
+                    or _e in getattr(self, '_imported_generic_structs', {})):
+                fields[f'_{i}'] = f'{_e} *'
+            else:
+                _ect = _mojo_type(_e)
+                if isinstance(_ect, str) and _ect.startswith('MojoTuple_'):
+                    # A nested VALUE tuple: register the inner struct too,
+                    # or the outer typedef references an unknown type and
+                    # the whole TU fails gcc with `unknown type name`
+                    # (measured 2026-10-21 part 4 integration:
+                    # test_builtin/test_tuple's `Tuple[Int, Tuple[String,
+                    # Float32]]` emitted the outer typedef whose `_1` field
+                    # names the never-registered inner struct).
+                    self._ensure_tuple_struct(_e)
+                fields[f'_{i}'] = _ect
+        self.struct_field_types[name] = fields
+        return name
     def _infer_param_types(self, func: FunctionDef,
                            owner_struct: str | None = None) -> dict[str, str]:
         return ginf._infer_param_types(self, func, owner_struct)

@@ -56,6 +56,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+from mojo.middle.calls_shared import _py_box_expr
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -763,6 +764,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a compiled generator/coroutine": every
+        # consumer of the handle (`.close()`, `next()`, `for`) recovers the
+        # resume/value/destroy api by looking up the VALUE it was handed, so
+        # the fresh read-back temp needs the entry the store recorded on the
+        # NAME. A poisoned name (rebound, or stored from a function) has no
+        # single api, so it gets none and keeps the honest refusal. See
+        # `emit_stmts._note_global_generator_store`.
+        if (name in gen._global_generator_api
+                and name not in gen._global_generator_api_poisoned):
+            gen._generator_var_api[t] = gen._global_generator_api[name]
         # …and "this global holds a plain integer" (`gen._int_word_vals`), the
         # same hop and the same reason for the same reason-as-the-three-above:
         # reading a global mints a FRESH temp, and the dict-key decision is
@@ -876,6 +887,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
             vp = gen._new_val('void *', f'(void *){raw_ptr}')
             gen._emit(f'  {t} = (int64_t){vp};')
+        elif ctype == 'MojoGenerator *' and c_decl_type == 'int64_t':
+            # The reverse of the branch above: a generator/coroutine handle
+            # global is a BOXED `int64_t` field (see the early cdecl seeding in
+            # `gen_module_impl`), so load the word and unbox it through
+            # `void *` — GIMPLE rejects a direct int64_t -> pointer assignment.
+            raw_word = gen._new_val('int64_t', f'{field_ref}')
+            vp = gen._new_val('void *', f'(void *){raw_word}')
+            gen._emit(f'  {t} = (MojoGenerator *){vp};')
         else:
             # Global is int64_t or same type as ctype — direct assignment is valid.
             gen._emit(f'  {t} = {field_ref};')
@@ -980,6 +999,38 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # sentinel `comptime _InvalidIndex: Int = -1`) and `-fgimple`
             # rejects a cast applied directly to a negative literal.
             return 'int64_t', gen._new_val('int64_t', str(_ct))
+        # PART 6 (2026-10-23, family S): a comptime STRING constant — the
+        # pointer-range case the comment above routes AROUND. On the
+        # CPython path the folded value is a real `str` (module-level
+        # `comptime E = "..."` / `comptime E = StringSlice("...")` after
+        # comptime.py's family-S fold); on the self-hosted path it arrives
+        # boxed, so a pointer-range int64 is the string's char* bits. In
+        # this codegen's string model the value IS its char* buffer, so the
+        # read answers a char* the ordinary char* machinery consumes
+        # (method table, free len, subscript). Without this branch, a
+        # module-level comptime string read fell to the placeholder word 0
+        # below (measured 2026-10-23, probe f_global: `var s = E;
+        # s.byte_length()` then read the zero stub on the word receiver).
+        if isinstance(_ct, str):
+            _sname = gen._intern_string(gimple_ctypes._c_escape(_ct))
+            return 'char *', gen._new_val('char *', f'{_sname}')
+        if isinstance(_ct, int) and _ptr_slot_in_range(_ct):
+            # Pointer-range window: on the self-hosted path a folded
+            # string can arrive boxed here; on the CPython path a
+            # genuine comptime int lives here too (measured 2026-10-23:
+            # std/time/time.mojo's `_NSEC_PER_SEC` folds to 1000000000,
+            # and answering it as a char* made the `/` dispatch take the
+            # path-join arm — gcc: "pointer value used where a
+            # floating-point was expected", the C->E the first full
+            # sweep of this piece surfaced). The value alone cannot
+            # discriminate a boxed string pointer from a large int, so
+            # the storage sites mark string-typed values in
+            # `_comptime_str_names`; only a marked name answers char*,
+            # everything else keeps the pre-branch placeholder (the
+            # master behaviour for this window — an honest zero).
+            if _as_str(name) in getattr(gen, '_comptime_str_names', ()):
+                _w = gen._new_val('int64_t', str(_ct))
+                return 'char *', gen._new_val('char *', f'(char *){_w}')
     # Unknown identifier (compile-time param, undeclared external, etc.).
     # Emit a placeholder so GCC doesn't see an undeclared reference.
     t = gen._new_temp('int64_t')
@@ -1025,8 +1076,24 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
             # and a C-style cast is not a legal gimple operand. See
             # emit_infra.py's range()-bound note for the full rationale.
-            zero = gen._new_val('int64_t', "0LL")
-            gen._emit(f"  {t} = {ov} == {zero};")
+            _tag = gen._tagged_opt_read.get(ov)
+            if _tag is not None:
+                # PART 6 (2026-10-22, family C): `not <tagged Optional>` is
+                # true exactly when the field is None — test the is_some
+                # side-band, not the raw word (Some(0) is word 0 but must
+                # read back as "not None" = false here). Three raw-GIMPLE
+                # steps: read the side-band into a same-type `_Bool` temp
+                # (a cast may not sit on a component ref), mirror the
+                # existing _Bool-`not` arm below (cast to int, compare),
+                # because comparison operands must share a type.
+                _ov2, _op2, _sf2 = _tag
+                _sv = gen._new_temp('_Bool')
+                gen._emit(f"  {_sv} = {_ov2}{_op2}{_sf2}_is_some;")
+                int_t = gen._new_val('int', f"(int){_sv}")
+                gen._emit(f"  {t} = {int_t} == 0;")
+            else:
+                zero = gen._new_val('int64_t', "0LL")
+                gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type
             # Cast _Bool to int before comparing with integer 0
@@ -2381,6 +2448,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         field_type = field_map[node.member]
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
+        # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
+        # field so the boolean-context conversions (_ensure_bool_cond /
+        # `not`) consult the is_some side-band instead of the raw word.
+        # Value-context reads record but are never consulted.
+        if (struct_name in gen._tagged_optional_fields
+                and node.member in gen._tagged_optional_fields[struct_name]):
+            gen._tagged_opt_read[t] = (
+                ov, op, gimple_ctypes._safe_field(node.member))
         # Propagate element/dict-val type from stored field metadata so
         # subscript/iteration later recovers the right element type instead
         # of defaulting to int64_t (see BUG-2026-044).
@@ -3445,6 +3520,19 @@ def _scalar_typename(gen, ctype: str) -> str:
     return 'int'
 
 
+# Plain scalar word types the box-binform dispatch may see as an operand
+# type (2026-10-21 part 4, further, test_python_object): a PythonObject box
+# lowers to int64_t and its literal operands to the usual integer types.
+# DOUBLEs and pointers are deliberately excluded: a box op with one of
+# those on the C-type side is a shape the file never produces, and the
+# gate must not steal an existing lowering for it.
+_PYBOX_SCALARS = frozenset({
+    'int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
+    'unsigned int', 'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t',
+    '_Bool',
+})
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3467,6 +3555,53 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
     if gen._bytes_subclass_of(rt):
         rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+    # Binary op on a boxed PythonObject word (2026-10-21 part 4, further,
+    # test_python_object): a `PythonObject(...)` local is an int64 box — a
+    # number, a char *, or a container pointer — and raw C arithmetic on
+    # those words is wrong in general: true division of ints must answer
+    # DOUBLE BITS (measured: `a / b` on 34 and 10 asserted against 3.4 but
+    # computed 3), `list_box * 2` is list repetition (raw C did pointer
+    # arithmetic and `String(py=...)` printed garbage), `1 + "two"` must
+    # RAISE TypeError (measured: test_unsupported_operands). The runtime
+    # answers from the word's runtime class. Gate: at least one operand
+    # statically produces a box AND both operands lower to plain scalar
+    # words — any other shape keeps the exact lowering below, so no other
+    # file's C moves. `//` and `**` are dispatched before this tail
+    # (_lower_floordiv/_lower_pow carry the same gate).
+    if op in ('+', '-', '*', '/', '%', '<', '<=', '>', '>=', '==', '!='):
+        _lb, _ld = _py_box_expr(gen, left_node)
+        _rb, _rd = _py_box_expr(gen, right_node)
+        if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+            # Materialize the operand words into plain `int64_t` temps: a
+            # cast expression (what `_to_int64` returns for a narrower
+            # word) is not a valid raw-GIMPLE call argument.
+            _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+            _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+            _flags = [('int', '1' if _ld else '0'),
+                      ('int', '1' if _rd else '0')]
+            if op == '/':
+                t = gen._call_expr('int64_t', 'mojo_pyobject_truediv',
+                                   [('int64_t', _lv64),
+                                    ('int64_t', _rv64)] + _flags)
+                return 'int64_t', t
+            if op in ('<', '<=', '>', '>=', '==', '!='):
+                _code = {'<': '<', '<=': 'L', '>': '>', '>=': 'G',
+                         '==': 'E', '!=': 'N'}[op]
+                # mojo_pyobject_cmp returns `int`; raw GIMPLE requires the
+                # call's result in a same-type temp — bridge to the `_Bool`
+                # slot. Measured 2026-10-21 part 4 integration.
+                _tcmp = gen._call_expr('int', 'mojo_pyobject_cmp',
+                                       [('char', f"'{_code}'"),
+                                        ('int64_t', _lv64),
+                                        ('int64_t', _rv64)])
+                t = gen._new_val('_Bool', f'(int){_tcmp}')
+                return '_Bool', t
+            _oc = {'+': '+', '-': '-', '*': '*', '%': '%'}[op]
+            t = gen._call_expr('int64_t', 'mojo_pyobject_arith',
+                               [('char', f"'{_oc}'"),
+                                ('int64_t', _lv64),
+                                ('int64_t', _rv64)] + _flags)
+            return 'int64_t', t
     # An operand read out of a heterogeneous container at an index that is not
     # a compile-time constant may be a BOX (see mojo_list_get_boxed), and
     # arithmetic on the box's ADDRESS is a silent wrong value — the float's
@@ -3681,6 +3816,43 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 nv = gen._to_int64(lt2, lv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
             return 'char *', gen._emit_str_cat(sv, rv2, _free_sv, gen._is_fresh_operand(right_node, rv2))
+        # The measured pointer + char* MIX (2026-10-23, family S):
+        # std/collections/string/string.mojo's in-TU String.__init__ does
+        # `self += REPLACEMENT` with self a 'String *' (the materialized
+        # struct pointer) and REPLACEMENT the now-folded function-level
+        # comptime string (a real char*). Before this piece that read
+        # answered the placeholder word 0, so this exact shape was an
+        # int64 + int64 word add (the in-TU String `+=` concat is an
+        # unimplemented latent — the value was ALREADY wrong on master,
+        # the file green at the compile gate). With the char* live and no
+        # arm for (struct-ptr, char*), the mix fell to the tail's raw `+`
+        # as int64 + char* — C pointer arithmetic, which gcc -fgimple
+        # rejects with an ICE in build2 (measured: "internal compiler
+        # error: in build2, at tree.cc:5204" at string.mojo:441). Mirror
+        # master's compilable word-add: bridge the char* to a word too.
+        # EXCLUSION (measured 2026-10-23, part 6 family S, gimplerunner):
+        # `MojoBytes *` / `MojoMemoryView *` on the pointer side must NOT
+        # take this arm — the XOR bytes arm below (`bytes + X` /
+        # `X + bytes`, the struct.pack zip fix) owns those: it coerces the
+        # char* via mojo_bytes_from_cstr / mojo_memoryview_tobytes and
+        # concats real bytes. `b'k' + str(i).encode()` hit this arm
+        # first (lt2 = 'MojoBytes *', rt2 = 'char *') and emitted a
+        # WORD ADD of the two handles, stored into the set as an INT
+        # key — `print(len(s), b'k0' in s, b'k29' in s)` printed
+        # `30 False False` (gimple_set_bytes_many_rehashes) where master
+        # printed `30 True True` through mojo_bytes_concat.
+        if (lt2.endswith(' *') and rt2 == 'char *'
+                and lt2 not in ('MojoBytes *', 'MojoMemoryView *')):
+            lp = gen._new_val('int64_t', f"(int64_t){lv2}")
+            sw = gen._new_val('int64_t', f"(int64_t){rv2}")
+            t = gen._new_val('int64_t', f"{lp} + {sw}")
+            return 'int64_t', t
+        if (rt2.endswith(' *') and lt2 == 'char *'
+                and rt2 not in ('MojoBytes *', 'MojoMemoryView *')):
+            lp = gen._new_val('int64_t', f"(int64_t){lv2}")
+            sw = gen._new_val('int64_t', f"(int64_t){rv2}")
+            t = gen._new_val('int64_t', f"{lp} + {sw}")
+            return 'int64_t', t
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
     # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1
@@ -4967,6 +5139,24 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # Boxed-PythonObject floor division (2026-10-21 part 4, further,
+    # test_python_object): `a // b` on box locals answers through the
+    # runtime's word-class checks (int result, zero-division RAISE, double
+    # bits when a double is involved) instead of raw C `/`. Gate: at least
+    # one operand statically produces a box and both lower to scalar words
+    # — the same gate as _lower_binary_tail's; `//` is dispatched here
+    # before that tail, so it needs its own copy.
+    _lb, _ld = _py_box_expr(gen, node.left)
+    _rb, _rd = _py_box_expr(gen, node.right)
+    if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+        _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+        _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        t = gen._call_expr('int64_t', 'mojo_pyobject_floordiv',
+                           [('int64_t', _lv64),
+                            ('int64_t', _rv64),
+                            ('int', '1' if _ld else '0'),
+                            ('int', '1' if _rd else '0')])
+        return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
         t1 = gen._new_val(td, f"{lv} / {rv}")
@@ -4998,6 +5188,21 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
 def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # Boxed-PythonObject power (part 4, further, test_python_object): the
+    # runtime answers integer `**` exactly (34 ** 2 is 1156, a C `pow`
+    # round-trip can drift) and RAISES on str/container operands, where
+    # raw C `pow` on a pointer word would print garbage. Same gate as
+    # _lower_binary_tail's; `**` is dispatched here before that tail.
+    _lb, _ld = _py_box_expr(gen, node.left)
+    _rb, _rd = _py_box_expr(gen, node.right)
+    if (_lb or _rb) and lt in _PYBOX_SCALARS and rt in _PYBOX_SCALARS:
+        _lv64 = gen._new_val('int64_t', gen._to_int64(lt, lv))
+        _rv64 = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        t = gen._call_expr('int64_t', 'mojo_pyobject_pow',
+                           [('int64_t', _lv64),
+                            ('int64_t', _rv64),
+                            ('int', '1' if _ld else '0')])
+        return 'int64_t', t
     if lt in gimple_ctypes._FLOAT_TYPES or rt in gimple_ctypes._FLOAT_TYPES:
         td = gimple_ctypes.TypeLattice.join(lt, rt)
         t = gen._new_val(td, f"pow ({lv}, {rv})")

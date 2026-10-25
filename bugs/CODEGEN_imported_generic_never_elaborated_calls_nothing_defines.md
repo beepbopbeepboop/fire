@@ -1210,3 +1210,476 @@ DIFFERENT population (instantiation declines); the 3 E->C lifts and the 3
 C->C deltas above act on the call-site side. The census is not re-run in
 this session (same treatment as the 2026-10-21 section above it); the
 declared-red population it complements is the 9 entries named above.
+
+## 2026-10-22 (further, part 4): remeasured — the declared-red dict is
+8 -> 5; this doc's own entries are unchanged, the product refusal
+relocated to the owned site
+
+The part-4 campaign lifts 3 of the 8 declared-red entries — all three from
+the R1 doc's census (chain/zip via the out-res factory subpath,
+test_python_object via the pyobj-list arm; see the R1 doc's
+"2026-10-22 (further, part 4)" section for the measured mechanisms and the
+full gate record: sweep 605/5, A/B C->E 0, ladders with parity). From this
+doc's perspective the measured surface is unchanged, plus one relocation:
+
+- `test/os/path/test_getsize.mojo` — still fails real `gcc -c` on the
+  monomorphized `getsize_8_PathLike_6_String` TU (implicit declaration of
+  `stat`, 3 attempts) — same surface as 2026-10-21 (further); the
+  cross-stdlib `stat[PathLike]` transitive elaboration and the out-param
+  result model are untouched by the part-4 changeset (A/B E->E, no
+  message change).
+- `test/itertools/test_cycle.mojo`'s 2 user-owned sites — still refused at
+  the seed's container gate (a local fn call returning a user-defined
+  `IterableOwned`, the local-generic-elaboration sibling); A/B E->E, no
+  message change; 15/17 sites still work with real values.
+- `test/itertools/test_product.mojo` (listed in this doc's family table for
+  the shared R2 local-fn-call family) — the refusal RELOCATED, measured
+  2026-10-22: the part-4 two-container factory seed lifts the NON-OWNED
+  shapes (`test_product2`/`_param`/`_unequal`/`_copies` — products of two
+  List locals — now lower; the module compiles through them), and the
+  remaining site is `test_product2_owned`: `product(_owned3(1, 2, 3),
+  _owned2(10, 20))` — the container arguments are LOCAL FUNCTION CALLS
+  returning owned values, the same family as the cycle sites above. The
+  seed cannot file records for them, the boxed `it` stays `int64_t`, and
+  `next(it)` hits the hard refusal (measured: receiver `int64_t`, in
+  function `test_product2_owned`).
+
+The elaborator-decline census is not re-run (same treatment as the
+2026-10-21 sections above). The declared-red population it complements is
+now the 5 entries named in the R1 doc's 2026-10-22 table (plus the
+floor-green `test_set`, out of the sweep).
+
+## 2026-10-22 (part 5): re-measured — test_getsize unchanged, the closure
+mapped in full; the declared-red population is 5 -> 2
+
+The part-5 campaign (struct-fn container kind + struct-literal-element
+subpath; see the R1 doc's "2026-10-22 (part 5)" section for the measured
+mechanisms, the ladder evidence, and the full gate record: sweep 608/2,
+A/B both shapes C->E 0, warn set 19/294 identical, no-new-casts 19
+unchanged) lifts 3 of the 5 declared-red entries (test_map, test_cycle,
+test_product — all from the R1 doc's census). From this doc's
+perspective the measured surface is unchanged, plus the closure mapping:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-22, unchanged:
+  codegen fails (`gcc -c failed for the monomorphized
+  getsize_8_PathLike_6_String (exit 1, 3 attempts)`; `implicit
+  declaration of function 'stat'`); the emitted body is still
+  `stat (path)` + `_mojo_dispatch_getattr(..., "st_size")` — the result
+  modelled as a word, `.st_size` fetched dynamically. The factory changes
+  do not touch this file (no dependent-return factory call; the failure
+  is in the monomorphized module compile — A/B ERROR->ERROR, no message
+  change). This session mapped the closure in full, and it is a C-ABI-FFI
+  sub-campaign, not a next-fix: std/os/fstat.mojo's `stat[PathLike]`
+  selects the platform arm with a comptime branch
+  (`CompilationTarget.is_macos()`); `_stat_macos` is
+  `external_call["stat", Int32](path.as_c_string_span(),
+  Pointer(to=stat))` — an FFI call with an OUT PARAMETER filling the
+  `_c_stat` C-ABI struct (17 mixed-width fields incl. `_CTimeSpec` +
+  `Array[Int64, 2]`), which the in-TU materializer does not lay out in
+  C-ABI order; the result travels through `_to_stat_result()` (18-field
+  projection + `Int(...)` casts) and the 18-argument keyword constructor
+  of `stat_result`. Every link of that chain (C-ABI struct layout,
+  external_call out-struct, `as_c_string_span`, the comptime target
+  branch, the `Error("unable to stat '", path, "'")` raise) is an
+  unmeasured mechanism. The `#include <sys/stat.h>` route stays closed:
+  every TU includes fire_runtime.h and std/os/_macos.mojo declares `stat`
+  itself via `external_call["stat", Int32]` (conflicting types).
+- `test/collections/string/test_iterators.mojo` (listed in this doc's
+  family table for the shared method-call dependent-return family) —
+  RE-MEASURED 2026-10-22, unchanged: `s.bytes()` on a local `StringSlice`
+  lowers to the zero stub `_t2 = 0; /* TODO: char*.bytes */` and
+  `next(bytes)` hits the hard refusal (A/B ERROR->ERROR, no message
+  change). The part-5 struct-fn kind does not reach it: its one
+  factory-shaped site is a METHOD call, and its closure (the
+  StringSpan[origin] method family, ~100 methods, + Span/_SpanIter
+  nesting + alias/origin inference) is Part-6 scale.
+
+The elaborator-decline census is not re-run (same treatment as the
+2026-10-21 sections above). The declared-red population it complements is
+now the 2 entries above (plus the floor-green `test_set`, out of the
+sweep, and the floor-green `test_product`, ladder-red on the 4 measured
+families A-D in the R1 doc).
+
+## 2026-10-22 (part 6): re-measured — test_getsize and test_iterators
+unchanged; gap (C) closed in the R1 doc (ladder-red 4 -> 3)
+
+The part-6 campaign's first target was the R1 doc's gap (C) — the
+tagged-Optional field side-band + the dead-guard fold in
+`monomorphize_source` (see the R1 doc's "2026-10-22 (part 6)" section for
+the measured mechanism, the GIMPLE strictness rule, the ladder evidence
+(`test_product_bounds` FAIL -> PASS, full 6,5,4,3,2,1,0 sequence, zero
+regressions), and the full gate record: sweep 608/2 in both trees, A/B
+C-hash 610 files with EXACTLY 3 C->C changes (test_once, test_peek,
+test_product — the measured blast radius), warn set 19/294 byte-identical,
+no-new-casts 19 unchanged). From this doc's perspective the declared-red
+surface is UNCHANGED, re-measured on the part-6 sweep:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-22 (part 6),
+  unchanged: same failure (`gcc -c failed for the monomorphized
+  getsize_8_PathLike_6_String (exit 1, 3 attempts)`; `implicit
+  declaration of function 'stat'`), same emitted body (`stat (path)` +
+  `_mojo_dispatch_getattr(..., "st_size")`). The family-C side-band does
+  not touch this file (no in-TU `Optional[...]` field; A/B ERROR->ERROR,
+  no message change). The `#include <sys/stat.h>` route stays closed
+  (conflicting types with fire_runtime.h / _macos.mojo's own
+  `external_call["stat", Int32]` declaration); the fix is the C-ABI-FFI
+  sub-campaign mapped in the part-5 section above, plus the
+  NamedTemporaryFile/`with`/`.write`/`.byte_length` closure the test
+  needs.
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-22
+  (part 6), unchanged: `s.bytes()` still lowers to the zero stub,
+  `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR, no message
+  change; the method-call dependent-return closure is the next sub-
+  campaign).
+
+The declared-red population is still these 2 entries. `test_product`
+remains floor-green and ladder-red, now on the 3 measured families
+A/B/D (family C closed by this section's mechanism — the staged next
+mechanisms for A/B/D are in the R1 doc's part-6 section, and the value-
+level Optional representation for the bounds-guard shape is the staged
+next mechanism for any non-list iterator arg to the product family).
+
+## 2026-10-23 (part 6, family D piece 1): re-measured — test_getsize and
+test_iterators unchanged; the copies-family template-symbol hazard is
+removed (R1 doc)
+
+The part-6 campaign's second target was the R1 doc's gap (D) piece 1 —
+the DIRECT wrapper constructor subpath in `elab_intu` (the bare
+`_ProductN(local-struct args)` spelling the copies tests use), which
+removes the old-path `extern int64_t _Product2 (...);` template symbol
+the -fsyntax-only gate cannot see, plus the trait-default `bounds`
+synthesis on the local inner struct (see the R1 doc's "2026-10-23 (part
+6, family D piece 1)" section for the measured mechanism, the ladder
+evidence — hazard gone from the object, TU links, 12 ladder-red tests at
+the identical first assert, zero PASS->FAIL — and the full gate record:
+sweep 608/2 in both trees, A/B C-hash 610 files with EXACTLY 1 C->C
+change, `test/itertools/test_product.mojo` (the intended file), warn set
+19/294 byte-identical, no-new-casts 19 unchanged). From this doc's
+perspective the declared-red surface is UNCHANGED, re-measured on the
+D1 sweep. (Gate note: the D1 bucket's first run failed the self-host
+census check `every_ast_mutation_site_invalidates_the_walk_memo` on the
+new `sd.methods.append` site in elab_intu — fixed with
+`_walk_ast_invalidate(sd)`, zero generated-C change, gimple job green;
+see the R1 doc's 2026-10-23 gate record.)
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-23 (part 6,
+  family D piece 1), unchanged: same failure (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String (exit 1, 3 attempts)`;
+  `implicit declaration of function 'stat'`), same emitted body. The
+  direct-ctor subpath does not touch this file (no bare constructor call
+  to an imported generic struct — its `stat(...)` is an FFI call; A/B
+  ERROR->ERROR, no message change). The `#include <sys/stat.h>` route
+  stays closed; the fix is the C-ABI-FFI sub-campaign mapped in the
+  part-5 section above.
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-23
+  (part 6, family D piece 1), unchanged: `s.bytes()` still lowers to the
+  zero stub, `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR,
+  no message change; the method-call dependent-return closure is the
+  next sub-campaign).
+
+The declared-red population is still these 2 entries. `test_product`
+remains floor-green and ladder-red, now on 3 measured families A/B/D
+with D's LINK HAZARD removed (the copies family's remaining red is
+value-level — the staged D2: test_utils inlining + constructor-based
+field copy, in the R1 doc's 2026-10-23 section; the element_copies
+false green it documents is the same D2's second half).
+
+## 2026-10-23 (part 6, family D piece 2): re-measured — the two
+declared-reds unchanged; the fillable-default constructor hazard is
+taken over exactly where strict inference refuses
+
+The R1 doc's "2026-10-23 (part 6, family D piece 2)" section carries
+the measured mechanism (the fill_defaults inference + the vote-rule
+fix + the kwarg-bracket placeholder, the ref-scalar parameter ABI, the
+`.value()` identity, the constructor field copy, the E1/E2 element
+inference + pointer-slot unpack, and the strict-refusal gate), the
+ladder evidence (idx 2 FAIL→PASS with real values, the other 16 tests
+byte-identical status, zero PASS→FAIL; idx 8/13 non-vacuous with the
+named Family-A remainder), and the full gate record. From this doc's
+perspective:
+
+- `test/os/path/test_getsize.mojo` — RE-MEASURED 2026-10-23 (part 6,
+  family D piece 2), unchanged: same failure (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String (exit 1, 3 attempts)`;
+  `implicit declaration of function 'stat'`), same emitted body (A/B
+  ERROR->ERROR, byte-identical message). The D2 constructor subpath does
+  not touch this file (no bare constructor call to an imported generic
+  struct; its `stat(...)` is the C-ABI-FFI shape the part-5 section
+  maps as a sub-campaign).
+- `test/collections/string/test_iterators.mojo` — RE-MEASURED 2026-10-23
+  (part 6, family D piece 2), unchanged: `s.bytes()` still lowers to the
+  zero stub, `next(bytes)` still hits the hard refusal (A/B ERROR->ERROR,
+  byte-identical message; the method-call dependent-return closure is the
+  next sub-campaign).
+
+The zero-stub hazard surface this doc tracks: the D2 piece removes the
+copies family's template-symbol hazard (D1) AND takes over the BARE-
+LITERAL constructor calls whose type arguments the `.o` route's strict
+inference refuses — measured split in the R1 doc: `CopyCounter(1)`
+strict refuses (the fillable `trivial_copy` comptime value parameter) so
+the in-TU materialization owns it; `Interval(1, 10)` / `Optional(123)` /
+`ArcPointer(4)` / `Repr(42)` strict answers, so the `.o` route owns
+them (the strict-refusal gate in `_infer_struct_args` is the boundary;
+the full-sweep regression it fixed is documented there). The A/B C-hash
+(population-wide, 610 files, fresh per-file process both trees): 0
+status changes, 23 C->C, every one classified in the R1 doc's gate
+record (16 files the `.value()` identity, 6 files the in-TU counter/
+random-struct materialization, test_product the D2 core), 0 E-message
+changes, 0 removed definitions, zero dangling references. `test_product`
+remains floor-green and ladder-red: the copies family is VALUE-GREEN
+(idx 2), the element_copies family (idx 8/13) is now NON-VACUOUS and
+red on the measured Family-A comptime-alias remainder, and families
+A/B hold the other reds (R1 doc).
+
+## 2026-10-23 (part 6, family A): re-measured — test_getsize and
+test_iterators unchanged; the nested-product zero-stub population is
+materialized in-TU (78 definitions, 0 removed, 0 dangling)
+
+- `test/os/path/test_getsize.mojo` and `test/collections/string/
+  test_iterators.mojo`: re-measured through the 610-file A/B — their
+  ERROR signatures are BYTE-IDENTICAL to the D2 master, so both
+  `EXPECTED_FAILURES` entries stay accurate without a refresh. The
+  closure maps hold: `getsize`'s `stat(...)` C-ABI path (`_c_stat` 17-
+  field struct, `external_call["stat", Int32]`, the 18-field projection)
+  and test_iterators' `s.bytes()` dependent-return factory +
+  `StringSpan[origin]` method family remain the next items.
+- The zero-stub hazard surface this doc tracks, the nested-product
+  half: at D2 the comptime aliases (`Self._Product2Type` /
+  `Self._OuterProduct2Type`, `itertools.mojo`) erased to words, so the
+  spliced `_Product3`/`_Product4` `__init__` constructor calls became
+  `int64_t.<alias>() stubbed` — a stub emits NO call, so the hazard was
+  invisible while the whole nested chain was dead code (the ladder's
+  idx 8/13 crashed on the NULL tuple the stubbed `__next__` returned).
+  Family A evaluates the aliases to the named instantiations' mangled
+  names (R1 doc, the mechanism) and materializes them in-TU in the same
+  closure: 13 new nested `_Product2` instantiations (CC / Int / TCI /
+  owned / borrowed-ListIter element families, including the nested-
+  mention shapes `_Product2[A, _Product2[B, C]]` and `_Product2[A,
+  _Product3[B, C, D]]`) with 78 added DEFINITIONS — every
+  `P2_bc___next__` / `___init__` / `bounds` the spliced wrappers now
+  call is defined in the same TU. Removed-symbol check: 0 removed
+  definitions, zero dangling references; the 610-file A/B confirms no
+  other TU's surface changed (0 status changes, 1 C→C = test_product,
+  0 E-message changes).
+- Result: the ladder's element_copies / copies / product3 / product4
+  families go GREEN with their pinned copy counts (R1 doc, the
+  measurements); the remaining reds on the product ladder are the
+  comptime-FOR-parameter family (idx 4/10/16, trip_count 0 — family B),
+  byte-identical to the D2 signatures.
+
+## 2026-10-23 (part 6, family B): re-measured — the two declared reds
+unchanged; the product ladder's comptime-for family is no longer a
+declared-red population (17/17)
+
+- `test/os/path/test_getsize.mojo` and `test/collections/string/
+  test_iterators.mojo`: re-measured through the 610-file A/B — their
+  ERROR signatures are BYTE-IDENTICAL to the Family-A master (fresh
+  worktree at 9cf074f8), so both `EXPECTED_FAILURES` entries stay
+  accurate without a refresh. The closure maps hold: `getsize`'s
+  `stat(...)` C-ABI path and test_iterators' `s.bytes()`
+  dependent-return factory + `StringSpan[origin]` method family remain
+  the next items.
+- The product ladder's comptime-for family (idx 4/10/16) is CLOSED:
+  family B unrolls `comptime for ... in product(range(...), ...)` at
+  codegen time (R1 doc, the mechanism), so the three tests assert on
+  the real accumulated trip counts (4/8/16, negative-control-verified)
+  and the ladder is 17/17 — no product-ladder reds remain to declare.
+  A/B: 0 status changes, exactly 1 C→C (test_product — the only file
+  with the pattern; the 14 non-param functions byte-identical after
+  per-TU `_slit_` normalization, 0 removed/added definitions), 0
+  E-message changes.
+
+## 2026-10-23 (part 6, family S): test_iterators closed (sister doc);
+test_getsize re-measured — unchanged, and its entry stays accurate
+
+- `test/collections/string/test_iterators.mojo`: CLOSED by this piece —
+  sweep ERROR → C, 7/7 ladder with real values + negative control,
+  entry REMOVED from `EXPECTED_FAILURES` (measured-removal comment in
+  compile_stdlib.py). The mechanism — the four hand-built in-TU
+  string-iterator structs, the char*-intrinsic method subset, the
+  comptime-string provenance machinery — is documented in the sister
+  doc `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`
+  (family-S section); this doc's share of the evidence is the A/B:
+  the 610-file C-hash diff shows the file's ERROR signature gone
+  (the lone status change, ERROR→C) and its `next()` refusal no
+  longer in the E-message column (0 E-message changes tree-wide —
+  the only remaining E is test_getsize below, byte-identical).
+- `test/os/path/test_getsize.mojo`: RE-MEASURED, unchanged. The whole
+  family-S piece (in-TU siter structs, comptime string reads,
+  as_bytes word-boxing, the String() ctor actuals record, the
+  provenance gate) does not touch this file's failure: the sweep
+  reports the same codegen error (`gcc -c failed for the
+  monomorphized getsize_8_PathLike_6_String`; `implicit declaration
+  of function 'stat'`), and the A/B TSV diff shows its E-message
+  byte-identical (0 E-message changes across all 610). The closure
+  map holds verbatim: `stat[PathLike]`'s comptime
+  `CompilationTarget.is_macos()` platform branch, `_stat_macos`'s
+  `external_call["stat", Int32](path.as_c_string_span(),
+  Pointer(to=stat))` with the OUT parameter filling the 17-field
+  `_c_stat` C-ABI struct (incl. `_CTimeSpec` + `Array[Int64, 2]`)
+  that the in-TU materializer does not lay out in C-ABI order, the
+  18-field `_to_stat_result()` projection + Int casts, and the 18-
+  argument keyword constructor of `stat_result`. `#include
+  <sys/stat.h>` stays closed: conflicting types with fire_runtime.h
+  and _macos.mojo:137. The `EXPECTED_FAILURES` entry carries the
+  2026-10-23 (part 6, family S) re-measurement note.
+- Sweep state this piece: **608/2 → 609/1** — the only remaining
+  declared red is test_getsize itself; the next piece is its
+  C-ABI-FFI sub-campaign (bar: the mangled stat path defined in-TU +
+  a real run returning the right st_size for a real scratch file).
+
+## 2026-10-23 (part 6, closing piece): test_getsize CLOSED — the
+C-ABI-FFI sub-campaign lands, the 610-file sweep is 610/0, and the
+2026-10-03 false-PASS bar is met with real values
+
+### The two defects, closed in the emitted C (measured before/after)
+
+Pre-fix, the monomorphized `getsize_8_PathLike_6_String` TU's body was
+`_t2 = stat (path);` (bare `stat`, no prototype — `implicit declaration
+of function 'stat'`, a C23 hard error that killed `gcc -c` on 3
+attempts) whose result was modelled as a boxed `int64_t` word,
+reinterpreted `(void *)`, with `.st_size` fetched by dynamic
+`_mojo_dispatch_getattr (_t3, "st_size")`. Post-fix, the same body is:
+
+    before:  _t2 = stat (path);
+             _t3 = (void *)_t2;
+             _t4 = _mojo_dispatch_getattr (_t3, _t5);  /* "st_size" */
+             return _t4;
+    after:   _t2 = stat_8_PathLike_6_String (path);
+             _t3 = _t2->st_size;
+             return _t3;
+
+`stat_8_PathLike_6_String` (the campaign mangle of `stat[PathLike]`
+with `PathLike=String`, same scheme as the caller's own
+`getsize_8_PathLike_6_String`) is a `static` in-TU materialization
+emitted once per TU by `emit_calls._CABI_STAT_BLOCK` (driven by the
+gated branch at the tail of `_lower_call` + `module_gen`'s
+`_needs_cabi_stat`). Its body is the REAL measured chain
+(`std/os/path/path.mojo:382` → `std/os/fstat.mojo:179` comptime-if
+macos arm → `std/os/_macos.mojo:136` → the `_to_stat_result` projection
+at `_macos.mojo:114`): a zero-filled C-ABI `gs_cstat` (the `_c_stat()`
+default-init, measured `memset 0`), the REAL 2-arg system call
+`extern int stat (const char *, gs_cstat *)` with the OUT parameter
+filling the caller-owned struct (no 1-arg prototype), `err == -1` →
+`Error("unable to stat '<path>'")` via `mojo_str_cat` +
+`mojo_exc_type_set (471634805)` (the crc32 `Error` tag) +
+`mojo_raise`, and the 15-field projection (11 `Int`-widening casts +
+the 4 `_CTimeSpec` word pairs) into the in-TU `gs_stat_result` — whose
+typedef the TU's own struct-emit pass spells from the branch's
+`struct_field_types` registration, the same registration that makes
+the chained `.st_size` resolve as a direct `->` field read instead of
+the dynamic getattr.
+
+The gate is narrow by construction: a bare `stat(<one char* arg>)`
+call in a TU with NO import and NO local binding for `stat` — the
+isolated monomorphized TU only. `std/os/path/path.mojo` IMPORTS
+`stat` (from `..fstat`) and `std/os/fstat.mojo` locally BINDS it, so
+neither main-pipeline TU can fire the branch; the 610-file A/B
+confirms exactly one file's C changed (see below). The
+`#include <sys/stat.h>` route stays CLOSED per the decision
+(conflicting types with fire_runtime.h and the `_macos` TU's own
+`external_call` declaration of `stat` — the `<time.h>`/`clock_gettime`
+precedent); the C-ABI layout is spelled in codegen instead.
+
+### The C-ABI layout: measured on this platform, validated twice
+
+The SDK header's `struct stat` (Darwin 27, arm64) measures as 144
+bytes, align 8, with offsets 0/4/6/8/16/20/24/32/48/64/80/96/104/112/
+116/120/124/128 — note the packed `dev`/`mode`/`nlink`/`ino` head
+(u32/u16/u16/u64) is THIS platform's measured ABI, not the
+x86_64-era layout the earlier closure map assumed. The codegen
+spelling was validated before landing, both ways: (1) an offsetof
+probe compiled with the same gcc compares the spelled struct against
+the header's — all 18 fields + sizeof + align matching; (2) a real
+run of the EXACT block shape (own-spelled struct, own 2-arg
+prototype, system `stat` call) against a real 12345-byte scratch
+file returned `size=12345 ino=94996773 mode=100644 uid=505
+dev=16777230` — byte-identical to the system-header reference run.
+
+A latent layout bug was caught and fixed by the real run before
+landing: the first block version embedded the TU's `gs_ctimespec`
+typedef in `gs_cstat` — which the struct-emit pass spells with the
+campaign's 8-byte type-tag header (24 bytes) — shifting `st_size`
+from its real ABI offset 96 to 128, so the ladder's 15-byte file
+answered 0. The timespecs are inlined 16-byte C-ABI structs and the
+projection copies them word by word (C forbids assigning between
+distinct struct types); documented in `_CABI_STAT_BLOCK`'s own
+comment.
+
+### Ladder: the 2026-10-03 bar, met with real values
+
+- `nm` on the monomorphized object: the instantiation's stat path is
+  DEFINED in the module's own object — `t _stat_8_PathLike_6_String`
+  (static — one definition per TU is all the link needs, and static
+  keeps two TUs that ever both materialize `stat` from colliding) and
+  `T _getsize_8_PathLike_6_String` (the caller's entry); the only
+  undefined stat-path symbol is the SYSTEM `stat`, which the real
+  link resolves from libSystem.
+- The real link (test driver + the monomorphized object +
+  `build/libmojostdlib.arm64.dylib`) leaves no undefined symbol for
+  the stat path, and the binary runs.
+- REAL RUN against real scratch files of known size (created in the
+  scratch dir, cleaned up after): 0/15/999 bytes → `got=0/15/999`
+  (LADDER PASS rc=0). This is the false-PASS cautionary tale's
+  answer: the vacuous 0-stub shape (both sides answering 0) would
+  have passed a syntax-only gate; the 15/999 cases cannot.
+- Negative control: patching a COPY of the C's `st_size` projection
+  `+1` rebuilds to `got=1/16/1000` (LADDER FAIL rc=1) — the values
+  flow from the real `stat()`, not a stub.
+
+### Field counts, corrected (measured against the stdlib source)
+
+The family-S section's closure map carried "17-field `_c_stat`" and
+"18-field `_to_stat_result()` projection / 18-argument keyword
+constructor". Measured this piece: `_c_stat`
+(`std/os/_macos.mojo:33`) has **18** Mojo fields;
+`stat_result` (`std/os/fstat.mojo:44`) has **15** fields (11 `Int` +
+4 `_CTimeSpec`), and the 15-arg keyword constructor — the projection
+copies exactly those 15 (11 casts + 4 timespecs). The earlier "18"
+conflated the two.
+
+### Battery
+
+- Sweep: current tree **610/0** (0 expected, 0 unexpected, rc=0; the
+  stale-entry hygiene gate fired once pre-removal, clean after);
+  fresh master worktree at 1057cd70: **609/1** (test_getsize, the
+  baseline). The campaign arc lands: 592/18 → … → 608/2 → 609/1 →
+  **610/0** — the 610-file stdlib compiles, end to end.
+- A/B (610 files, both trees, fresh process per file): exactly ONE
+  changed file — `test/os/path/test_getsize.mojo`, ERROR → C (the
+  file whose isolated TU this piece fixed; its own C now exists).
+  Zero C→E, zero unclassified. Removed-symbol hazard check: the
+  master's file never produced an object (its compile failed), so it
+  contributed no symbols to remove, and the other 609 files' C is
+  byte-identical — no TU's symbol surface changed elsewhere.
+- Warn set: 19 files / 294 total, byte-identical from both
+  full-sweep logs. no-new-casts: 19 (baseline). formal_doc_index:
+  133 documents, block current.
+- `EXPECTED_FAILURES`: the final entry REMOVED with the
+  measured-removal comment in compile_stdlib.py — the dict is now
+  empty and the hygiene gate passes on a clean re-sweep.
+
+### Staged remainder (pre-existing main-pipeline class, not this
+piece's)
+
+The full test BINARY's wrapper still cannot link, for reasons that
+pre-date and do not touch the stat chain: the test's own
+`NamedTemporaryFile(delete=False)` call lowers to a zero-arg
+`NamedTemporaryFile ()` whose bare ctor symbol no object defines
+(the struct-ctor qualifier-mismatch class named in
+`monomorphize.build`'s docstring — the home TU defines
+`std_tempfile_tempfile_NamedTemporaryFile___init__`, not the bare
+name), and `std_testing___init___assert_equal` / `main` the same.
+Measured: the link's undefined list is exactly those plus
+runtime/libc symbols, none stat-related. That closure is a separate
+sub-campaign; the stat chain itself — the subject of this doc — is
+closed.
+
+### Status
+
+CLOSED. The headline figure in the first section (96 sites / 51
+names / 60 files, later the 1938/851/381 total) is the class; this
+piece closes its last live member: the 610-file sweep is 610/0 with
+every remaining execution-level gap either closed with real-value
+ladders (this doc's and the sister doc's families) or declared and
+measured in the staged remainders named above.

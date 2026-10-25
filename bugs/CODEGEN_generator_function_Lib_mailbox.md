@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (2026-10-25, master 93d13780 — the 2026-09-05 named refusal no longer fires; the first own-file class is the value-position enumerate() cast, fixed as 93d13780 (12 sites → 0); the residual 2 are a new small class)
+
+Re-measured post merge (mojo-reference2 b35a79ea + f234a398 + baa9854b + cb156b54 + 93d13780). Entry module via the in-process do_imports=False entry C (byte-identical to the fire.py build's C for this file), gated by `gcc-mp-15 -fgimple -fsyntax-only`:
+
+- **The 2026-09-05 entry's named refusal — `Message[...] = ...` subscript store on user-defined struct 'Message' — does NOT fire on the real path.** Consistent with the 2026-08-25/26 entries below: it is the do_imports=False probe artifact (the external base `email.message.Message` is invisible); on the whole-program path the base is present and `Message.__setitem__` resolves through inheritance.
+- **The current first own-file class (pre-fix): the value-position `enumerate(...)` cast — 12 errors across four `self._toc = dict(enumerate(zip(starts, stops)))` sites** (mailbox.py:942:19/31 + 945:1, 986:19/31 + 990:1, 1432:20/32, 1433:20/32 + 1437:1 ×2): `expected expression before '(' token` + `invalid argument to gimple call`. Mechanism: `_lower_builtin_enumerate_value` emitted `boxed = (int64_t)(intptr_t)raw` and `mojo_list_append_int(res, (int64_t)(intptr_t)pair)` — nested casts rejected by gcc -fgimple inside __GIMPLE-tagged functions (the tag rule applies to every no-setjmp method). Fixed in **93d13780** (identity copy + hoisted single-cast temp; a semantic no-op — bit-identical values, valid gimple in tagged and untagged contexts; the previously-green probe shapes stay green).
+- **Post 93d13780: the entry C goes 14 → 2 errors; the 3-error minimal repro goes 3 → 0.** The residual 2 are a DIFFERENT class: `mailbox.py:895:1: error: unknown type name 'MojoGenerator'; did you mean 'Generator'?` and `mailbox.py:107:26: error: conflicting types for 'Mailbox___iter__'; have 'MojoGenerator *(Mailbox *)'` — an unresolved `MojoGenerator` spelling plus a `__iter__` return-type conflict. Named, not attempted (shared generator-type machinery; blast radius across rows).
+- The whole-closure build additionally fails downstream of the known reject families (weakref d.pop, next()-receiver traceback/dis/re, tarfile MojoBytes→MojoList coercion, tempfile next()).
+
+**Verdict**: the doc-named refusal is the probe artifact that no longer fires; the first own-file class is fixed in 93d13780 (12 sites → 0). The row stays open on the residual 2 above plus the downstream rejects. Doc stays open.
+
 ## Status (2026-09-05 — A3 stack-switch cutover: blocked by a non-generator module refusal)
 
 All 5 generators (`Mailbox.itervalues` / `.iteritems`,
