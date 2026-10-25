@@ -320,6 +320,45 @@ edited module_gen.py (+146) and gimple_codegen.py. The row-10 walk
 shape must be re-measured COLD on the merged tree before concluding
 the selfhost chain didn't move the picture.
 
+## 2026-10-25 — the `name 'n'` walk-state class resolves to a missing import (no new fix needed) + the :1199 diagnostic gap is named
+
+The `name 'n' is not defined` class (recorded 2026-10-24 as a NEW named
+class from the cold walk; A3 visit 300, `collections`) is RESOLVED without
+a new commit. Root cause measured: a bare read of a compiler module global
+that was never imported — `gimple_codegen.py`'s import line carried
+`py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node` but
+not `_as_int`, so `gimple_codegen.py:4469` (`return _as_int(
+_SCALAR_CTYPE_SIZE[ctype])`, the mutable-local box path) NameError'd on
+any module whose shape reached it — 27 latent stdlib-build failures, not a
+scope-chain/walk-state artifact. The call site is rare, which is why only
+a large in-process stdlib walk surfaced it. The fix is already in the
+tree: 61adf216 (in via the mojo-reference2 merge b35a79ea) added the
+import — its own message: "Also adds missing _as_int import in
+gimple_codegen.py (fixes 27 stdlib codegen failures: name '_as_int' is
+not defined)".
+
+A3's six `n` instances (abc/ntpath/collections/importlib.
+machinery/weakref), missing a DIFFERENT name than the clean tree's
+`_as_int`: A3 ran on the merge's mid-edit working tree (proven two ways —
+its CAS key prefix matches no clean checkout; the missing name differs),
+so they were a SECOND, transient missing global in that state. Full-
+coverage no-repro on clean trees: the standalone-driver walk probe (entry
+ctypes/util.py, private empty store, first-error traceback capture) gives
+e214bcd2 = HIT at visit 34 (enum.py, the `_as_int` traceback above) and
+da0cd410 + 26ff6613 + e214bcd2-with-the-import = zero `is not defined`
+across 250+ visits covering all six victim modules. Evidence:
+/private/var/folders/bt/pjzl0n_w8xn64y008k907xch0000gs/T/opencode/fsdec/
+probe_name_n{,_e214,_e214b,_da0}.log + probe_name_n.py + key_match.py.
+
+The `emit_resolve.py:1199` reject-handler wrapper is the diagnosed
+DIAGNOSTIC GAP, not the mechanism: it prints `str(e)` only, which is what
+turned a one-line missing import into a "walk-state class". Closing it is
+feature-sized on the self-hosted path (the handler's own comment records
+that `print(..., flush=True)` is the only diagnostic channel that works in
+the compiled binary, and lowering a real traceback into the self-hosted
+compiler is a codegen feature, not a one-liner). Roadmap input, not
+implemented.
+
 ## Working rules
 
 1. One queue item at a time; do not bundle unrelated fixes.
