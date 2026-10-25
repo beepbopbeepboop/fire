@@ -286,6 +286,40 @@ work, and in each the doc already says what the next step is. The only thing
 that was missing was the statement "this was looked at and deliberately not
 started", which is what this table is.
 
+## 2026-10-24 — correction to the 12e9ff38 memory-model sentence (A3 + row-B terminals)
+
+12e9ff38's "bytes go to per-module retention structures" sentence is
+REFUTED. The A3 standalone-inline terminal (3 h wall guard, exit 0,
+visit 324) measured retention at 29 modules / ~0.2 GB
+(`_module_stmts entries=29 shallow=1128 trans=1440`) for the whole
+run, while the process held ≤979 MB RSS / 0.25 GB traced across all
+324 visits. The bytes at traced scale are the walk's own machinery
+and the `'\n'.join` assembly (terminal top sites: `emit_infra.py:6635`
+62.3 MB/36 blocks and growing from A2's 13.0 MB/20; `exprtypes.py:158`
+parent-memo 30.1 MB over 640,700 blocks).
+
+A3 also REFUTES the same-process-sequence + retry-amplification
+hypothesis at WALK SCALE: it ran the exact sequence (failed link-mode
+walk, then inline fallback) with 13 rejects / max ×2, and the walk
+stayed flat — against row-B's 34 rejects / max ×10 at full closure
+scale.
+
+Row-B terminal (the no-memcap CLI run, ctypes/util.py): SIGKILL
+(rc 137) at ~5.5 h, peak RSS ≈ 62.8 GB, store 0 files, no binary —
+the walk never completed, so the nine rows do not get cheaper.
+Ranked open candidates for the ≥62.8 GB regime: (1) CLI retry
+amplification at full-closure scale — `_WALK_AST_PARENTS` is a
+never-cleared module-level dict and the terminal top site #2 at only
+324 visits; (2) the post-walk whole-program `'\n'.join`, the growing
+#1 site A3 never reached; (3) link-mode residual state (weak). Ruled
+out: gcc coprocess, closure difference.
+
+PROVENANCE GATE: A3 and row-B both ran the PRE-MERGE compiler
+(d20e7984 state, in memory since launch); the merged selfhost chain
+edited module_gen.py (+146) and gimple_codegen.py. The row-10 walk
+shape must be re-measured COLD on the merged tree before concluding
+the selfhost chain didn't move the picture.
+
 ## Working rules
 
 1. One queue item at a time; do not bundle unrelated fixes.
