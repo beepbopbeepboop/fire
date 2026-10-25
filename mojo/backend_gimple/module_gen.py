@@ -5775,7 +5775,26 @@ def gen_module_impl(self, stmts):
                             # pass emits it BEFORE this struct's own
                             # typedef (the wrapper references it by name in
                             # its field declaration).
-                            self._ensure_tuple_struct(_as_str(field.type_ann))
+                            _reg = self._ensure_tuple_struct(_as_str(field.type_ann))
+                            if _reg != ft:
+                                # The hook is the authority on the
+                                # annotation's representation. In a `.py`
+                                # module its Python-mode gate (measured
+                                # 2026-10-22, the selfhost TU — a `.py`
+                                # `tuple[...]` is a RUNTIME container, never
+                                # the synthesized by-value struct, the same
+                                # gate `_resolve_type` applies to local/param
+                                # annotations) answers `MojoList *` and
+                                # deliberately does NOT register the struct.
+                                # Keeping the struct spelling in the field
+                                # would emit a member whose typedef is never
+                                # emitted: `unknown type name
+                                # 'MojoTuple_4b512f0f1ff7'` — measured
+                                # 2026-10-25, Tools/cases_generator/lexer.py's
+                                # Token dataclass (`begin: tuple[int, int]`),
+                                # row COMPILE_FAIL_Tools_cases_generator_parsing.
+                                # Take the gate's container spelling.
+                                ft = _reg
                         if (_fann_s and _fann_s[0].isupper() and '[' not in _fann_s
                                 and '.' not in _fann_s and '*' not in _fann_s
                                 and _fann_s not in self._IMPORTED_STRUCT_SKIP_BASENAMES
