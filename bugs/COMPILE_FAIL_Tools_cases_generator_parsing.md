@@ -1,5 +1,17 @@
 # COMPILE_FAIL: Tools/cases_generator/parsing.py
 
+## Status (2026-10-25, master 93d13780 — the 2026-09-30 "false green" header is invalidated in both halves: the file now FAILS LOUDLY, and its first own-file class was a NEW shared-path defect, fixed as cb156b54; the residual 12 own-file errors are an older class)
+
+Fresh whole-closure `python3 fire.py build .../Tools/cases_generator/parsing.py` on master `93d13780` (post mojo-reference2 merge b35a79ea, plus f234a398, baa9854b, cb156b54, 93d13780):
+
+- **The 2026-09-30 header's central claim — exit 0 with the `globals()` weak stub printing "globals: unavailable in compiled mode" — no longer holds.** The 2026-10-22 `.py`-mode gate (97f2256e, for the selfhost TU: a `.py` `tuple[...]` annotation is a RUNTIME container, never the synthesized by-value struct) plus the merge's selfhost chain make the row fail LOUDLY: **rc 1, 240 errors** (pre-cb156b54). The silent-wrong state this doc warned about is gone; the row is an honest COMPILE_FAIL again.
+- **The first own-file class (pre-fix) was a new shared-path defect**: `unknown type name 'MojoTuple_4b512f0f1ff7'` — 29 refs (parsing.py:1616/1617, lexer.py:255, ...), all from lexer.py's `Token` dataclass (`begin: tuple[int, int]`). module_gen's struct-field loop called `_ensure_tuple_struct(...)` and DISCARDED its return: in a `.py` module the hook's Python-mode gate answers `MojoList *` and deliberately does NOT register the synthesized struct, so the field named a typedef that is never emitted. Fixed in **cb156b54** (the loop consumes the hook's answer when it differs from the struct spelling; the `.mojo` path is byte-identical — mimo.mojo A/B diff empty). An 18-line probe fails before, builds after, with `t.begin[1] == 2` asserted against CPython.
+- **Post cb156b54: 240 → 193 errors total; own-file (the cases_generator package) 59 → 12; `MojoTuple_4b512f0f1ff7` refs 29 → 0.**
+- **The residual 12 own-file errors are an older class (all present in the pre-fix log too)**: 8 × `__mgco_tokenize_*` generator-companion symbol errors (4 × `conflicting types for '__mgco_tokenize_start'` + 4 × `redefinition of '__mgco_tokenize_{body,value,resume,destroy}'` — lexer.py:294/428/432/435/438/2011, plexer.py:1662/13583), 3 × at the `cast(Literal["inst","op"], ...)` sites (parsing.py:392:39 + :401:1 ×2), 1 × `conflicting types for '_mojo_repr_set'` (plexer.py:13520:15). The count coincidentally matches this doc's original "12 own-file errors" (the 2026-08-09 polymorphic `yield from self.<field>.tokens()` static-dispatch cluster) but is a different class.
+- **Owner flag (NEW, runtime values)**: the same probe's `t.line` property (computed from `self.begin[1]`) prints `91091344` — garbage — while `t.begin[1]` itself is correct (`2`, matching CPython). A property-dispatch gap, separate from this doc; flagged for the owner.
+
+**Verdict**: the doc's 2026-09-30 premise (compiles + silently wrong) is invalidated in both halves; the first own-file class is fixed (cb156b54). The row stays open on the 12 above plus downstream rejects. Doc stays open.
+
 ## Status (2026-09-30, branch work/compile-fail-stdlib-misc — THIS DOC'S CENTRAL CLAIM IS NOW FALSE: the 12 own-file errors are GONE and the file BUILDS. But it is SILENTLY WRONG, which is worse, and the cause is `lexer.py`'s `globals()`, not `parsing.py`)
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`:
