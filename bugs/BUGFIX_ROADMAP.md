@@ -359,6 +359,39 @@ the compiled binary, and lowering a real traceback into the self-hosted
 compiler is a codegen feature, not a one-liner). Roadmap input, not
 implemented.
 
+## 2026-10-25 — remesC terminal: the merged tree reproduces the row-B regime; provenance gate answered; peak correction
+
+The provenance-gate re-measure (remesC: the row-10 walk shape COLD on the
+merged tree, identical shape to row-B — no-memcap CLI, private empty
+GMOJO_HOME store, tree head 26ff6613 = selfhost chain + f234a398 +
+baa9854b) terminated:
+
+- SIGKILL (rc 137) at t=18267 s (~5.1 h; row-B died at ~19750 s), peak
+  RSS **75.72 GB** (t=9047 s), store 0 files, no binary — the walk never
+  completed. **The merged selfhost chain did NOT move the walk's memory
+  picture**: same regime, same terminal, within a few percent of the
+  pre-merge peak. The 12e9ff38-correction candidates for the >=78 GB
+  regime stand (CLI retry amplification at full-closure scale; the
+  post-walk whole-program `'\n'.join`).
+- PEAK CORRECTION: row-B's TRUE peak was **78.2 GB** (80103.5 MB,
+  t=4893 s = 81 min in; the monitor's `top:` value with the tree hint =
+  the walk PID). The 26ff6613 block's "peak RSS ≈ 62.8 GB" was a
+  mid-oscillation sample (t=19362 s), not the peak. remesC's 75.72 GB
+  therefore tracks row-B's 78.2 GB, not 62.8.
+- REJECT-SET DIFF (the baa9854b field check): row-B 14 distinct / 34
+  total rejects; remesC 13 distinct / 33 total. GONE: `dis 504:36` and
+  `fractions 478:21` unterminated string literal — the f-string
+  format-spec fix works in the cold full-closure walk. NEW: `dis:
+  next(...) on next(IdentExpr) (receiver typed MojoList *)` — dis.py
+  now PARSES (the f-string fix) and fails DEEPER, in the known
+  next()-receiver codegen class: progress, not a regression. No
+  `name 'X'` instances in either (the _as_int fix, 61adf216, holds in
+  the full CLI walk).
+- The nine budget-class rows remain budget-blocked (the walk still
+  dies before publishing; publish is on completion only — a killed walk
+  publishes nothing). CAS pre-warm remains the only cheap scheduling
+  lever; zero lever on a cold day.
+
 ## Working rules
 
 1. One queue item at a time; do not bundle unrelated fixes.
