@@ -383,6 +383,13 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name == 'sys' and node.member == 'platform'):
         return True
+    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
+            and node.obj.name == 'sys' and node.member == 'byteorder'):
+        # Foldable only where `eval_const` really can read the host value:
+        # in the self-hosted binary `sys` binds the compiled stdlib's, which
+        # exposes no byteorder, the fold declines, and a shape-only "yes"
+        # would then read as CONST_FALSE and drop the live branch.
+        return eval_const(node, bindings) is not None
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
         return _const_foldable(node.operand, bindings, call_hook)
     if isinstance(node, BinaryOp):

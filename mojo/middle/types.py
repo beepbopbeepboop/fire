@@ -825,7 +825,17 @@ def _decl_scan_space(c) -> bool:
 
 def source_decl_ends(text: str, keywords: list, name: str, openers: str,
                      line_start: bool = False) -> list[int]:
-    """The end offsets of every `<keyword>\\s+<name>\\s*<opener>` in `text`, in
+    """The end offsets of `source_decl_spans`' matches (see it for the scan)."""
+    ends: list[int] = []
+    for sp in source_decl_spans(text, keywords, name, openers, line_start):
+        ends.append(sp[1])
+    return ends
+
+
+def source_decl_spans(text: str, keywords: list, name: str, openers: str,
+                      line_start: bool = False) -> list:
+    """The `(start, end)` offsets -- `m.start()`, `m.end()` -- of every match,
+    in order; the end offsets of every `<keyword>\\s+<name>\\s*<opener>` in `text`, in
     order: what `[m.end() for m in re.finditer(rf'\\b(?:kw1|kw2)\\s+
     {re.escape(name)}\\s*[<openers>]', text)]` answers (`^` instead of `\\b`,
     with MULTILINE, when `line_start`).
@@ -843,7 +853,7 @@ def source_decl_ends(text: str, keywords: list, name: str, openers: str,
 
     `keywords` is a list of words (`['fn', 'def']`), `openers` the set of
     single characters that may follow (`'('`, `'[:'`)."""
-    ends: list[int] = []
+    ends: list = []
     n = len(text)
     nl = len(name)
     if nl == 0:
@@ -869,7 +879,7 @@ def source_decl_ends(text: str, keywords: list, name: str, openers: str,
                         ok = start == 0 or not (text[start - 1].isalnum()
                                                 or text[start - 1] == '_')
                     if ok:
-                        ends.append(j + 1)
+                        ends.append((start, j + 1))
                         break
         pos = text.find(name, pos + 1)
     return ends

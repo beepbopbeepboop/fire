@@ -4892,9 +4892,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 # `_inline_module_qualifiers.get('root', 'root')` turned the
                 # root module's '' qualifier into `root_` symbols nothing
                 # defines.
-                _has = gen._call_expr('int', f'mojo_dict_contains{_sfx}',
-                                      [('MojoDict *', ov), (key_type, key_val)])
-                cond = gen._new_val('_Bool', f'{_has} != 0')
+                #
+                # The test is on the RAW pointer word (NULL == absent, and ""
+                # is a non-NULL pointer), NOT a second `mojo_dict_contains`
+                # probe: a content-keyed (tuple/container) key is a one-shot
+                # placeholder `_apply_kw_keys` consumes at the FIRST dict call
+                # that takes it, so a second lookup with the same key value
+                # probed the plain char* domain and always missed
+                # (`d.get(("a", 1), "none")` answered "none" on a hit).
+                cond = gen._ensure_bool_cond('int64_t',
+                                             gen._to_int64('char *', raw))
             else:
                 cond = gen._ensure_bool_cond(result_type, raw_r)
             t = gen._new_temp(result_type)

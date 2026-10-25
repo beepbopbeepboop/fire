@@ -9163,12 +9163,16 @@ def gen_module_impl(self, stmts):
                     _so_set = _so_inner.setdefault(pnames[i], set())
                     _so_set.add(_gmi_as_str(st))
                 spt = _arg_struct_ptr_type(caller_name, a)
-                if not spt and not isinstance(a, (
-                        gimple_ctypes.IntLiteral, gimple_ctypes.BoolLiteral,
-                        gimple_ctypes.NoneLiteral, gimple_ctypes.FloatLiteral,
-                        gimple_ctypes.StringLiteral, gimple_ctypes.ListExpr,
-                        gimple_ctypes.DictExpr, gimple_ctypes.SetExpr,
-                        gimple_ctypes.TupleExpr, gimple_ctypes.Comprehension)):
+                # Only a DERIVED argument (a field read, a subscript) vetoes.
+                # A bare identifier of unknown type is "not known YET", not
+                # "known not to be this struct": a parameter forwarded
+                # through thin wrappers (`def b(w): return a(w)`) is resolved
+                # by the propagation fixpoint below, and a local seen from
+                # the module-scope walk (which descends into function bodies)
+                # has no type entry at all. Vetoing on those turned a
+                # unanimous single-struct observation into a split vote.
+                if not spt and isinstance(a, (gimple_ctypes.MemberExpr,
+                                              gimple_ctypes.SubscriptExpr)):
                     # An argument whose struct type nothing knows -- a boxed
                     # field read (`_fld.target`), a list element, a word of
                     # unknown kind -- may be ANY node, so it is a vote
