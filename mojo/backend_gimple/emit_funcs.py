@@ -618,7 +618,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                         break
                 _pd = getattr(_fi_fn, 'param_defaults', None) or {} if _fi_fn else {}
                 if _pd:
-                    _dl = list(_pd.items())
+                    _dl = param_default_pairs(_pd)
                     gen._func_param_defaults.setdefault(symbol_name, _dl)
                     try:
                         gen._func_param_defaults.setdefault(
@@ -1636,8 +1636,11 @@ def _selfhost_gimplegen_frozen_sigs(gen, gg_cls) -> dict:
         # Index arg_pairs[i][0]/[1] directly rather than tuple-unpacking a
         # for-clause target (`for pn, dv in (...).items()`) — the
         # established boxing bug.
-        _dflts = [(_pd_pair[0], _pd_pair[1])
-                  for _pd_pair in (getattr(_m, 'param_defaults', None) or {}).items()]
+        # An explicit loop over the KEYS: a comprehension over `.items()` pairs
+        # boxes both slots of each pair on the self-hosted path, so the frozen
+        # table's default entries were not `(name, node)` pairs at all and
+        # `lower_struct_method_call`'s `_method_dflts[k][1]` read the integer 2.
+        _dflts = param_default_pairs(getattr(_m, 'param_defaults', None) or {})
         _out[f'GimpleGen_{_m.name}'] = (_rc, _pcs, _dflts)
     return _out
 
@@ -1712,10 +1715,9 @@ def overload_suffix_for(c_param_types) -> str:
     _i = 0
     _sn = len(_s)
     while _i < _sn:
-        _c = _s[_i]
-        if isinstance(_c, str):
-            _c = ord(_c)
-        _h = (_h * 31 + _c) & 0x7FFFFFFF
+        _ch = _s[_i]
+        _code = ord(_ch)
+        _h = (_h * 31 + _code) & 0x7FFFFFFF
         _i = _i + 1
     _h = _h & 0xFFFFFF
     _out = ''
@@ -2615,13 +2617,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._scalar_annotated_locals = set()
     for _dn in gimple_exprtypes._walk_ast(node.body):
         if isinstance(_dn, gimple_ctypes.VarDecl) and getattr(_dn, 'type_ann', None):
-            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
-                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+            if gimple_ctypes.is_scalar_annotation(str(_dn.type_ann).strip()):
                 gen._scalar_annotated_locals.add(_dn.name)
         elif (isinstance(_dn, gimple_ctypes.AssignStmt) and isinstance(_dn.target, gimple_ctypes.IdentExpr)
                 and getattr(_dn, 'type_ann', None)):
-            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
-                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+            if gimple_ctypes.is_scalar_annotation(str(_dn.type_ann).strip()):
                 gen._scalar_annotated_locals.add(_dn.target.name)
     # Per-lexical-scope import tracking: this function body is its own
     # scope — push a fresh frame and pre-record every `from X import ...`
@@ -3386,7 +3386,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
         if (_fann and _fann[0].isupper() and '[' not in _fann
                 and '.' not in _fann and _fann not in gen.struct_field_types
                 and _fann not in gen._IMPORTED_STRUCT_SKIP_BASENAMES
-                and gimple_ctypes._TYPE_MAP.get(_fann) is None):
+                and not gimple_ctypes.type_map_has(_fann)):
             gen._materialize_imported_struct(module, _fann, _fann)
         fields[f.name] = gen._imported_field_ctype(f.type_ann)
     # Carry the struct's real methods along so the signature-registration
@@ -3540,7 +3540,7 @@ def _resolve_sibling_param_ctype(gen, module: str, raw_ptype) -> str | None:
         return None
     if base in gen.struct_field_types:
         return f"{base} *"
-    if gimple_ctypes._TYPE_MAP.get(base) is not None:
+    if gimple_ctypes.type_map_has(base):
         return None  # a real scalar/builtin Mojo type, not a struct
     if gen._materialize_imported_struct(module, base, base):
         return f"{base} *"

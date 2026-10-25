@@ -2241,9 +2241,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._emit_label(bb_merge)
                 return 'int', t
             elif outer_member == 'normpath' and len(node.args) == 1:
-                # os.path.normpath(p) → stub: return p unchanged
+                # os.path.normpath(p): the real lexical normalization
+                # (`int_normpath`, posixpath semantics). It used to return `p`
+                # unchanged, so a path built with `..` stayed unnormalized and
+                # the self-hosted binary's `#line` directives and module-path
+                # keys spelled `.../stage2/../mojo/x.py` where the Python
+                # reference spells `.../mojo/x.py`.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                return arg_type, arg_val
+                t = gen._call_expr('int64_t', 'int_normpath', [('int64_t', '0'), (arg_type, arg_val)])
+                cast = gen._new_val('char *', f'(char *){t}')
+                return 'char *', cast
             elif outer_member == 'isfile' and len(node.args) == 1:
                 # os.path.isfile(p) — real S_ISREG stat check (int_isfile in
                 # runtime/fire_runtime.c), mirroring the isdir/exists cases

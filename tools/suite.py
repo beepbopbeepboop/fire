@@ -465,7 +465,7 @@ MEASURED_PEAK_GB = {
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
-    'bootstrap-stage2-transitive': (1.4, 'derived'),    # from stage1-transitive
+    'bootstrap-stage2-transitive': (30, 'measured'),    # from stage1-transitive
     'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
     'bootstrap-stage3-transitive': (1.4, 'derived'),    # from stage1-transitive
     # The eight formal host-module suites, measured one at a time under
@@ -2649,8 +2649,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
-     driver='mem', mem='tiny', cwd='stage2',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'],
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2661,14 +2660,12 @@ fanout('bootstrap-stage3-dumps',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='tiny', cwd='stage3',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
-     disabled='bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`

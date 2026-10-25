@@ -3244,7 +3244,7 @@ def _emit_mut_local_box_allocs(gen):
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
-        vp = gen._new_val('void *', f"malloc ({gimple_codegen._SCALAR_CTYPE_SIZE.get(ctype, 8)})")
+        vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
         _box_param_c = gen._mut_boxed_param_c.get(mn)
         if _box_param_c:
@@ -5907,7 +5907,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit_label(bb_chk3)
             gen._emit(f'  if ({_tag} == 3) goto {bb_list}; else goto {bb_chk2};')
             gen._emit_label(bb_list)
-            _lrepr = gen._call_expr('char *', *gen._list_repr_call(_lp))
+            _lrfn, _lrargs = gen._list_repr_call(_lp)
+            _lrepr = gen._call_expr('char *', _lrfn, _lrargs)
             gen._emit(f'  {_res} = {_lrepr};')
             gen._emit(f'  goto {bb_done};')
             gen._emit_label(bb_chk2)
@@ -6771,7 +6772,7 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
     st = gen._literal_storage
     if st != '' and gen._literal_storage_ctype == ctype:
         gen._literal_storage = ''
-        gen._emit(f"  {_OWNED_STACK_KIND[ctype][0]} (&{st});")
+        gen._emit(f"  {_owned_stack_init_fn(ctype)} (&{st});")
         gen._emit(f"  {t} = &{st};")
         return
     if ctype == 'MojoDict *':
@@ -7226,6 +7227,19 @@ _OWNED_STACK_KIND = {
     'MojoSet *':  ('mojo_set_init',  'MojoSet'),
 }
 
+def _owned_stack_init_fn(ctype: str) -> str:
+    """`_OWNED_STACK_KIND[ctype][0]` as a `str`. Indexed and `_as_str`'d rather
+    than unpacked from the dict's tuple value: the unpack boxes both slots once
+    self-hosted, so the storage declaration printed the address of the struct
+    name (`4344599392 _owned_storage1_items;`)."""
+    return _as_str(_as_list(_OWNED_STACK_KIND[ctype])[0])
+
+
+def _owned_stack_struct(ctype: str) -> str:
+    """`_OWNED_STACK_KIND[ctype][1]` as a `str` — see `_owned_stack_init_fn`."""
+    return _as_str(_as_list(_OWNED_STACK_KIND[ctype])[1])
+
+
 def ann_container_ctype(gen, ann):
     """The container ctype a binding statement's OWN annotation names, when
     it names one of the three owned-stack container kinds; else None.
@@ -7380,13 +7394,14 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
             gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
             gen._literal_storage_ctype = f"{_sname} *"
             return False
-        _init_fn, _struct = _OWNED_STACK_KIND[lit]
+        _struct = _owned_stack_struct(lit)
         gen.temp_counter += 1
         gen.decls.append(f"  {_struct} _owned_storage{gen.temp_counter}_{name};")
         gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
         gen._literal_storage_ctype = lit
         return False
-    init_fn, struct_name = _OWNED_STACK_KIND[ctype]
+    init_fn = _owned_stack_init_fn(ctype)
+    struct_name = _owned_stack_struct(ctype)
     gen.temp_counter += 1
     storage = f'_owned_storage{gen.temp_counter}_{name}'
     gen.decls.append(f"  {struct_name} {storage};")

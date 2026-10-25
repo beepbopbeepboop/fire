@@ -1494,6 +1494,16 @@ def _gen_stmt_AssignStmt(gen, node):
                     or (isinstance(node.value, gimple_ctypes.IdentExpr)
                         and node.value.name == 'None')):
                 ctype = 'int64_t'
+            # `ptype: str = None` ANNOTATES the variable as a string-or-None,
+            # so its slot is a `char *` whatever the pre-pass hinted for the
+            # name, and a tuple built from it records a str kind (whose null
+            # word reprs as None) instead of an int kind (which reprs the same
+            # word as `0`).
+            if (_as_str(getattr(node, 'type_ann', None)) in ('str', 'String')
+                    and (isinstance(node.value, gimple_ctypes.NoneLiteral)
+                         or (isinstance(node.value, gimple_ctypes.IdentExpr)
+                             and node.value.name == 'None'))):
+                ctype = 'char *'
             gen._declare_var(tname, ctype)
             # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
             # the rewriter turns `parts: List[String] = ...` into an
@@ -2084,12 +2094,12 @@ def _gen_stmt_AssignStmt(gen, node):
                                         else:
                                             _am = gimple_ctypes.re.match(r'^(.+)\[(\d+)\]$', ftype)
                                             _ect, _acnt = (_am.group(1), int(_am.group(2))) if _am else ('int64_t', 1)
-                                        if _ect in gimple_codegen._SCALAR_CTYPE_SIZE:
+                                        if gen._has_scalar_ctype_size(_ect):
                                             # Scalar element type: `sizeof(int64_t)` itself
                                             # is rejected by GIMPLE's sizeof grammar (see
                                             # above), so use a literal byte count computed
                                             # in Python instead.
-                                            _nbytes = gimple_codegen._SCALAR_CTYPE_SIZE[_ect] * _acnt
+                                            _nbytes = gen._scalar_ctype_size(_ect, 8) * _acnt
                                         else:
                                             # Struct element type: unlike a scalar typedef,
                                             # `sizeof(StructName)` (a bare aggregate type
@@ -2626,6 +2636,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         else:
             gen._emit(gimple_codegen._RETURN)
     else:
+        # Declared `str` BEFORE the unpack: `lower_expr`'s tuple result comes
+        # back as an untyped pair once self-hosted, so an undeclared `v` was an
+        # `int64_t`, and the `f"  return {v};"` below formatted the temp's
+        # ADDRESS as a decimal (`return 515548663312;`) for every function that
+        # returns a non-literal.
+        vtype: str = ''
+        v: str = ''
         vtype, v = gen.lower_expr(node.value)
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately

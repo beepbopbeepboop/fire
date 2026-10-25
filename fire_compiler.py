@@ -2087,6 +2087,45 @@ def _unterminated_quote_pos(line: str) -> int:
     return open_at if delim is not None else -1
 
 
+def _drop_line_continuations(literal: str) -> str:
+    r"""`literal` with every backslash-newline pair deleted, as CPython does
+    inside a NON-raw string literal (a triple-quoted body that opens with a backslash and a line
+    break is `abc`, not a backslash, a newline and `abc`). The caller decides rawness; a raw literal keeps the
+    pair as content and never comes here.
+
+    A backslash consumes the NEXT character, so `\\<nl>` (an escaped backslash
+    followed by a real line break) is left alone: only a backslash that is not
+    itself escaped can join the lines. Every line end is `_LINE_TERMINATORS`'s
+    (`\r\n`, `\r`, `\n`). The line COUNT the pad is paid back from is taken from
+    the ORIGINAL literal by the caller, so deleting the pair here shifts no
+    later line number.
+    """
+    if '\\' not in literal:
+        return literal
+    out = []
+    i = 0
+    n = len(literal)
+    while i < n:
+        c = literal[i]
+        if c == '\\' and i + 1 < n:
+            nxt = literal[i + 1]
+            if nxt == '\n':
+                i += 2
+                continue
+            if nxt == '\r':
+                i += 2
+                if i < n and literal[i] == '\n':
+                    i += 1
+                continue
+            out.append(c)
+            out.append(nxt)
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
 def _is_raw_literal_at(line: str, quote_pos: int) -> bool:
     r"""True when the literal whose opening quote is at `quote_pos` in `line` is
     raw — i.e. its prefix carries `r`/`R`, so nothing in it is an escape.
@@ -2353,7 +2392,10 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     pending_pad = _flush_line_pad(out, seg, pending_pad)
                     literal = src[start:end]
                     placeholder = f"__MOJO_STR_{string_idx[0]}__"
-                    string_cache[placeholder] = literal
+                    if _is_raw_literal_at(src, i):
+                        string_cache[placeholder] = literal
+                    else:
+                        string_cache[placeholder] = _drop_line_continuations(literal)
                     string_idx[0] += 1
                     # Preserve the original newline count: collapsing a
                     # multi-line triple-quoted string (a docstring is the
@@ -3516,6 +3558,15 @@ def _as_vardecl_node(e: object) -> VarDecl:
     return e
 
 
+def _as_slice_node(e: object) -> SliceExpr:
+    """See _as_ident_node: static SliceExpr view of a boxed handle, so the
+    `.obj is None` test in the postfix-subscript parser is a DIRECT field load.
+    Through the boxed handle it was a dynamic getattr whose answer never
+    compared equal to None, so every `x[a:b]` stayed a `SubscriptExpr` whose
+    index was a SliceExpr instead of becoming the slice itself."""
+    return e
+
+
 def _as_callexpr_node(e: object) -> CallExpr:
     """See _as_ident_node: static CallExpr view of a boxed handle, so a
     following `.func` / `.args` / `.kwargs` read compiles to a DIRECT struct
@@ -3892,7 +3943,7 @@ class Parser:
                 t = self._peek()
                 if t.kind in ("NAME", "KW"):
                     pname = self._advance().value
-                    ptype = None
+                    ptype: str = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     params.append(("**" + pname, ptype))
@@ -3934,7 +3985,7 @@ class Parser:
                 t = self._peek()
                 if t.kind in ("NAME", "KW"):
                     pname = self._advance().value
-                    ptype = None
+                    ptype: str = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     if conv is None:
@@ -3976,7 +4027,7 @@ class Parser:
             if t.kind == "NAME": pname = self._advance().value
             elif t.kind == "KW": pname = self._advance().value
             else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
-            ptype = None
+            ptype: str = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
             # Default value =expr: parsed and stored for the interpreter to use
@@ -5367,8 +5418,8 @@ class Parser:
                             # with the wrong bounds and object. `obj is None`
                             # distinguishes "still needs attaching" from
                             # "already a complete nested expression".
-                            if isinstance(only, SliceExpr) and only.obj is None:
-                                only.obj = expr  # attach object to the bare slice
+                            if isinstance(only, SliceExpr) and _as_slice_node(only).obj is None:
+                                _as_slice_node(only).obj = expr  # attach object to the bare slice
                                 expr = only
                             else:
                                 expr = SubscriptExpr(obj=expr, index=only)
@@ -7437,6 +7488,8 @@ class Parser:
         either without each caller having to know which it got.
         """
         produced = self._parse_stmt()
+        if produced is None:
+            return
         if isinstance(produced, list):
             stmts.extend(produced)
         else:
@@ -7446,8 +7499,15 @@ class Parser:
         # Support inline single-statement body: "def foo(): return x" on one line
         if self._peek().kind != "NEWLINE":
             start_line = self._peek().line
-            stmt = self._parse_stmt()
-            stmts = [stmt] if stmt is not None else []
+            # Collected through `_parse_stmt_into`, like the indented path
+            # below: `[stmt]` over `_parse_stmt()`'s result gave the list the
+            # static element type of ONE of that function's return shapes once
+            # self-hosted, so an inline `if c: n += 1` body printed an
+            # AugAssignStmt as an ExprStmt (its fields read through the wrong
+            # layout), and a multi-target `comptime a, b = ...` result (a
+            # list) was never flattened here at all.
+            stmts = []
+            self._parse_stmt_into(stmts)
             # Same-line multi-statement inline body: "if x: a = 1; continue" —
             # the tokenizer (see py_tokenize's `_split_on_separators` loop)
             # splits each ';'-separated piece of a physical line into its own
@@ -7466,9 +7526,7 @@ class Parser:
                    and self._peek(1).kind not in ("DEDENT", "EOF")):
                 self._advance()  # consume the semicolon-split NEWLINE
                 start_line = self._peek().line
-                nxt = self._parse_stmt()
-                if nxt is not None:
-                    stmts.append(nxt)
+                self._parse_stmt_into(stmts)
             return stmts
         self._expect("NEWLINE")
         self._skip_newlines()
@@ -7518,7 +7576,7 @@ class Parser:
             val = TupleExpr(elements=elements, line=val.line, col=val.col)
         return YieldExpr(value=val, line=line, col=col)
 
-    def _parse_expr_or_yield(self):
+    def _parse_expr_or_yield(self) -> object:
         """Like `_parse_expr(0)` but also recognizes a leading `yield`/
         `yield from` — for use ONLY at the specific grammar positions real
         Python allows a bare (unparenthesized) yield expression: the whole
@@ -8023,7 +8081,7 @@ class Parser:
         while self._peek().kind == "DOT":
             self._advance()
             module += "." + self._ident()
-        alias = None
+        alias: str = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         return (module, alias)
@@ -8068,7 +8126,7 @@ class Parser:
         # `_ident()` (not `_expect("NAME")`): an imported name may collide with
         # a Mojo keyword, e.g. `from weakref import ref` — `ref` lexes as KW.
         name = self._ident()
-        alias = None
+        alias: str = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         names.append((name, alias))
@@ -8089,7 +8147,7 @@ class Parser:
                 self._advance()
                 break
             name = self._ident()  # keyword-named imports (e.g. `ref`) allowed
-            alias = None
+            alias: str = None
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
             names.append((name, alias))

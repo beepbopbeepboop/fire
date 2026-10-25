@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import determinism_trace as _dtrace
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_list, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -1545,7 +1545,15 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         # Drop the `None` marker before joining (see `_local_value_type`):
         # `None` is the NULL sentinel and must not narrow a pointer slot.
         # A name whose only assignment is `None` is still the int64_t box.
-        types = [t for t in inferred[vname] if t != _NONE_TYPE_MARKER]
+        # Explicit loop over `_as_list(...)`: a comprehension over
+        # `inferred[vname]` (a dict VALUE, erased to a word once self-hosted)
+        # lowers to "comprehension over int64_t" and yields an EMPTY list, so
+        # every local fell back to `int64_t` (`x = True` declared `int64_t`).
+        types: list = []
+        for _tk in _as_list(inferred[vname]):
+            _tks = _as_str(_tk)
+            if _tks != _NONE_TYPE_MARKER:
+                types.append(_tks)
         if not types:
             types = ['int64_t']
         result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
@@ -1591,9 +1599,12 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     _known_structs = set(gen.struct_field_types)
     conflicting: set = set()
     for vname in inferred:
-        _kinds = {t for t in inferred[vname]
-                  if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)}
+        _kinds: set = set()
+        for _ik in _as_list(inferred[vname]):
+            _iks = _as_str(_ik)
+            if (_iks in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                    or gimple_exprtypes._is_known_struct_ptr_ctype(_iks, _known_structs)):
+                _kinds.add(_iks)
         if not _kinds:
             continue
         # A container kind and a real SCALAR is the same "no single C type"
@@ -1618,8 +1629,11 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         # `_non_kind` excludes the `None` marker: `None` is the NULL
         # sentinel, pointer-compatible, and `slots = None` then
         # `slots = list(...)` must keep the container type.
-        _non_kind = {t for t in inferred[vname]
-                     if t not in _kinds and t != _NONE_TYPE_MARKER}
+        _non_kind: set = set()
+        for _nk in _as_list(inferred[vname]):
+            _nks = _as_str(_nk)
+            if _nks not in _kinds and _nks != _NONE_TYPE_MARKER:
+                _non_kind.add(_nks)
         _float_conflict = any(
             gimple_ctypes.TypeLattice.is_float(t) for t in _non_kind)
         # An INT conflict is trusted only when this name was assigned a

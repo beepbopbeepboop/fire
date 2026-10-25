@@ -1597,6 +1597,20 @@ def _ctor_cname_via_module(gen, binding: str, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 # --- dependency _selfhost_gen_self_param_ctype (from gimple_gen_funcs.py) ---
+def param_default_pairs(d) -> list:
+    """`[(name, default_node), ...]` of a `param_defaults` dict, in order, built
+    by an explicit loop over the keys. `[(k, v) for k, v in d.items()]` and
+    `list(d.items())` box each pair's slots on the self-hosted path: the
+    recorded defaults came out as a list holding the integer 2, and
+    `lower_struct_method_call` indexed `[1]` of it (a SIGSEGV for any program
+    calling a defaulted GimpleGen method)."""
+    pairs = []
+    dd = _as_dict(d)
+    for k in dd:
+        pairs.append((_as_str(k), dd[k]))
+    return pairs
+
+
 def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     """Self-hosting bootstrap only: in this compiler's OWN extracted GIMPLE
     backend modules (`gimple_*.py`), the former `GimpleGen` methods now live

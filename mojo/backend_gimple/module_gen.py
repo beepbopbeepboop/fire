@@ -28,7 +28,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _as_vardecl_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
@@ -73,6 +73,7 @@ import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
@@ -210,7 +211,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     ipt = gen._inferred_param_types
     if not ipt:
         return
-    names = getattr(gen, '_func_param_names', {})
+    names = gen._func_param_names
     # "<func>\x1f<param>" -> "\x1f"-joined DISTINCT ctypes of the unambiguous
     # literal arguments seen for that parameter. FLAT, not a tuple-keyed dict of
     # sets: a tuple key hashes by its heap address once self-hosted (see
@@ -309,8 +310,12 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # entry written here reaches the forward declaration and not the
         # definition — see `_annotated_params`' own comment for the
         # "conflicting types" that produces.
-        _ann_for = (getattr(gen, '_annotated_params', {}) or {}).get(fname)
-        if cur is None and not (_ann_for and _ann_for.get(pname)):
+        _ann_for = _as_dict(gen._annotated_params.get(fname))
+        _ann_has = False
+        if _ann_for:
+            if pname in _ann_for:
+                _ann_has = True
+        if cur is None and not _ann_has:
             # ...but ONLY for the two shapes this pass exists to choose
             # between. A CONTAINER member is not one of them: `char *` and
             # `double` are the scalar resolutions and a container is a
@@ -407,7 +412,7 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
     ipt = gen._inferred_param_types
     if not ipt:
         return
-    names = getattr(gen, '_func_param_names', {}) or {}
+    names = gen._func_param_names
     containers = tuple(_GMI_PARAM_KIND_OF_CTYPE)
     # (func, param) -> the (callee, callee param) pairs it is forwarded to.
     # The CALLEE'S NAME and not its concluded kind, because the conclusion is
@@ -462,7 +467,7 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
                     _fhl.append(_fh)
     if not fwd:
         return
-    ann = getattr(gen, '_annotated_params', {}) or {}
+    ann = gen._annotated_params
     changed = True
     while changed:
         changed = False
@@ -495,7 +500,11 @@ def _gmi_apply_forwarded_param_evidence(gen, all_functions) -> None:
             if _cur is not None and _as_str(_cur) not in containers:
                 continue
             _fann = _as_dict(ann.get(_fname))
-            if _fann and _fann.get(_pname):
+            _fann_has = False
+            if _fann:
+                if _pname in _fann:
+                    _fann_has = True
+            if _fann_has:
                 continue
             if _cur is not None and _as_str(_cur) == _want:
                 continue
@@ -1116,7 +1125,7 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name, fields, optional_tags=None):
+def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None) -> list:
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1145,9 +1154,15 @@ def _render_struct_typedef_body(struct_name, fields, optional_tags=None):
         # `dict(x)` copy replaced by an indexed loop + _as_str a few
         # hundred lines below, in gen_module_impl) — this loop shape was
         # never actually the bug.
-        for field_name, field_type in fields.items():
-            field_name = _as_str(field_name)
-            ft = '' + _as_str(field_type)
+        # Keys read by iterating the (now ANNOTATED `dict`) parameter and the
+        # value looked up by key. The `for name, ty in fields.items()` pair
+        # unpack this replaced boxed both slots once self-hosted -- the first
+        # iteration produced `int 0;` -- and the annotation is what tells the
+        # self-hosted backend `fields` is a dict (the thing `.items()` used to
+        # be the only signal for; see the reverted attempt above).
+        for _fk in fields:
+            field_name = _as_str(_fk)
+            ft = '' + _as_str(fields[field_name])
             if ft == f"{struct_name} *":
                 ft = f"struct {struct_name} *"
             safe_fn = _safe_field(field_name)
@@ -2188,7 +2203,14 @@ def _emit_reflection_dispatch(self, parts):
                 "     * did before. The renderer is the runtime's ONE\n"
                 "     * `mojo_repr_slot_kind` (see fire_runtime.h), which answers NULL\n"
                 "     * for a kind it does not own and lands on the int path below. */\n"
-                "    char *_sk = mojo_repr_slot_kind(pk ? pk[_i] : 0, _v);\n"
+                "    /* A LIST slot goes to the generic reader, not the runtime's\n"
+                "     * kinds-aware list walker: this module's `_mojo_repr_list` asks the\n"
+                "     * list for its own kinds FIRST (so the answer is the same for a list\n"
+                "     * that has them) and otherwise reads each element through the type\n"
+                "     * tag, which is the only thing that can print a list of AST nodes --\n"
+                "     * an `IfStmt.elifs` pair `(cond, [ReturnStmt, ...])` printed its body\n"
+                "     * as a bare pointer decimal through the runtime walker. */\n"
+                "    char *_sk = (pk && pk[_i] == 'l') ? NULL : mojo_repr_slot_kind(pk ? pk[_i] : 0, _v);\n"
                 "    char *_s = _sk ? _sk\n"
                 "      : ((_i == 0 && !(_v > 65536))\n"
                 "         ? mojo_repr_int(_v) : _mojo_generic_elem_repr(_v));\n"
@@ -3013,7 +3035,16 @@ def gen_module_impl(self, stmts):
     # BOTH halves: the synthesised kernels AND the host rewrite that calls
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
-    if getattr(self, 'auto_gpu', True):
+    # The self-hosted binary has no auto-offload: `mojo/middle/offload.py` is
+    # not part of the closure `stage2/mojo` is built from (see
+    # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md), so
+    # `offload_module` there is a weak "unavailable in compiled mode" stub that
+    # returns a bare 0 -- and the tuple-unpack below then walked that 0 and
+    # raised "object is not iterable". `__file__` is the uniform `<bootstrap>`
+    # placeholder in every compiled module and the real path under CPython, so
+    # this skips the synthesis exactly where it cannot run and leaves the
+    # reference path untouched.
+    if getattr(self, 'auto_gpu', True) and __file__ != '<bootstrap>':
         # The synthesiser needs somewhere to record per-buffer element counts
         # (a GEMM's A is M*K, B is K*N, C is M*N, and one count cannot say
         # that). Created HERE, before the synthesis, and read by the
@@ -4512,10 +4543,15 @@ def gen_module_impl(self, stmts):
         'stop': 'int64_t',
         'step': 'int64_t',
     }
+    # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
+    # value, generators, line, col) and this seed fixes the field ORDER of the
+    # typedef and of the generated `__repr__` that prints the `.ast`. A stale
+    # `key` made the compiled dump print `key=None` where CPython prints
+    # `value=None`, and put `value` after `generators`.
     self.struct_field_types['Comprehension'] = {
         'kind': 'char *',
         'element': 'int64_t',
-        'key': 'int64_t',
+        'value': 'int64_t',
         'generators': 'MojoList *',
     }
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
@@ -4639,7 +4675,7 @@ def gen_module_impl(self, stmts):
     self.struct_boxed_fields['MatchStmt'] = {'subject'}
     self.struct_boxed_fields['LambdaExpr'] = {'body'}
     self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
-    self.struct_boxed_fields['Comprehension'] = {'element', 'key'}
+    self.struct_boxed_fields['Comprehension'] = {'element', 'value'}
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
     # node. Its `iterable` is `object` (any AST node), so it must be marked
     # boxed like Comprehension's `element`/`key`: the generated
@@ -4749,12 +4785,18 @@ def gen_module_impl(self, stmts):
             _cur = _gg_ft.get(_f)
             if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
                 _gg_ft[_f] = _c
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
+        for _mangled, _gg_sig in _gg_sigs.items():
+            # Explicit-index value access — NOT for-clause tuple destructuring
+            # `for _mangled, (_rc, _pcs, _dflts) in ...` (the boxing bug: the
+            # for-clause pair-unpack on the self-hosted path returns [pair, 2]).
+            _rc = _gg_sig[0]
+            _pcs = _gg_sig[1]
+            _dflts = _gg_sig[2]
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             self._mangled_signature_ctypes[_mangled] = list(_pcs)
             if _dflts:
-                self._func_param_defaults[_mangled] = list(_dflts)
+                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
             self._selfhost_locked_param_types.add(_mangled)
         # Recover the `_annotation_dict_val_type` seeding of
         # `_field_dict_val_types` / `_field_dict_nested_val_types` that
@@ -6680,8 +6722,7 @@ def gen_module_impl(self, stmts):
                 except Exception:
                     _mangled = None
                 if _mangled:
-                    self._func_param_defaults[_mangled] = [
-                        (pn, _dv) for pn, _dv in _dflts.items()]
+                    self._func_param_defaults[_mangled] = param_default_pairs(_dflts)
         if isinstance(s, FunctionDef):
             _kw_i = -1
             _ci = 0
@@ -7134,10 +7175,16 @@ def gen_module_impl(self, stmts):
                         if _as_str(_ppair[0]) == _as_str(_pv.name):
                             self._passthrough_param_idx[s.name] = _ppi
                             break
-            _ret_elem = self._infer_return_elem_type(
-                s.body, func_def=s, _base_var_types=_p2c_base_var_types)
+            # The return ANNOTATION is authoritative when it names a homogeneous
+            # tuple: body inference over a function that returns its own
+            # callees' tuple slots (`return _lt, _lv` after `_lt, _lv =
+            # lower_expr(...)`) answers `int64_t` once self-hosted, and an
+            # inferred answer used to WIN over the annotation, so every caller
+            # of `lower_expr` unpacked its two `str` slots as words.
+            _ret_elem = _homogeneous_tuple_ann_elem(self, s.return_type)
             if _ret_elem is None:
-                _ret_elem = _homogeneous_tuple_ann_elem(self, s.return_type)
+                _ret_elem = self._infer_return_elem_type(
+                    s.body, func_def=s, _base_var_types=_p2c_base_var_types)
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
@@ -7148,8 +7195,6 @@ def gen_module_impl(self, stmts):
                 for m in s.methods:
                     if m.name == '__init__':
                         continue
-                    _ret_elem = self._infer_return_elem_type(
-                        m.body, _base_var_types=_p2c_base_var_types)
                     _key = f"{s.name}_{m.name}"
                     # A homogeneous `tuple[T, T[, ...]]` return annotation is
                     # authoritative for the caller's unpacking accessor — body
@@ -7159,8 +7204,10 @@ def gen_module_impl(self, stmts):
                     # was unpacked via mojo_list_get_int → the boxed char* read
                     # back as 0 → empty string-pool entries for every user
                     # StringLiteral once self-hosted).
+                    _ret_elem = _homogeneous_tuple_ann_elem(self, m.return_type)
                     if _ret_elem is None:
-                        _ret_elem = _homogeneous_tuple_ann_elem(self, m.return_type)
+                        _ret_elem = self._infer_return_elem_type(
+                            m.body, _base_var_types=_p2c_base_var_types)
                     if _ret_elem is not None and self._return_elem_types.get(_key) != _ret_elem:
                         self._return_elem_types[_key] = _ret_elem
                         _c_changed = True
@@ -7831,7 +7878,7 @@ def gen_module_impl(self, stmts):
                     # convention must win or `Int64(n)` would be observed as a
                     # boxed struct. Same exclusion `_resolve_type` and
                     # `_quick_type`'s `_SCALAR_CTORS` row apply.
-                    and _cname not in gimple_ctypes._TYPE_MAP):
+                    and not gimple_ctypes.type_map_has(_cname)):
                 return f'{_cname} *'
             return None
         return None
@@ -8223,7 +8270,7 @@ def gen_module_impl(self, stmts):
                     _m_dflts = getattr(m, 'param_defaults', None) or {}
                     if _m_dflts:
                         self._func_param_defaults.setdefault(method_full_name,
-                                                             [(pn, dv) for pn, dv in _m_dflts.items()])
+                                                             param_default_pairs(_m_dflts))
 
     for s in all_structs_for_methods:
         if not isinstance(s, StructDef):
@@ -8253,11 +8300,14 @@ def gen_module_impl(self, stmts):
     # passes (they run between the early apply above and here and rewrite
     # `func_param_types` / `func_return_types` from local inference).
     if _gg_sigs:
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
+        for _mangled, _gg_sig in _gg_sigs.items():
+            _rc = _gg_sig[0]
+            _pcs = _gg_sig[1]
+            _dflts = _gg_sig[2]
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             if _dflts:
-                self._func_param_defaults[_mangled] = list(_dflts)
+                self._func_param_defaults[_mangled] = _dflts   # NOT list(_dflts): self-hosted, that copy of a list of pairs came back [pair, 2]
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
@@ -9189,7 +9239,7 @@ def gen_module_impl(self, stmts):
                 # `_gmi_apply_call_site_param_evidence` states for its own walk.
                 if len(_fk_args) != len(_fk_pnames):
                     continue
-                _fk_ann = (getattr(self, '_annotated_params', {}) or {}).get(_fk_callee) or {}
+                _fk_ann = (self._annotated_params).get(_fk_callee) or {}
                 _fk_callee_ipt = self._inferred_param_types.get(_fk_callee) or {}
                 for _fk_i, _fk_a in enumerate(_fk_args):
                     # Only a PARAMETER of the caller being handed on: the caller's
@@ -10605,8 +10655,7 @@ def gen_module_impl(self, stmts):
             self.func_param_types[f"{base}_start"] = param_ctypes
             _gen_dflts = getattr(m, 'param_defaults', None) or {}
             if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = [
-                    (pn, dv) for pn, dv in _gen_dflts.items()]
+                self._func_param_defaults[f"{base}_start"] = param_default_pairs(_gen_dflts)
             self._generator_cpp_units.append(cpp_text)
     # The ids come out only here, after EVERY struct has had its turn. Popping
     # inside the loop is precisely what stopped a subclass from being reached.
@@ -14231,21 +14280,38 @@ def gen_module_impl(self, stmts):
                 parts.append(f"typedef struct {sd.name} {{")
                 parts.append(f"  int64_t __mojo_type_id;")
                 emitted_fields = set()
-                for field in sd.fields:
-                    if isinstance(field, VarDecl):
-                        if sd.name in self.struct_field_types and field.name in self.struct_field_types[sd.name]:
-                            ft = self.struct_field_types[sd.name][field.name]
+                for _field_any in sd.fields:
+                    if isinstance(_field_any, VarDecl):
+                        # A typed view of the loop element: `field.name` read off
+                        # the boxed loop variable came back as the integer 0 once
+                        # self-hosted, so every such struct's typedef printed
+                        # `int 0;` in place of its fields.
+                        field = _as_vardecl_node(_field_any)
+                        _fname = _as_str(field.name)
+                        ft: str = ''
+                        if sd.name in self.struct_field_types and _fname in self.struct_field_types[sd.name]:
+                            ft = _as_str(self.struct_field_types[sd.name][_fname])
+                        elif field.type_ann:
+                            ft = self._resolve_type(field.type_ann)
                         else:
-                            ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
-                        safe_fn = _safe_field(field.name)
+                            ft = 'int'
+                        safe_fn = _safe_field(_fname)
                         _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
                         if _arr_dm:
                             parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
                         else:
                             parts.append(f"  {ft} {safe_fn};")
-                        emitted_fields.add(field.name)
+                        emitted_fields.add(_fname)
                 if sd.name in self.struct_field_types:
-                    for field_name, field_type in self.struct_field_types[sd.name].items():
+                    # Keys and values read through `_as_str`, not unpacked from
+                    # `.items()`: the pair unpack boxes both slots once
+                    # self-hosted, so the typedef came out `int 0;` (the field's
+                    # NAME and TYPE printed as their own addresses) for every
+                    # struct whose fields are only known from the registry.
+                    _sd_fields = _as_dict(self.struct_field_types[sd.name])
+                    for _fkey in _sd_fields:
+                        field_name = _as_str(_fkey)
+                        field_type = _as_str(_sd_fields[field_name])
                         if field_name not in emitted_fields:
                             safe_fn = _safe_field(field_name)
                             _arr_dm2 = re.match(r'^(.+)\[(\d+)\]$', field_type)

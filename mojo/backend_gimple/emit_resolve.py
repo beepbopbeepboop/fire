@@ -2560,7 +2560,11 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
-        return gen._call_expr('char *', *gen._list_repr_call(rav))
+        # Unpacked into named locals, not splatted into the call: a `*call()`
+        # of a returned tuple becomes ONE positional argument once
+        # self-hosted (the whole `(fn, args)` pair printed as the callee).
+        _lfn, _largs = gen._list_repr_call(rav)
+        return gen._call_expr('char *', _lfn, _largs)
     if rat == 'MojoSet *':
         return gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', rav)])
     if rat == 'MojoDict *':
@@ -3893,6 +3897,20 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 # `_elem_types[res]` above stays 'MojoList *' (what res
                 # CONTAINS); `_nested_elem_types` says what those hold.
                 gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        elif et == 'int64_t' and ev in gen._elem_types and gen._elem_types[ev] != 'int64_t':
+            # A BOXED tuple element: a call annotated `-> tuple[str, str]`
+            # returns its pair as an `int64_t` handle (see `_mojo_type`) and
+            # records the slots' type on the result value (`_return_elem_types`).
+            # The list of such pairs -- `[gen.lower_expr(a) for a in args]` --
+            # is a list of lists whose inner element type is that answer, and
+            # recording it is what makes `at, av = pairs[0]` read both slots as
+            # `char *`. Without it the unpack boxed them to `int64_t` and every
+            # f-string over them printed an ADDRESS (`_t39 = (int64_t)5190...;`
+            # where the reference prints `(int64_t)tokens;`).
+            gen._elem_types[res] = 'MojoList *'
+            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
             if ev in gen._tuple_slot_types:
                 gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
