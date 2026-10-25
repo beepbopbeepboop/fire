@@ -4844,6 +4844,29 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
+    # `for w in PATTERN.findall(text)` on a module-level `re.compile(<literal>)`
+    # pattern: the method spelling of `re.findall(PATTERN, text)`. It emitted
+    # `mojo_unsupported_iter` and ran zero times (the compiled compiler's own
+    # `infra_infer._bound_names_in`, so its int-keyed-dict scan saw nothing).
+    test_gimple_stdout("gimple_compiled_pattern_findall_method_loop", """\
+import re
+_TOK = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_PAIR = re.compile(r'(\\w+)=(\\d+)')
+
+def names(x, out):
+    if isinstance(x, str):
+        for m in _TOK.findall(x):
+            out.add(m)
+
+def main():
+    out = set()
+    names("a, (b_1, c)", out)
+    print(sorted(out))
+    for k, v in _PAIR.findall("x=1 yy=22"):
+        print(k, v)
+main()
+""", "['a', 'b_1', 'c']\nx 1\nyy 22\n")
+
     # `d.get(k, default)` on a str-valued dict tests PRESENCE, not truth: an
     # empty-string value is a real value (the self-hosted compiler's root
     # module qualifier is ''), and the presence test must read the first

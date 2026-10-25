@@ -3110,15 +3110,20 @@ def _rewrite_product2_elem_copy(base, targs, concrete):
     if not _ELEM_COPY_RE.search(concrete):
         return concrete
 
+    # The substitution counter is a one-element list the callback closes over,
+    # not an attribute on the function object (`_sub.n += 1`): the compiled
+    # compiler has no function-attribute storage, so the self-host build
+    # failed on `request for member 'n' in something not a structure`.
+    _n = [0]
+
     def _sub(mo):
         ind = mo.group(1)
-        i = _sub.n
-        _sub.n += 1
+        i = _n[0]
+        _n[0] = i + 1
         src = '_elem_src' if i == 0 else f'_elem_src{i}'
         return (f'{ind}var {src}: {elem} = '
                 f'self._inner_a_elem.unsafe_value()\n'
                 f'{ind}var elem = {src}.copy()')
-    _sub.n = 0
     return _ELEM_COPY_RE.sub(_sub, concrete)
 
 
