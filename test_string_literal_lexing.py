@@ -279,6 +279,33 @@ LITERALS = [
     ("rf_escaped_open_brace",    r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"',
      r'rf"^[^\n]*\b{1}_[0-9a-f]+ \{{"'),
     ("rf_escaped_close_brace",   r'rf"a\}}b"', r'rf"a\}}b"'),
+
+    # ── A REPLACEMENT FIELD IN THE FORMAT-SPEC PART (2026-10-24) ─────────────
+    #
+    # The spec part is still inside the field, so the `}` that closes a nested
+    # spec field is immediately followed by the OUTER field's `}` — a run of
+    # two CLOSERS. The pair arm used to fire at every depth and read that run
+    # as an escaped pair, leaving the depth open and refusing the whole file
+    # as "unterminated string literal". The stdlib spells it in production:
+    # `dis.py:504` is `f'{positions_str:{lineno_width}}'` and `fractions.py:478`
+    # is `f"{abs(n):{thousands_sep}}/{d:{thousands_sep}}"` — both CPython
+    # accepts, and both were this front end's own row-B rejects on 2026-10-24.
+    # The literals here use only literals in the fields, because the oracle is
+    # an `eval` with no names; the variable shapes are pinned at file level by
+    # the two stdlib lines tokenizing.
+    ("f_spec_nested_field",      'f"{1:{2}}"',       'f"{1:{2}}"'),
+    # The stdlib's own spelling is the SINGLE-quoted one.
+    ("f_spec_nested_field_sq",   "f'{1:{2}}'",       "f'{1:{2}}'"),
+    ("f_spec_nested_field_with_text", 'f"{1:{2}3}"', 'f"{1:{2}3}"'),
+    ("f_spec_nested_field_then_field", 'f"{1:{2}}{2}"', 'f"{1:{2}}{2}"'),
+    # A nested LITERAL inside the spec, so the delimiter recursion and the
+    # spec scan have to agree: the `"` that closes the nested literal is not
+    # this literal's end, and the spec's `}}` run is two closers.
+    ("f_spec_nested_literal",    'f"{1:{\'d\'}}"',   'f"{1:{\'d\'}}"'),
+    ("rf_spec_nested_field",     'rf"{1:{2}}"',      'rf"{1:{2}}"'),
+    # Triple-quoted: the depth logic is off by construction, and the row pins
+    # that the single-quoted fix did not need it and cannot have broken it.
+    ("f_spec_nested_field_triple", 'f"""{1:{2}}"""', 'f"""{1:{2}}"""'),
     # ── the controls: every one is refused, and CPython refuses it too ───────
     #
     # The depth rule must not have turned "unterminated is a refusal" into "a
@@ -293,6 +320,20 @@ LITERALS = [
     ("f_unclosed_field_at_quote", 'f"a{b\n"',     None),
     ("f_escaped_pair_then_eol",  'f"a{{b\n"',     None),
     ("f_lone_close_brace_eol",   'f"a}b\n"',     None),
+    # A `}` left at the TEXT level after the fields closed closes nothing, and
+    # CPython refuses the literal for it ("f-string: single '}' is not
+    # allowed") rather than reading it as text. Before the 2026-10-24 fix this
+    # front end read such a `}` as content and accepted literals CPython
+    # refuses — the `f_lone_close_brace_eol` row above refused by ACCIDENT (the
+    # line break, not the brace); these rows refuse for the brace itself,
+    # including the `}}}` shape in which the pair arm inside a field used to
+    # leave the LAST `}` lone at the text level.
+    ("f_lone_close_brace",       'f"}"',         None),
+    ("f_lone_close_brace_in_text", 'f"a}b"',     None),
+    ("f_spec_then_lone_close",   'f"{1:}}"',     None),
+    ("f_spec_nested_then_lone",  'f"{1:{2}}}"',  None),
+    ("f_field_then_lone_close",  'f"{1:{2}}x}"', None),
+    ("f_dict_then_extra_close",  'f"{ {1:2}}}"', None),
     ("ordinary_braces_then_eol", '"a{b\n"',      None),
 ]
 

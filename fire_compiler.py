@@ -1739,12 +1739,30 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
                 for n in ys]}"
 
     and reports "unterminated string literal" for `f"a{b`. So for an
-    interpolated single-quoted literal this tracks field depth and does not end
-    the literal at a line break inside one. Depth 0 is unchanged, which is the
-    property that keeps every genuinely unterminated literal a refusal. `{{` and
-    `}}` are ESCAPED braces -- `f"a{{b"` is the three characters `a{b` and opens
-    no field -- and a line break after one is still the end of the literal,
-    exactly as CPython has it.
+    interpolated single-quoted literal this tracks the field depth and does not
+    end the literal at a line break inside one. Depth 0 is unchanged, which is
+    the property that keeps every genuinely unterminated literal a refusal.
+
+    `{{` and `}}` are ESCAPED braces AT THE TEXT LEVEL (depth 0) ONLY --
+    `f"a{{b"` is the three characters `a{b` and opens no field -- and a line
+    break after one is still the end of the literal, exactly as CPython has it.
+    INSIDE a field (depth > 0) every brace is a plain opener or a plain
+    closer, in the format-spec part just as in the expression part: CPython's
+    own 3.14 scan (`Parser/lexer/lexer.c`) is a bracket counter in which the
+    field's own `{` counts and the pair semantics never apply inside a field,
+    so a replacement field in a format spec is closed by the `}` that FOLLOWS
+    its own close -- `f"{a:{b}}"` (a stdlib shape: `dis.py:504`,
+    `fractions.py:478`) carries a `}}` that is two CLOSERS, not an escaped
+    pair. The pair arm used to fire at every depth and swallowed both closers,
+    leaving the depth open, which refused the whole file as "unterminated
+    string literal" (measured 2026-10-24; the fix is the `depth == 0` gate on
+    both pair arms below).
+
+    And a `}` left at the text level closes nothing: CPython refuses such a
+    literal ("f-string: single '}' is not allowed" -- `f"}"`, `f"a}b"`,
+    `f"{a:}}"`, `f"{ {}}}"`, `f"{a:{b}}}"` all refuse) rather than reading
+    the brace as text, so this function refuses it too instead of reporting
+    an end CPython never tokenizes.
 
     A `#` inside a field needs NO arm here, and that is worth saying because the
     obvious arm is wrong. This function answers where a literal ENDS, and to
@@ -1810,7 +1828,14 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
         if fields:
             if c == '{':
                 if j + 1 < n:
-                    if src[j + 1] == '{':
+                    if src[j + 1] == '{' and depth == 0:
+                        # An escaped brace pair, and ONLY at the text level:
+                        # inside a field CPython's `{` OPENS (a replacement
+                        # field in the format-spec part, an expression brace
+                        # in the expression part), so the pair there is two
+                        # opens, not a neutral escape — `f"{a:{{b}}"` is
+                        # CPython's own refusal, not a literal this function
+                        # may end.
                         j += 2
                         continue
                 depth += 1
@@ -1818,11 +1843,37 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool,
                 continue
             if c == '}':
                 if j + 1 < n:
-                    if src[j + 1] == '}':
+                    if src[j + 1] == '}' and depth == 0:
+                        # The same pair, closing, text level only. Inside a
+                        # field `}}` is the run of one field's close followed
+                        # by the next closer, not an escape: `f"{a:{b}}"` —
+                        # a replacement field in the format-spec part, the
+                        # stdlib's own `dis.py:504` (`f'{positions_str:{lineno_width}}'`)
+                        # and `fractions.py:478` spelling — carries the nested
+                        # field's close immediately followed by the outer
+                        # field's close. The pair arm used to fire there (at
+                        # any depth), swallow both closers, leave the depth
+                        # open, and refuse the whole file as "unterminated
+                        # string literal" (measured 2026-10-24: the
+                        # format-spec class, A3 visit 318 + row-B stderr).
                         j += 2
                         continue
                 if depth > 0:
                     depth -= 1
+                else:
+                    # A `}` left at the text level after the fields closed
+                    # closes nothing, and CPython refuses the literal for it
+                    # ("f-string: single '}' is not allowed" — `f"}"`,
+                    # `f"a}b"`, `f"{a:}}"`, `f"{ {}}}"`, `f"{a:{b}}}"` all
+                    # refuse, triple-quoted included; this refusal lives on
+                    # the `fields` path only, the single-quoted one, where
+                    # the depth is tracked — the triple-quoted path keeps its
+                    # documented simpler behaviour) rather than reading it
+                    # as text. A literal CPython never tokenizes is not one
+                    # whose end this function may report, which is also what
+                    # keeps `f"{a:{b}}}"` a refusal instead of a false
+                    # accept once the pair arm stops firing inside a field.
+                    return -1
                 j += 1
                 continue
         if src.startswith(delim, j):
