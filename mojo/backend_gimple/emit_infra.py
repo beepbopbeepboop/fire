@@ -3087,6 +3087,11 @@ def _write_dest(gen, name: str) -> str:
         # branches, which already use this exact same direct-current-
         # module routing for the identical reason.
         safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
+        # Every write that reaches here (augmented and multi-target assignment,
+        # `var` declarations, range-loop targets, ...) bypasses
+        # `_note_global_store_types`, so it cannot be vouched for as the one
+        # binding `_global_generator_api` recorded: poison it.
+        gen._global_generator_api_poisoned.add(name)
         return f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
     return gen._cname(name)
 
