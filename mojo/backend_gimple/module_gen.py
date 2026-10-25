@@ -14706,6 +14706,43 @@ def gen_module_impl(self, stmts):
                     # typedef (see the struct-method-extern site above —
                     # measured 2026-10-21 part 4 integration).
                     self._ensure_tuple_struct(_as_str(sym_info.get('return_type')))
+                # The scanned RETURN type is a second, independent inference
+                # (`module_loader`'s text scan defaults an UNANNOTATED `def`
+                # to int64_t) while the definition — when it is in this TU —
+                # is typed from the body's own returns, and gen_func publishes
+                # that final answer to the whole-program
+                # `_home_def_return_types` store (see its call site). When
+                # the two disagree and the definition is in this TU, the
+                # hard gcc error is `conflicting types ... have
+                # 'int64_t(...)'` against the definition's own prototype —
+                # measured 2026-10-25, row COMPILE_FAIL_zipfile___init__
+                # (the item-1 oracle's single NEW error): pathlib/_os.py's
+                # `def copyfile2(source, target):` body ends in a bare call
+                # (no return -> the emitting compile inferred `void` and
+                # emitted `void pathlib__os_copyfile2_2dbb98 (int64_t,
+                # int64_t)`) while every importer's scan typed the extern
+                # `extern int64_t pathlib__os_copyfile2_2dbb98 (int64_t,
+                # int64_t);  /* from pathlib._os */` —
+                # `pathlib/_os.py:2366:16: conflicting types`. The
+                # home-compiled answer wins, exactly like the empty-param
+                # arm above lets the store's PARAMS win, and like the
+                # MojoTuple arm above lets the home's body-sensitive RETURN
+                # win. Return type only: the scan's resolved PARAM list is
+                # left alone (same scoping the empty-param arm's comment
+                # states for the reverse case). No store entry — the
+                # definition never compiled in this closure, e.g. a dylib
+                # link — leaves the scan untouched, as before.
+                _home_ret_hit = _ggf_dup._home_def_return_type(
+                    self, _ggf_dup._func_home_qualifier(self, _sn), _sn)
+                if _home_ret_hit:
+                    # The return type is a POSSIBLY-MULTI-TOKEN prefix
+                    # (`char *`, `MojoList *`) ending where the function
+                    # NAME begins — `safe` — so replace up to the first
+                    # occurrence of the name, not just the first token.
+                    _m = re.match(r'.*?' + re.escape(safe), signature)
+                    if _m and _m.end() < len(signature):
+                        signature = (_home_ret_hit + ' ' + safe
+                                     + signature[_m.end():])
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             _raw_ret = _as_str(sym_info.get('return_type', 'int64_t'))
