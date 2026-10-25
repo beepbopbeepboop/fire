@@ -1893,6 +1893,55 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._emit(f"  mojo_list_append_int ({lst}, {aval});")
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
         param_types = list(param_types[:-1]) + ['MojoList *']
+    elif param_types and '...' in param_types:
+        # MID-LIST sentinel: `def f(a, *args, b=...)` — the packing slot is
+        # not last, so trailing fixed params ride after it. Before 2026-10-25
+        # (row COMPILE_FAIL_zipfile___init__, the _bootstrap_external:1396:39
+        # class) this shape never packed: the coercion loop treats '...' as a
+        # wildcard (no coercion, no packing) while the emitted def prototype
+        # has a CONCRETE MojoList * at the slot — `passing argument 2 of
+        # '_bootstrap__verbose_message' from incompatible pointer type` for
+        # every call whose *args is non-empty. CPython binding: the prefix
+        # binds left, the trailing fixed params bind from the tail (the
+        # upstream default/kw padding has already placed keyword values at
+        # their tail slots before this point), and every pair in between is
+        # a loose vararg. Guarded to `len(arg_pairs) >= i + n_suffix`:
+        # fewer pairs than prefix+suffix is a call the padding never
+        # completed (a CPython TypeError shape), and packing it would
+        # double-count the overlapping tail pairs.
+        i = param_types.index('...')
+        n_suffix = len(param_types) - i - 1
+        if len(arg_pairs) >= i + n_suffix:
+            middle = arg_pairs[i:len(arg_pairs) - n_suffix]
+            suffix = arg_pairs[len(arg_pairs) - n_suffix:]
+        else:
+            # Fewer pairs than prefix+suffix: a call the upstream padding
+            # never completed (a CPython TypeError shape — required slots
+            # unfilled). Packing the overlapping tail would double-count it,
+            # so just insert the (possibly empty) list at the slot and keep
+            # the remaining pairs in place.
+            middle = []
+            suffix = arg_pairs[i:]
+        if middle and all(at == 'MojoList *' for at, _ in middle):
+            # Every middle pair is ALREADY a list: either
+            # `_pack_vararg_trailing_params` repacked this call upstream, or
+            # the padding installed its empty *args placeholder for a call
+            # that passed no varargs (measured: `re.split(pat, s)` — the
+            # placeholder list is the correct slot value; the pre-fix C
+            # passed it through and only the missing declaration erred).
+            # Re-wrapping it would double-box the pointer bits into a second
+            # list — so only fix the slot's declared type and pass through.
+            arg_pairs = arg_pairs[:i] + middle + suffix
+            param_types = (list(param_types[:i]) + ['MojoList *']
+                           + list(param_types[i + 1:]))
+        else:
+            lst = gen._new_val('MojoList *', "mojo_list_new ()")
+            for atype, aval in middle:
+                aval = gen._coerce_to_type(atype, 'int64_t', aval)
+                gen._emit(f"  mojo_list_append_int ({lst}, {aval});")
+            arg_pairs = arg_pairs[:i] + [('MojoList *', lst)] + suffix
+            param_types = (list(param_types[:i]) + ['MojoList *']
+                           + list(param_types[i + 1:]))
 
     # Buffers packed for this call, written back and freed once it is emitted.
     # Local, not on `gen`: `_emit_call` can be re-entered by a nested lowering
