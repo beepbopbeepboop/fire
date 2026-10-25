@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (550 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (552 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **697** | `fire_runtime.h` 594, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **284** | every parameter and the return value is one 64-bit word |
+| entry points across **11** headers | **698** | `fire_runtime.h` 595, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **285** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **413** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **284 of 697 (40.7%)** is the reachable-surface ceiling. The previous
+So **285 of 698 (40.8%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -524,14 +524,14 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 284 | 284 |
+| word-shaped entry points (`runtime_abi`) | 285 | 285 |
 | …of which the runtime dylib actually **exports** | 228 | 228 |
 | …reachable with no heap handle the formal path cannot obtain | **188** | **188** |
 
 So the honest statement of the surface is **188 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 284) of §2.2. The two gaps between 284 and
-188 are both deliberate and both named:
+was written, and not the 219 (now 285) of §2.2. The two gaps between the
+2026-10-23 census (284, below) and 188 are both deliberate and both named:
 
 - **40 of the 228** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
@@ -589,6 +589,13 @@ like the eleven — added 1 to the word and exported rows at once (283 → 284,
 who checks the arithmetic (`284 − 228 = 56`, `228 − 188 = 40`) is checking the
 two claims this table makes about WHY the surface stops where it does, not
 just the numbers.
+
+Re-censused 2026-10-24 (after the `mojo-reference2` merge added
+`int_normpath` to `fire_runtime.h`): the header row above is now 285 (the
+live `runtime_abi()` census, read off the headers on every run), while the
+exported/reachable rows (228/188) remain the 2026-10-23 dylib measurement —
+they are `runtime_abi() ∩ the dylib's export table`, and they move only when
+the dylib is rebuilt and `test_formal_runtime_link.py` re-measures them.
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
 and that last clause is the honest boundary: a call that *builds, links and
