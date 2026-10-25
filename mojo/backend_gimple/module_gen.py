@@ -12053,8 +12053,15 @@ def gen_module_impl(self, stmts):
                     and isinstance(_scan_stmt.value.func.obj, IdentExpr)
                     and _scan_stmt.value.func.obj.name in _COMPILE_TIME_CALL_MODULES
                     and _scan_stmt.value.func.member == 'compile'
-                    and _scan_stmt.value.args
+                    and len(_scan_stmt.value.args) == 1
+                    and not _scan_stmt.value.kwargs
                     and isinstance(_scan_stmt.value.args[0], StringLiteral)):
+                # ONE argument and no keyword: a flagged `re.compile(p,
+                # re.MULTILINE)` is a different pattern than `p`, the
+                # engine has no flag input, and recording only the string
+                # lowered `for m in P.findall(s)` to a scan that silently
+                # matched nothing (the compiled `_dep_sources_texts` found no
+                # dependencies). Unrecorded, the loop is refused loudly.
                 self._regex_patterns[_gname] = _scan_stmt.value.args[0].value
             if _gname in _pre_declared_globals:
                 continue

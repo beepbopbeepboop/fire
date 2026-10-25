@@ -3694,39 +3694,6 @@ def _rewrite_ctor_calls(work, stmts):
 
 
 def _bracket_mentions(src: str, name: str) -> list:
-    """The argument keys of every `name[ a, b ]` mention in `src`, each key the
-    comma-separated arguments stripped and joined with the unit separator
-    (the key `_rewrite_intu_ctor_calls` indexes its tables by). The scan
-    `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` makes, written without a run-time
-    regex (the compiled compiler has no engine for a pattern built around a
-    name): NAME on a word boundary, optional whitespace, `[`, one or more
-    non-`]` characters, `]`."""
-    out = []
-    n = len(src)
-    nl = len(name)
-    if nl == 0:
-        return out
-    pos = src.find(name)
-    while pos >= 0:
-        end = pos + nl
-        before_ok = pos == 0 or not (src[pos - 1].isalnum() or src[pos - 1] == '_')
-        after_ok = end >= n or not (src[end].isalnum() or src[end] == '_')
-        if before_ok and after_ok:
-            j = end
-            while j < n and src[j] in ' \t\r\n\f\v':
-                j += 1
-            if j < n and src[j] == '[':
-                close = src.find(']', j + 1)
-                if close > j + 1 and src[j + 1:close].strip() != '':
-                    parts = []
-                    for x in src[j + 1:close].split(','):
-                        parts.append(x.strip())
-                    out.append('\x1f'.join(parts))
-        pos = src.find(name, pos + 1)
-    return out
-
-
-def _bracket_mentions(src: str, name: str) -> list:
     """The argument keys of every `name[ a, b ]` mention in `src`: each key is
     the comma-separated arguments, stripped and joined with the ASCII unit
     separator (the key `_rewrite_intu_ctor_calls`' tables are indexed by).
