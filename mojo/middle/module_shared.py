@@ -222,16 +222,10 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
             _n, _v = _s.target.name, _s.value
             if _n in _out or _dispatch_only(_n) is not None:
                 continue
-            # An int or bool literal is the `int` field `_gscan_declare_global`
-            # declares for it (`int NAME;`, semantic and C-decl both `int`).
-            # This said `int64_t` for the C-decl (and `_Bool` for a bool), so
-            # the pre-seed DID disagree with the scan it promises to agree
-            # with: whichever of the two ran on a given instance decided the
-            # assignment's destination type, and the reference (pre-seeded)
-            # wrote `_t = 8LL` through an int64_t temp into the `int` field
-            # where the self-hosted compiler wrote `_t = 8`.
-            if isinstance(_v, IntLiteral) or isinstance(_v, BoolLiteral):
-                _out[_n] = (_mod, 'int', 'int')
+            if isinstance(_v, IntLiteral):
+                _out[_n] = (_mod, 'int', 'int64_t')
+            elif isinstance(_v, BoolLiteral):
+                _out[_n] = (_mod, '_Bool', '_Bool')
             elif isinstance(_v, StringLiteral):
                 _out[_n] = (_mod, 'char *', 'char *')
             elif isinstance(_v, (SetExpr,)) or (
@@ -287,7 +281,6 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                           else _tgt.name if isinstance(_tgt, IdentExpr) else None)
                 if _fname is None:
                     continue
-                _fname = _as_str(_fname)
                 _inner = _ann[_ann.index('[') + 1:_ann.rindex(']')]
                 _parts = [p.strip() for p in _inner.split(',')]
                 if len(_parts) == 2:
@@ -300,18 +293,7 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                     # pre-existing behavior, not a regression, and seeding it
                     # here would widen this pre-pass's blast radius.
                     if _vt == 'char *':
-                        # A named, typed inner dict rather than a chained
-                        # `_out.setdefault(...).setdefault(...)`: the chain's
-                        # intermediate has no static type in the self-hosted
-                        # compiler, so its second call never reached a dict
-                        # and the compiled compiler seeded NOTHING -- every
-                        # `gen._elem_types.get(..)` there read the int view.
-                        _sname = _as_str(_s.name)
-                        if _sname not in _out:
-                            _out[_sname] = {}
-                        _fd: dict = _out[_sname]
-                        if _fname not in _fd:
-                            _fd[_fname] = _vt
+                        _out.setdefault(_s.name, {}).setdefault(_fname, _vt)
     return _out
 
 def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
@@ -1505,46 +1487,6 @@ def _cpp_method_receiver_name(m) -> str:
     return _method_receiver_kind(m)
 
 
-def _gmi_tuple_target_globals(stmt) -> list:
-    """`[(name, element value or None)]` for a module-level UNPACKING
-    assignment (`A, B = 1, 2` / `OP_X, OP_Y = range(2)` / `[a, b] = f()`),
-    one row per bound name, flattened through nested target groups; `[]` for
-    any other statement.
-
-    The element value is the matching element of a same-shaped tuple/list
-    LITERAL right-hand side, and None when the RHS is anything else (its
-    elements are only known at run time). Both global scans ask this one
-    function, so they agree on which names an unpacking binds -- which is
-    the reason it exists: neither scan saw an unpacking at all, so its names
-    got no module-global field, and the top-level code bound them as LOCALS
-    of `_toplevel`. Every function reading one then read an undeclared name
-    as 0; the regex compiler's `OP_CHAR, ..., OP_REPEAT = range(7)` made
-    every compiled regex program a table of opcode 0."""
-    out = []
-    if not isinstance(stmt, AssignStmt):
-        return out
-    tgt = stmt.target
-    if not (isinstance(tgt, TupleExpr) or isinstance(tgt, ListExpr)):
-        return out
-    _gmi_tuple_target_rows(tgt, stmt.value, out)
-    return out
-
-
-def _gmi_tuple_target_rows(tgt, value, out: list) -> None:
-    elems = tgt.elements
-    vals = None
-    if ((isinstance(value, TupleExpr) or isinstance(value, ListExpr))
-            and len(value.elements) == len(elems)):
-        vals = value.elements
-    for i in range(len(elems)):
-        e = elems[i]
-        v = vals[i] if vals is not None else None
-        if isinstance(e, IdentExpr):
-            out.append((_as_str(e.name), v))
-        elif isinstance(e, TupleExpr) or isinstance(e, ListExpr):
-            _gmi_tuple_target_rows(e, v, out)
-
-
 def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
@@ -1570,8 +1512,7 @@ def _gmi_scan_func_body_for_self_attr(self, fname, body):
                 and isinstance(_fstmt.target, MemberExpr)
                 and isinstance(_fstmt.target.obj, IdentExpr)
                 and _fstmt.target.obj.name == fname):
-            attr = _as_str(_fstmt.target.member)
-            fname = _as_str(fname)
+            attr = _fstmt.target.member
             self._func_attrs.setdefault(fname, {})
             if attr not in self._func_attrs[fname]:
                 mangled = f"_funcattr_{fname}__{attr}"

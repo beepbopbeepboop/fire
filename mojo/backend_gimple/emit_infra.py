@@ -63,7 +63,6 @@ from ownership_check import _block_terminates
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
-    opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
     _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
@@ -144,23 +143,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # SIGSEGV'd on `mojo_list_len(l=0x1)` for `main()`'s params, which are a
     # real empty list, not None). An explicit `is not None` check never
     # participates in that unification.
-    # The UNANNOTATED ones among them: a parameter nothing declared a type
-    # for holds a word of unknown kind -- a container, a string, None or an
-    # int -- so its truth value has to be asked of the runtime
-    # (`_ensure_bool_cond`), not read as `word != 0`. An empty `{}` passed for
-    # one is a live pointer, and `not sym_info` answered False for it.
-    gen._cur_untyped_params = set()
-    # Locals whose container contents are of an unrecorded kind (see
-    # `infra_infer.opaque_container_locals`): a store into one is not
-    # evidence about its other values.
-    gen._opaque_container_locals = (opaque_container_locals(body)
-                                    if body is not None else set())
     if params is not None:
         for _p in params:
-            gen._cur_func_params.add(_as_str(_p[0] if isinstance(_p, (tuple, list)) else _p))
-            if (isinstance(_p, (tuple, list)) and len(_p) > 1 and _p[1] is None
-                    and not _as_str(_p[0]).startswith('*')):
-                gen._cur_untyped_params.add(_as_str(_p[0]))
+            gen._cur_func_params.add(_p[0] if isinstance(_p, (tuple, list)) else _p)
     # The lambda beta-reduction's cache is keyed by body IDENTITY (see
     # mojo/middle/lambdareduce.reducible_lambdas), so it deliberately
     # SURVIVES `_reset_func` — a lifted closure resets too, and a one-slot
@@ -381,29 +366,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
     # wrong here). See `register_nested_env_free`.
     gen._owned_env_names: set = set()
-    # Temps holding the raw word an UNTYPED `_mojo_dispatch_getattr` returned
-    # (`_lower_MemberExpr` on a boxed receiver whose member no struct types
-    # unambiguously): the value is a string, an int, or any handle, and only
-    # the runtime can say which. `_stringify_value` asks it
-    # (`mojo_cstr_or_int_str`) instead of formatting the word as a decimal.
-    # A function body starts OUTSIDE every try/with emit frame. A lambda is
-    # lifted -- and its body emitted -- while the enclosing function may be
-    # inside a `try`, and that frame then intercepted the LAMBDA's `return`
-    # as the try's own early return (`_elaborate_generic_call_lambda_1`
-    # assigned a temp of the parent function and jumped to its finally).
-    gen._emit_frames = []
-    gen._dyn_word_vals: set = set()
-    # The LOCALS such a word was bound to (`x = obj.attr`, or one slot of an
-    # unpack whose source carries no element type): same question, asked of
-    # the name, because a later read of the local is the local itself.
-    gen._dyn_word_locals: set = set()
-    # A parameter ANNOTATED `object` is such a word by declaration: whatever
-    # the call sites pass, the function's own code may not assume a kind.
-    if params is not None:
-        for _dwp in params:
-            if (isinstance(_dwp, (tuple, list)) and len(_dwp) > 1
-                    and isinstance(_dwp[1], str) and _dwp[1].strip() == 'object'):
-                gen._dyn_word_locals.add(_as_str(_dwp[0]))
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -755,10 +717,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # rather than once per local. Reset per function for the same reason as
     # every map above: local names recycle.
     gen._mixed_container_locals = None
-    # Lazily filled by `emit_exprs.none_bound_locals`: the locals some binding
-    # in this function sets to the literal `None`. Per function, because local
-    # names recycle.
-    gen._none_bound_names = None
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -817,341 +775,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # real Python function's body (current_func_name is ALSO non-empty there,
     # e.g. '_cas_toplevel', so current_func_name alone can't tell them apart).
     gen._in_toplevel_gen: bool          = False
-
-
-# ── Per-function state snapshot ─────────────────────────────────────────────
-#
-# `_reset_func` owns every table that is "per FUNCTION" -- the C body being
-# built, the temp/bb counters and every table keyed by a temp or local name.
-# A lambda is lifted in the MIDDLE of its enclosing function
-# (`_lower_LambdaExpr` -> `_gen_lifted_closure` -> `_reset_func`), so all of
-# that state is the parent's and has to come back intact afterwards. That used
-# to be an ad-hoc list of ~20 fields in `_lower_LambdaExpr`; the other ~50 were
-# silently lost, and whichever the parent read next went wrong. The measured
-# case: `sorted(d.items(), key=lambda kv: kv[1])` lost the `.items()` pair
-# record (`_dict_items_val_elems`) of the list it was sorting, so the
-# `for k, v in ...` that consumed it read both slots as integers.
-#
-# ONE snapshot of exactly the fields `_reset_func` resets, and `test_gimple.py`
-# checks the two cannot drift: a field added to `_reset_func` and not here
-# fails that check rather than corrupting the parent of the next lambda.
-# Fields `_reset_func` empties IN PLACE (`.clear()` rather than a rebind; see
-# its notes on the self-hosted leak) are kept as the object AND a copy of its
-# contents (`*_items`), because the in-place clear would otherwise empty the
-# snapshot too.
-class FuncState:
-    """Everything `_reset_func` resets, captured by `save_func_state`."""
-    def __init__(self):
-        self.fs_cur_func_body: list = []
-        self.fs_cur_func_params: set = set()
-        self.fs_cur_untyped_params: set = set()
-        self.fs_opaque_container_locals: set = set()
-        self.fsbb_counter: int = 0
-        self.fstemp_counter: int = 0
-        self.fs_fresh_vals: set = set()
-        self.fs_fresh_str_tmps: set = set()
-        self.fs_boxed_vals: set = set()
-        self.fs_func_value_names: dict = {}
-        self.fsdecls: list = []
-        self.fsbody_lines: list = []
-        self.fsvar_types: dict = {}
-        self.fs_callable_param_gen_api: dict = {}
-        self.fs_callable_param_ret_types: dict = {}
-        self.fs_gimple_mut_ptr: dict = {}
-        self.fs_boxed_mut_locals: dict = {}
-        self.fs_mut_boxed_param_c: dict = {}
-        self.fs_addressed_locals: set = set()
-        self.fs_tagged_gen_tuple_locals: set = set()
-        self.fs_tagged_dyn_src: dict = {}
-        self.fs_tagged_dyn_vals: dict = {}
-        self.fs_owned_str_elem_vals: set = set()
-        self.fs_owned_str_elem_names: set = set()
-        self.fs_closure_vals: set = set()
-        self.fs_owned_closure_names: set = set()
-        self.fs_owned_env_names: set = set()
-        self.fs_emit_frames: list = []
-        self.fs_dyn_word_vals: set = set()
-        self.fs_dyn_word_locals: set = set()
-        self.fs_maybe_kinds_vals: set = set()
-        self.fsloop_stack: list = []
-        self.fsexc_depth: int = 0
-        self.fs_try_loop_protect: list = []
-        self.fs_try_finally_bodies: list = []
-        self.fs_func_used_setjmp: bool = False
-        self.fsfunc_ret_type: str = ''
-        self.fs_last_was_terminal: bool = False
-        self.fs_elem_types: dict = {}
-        self.fs_nested_elem_types: dict = {}
-        self.fs_dict_items_val_elems: dict = {}
-        self.fs_dict_items_int_keys: set = set()
-        self.fs_dict_item_int_key_vars: set = set()
-        self.fs_int_key_loop_vars: set = set()
-        self.fs_tuple_slot_types: dict = {}
-        self.fs_dict_item_pair_vars: dict = {}
-        self.fs_list_iter_cursor: dict = {}
-        self.fs_boxed_container_vals: set = set()
-        self.fs_span_mut_params: dict = {}
-        self.fs_actual_types: dict = {}
-        self.fs_narrowed_exprs: dict = {}
-        self.fs_param_struct_types: dict = {}
-        self.fs_bound_method_ret_types: dict = {}
-        self.fs_callable_ret_types: dict = {}
-        self.fs_container_callable_ret: dict = {}
-        self.fs_builtin_method_values: dict = {}
-        self.fs_bm_tainted_locals: set = set()
-        self.fs_mixed_container_locals: object = None
-        self.fs_pybox_double_vars: object = None
-        self.fs_pybox_vars: object = None
-        self.fs_tagged_opt_read: object = None
-        self.fs_none_bound_names: object = None
-        self.fs_dict_val_types: dict = {}
-        self.fs_dict_nested_val_types: dict = {}
-        self.fs_struct_layout: dict = {}
-        self.fs_layout_hint: str = ''
-        self.fscurrent_func_name: str = ''
-        self.fs_loop_depth: int = 0
-        self.fs_captures: dict = {}
-        self.fs_env_param: str = ''
-        self.fs_closure_envs: dict = {}
-        self.fs_inner_func_name: str = ''
-        self.fs_c_names: dict = {}
-        self.fs_except_as_names: set = set()
-        self.fs_func_declared_globals: set = set()
-        self.fs_func_declared_nonlocals: set = set()
-        self.fs_in_toplevel_gen: bool = False
-        self.fs_cstr_key_src: dict = {}
-        self.fs_kw_key_src: dict = {}
-        self.fs_int_word_vals: set = set()
-        self.fs_struct_field_owners: dict = {}
-        self.fs_struct_slot_kinds: dict = {}
-        self.fs_cstr_key_src_items: dict = {}
-        self.fs_kw_key_src_items: dict = {}
-        self.fs_int_word_vals_items: set = set()
-        self.fs_fresh_vals_items: set = set()
-        self.fs_boxed_vals_items: set = set()
-        self.fs_func_value_names_items: dict = {}
-        self.fs_fresh_str_tmps_items: set = set()
-        self.fs_struct_field_owners_items: dict = {}
-        self.fs_struct_slot_kinds_items: dict = {}
-
-
-def save_func_state(gen) -> FuncState:
-    """Snapshot the per-function state (see `FuncState`)."""
-    st = FuncState()
-    st.fs_cur_func_body = gen._cur_func_body
-    st.fs_cur_func_params = gen._cur_func_params
-    st.fs_cur_untyped_params = gen._cur_untyped_params
-    st.fs_opaque_container_locals = gen._opaque_container_locals
-    st.fsbb_counter = gen.bb_counter
-    st.fstemp_counter = gen.temp_counter
-    st.fs_fresh_vals = gen._fresh_vals
-    st.fs_fresh_str_tmps = gen._fresh_str_tmps
-    st.fs_boxed_vals = gen._boxed_vals
-    st.fs_func_value_names = gen._func_value_names
-    st.fsdecls = gen.decls
-    st.fsbody_lines = gen.body_lines
-    st.fsvar_types = gen.var_types
-    st.fs_callable_param_gen_api = gen._callable_param_gen_api
-    st.fs_callable_param_ret_types = gen._callable_param_ret_types
-    st.fs_gimple_mut_ptr = gen._gimple_mut_ptr
-    st.fs_boxed_mut_locals = gen._boxed_mut_locals
-    st.fs_mut_boxed_param_c = gen._mut_boxed_param_c
-    st.fs_addressed_locals = gen._addressed_locals
-    st.fs_tagged_gen_tuple_locals = gen._tagged_gen_tuple_locals
-    st.fs_tagged_dyn_src = gen._tagged_dyn_src
-    st.fs_tagged_dyn_vals = gen._tagged_dyn_vals
-    st.fs_owned_str_elem_vals = gen._owned_str_elem_vals
-    st.fs_owned_str_elem_names = gen._owned_str_elem_names
-    st.fs_closure_vals = gen._closure_vals
-    st.fs_owned_closure_names = gen._owned_closure_names
-    st.fs_owned_env_names = gen._owned_env_names
-    st.fs_emit_frames = gen._emit_frames
-    st.fs_dyn_word_vals = gen._dyn_word_vals
-    st.fs_dyn_word_locals = gen._dyn_word_locals
-    st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
-    st.fsloop_stack = gen.loop_stack
-    st.fsexc_depth = gen.exc_depth
-    st.fs_try_loop_protect = gen._try_loop_protect
-    st.fs_try_finally_bodies = gen._try_finally_bodies
-    st.fs_func_used_setjmp = gen._func_used_setjmp
-    st.fsfunc_ret_type = gen.func_ret_type
-    st.fs_last_was_terminal = gen._last_was_terminal
-    st.fs_elem_types = gen._elem_types
-    st.fs_nested_elem_types = gen._nested_elem_types
-    st.fs_dict_items_val_elems = gen._dict_items_val_elems
-    st.fs_dict_items_int_keys = gen._dict_items_int_keys
-    st.fs_dict_item_int_key_vars = gen._dict_item_int_key_vars
-    st.fs_int_key_loop_vars = gen._int_key_loop_vars
-    st.fs_tuple_slot_types = gen._tuple_slot_types
-    st.fs_dict_item_pair_vars = gen._dict_item_pair_vars
-    st.fs_list_iter_cursor = gen._list_iter_cursor
-    st.fs_boxed_container_vals = gen._boxed_container_vals
-    st.fs_span_mut_params = gen._span_mut_params
-    st.fs_actual_types = gen._actual_types
-    st.fs_narrowed_exprs = gen._narrowed_exprs
-    st.fs_param_struct_types = gen._param_struct_types
-    st.fs_bound_method_ret_types = gen._bound_method_ret_types
-    st.fs_callable_ret_types = gen._callable_ret_types
-    st.fs_container_callable_ret = gen._container_callable_ret
-    st.fs_builtin_method_values = gen._builtin_method_values
-    st.fs_bm_tainted_locals = gen._bm_tainted_locals
-    st.fs_mixed_container_locals = gen._mixed_container_locals
-    st.fs_pybox_double_vars = gen._pybox_double_vars
-    st.fs_pybox_vars = gen._pybox_vars
-    st.fs_tagged_opt_read = gen._tagged_opt_read
-    st.fs_none_bound_names = gen._none_bound_names
-    st.fs_dict_val_types = gen._dict_val_types
-    st.fs_dict_nested_val_types = gen._dict_nested_val_types
-    st.fs_struct_layout = gen._struct_layout
-    st.fs_layout_hint = gen._layout_hint
-    st.fscurrent_func_name = gen.current_func_name
-    st.fs_loop_depth = gen._loop_depth
-    st.fs_captures = gen._captures
-    st.fs_env_param = gen._env_param
-    st.fs_closure_envs = gen._closure_envs
-    st.fs_inner_func_name = gen._inner_func_name
-    st.fs_c_names = gen._c_names
-    st.fs_except_as_names = gen._except_as_names
-    st.fs_func_declared_globals = gen._func_declared_globals
-    st.fs_func_declared_nonlocals = gen._func_declared_nonlocals
-    st.fs_in_toplevel_gen = gen._in_toplevel_gen
-    st.fs_cstr_key_src = gen._cstr_key_src
-    for _k in gen._cstr_key_src:
-        st.fs_cstr_key_src_items[_k] = gen._cstr_key_src[_k]
-    st.fs_kw_key_src = gen._kw_key_src
-    for _k in gen._kw_key_src:
-        st.fs_kw_key_src_items[_k] = gen._kw_key_src[_k]
-    st.fs_int_word_vals = gen._int_word_vals
-    for _k in gen._int_word_vals:
-        st.fs_int_word_vals_items.add(_k)
-    for _k in gen._fresh_vals:
-        st.fs_fresh_vals_items.add(_k)
-    for _k in gen._boxed_vals:
-        st.fs_boxed_vals_items.add(_k)
-    for _k in gen._func_value_names:
-        st.fs_func_value_names_items[_k] = gen._func_value_names[_k]
-    for _k in gen._fresh_str_tmps:
-        st.fs_fresh_str_tmps_items.add(_k)
-    st.fs_struct_field_owners = gen._struct_field_owners
-    for _k in gen._struct_field_owners:
-        st.fs_struct_field_owners_items[_k] = gen._struct_field_owners[_k]
-    st.fs_struct_slot_kinds = gen._struct_slot_kinds
-    for _k in gen._struct_slot_kinds:
-        st.fs_struct_slot_kinds_items[_k] = gen._struct_slot_kinds[_k]
-    return st
-
-
-def restore_func_state(gen, st: FuncState) -> None:
-    """Put back what `save_func_state` captured."""
-    gen._cur_func_body = st.fs_cur_func_body
-    gen._cur_func_params = st.fs_cur_func_params
-    gen._cur_untyped_params = st.fs_cur_untyped_params
-    gen._opaque_container_locals = st.fs_opaque_container_locals
-    gen.bb_counter = st.fsbb_counter
-    gen.temp_counter = st.fstemp_counter
-    gen._fresh_vals = st.fs_fresh_vals
-    gen._fresh_str_tmps = st.fs_fresh_str_tmps
-    gen._boxed_vals = st.fs_boxed_vals
-    gen._func_value_names = st.fs_func_value_names
-    gen.decls = st.fsdecls
-    gen.body_lines = st.fsbody_lines
-    gen.var_types = st.fsvar_types
-    gen._callable_param_gen_api = st.fs_callable_param_gen_api
-    gen._callable_param_ret_types = st.fs_callable_param_ret_types
-    gen._gimple_mut_ptr = st.fs_gimple_mut_ptr
-    gen._boxed_mut_locals = st.fs_boxed_mut_locals
-    gen._mut_boxed_param_c = st.fs_mut_boxed_param_c
-    gen._addressed_locals = st.fs_addressed_locals
-    gen._tagged_gen_tuple_locals = st.fs_tagged_gen_tuple_locals
-    gen._tagged_dyn_src = st.fs_tagged_dyn_src
-    gen._tagged_dyn_vals = st.fs_tagged_dyn_vals
-    gen._owned_str_elem_vals = st.fs_owned_str_elem_vals
-    gen._owned_str_elem_names = st.fs_owned_str_elem_names
-    gen._closure_vals = st.fs_closure_vals
-    gen._owned_closure_names = st.fs_owned_closure_names
-    gen._owned_env_names = st.fs_owned_env_names
-    gen._emit_frames = st.fs_emit_frames
-    gen._dyn_word_vals = st.fs_dyn_word_vals
-    gen._dyn_word_locals = st.fs_dyn_word_locals
-    gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
-    gen.loop_stack = st.fsloop_stack
-    gen.exc_depth = st.fsexc_depth
-    gen._try_loop_protect = st.fs_try_loop_protect
-    gen._try_finally_bodies = st.fs_try_finally_bodies
-    gen._func_used_setjmp = st.fs_func_used_setjmp
-    gen.func_ret_type = st.fsfunc_ret_type
-    gen._last_was_terminal = st.fs_last_was_terminal
-    gen._elem_types = st.fs_elem_types
-    gen._nested_elem_types = st.fs_nested_elem_types
-    gen._dict_items_val_elems = st.fs_dict_items_val_elems
-    gen._dict_items_int_keys = st.fs_dict_items_int_keys
-    gen._dict_item_int_key_vars = st.fs_dict_item_int_key_vars
-    gen._int_key_loop_vars = st.fs_int_key_loop_vars
-    gen._tuple_slot_types = st.fs_tuple_slot_types
-    gen._dict_item_pair_vars = st.fs_dict_item_pair_vars
-    gen._list_iter_cursor = st.fs_list_iter_cursor
-    gen._boxed_container_vals = st.fs_boxed_container_vals
-    gen._span_mut_params = st.fs_span_mut_params
-    gen._actual_types = st.fs_actual_types
-    gen._narrowed_exprs = st.fs_narrowed_exprs
-    gen._param_struct_types = st.fs_param_struct_types
-    gen._bound_method_ret_types = st.fs_bound_method_ret_types
-    gen._callable_ret_types = st.fs_callable_ret_types
-    gen._container_callable_ret = st.fs_container_callable_ret
-    gen._builtin_method_values = st.fs_builtin_method_values
-    gen._bm_tainted_locals = st.fs_bm_tainted_locals
-    gen._mixed_container_locals = st.fs_mixed_container_locals
-    gen._pybox_double_vars = st.fs_pybox_double_vars
-    gen._pybox_vars = st.fs_pybox_vars
-    gen._tagged_opt_read = st.fs_tagged_opt_read
-    gen._none_bound_names = st.fs_none_bound_names
-    gen._dict_val_types = st.fs_dict_val_types
-    gen._dict_nested_val_types = st.fs_dict_nested_val_types
-    gen._struct_layout = st.fs_struct_layout
-    gen._layout_hint = st.fs_layout_hint
-    gen.current_func_name = st.fscurrent_func_name
-    gen._loop_depth = st.fs_loop_depth
-    gen._captures = st.fs_captures
-    gen._env_param = st.fs_env_param
-    gen._closure_envs = st.fs_closure_envs
-    gen._inner_func_name = st.fs_inner_func_name
-    gen._c_names = st.fs_c_names
-    gen._except_as_names = st.fs_except_as_names
-    gen._func_declared_globals = st.fs_func_declared_globals
-    gen._func_declared_nonlocals = st.fs_func_declared_nonlocals
-    gen._in_toplevel_gen = st.fs_in_toplevel_gen
-    gen._cstr_key_src = st.fs_cstr_key_src
-    gen._cstr_key_src.clear()
-    for _k in st.fs_cstr_key_src_items:
-        gen._cstr_key_src[_k] = st.fs_cstr_key_src_items[_k]
-    gen._kw_key_src = st.fs_kw_key_src
-    gen._kw_key_src.clear()
-    for _k in st.fs_kw_key_src_items:
-        gen._kw_key_src[_k] = st.fs_kw_key_src_items[_k]
-    gen._int_word_vals = st.fs_int_word_vals
-    gen._int_word_vals.clear()
-    for _k in st.fs_int_word_vals_items:
-        gen._int_word_vals.add(_k)
-    gen._fresh_vals.clear()
-    for _k in st.fs_fresh_vals_items:
-        gen._fresh_vals.add(_k)
-    gen._boxed_vals.clear()
-    for _k in st.fs_boxed_vals_items:
-        gen._boxed_vals.add(_k)
-    gen._func_value_names.clear()
-    for _k in st.fs_func_value_names_items:
-        gen._func_value_names[_k] = st.fs_func_value_names_items[_k]
-    gen._fresh_str_tmps.clear()
-    for _k in st.fs_fresh_str_tmps_items:
-        gen._fresh_str_tmps.add(_k)
-    gen._struct_field_owners = st.fs_struct_field_owners
-    gen._struct_field_owners.clear()
-    for _k in st.fs_struct_field_owners_items:
-        gen._struct_field_owners[_k] = st.fs_struct_field_owners_items[_k]
-    gen._struct_slot_kinds = st.fs_struct_slot_kinds
-    gen._struct_slot_kinds.clear()
-    for _k in st.fs_struct_slot_kinds_items:
-        gen._struct_slot_kinds[_k] = st.fs_struct_slot_kinds_items[_k]
 
 
 def _record_sys_path_inserts(gen, source: str, base_dir: str = None) -> None:
@@ -1890,111 +1513,7 @@ def _new_bb(gen) -> str:
     return f"bb_{gen.bb_counter}"
 
 
-class EmitFrame:
-    """One protected region whose exits rewrite the lines emitted inside it.
-
-    `frame_kind` is 'try' (an early `return` in the try body pops the exception
-    stack and, with a `finally`, jumps to it instead of returning -- the
-    value is kept for the deferred return) or 'with' (a `break`/`continue`
-    out of the body pops the stack and runs the items' teardown first).
-
-    These used to be nested closures installed over `gen._emit`
-    (`gen._emit = intercepted_emit`). The self-hosted compiler calls
-    `gen._emit` as the GimpleGen METHOD it is, so the override never ran
-    there: every `return` inside a `try` lost its `mojo_exc_pop()` in the
-    stage2 binary (`ModuleLoader.load_module_from_path`,
-    `method_receiver_kind`), and every `finally` was skipped on an early
-    return. A frame stack that `_emit` itself consults is the same
-    behaviour in both compilers."""
-    def __init__(self, kind: str):
-        self.frame_kind: str = kind
-        self.bb_finally: str = ''
-        self.return_value: str = ''
-        self.has_return_value: bool = False
-        self.saw_return: bool = False
-        self.ctx_ts: list = []
-        self.ctx_vs: list = []
-        self.ctx_sns: list = []
-        self.gctx_bases: list = []
-        self.gctx_vs: list = []
-        self.teardown_done: bool = False
-
-
-def new_emit_frame(kind: str) -> EmitFrame:
-    return EmitFrame(kind)
-
-
-def push_emit_frame(gen, frame: EmitFrame) -> None:
-    gen._emit_frames.append(frame)
-
-
-def pop_emit_frame(gen) -> None:
-    gen._emit_frames.pop()
-
-
-def _emit_through(gen, line: str, level: int) -> None:
-    """Emit `line` as seen by frame `level` and every frame outside it (the
-    innermost frame is the last one); level -1 is the plain emitter."""
-    if level < 0:
-        _emit_raw(gen, line)
-        return
-    fr = gen._emit_frames[level]
-    stripped = line.strip()
-    if fr.frame_kind == 'try':
-        if stripped.startswith('return ') or stripped == 'return;':
-            if stripped.startswith('return ') and stripped != 'return;':
-                # ONE variable carries the value of every early return in
-                # this region to the deferred `return` after `finally`. The
-                # value text itself used to be kept, so with two returns in
-                # the body only the LAST one's temp was returned and the
-                # other path returned an unassigned temp: `return True, out`
-                # before a later `return False, out` came back as garbage
-                # (the self-hosted compiler's `_infer_return_maybe_kinds`).
-                _rv = stripped[7:].rstrip(';').strip()
-                if not fr.has_return_value:
-                    _rt = gen.func_ret_type if gen.func_ret_type else 'int64_t'
-                    fr.return_value = gen._new_temp(_rt)
-                    fr.has_return_value = True
-                _emit_through(gen, f"  {fr.return_value} = {_rv};", level - 1)
-            else:
-                fr.return_value = ''
-                fr.has_return_value = False
-            fr.saw_return = True
-            # An early return leaves the try block's protected region just as
-            # much as falling off the end of it does: it must pop the
-            # exception stack (_mojo_exc_top) like the normal-exit path, or a
-            # whole compiler run creeps `_mojo_exc_top` past the end of
-            # `_mojo_exc_stack[MOJO_EXC_STACK_MAX]`.
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            if fr.bb_finally != '':
-                _emit_through(gen, f"  goto {fr.bb_finally};", level - 1)
-            else:
-                _emit_through(gen, line, level - 1)
-            gen._last_was_terminal = True
-            return
-        _emit_through(gen, line, level - 1)
-        return
-    if fr.frame_kind == 'with':
-        if len(gen.loop_stack) > 0 and (
-                stripped == f"goto {gen._loop_continue_bb()};"
-                or stripped == f"goto {gen._loop_break_bb()};"):
-            _emit_through(gen, "  mojo_exc_pop ();", level - 1)
-            gen._with_emit_exits(fr.ctx_ts, fr.ctx_vs, fr.ctx_sns,
-                                 fr.gctx_bases, fr.gctx_vs)
-            fr.teardown_done = True
-            _emit_through(gen, line, level - 1)
-            return
-    _emit_through(gen, line, level - 1)
-
-
 def _emit(gen, line: str):
-    if len(gen._emit_frames) > 0:
-        _emit_through(gen, line, len(gen._emit_frames) - 1)
-        return
-    _emit_raw(gen, line)
-
-
-def _emit_raw(gen, line: str):
     gen.body_lines.append(line)
     # Track values produced by a runtime call that always returns a brand-new
     # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
@@ -2026,11 +1545,6 @@ def _elem_of(gen, name: str) -> str:
     # First, check if this is an int64_t-stored pointer with tracked element type
     if name in gen._elem_types:
         _v = gen._elem_types[name]
-        # A writer that records "element type not known" as an explicit
-        # None (`gen._elem_types[t] = gen._elem_types.get(src)`) leaves the
-        # key present with no type; that is the same answer as no key.
-        if _v is None:
-            return 'int64_t'
         # On the self-hosted path a metadata writer can leave an erased
         # sentinel here (`-1` / a tiny value) — the slot was stored via
         # `mojo_dict_set_int` after its value type unified to int64_t, so
@@ -2374,21 +1888,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         fixed_pairs = arg_pairs[:n_fixed]
         varargs = arg_pairs[n_fixed:]
         lst = gen._new_val('MojoList *', "mojo_list_new ()")
-        # A `*xs` argument contributes its ELEMENTS to the pack, not itself:
-        # `_hash(*parts)` forwarding a `*parts` parameter used to hand the
-        # callee a one-element list holding the caller's list.
-        _nodes_ok = arg_nodes is not None and len(arg_nodes) == len(arg_pairs)
-        for _vi in range(len(varargs)):
-            atype = _as_str(varargs[_vi][0])
-            aval = _as_str(varargs[_vi][1])
-            _vn = arg_nodes[n_fixed + _vi] if _nodes_ok else None
-            if (isinstance(_vn, gimple_ctypes.UnaryOp) and _vn.op == '*'
-                    and (atype == 'MojoList *' or atype == 'int64_t')):
-                _src = aval
-                if atype == 'int64_t':
-                    _src = _as_str(gen._materialize_as_list('int64_t', aval))
-                gen._emit(f"  mojo_list_extend ({lst}, {_src});")
-                continue
+        for atype, aval in varargs:
             aval = gen._coerce_to_type(atype, 'int64_t', aval)
             gen._emit(f"  mojo_list_append_int ({lst}, {aval});")
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
@@ -4605,24 +4105,6 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         if ev in getattr(gen, '_boxed_vals', ()):
             nv = gen._ensure_local('int64_t', ev)
             return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', nv)])
-        # An untyped attribute read (`_dyn_word_vals`): a string as often as
-        # an int -- `f"{sd.name}_{m.name}"` over a boxed StructDef, whose
-        # `name` no struct types unambiguously, formatted the name's ADDRESS
-        # as a decimal in the self-hosted compiler, so every
-        # `func_return_types` key it built missed. The runtime's own
-        # discriminator is right in both directions (a string comes back as
-        # itself, an int as its decimal) and is what argument coercion to a
-        # `str` parameter already uses for the same word.
-        # An UNANNOTATED parameter is the same word: `str(ann)` in
-        # `_elem_ann_consider(out, tgt, ann)` printed the annotation's address.
-        _untyped = getattr(gen, '_cur_untyped_params', ())
-        if et == 'int64_t' and (
-                ev in gen._dyn_word_vals
-                or _as_str(ev) in _untyped
-                or (isinstance(enode, gimple_ctypes.IdentExpr)
-                    and (enode.name in gen._dyn_word_locals
-                         or _as_str(enode.name) in _untyped))):
-            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float'):
@@ -4968,7 +4450,7 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
     return ctype, t
 
 
-def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
+def _compr_range_loop(gen, node, gen0, res, res_type):
     # `_compr_bind_target` (not a bare `_declare_var(..., force=...)`): the
     # bind/restore PAIR is what makes the shadow last exactly as long as the
     # comprehension. Every arm that only passed `force=` left the shadowed C
@@ -5127,7 +4609,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
+def _compr_cursor_loop(gen, node, gen0, res, res_type, rec):
     """`[... for x in it]` where `it` is a resumable iterator local.
 
     Every other comprehension arm walked `mojo_list_len`/`mojo_list_get_*` from
@@ -5181,7 +4663,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
+def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # `it_val` arrives from `_lower_comprehension` where it is reassigned
     # (the `_get_actual_type` cast block) — whole-function type
     # unification there can widen it back to int64_t even though it holds
@@ -5459,7 +4941,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
+def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     """`list(<supported generator call>())` / any other comprehension
     consuming one — mirrors _compr_list_loop's/_gen_for_generator_iter's
     resume()/value() convention (see _gen_for_generator_iter's
@@ -5574,7 +5056,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # what CPython's GC does too.
 
 
-def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
+def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = _compr_bind_target(gen, _as_str(gen0.target), 'char *')
     iter_t = gen._new_temp('MojoDictIter *')
@@ -5758,7 +5240,7 @@ def _compr_restore_target(gen, name, saved):
         gen._actual_types.pop(_n, None)
 
 
-def _compr_set_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
+def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop
     # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
     # its elements as `char *` — reading them back with mojo_set_iter_val_int
@@ -6201,7 +5683,10 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
     _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
-    gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
+    # Code-point count, not strlen: a string is a UTF-8 buffer, and Python's
+    # len counts code points (mojo_str_codepoint_len's doc comment). The
+    # BYTES arm above deliberately stays mojo_bytes_len: len(b) is bytes.
+    gen._emit(f'  {_res} = mojo_str_codepoint_len ({_sp2});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
     _lp2 = gen._coerce_to_type('int64_t', 'MojoList *', _it64)
@@ -6770,13 +6255,6 @@ def _eval_const_int(gen, node) -> int | None:
     return comptime_eval.eval_const_int(node, gen._comptime_vals,
                                           _comptime_call_hook(gen))
 
-
-def _eval_const_bool_state(gen, node) -> int:
-    """comptime_eval.CONST_TRUE / CONST_FALSE / CONST_UNKNOWN -- the spelling
-    every branching caller uses, because `_eval_const_bool`'s `bool | None`
-    collapses None into False once compiled (see comptime.CONST_UNKNOWN)."""
-    return comptime_eval.eval_const_bool_state(node, gen._comptime_vals,
-                                               _comptime_call_hook(gen))
 
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""

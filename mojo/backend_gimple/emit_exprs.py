@@ -30,7 +30,6 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
     _signed_int64, _signed_int64_c_literal, _as_intlit_node,
-    _as_ident_node, _as_vardecl_node,
 )
 import regex_compile
 import mlir
@@ -350,7 +349,7 @@ def _lower_StringLiteral(gen, node):
 
     # For f-strings with expressions: build a concatenation of all parts
     # Lower each expression part and concatenate via mojo_str_cat
-    acc_val: str | None = None
+    acc_val = None
     for kind, text, _spec, _conv in parts:
         if kind == 'lit':
             if not text:
@@ -1051,13 +1050,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.operand)
     if node.op == 'not':
         t = gen._new_temp('_Bool')
-        # A word of unknown kind (an unannotated parameter, an untyped read)
-        # too: `_ensure_bool_cond` asks the runtime for its truth value --
-        # `w == 0` called `not {}` False.
-        if (ot in gen._CONTAINER_LEN_FN or ot == 'char *'
-                or (ot == 'int64_t' and (
-                    ov in gen._dyn_word_vals or ov in gen._dyn_word_locals
-                    or ov in getattr(gen, '_cur_untyped_params', ())))):
+        if ot in gen._CONTAINER_LEN_FN or ot == 'char *':
             # Delegate to _ensure_bool_cond for real Python truthiness
             # (container length / non-empty string), then negate.
             # GIMPLE doesn't accept `!x`; cast-and-compare instead
@@ -1249,21 +1242,6 @@ _GIMPLE_SCALAR_CTYPES = frozenset({
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
     'float', 'double', 'long double', '_Bool', 'size_t', 'ssize_t',
 })
-
-
-def _mark_boxed_field_read(gen, struct_name, member, field_type, t) -> None:
-    """A read of a struct field the self-host tables declare BOXED
-    (`struct_boxed_fields`: `AssignStmt.type_ann`, `IfStmt.condition`, ...)
-    is a word of unknown kind -- a string as often as a node or None -- so its
-    `str()` / truth / `==` ask the runtime. Typed plain `int64_t`, `str(
-    _n.type_ann)` was `mojo_str_from_int` and printed the annotation
-    string's ADDRESS (the compiled compiler then recovered no GimpleGen dict
-    field value type from any method-body annotation)."""
-    if field_type != 'int64_t':
-        return
-    _bf = gen.struct_boxed_fields.get(_as_str(struct_name)) if struct_name else None
-    if _bf and member in _bf:
-        gen._dyn_word_vals.add(t)
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
@@ -1693,12 +1671,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # `sys.stdin.read()` rule's job — that fires on the CALL shape
             # before this value read is ever reached; this case covers
             # bare VALUE reads of the streams themselves.
-            # A plain comparison chain, not `{...}[node.member]`: the
-            # compiled compiler answered that subscript of an inline dict
-            # literal with '0', so every `sys.stderr.write(...)` it compiled
-            # wrote to fd 0.
-            _stream = _as_str(node.member)
-            fd = '0' if _stream == 'stdin' else ('1' if _stream == 'stdout' else '2')
+            fd = {'stdin': '0', 'stdout': '1', 'stderr': '2'}[node.member]
             t = gen._new_val('int64_t', fd)
             return 'int64_t', t
 
@@ -1981,16 +1954,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         ov = gen._new_val(_ret, f'{_c_fn} ()')
     else:
         ot, ov = gen.lower_expr(node.obj)
-        # A `char *`-declared local that is really a word of unknown kind
-        # (the shared loop variable of an untyped `for`'s dict/list dispatch,
-        # see `_dyn_word_locals`): its C type says "string", which would send
-        # `st.value` down the StringLiteral-identity shortcut below and hand
-        # the caller the statement itself. It is read as the word it is.
-        if (ot == 'char *' and isinstance(node.obj, IdentExpr)
-                and _as_str(node.obj.name) in gen._dyn_word_locals):
-            _dl = gen._ensure_local('char *', ov)
-            ov = gen._new_val('int64_t', f'(int64_t){_dl}')
-            ot = 'int64_t'
         # `self.prop.attr` where `prop` is a 0-arg property/method
         # accessed without call syntax (`self.prop`, no `()`) lowers to
         # a deferred, uncalled `MojoBoundMethod *` value (see
@@ -2088,7 +2051,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             ot = _pt
         field_type = gen.struct_field_types[_pst][node.member]
         t = gen._new_val(field_type, f"{ov}->{gimple_ctypes._safe_field(node.member)}")
-        _mark_boxed_field_read(gen, _pst, node.member, field_type, t)
         # Propagate container element/value types onto the field-read temp,
         # exactly like the generic instance-field branch further below (its
         # `_field_elem_types`/`_field_dict_val_types` seeding at the
@@ -2119,14 +2081,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _nested_p = gen._field_dict_nested_val_types.get(_pst, {}).get(node.member)
             if _nested_p:
                 gen._dict_nested_val_types[t] = _nested_p
-        elif field_type == 'MojoSet *':
-            # A `set[str]` field read off a struct-typed PARAMETER: the same
-            # element record the generic branch below carries, or `s.add(w)`
-            # of a word (`gen._extra_no_mangle.add(m['body_name'])`) took the
-            # int-tagged slot and `name in s` never found the string.
-            stored = gen._field_elem_types.get(_pst, {}).get(node.member)
-            if stored:
-                gen._elem_types[t] = stored
         return field_type, t
 
     # If the object lowered to a C type name (class used as cls argument),
@@ -2232,38 +2186,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # receiver whose `.value` is a field of no known struct); otherwise fall through
     # to the runtime tag dispatch below, which reads the field directly.
     if node.member == 'value' and ot in ('void *', 'int64_t', 'int'):
-        if ot == 'int64_t' and not gen._is_known_field('value'):
-            # A WORD's `.value` when no struct in THIS translation unit's table
-            # has such a field is still not provably the identity: the table
-            # is per module, and a backend module that walks another module's
-            # nodes (`ownership_destruct`'s `st.value` over fire_compiler
-            # statements) sees none of their layouts. The identity answer
-            # handed `_is_maybe_fresh_expr` the STATEMENT instead of its
-            # value, so the self-hosted compiler found no loop-scoped owned
-            # local at all. Ask the reflection dispatch, which knows every
-            # struct of the program, and keep the identity only when it has
-            # no such field (a bracket parameter's `type.value`).
-            ov = gen._ensure_local('int64_t', ov)
-            _vp = gen._new_val('void *', f"(void *){ov}")
-            gen._emit("  _mojo_getattr_missed = 0;")
-            gen._emit("  _mojo_getattr_nothrow = 1;")
-            _r = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                                [('void *', _vp), ('char *', gen._intern_string('value'))])
-            gen._emit("  _mojo_getattr_nothrow = 0;")
-            _missed = gen._new_val('int', '_mojo_getattr_missed')
-            _hit = gen._new_val('_Bool', f'{_missed} == 0')
-            t = gen._new_temp('int64_t')
-            _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
-            gen._emit(f"  if ({_hit}) goto {_bb_h}; else goto {_bb_m};")
-            gen._emit_label(_bb_h)
-            gen._emit(f"  {t} = {_r};")
-            gen._emit(f"  goto {_bb_e};")
-            gen._emit_label(_bb_m)
-            gen._emit(f"  {t} = {ov};")
-            gen._emit(f"  goto {_bb_e};")
-            gen._emit_label(_bb_e)
-            gen._dyn_word_vals.add(t)
-            return 'int64_t', t
         if ot == 'void *' or not gen._is_known_field('value'):
             t = gen._new_temp('int64_t')
             if ot == 'void *':
@@ -2447,7 +2369,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member in field_map:
         field_type = field_map[node.member]
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
-        _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
         # field so the boolean-context conversions (_ensure_bool_cond /
         # `not`) consult the is_some side-band instead of the raw word.
@@ -2653,7 +2574,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 gen._emit(f"  {t} = ({_boxed_ft}){raw};")
             _boxed_propagate_container_elems(gen, node.member, _boxed_ft, t)
             return _boxed_ft, t
-        gen._dyn_word_vals.add(raw)
         return 'int64_t', raw
     elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
         # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
@@ -2676,7 +2596,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if _resolved_field is not None:
             _ptr = gen._new_val(gen._actual_types[ov], f'({gen._actual_types[ov]}){ov}')
             t = gen._new_val(_resolved_field, f'{_ptr}->{gimple_ctypes._safe_field(node.member)}')
-            _mark_boxed_field_read(gen, _actual_sn, node.member, _resolved_field, t)
             return _resolved_field, t
         # A5 part 2: boxed handle to a known AST/compiler struct — `node.member`
         # is a REAL field of at least one struct in struct_field_types (IfStmt.
@@ -2743,10 +2662,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if ot in ('int', 'char'):
             ov = gen._new_val('int64_t', f'(int64_t){ov}')
         vp = gen._new_val('void *', f'(void *){ov}')
-        _dyn_raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                                  [('void *', vp), ('char *', f'"{node.member}"')])
-        gen._dyn_word_vals.add(_dyn_raw)
-        return 'int64_t', _dyn_raw
+        return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                        [('void *', vp), ('char *', f'"{node.member}"')])
     elif struct_name in gimple_ctypes._FIXED_RUNTIME_STRUCT_NAMES:
         # Step 4 (“setting/getting an arbitrary attribute on a generically-typed object”):
         # `ot` resolved to one of THIS codegen's own fixed-layout runtime
@@ -2995,21 +2912,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                        or (ltype == '_Bool' and _rp and node.op == 'or'))
         if _bool_merge:
             res_type = '_Bool'
-        # A string on one side and a word of unknown kind on the other
-        # (`_cur_env and getattr(ci, 'captures', None)`): the join called the
-        # result a `char *`, and the truth test then read the LIST the word
-        # held as a C string -- its header's first byte -- which the compiled
-        # compiler found empty and took the NULL-env branch. The result is a
-        # word that may be either, so it is typed as one and its truthiness
-        # (and str()/==) ask the runtime.
-        _mixed_word = (not _bool_merge
-                       and ((ltype == 'char *' and _rq == 'int64_t')
-                            or (ltype == 'int64_t' and _rq == 'char *')))
-        if _mixed_word:
-            res_type = 'int64_t'
         result = gen._new_temp(res_type)
-        if _mixed_word:
-            gen._dyn_word_vals.add(result)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
         bb_merge = gen._new_bb()
@@ -3049,15 +2952,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             gen._emit(f"  {result} = {_rb};")
         else:
             gen._safe_coerce_emit(rtype, res_type, rval, result)
-        # A word result either of whose operands is a word of unknown kind is
-        # one too: `(rv and ir) and ir != ret_type` selects the `rv` string
-        # (as a word) on its short-circuit edge, and a plain `!= 0` test of
-        # the merged word called the empty string true -- the compiled
-        # compiler then emitted a call temp for a value-discarding call.
-        if (res_type == 'int64_t' and not _mixed_word
-                and (gen._is_dyn_word(node.left, lval)
-                     or gen._is_dyn_word(node.right, rval))):
-            gen._dyn_word_vals.add(result)
         gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_merge)
         return res_type, result
@@ -3615,36 +3509,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # because the choice would otherwise have to be a runtime branch around
     # the whole operand dispatch. A wrong value traded for a wrong format is
     # the right way round; see the doc's Residue section.
-    #
-    # NOT for identity and equality, though. `is` asks about the slot's WORD,
-    # and `==`/`!=`/`in` against anything that is not a number ask about its
-    # value as whatever it is -- a string slot compared with a string, a
-    # node handle compared with a node. Reading those through a double made
-    # `b[2] is node` a floating-point comparison of two pointers and
-    # `t[0] == name` a `(char *)` of a double, which only ever worked while
-    # every value involved stayed below 2**53. Those operators take the
-    # slot's own word (`mojo_box_word`: the box kept only for a float) and
-    # mark it a word of unknown kind, which is what the equality lowering
-    # dispatches on at run time.
-    _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
     if lv in getattr(gen, '_boxed_vals', ()):
-        if op in _ident_ops and (op in ('is', 'is not')
-                                 or rt not in ('double', 'float')):
-            lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
-            lt = 'int64_t'
-            gen._dyn_word_vals.add(lv)
-        else:
-            lv = gen._new_val('double', f"mojo_box_double ({lv})")
-            lt = 'double'
+        lv = gen._new_val('double', f"mojo_box_double ({lv})")
+        lt = 'double'
     if rv in getattr(gen, '_boxed_vals', ()):
-        if op in _ident_ops and (op in ('is', 'is not')
-                                 or lt not in ('double', 'float')):
-            rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
-            rt = 'int64_t'
-            gen._dyn_word_vals.add(rv)
-        else:
-            rv = gen._new_val('double', f"mojo_box_double ({rv})")
-            rt = 'double'
+        rv = gen._new_val('double', f"mojo_box_double ({rv})")
+        rt = 'double'
 
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types
@@ -3788,16 +3658,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # `_free_sv`: the conversion temp is freed by the cat only when it is a
         # `mojo_str_from_int` result; a `mojo_char_to_str` result is a shared
         # immortal string and must never be freed.
-        # A WORD of unknown kind is a string as often as an int (Python's
-        # `str + int` is a TypeError, so a word that reaches a concatenation
-        # is a string unless proven otherwise): the runtime renders it,
-        # and the rendering is borrowed for a string -- never freed here.
-        if lt2 == 'char *' and rt2 == 'int64_t' and gen._is_dyn_word(right_node, rv2):
-            sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', rv2)])
-            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), False)
-        if rt2 == 'char *' and lt2 == 'int64_t' and gen._is_dyn_word(left_node, lv2):
-            sv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', lv2)])
-            return 'char *', gen._emit_str_cat(sv, rv2, False, gen._is_fresh_operand(right_node, rv2))
         if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
             _free_sv = True
             if gen._actual_types.get(rv2) == 'char':
@@ -4191,21 +4051,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 gen._emit(f'  {_t} = {_ans};')
                 return '_Bool', _t
 
-    # `==`/`!=` between two WORDS, at least one of unknown kind (an untyped
-    # attribute read, an unpacked slot with no record, an `object` parameter):
-    # Python compares the VALUES, and a C `==` compares the bits -- two equal
-    # strings at different addresses came out unequal. `mojo_word_eq` asks the
-    # runtime what each word is. The self-hosted compiler's own pattern matcher
-    # (`ast_rewriter.match_pattern`'s `term == pat.value`) never matched a
-    # literal, so no `os.environ` rewrite ever fired in the binary.
-    if (op in ('==', '!=') and lt == 'int64_t' and rt == 'int64_t'
-            and (gen._is_dyn_word(left_node, lv) or gen._is_dyn_word(right_node, rv))):
-        eq_t = gen._call_expr('int', 'mojo_word_eq', [('int64_t', lv), ('int64_t', rv)])
-        t = gen._new_temp('_Bool')
-        _cmp = '!= 0' if op == '==' else '== 0'
-        gen._emit(f'  {t} = {eq_t} {_cmp};')
-        return '_Bool', t
-
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
     lv_is_str_lit = isinstance(left_node, gimple_ctypes.StringLiteral)
@@ -4350,13 +4195,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is / is not → pointer identity
     if op in ('is', 'is not'):
         c_op = '==' if op == 'is' else '!='
-        # Identity is on the slot's WORD, not on the box a heterogeneous slot
-        # read may hand back (see `mojo_box_word`): `t[1] is None` for a None
-        # slot compared a heap cell's address with NULL.
-        if lt == 'int64_t' and lv in getattr(gen, '_boxed_vals', ()):
-            lv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', lv)])
-        if rt == 'int64_t' and rv in getattr(gen, '_boxed_vals', ()):
-            rv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', rv)])
         t = gen._new_temp('_Bool')
         if '*' in lt or '*' in rt:
             p1 = gen._new_temp('int64_t')
@@ -4529,16 +4367,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             rv = gen._new_val('int64_t', f'(int64_t){rv}')
             rt = 'int64_t'
 
-    # A module-level container is a boxed `int64_t` at the read, with its real
-    # kind recorded in `_actual_types` (`_lower_IdentExpr`'s global-read arm).
-    # The set/dict operator dispatch below asks about the KIND, so recover it
-    # first: `A = frozenset([...]); C = A | B` at module level emitted a C
-    # bitwise `|` of the two set POINTERS, and the self-hosted compiler's own
-    # `_FRESH_STRING_RETURNS = _FRESH_STRING_RETURNS | _OWNED_REPR_FNS` became
-    # an unusable word -- every "may the consumer free this?" answer was No.
-    if op in ('|', '-', '&', '^'):
-        lt, lv = gen._resolve_container_kind(lt, lv)
-        rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
 
@@ -4894,7 +4722,7 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             return 'MojoBytes *', _lit_bytes(fmt_bytes)
 
     arg_i = 0
-    acc_val: str | None = None
+    acc_val = None
     # Plain 4-way unpack, NOT `part[0]`/`part[1]` — `parts` is a
     # freshly-built `list[tuple]` (each entry appended via `parts.append((...))`
     # by the shared parser), and subscripting a value obtained by single-var
@@ -5088,7 +4916,7 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
         return 'char *', gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(fmt_text)))
 
     arg_i = 0
-    acc_val: str | None = None
+    acc_val = None
     # Plain 4-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` --
     # `_as_str(part[1])` alone was NOT sufficient: `part` here comes from
     # single-var for-loop iteration over a freshly-built `list[tuple]`,
@@ -5378,13 +5206,6 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tu
     return res
 
 
-def _set_needle_is_word(gen, xv: str) -> bool:
-    """An `int64_t` set needle whose kind is unknown -- anything this function
-    has not recorded as a real integer (`_int_word_vals`). See
-    mojo_set_contains_word."""
-    return xv not in gen._int_word_vals
-
-
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
     given both operands already lowered. Split out of
@@ -5500,10 +5321,6 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             return 'int', ti
         if xt == 'char *':
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
-        elif xt == 'int64_t' and _set_needle_is_word(gen, xv):
-            # A word of unknown kind against a set that is not known to hold
-            # ints: see mojo_set_contains_word.
-            gen._emit_call('int', ti, 'mojo_set_contains_word', [('MojoSet *', rv), ('int64_t', xv)])
         else:
             xv64 = gen._to_int64(xt, xv)
             gen._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
@@ -5946,7 +5763,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # registered containers still records nothing: the generic walker names
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(gen, elem, _kinds, lowered):
+    if _literal_needs_kinds(elem, _kinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
@@ -5994,47 +5811,10 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 # same one the sorters and the per-slot readers use.
 
 
-def _is_none_literal(e) -> bool:
-    return isinstance(e, gimple_ctypes.NoneLiteral) or (
-        isinstance(e, gimple_ctypes.IdentExpr) and e.name == 'None')
-
-
-def none_bound_locals(gen) -> set:
-    """The locals some binding in the function being lowered sets to the
-    literal `None` (`default = None`, then maybe `default = parse()`).
-
-    Such a local is an object word in which `None` is the NULL word -- the
-    value model has no other spelling for it -- so a container slot built from
-    it has to SAY so (`_list_literal_slot_kind`'s 'o'), or the slot reads back
-    as the integer 0. Cached per function (`_reset_func` clears it)."""
-    cached = gen._none_bound_names
-    if cached is not None:
-        return cached
-    out: set = set()
-    for n in gimple_exprtypes._walk_ast(gen._cur_func_body):
-        if isinstance(n, gimple_ctypes.AssignStmt):
-            if (isinstance(n.target, gimple_ctypes.IdentExpr)
-                    and _is_none_literal(n.value)):
-                out.add(_as_str(_as_ident_node(n.target).name))
-        elif isinstance(n, gimple_ctypes.VarDecl):
-            _vd = _as_vardecl_node(n)
-            if _vd.value is not None and _is_none_literal(_vd.value):
-                out.add(_as_str(_vd.name))
-    gen._none_bound_names = out
-    return out
-
-
 def _list_literal_slot_kind(gen, el, et) -> str:
-    if _is_none_literal(el):
+    if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
+            isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
         return 'n'
-    # An object-word local that may hold None (`params.append((pname,
-    # default))` in the parser, `default` None or a node): MOJO_KIND_OBJ, whose
-    # NULL word renders as None. As 'i' it rendered as `0`, so the self-hosted
-    # compiler's `.ast` dump printed `('x', 0)` for every defaultless lambda
-    # parameter where CPython prints `('x', None)`.
-    if (et == 'int64_t' and isinstance(el, gimple_ctypes.IdentExpr)
-            and _as_str(_as_ident_node(el).name) in none_bound_locals(gen)):
-        return 'o'
     # A Python bool is the same 0/1 word an int is, so only the EXPRESSION
     # separates them (the same reason `is_python_bool_expr` exists for a dict
     # slot). The runtime's alphabet already has its own byte for it
@@ -6064,21 +5844,7 @@ def _is_scalar_elem_kind(elem: str) -> bool:
             or elem == 'MojoBytes *')
 
 
-def _provably_int_word(gen, el, ev: str) -> bool:
-    """Is this `int64_t`-typed literal ELEMENT provably an integer, rather than
-    a word whose kind is unknown? An `int64_t` element is both in this value
-    model -- a real Int, or the box any untyped node/string/handle travels in
-    (`[self._parse_expr(0)]` in the compiler's own parser is a list of boxed
-    AST nodes typed `int64_t`). Only the former may be described as 'i'."""
-    if isinstance(el, IntLiteral):
-        return True
-    if (isinstance(el, UnaryOp) and _as_str(el.op) == '-'
-            and isinstance(el.operand, IntLiteral)):
-        return True
-    return ev in gen._int_word_vals
-
-
-def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
+def _literal_needs_kinds(elem: str, kinds: str) -> bool:
     """Whether a list/tuple LITERAL must record `mojo_list_set_kinds`.
 
     Two independent reasons, both of which the runtime already supports:
@@ -6102,18 +5868,7 @@ def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
     ks = set(kinds)
     if len(ks) > 1 or 'n' in ks:
         return True
-    if not _is_scalar_elem_kind(elem):
-        return False
-    # A homogeneous INTEGER row is only true of integers: an `int64_t`
-    # element that is a boxed node or string would be rendered as its address
-    # by the 'i' row (the self-hosted compiler's `.ast` dump printed every
-    # `ListExpr.elements` as decimals). Such a list keeps no row, as before,
-    # and the generic walker names its slots.
-    if ks == {'i'} and lowered is not None:
-        for _pl in lowered:
-            if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
-                return False
-    return True
+    return _is_scalar_elem_kind(elem)
 
 
 # `_lower_list_literal`'s spread test and `_lower_tuple_literal`'s identical
@@ -6303,27 +6058,6 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         kv_tmp = gen._new_val('char *', f"{kv}")
         kv = kv_tmp
         kt = 'char *'
-    elif kt == 'int64_t' and (
-            kv in gen._dyn_word_vals
-            or (isinstance(key_expr, IdentExpr)
-                and key_expr.name in gen._dyn_word_locals)
-            or not _provably_int_word(gen, key_expr, kv)):
-        # A word of unknown kind (an untyped attribute read, an unpacked slot
-        # with no record): a string as often as an int. The runtime's own
-        # discriminator keys a string by its text and an int by its decimal;
-        # `mojo_str_from_int` keyed EVERY such word by its decimal, so
-        # `{st.name: st for st in defs}` over StructDefs built a dict of
-        # address strings and every `name in d` missed (the self-hosted
-        # compiler then minted each method of a class as a phantom field).
-        # The same holds for ANY `int64_t` key this function has not proven
-        # to be an integer: `{kname: ... for kname, kexpr in node.kwargs}`
-        # unpacks the keyword NAME into an untyped word, and keying it by its
-        # decimal made every `'filename' in kwarg_dict` miss, so the
-        # self-hosted compiler passed every keyword argument of a statement
-        # call as 0. The runtime discriminator renders a real integer as its
-        # decimal, so a genuine int key is stored exactly as before.
-        # Transient: released right after the one store that copies it.
-        kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
         # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
@@ -6441,13 +6175,6 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
                            [('MojoSet *', t), ('MojoBytes *', ev)])
         elif et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', t), ('char *', ev)])
-        elif et == 'int64_t' and not _provably_int_word(gen, el, ev):
-            # `{_hn}` of a word of unknown kind: see mojo_set_add_word. Under
-            # the int view a string word was an ADDRESS, so `sorted(s)` of
-            # the self-hosted compiler's exception-descendant names sorted by
-            # address and its `except (A, B, ...)` tag tests came out in a
-            # different order from the reference compiler's.
-            gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', t), ('int64_t', ev)])
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', t), ('int64_t', ev64)])
@@ -6516,16 +6243,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is
     # useless for a (char*, pointer) pair like `(name, func)`.
-    # ...and for a HOMOGENEOUS tuple with no `*spread` too: the slot list is
-    # also the tuple's ARITY, which a `f(*t)` spread at a call site needs to
-    # expand into positional arguments (`lower_call_args`). Same types as the
-    # joined element, so no reader that already consulted this table reads a
-    # slot differently.
-    _has_spread = False
-    for _slt0 in lowered:
-        if _is_star_spread(_slt0[0]):
-            _has_spread = True
-    if per_element or (not _has_spread and len(lowered) > 0):
+    if per_element:
         _slot_ts = []
         for _slt in lowered:
             if _is_star_spread(_slt[0]):
@@ -6630,7 +6348,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # display rendered `(None, 1)` — for the reason that predicate's own
     # docstring gives, and it is the same rule the list lowering applies.
     _tkinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(gen, elem, _tkinds, lowered):
+    if _literal_needs_kinds(elem, _tkinds):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])
@@ -6734,16 +6452,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         if len(gen0.iterable.args) >= 2:
             _, _start_raw = gen.lower_expr(gen0.iterable.args[1])
             _start_val = gen._new_val('int64_t', f"(int64_t){_start_raw}")
-        if _inner_it_type != 'MojoList *':
-            # A dict, set, string or word of unknown kind: the same
-            # materialization `enumerate` gets as a `for` statement
-            # (`_materialize_as_list` asks the runtime what a word is). This
-            # used to emit a TODO and an EMPTY result, so the self-hosted
-            # compiler's `', '.join(f'{ct} __a{i}' for i, ct in
-            # enumerate(params))` declared every coroutine start function
-            # `(void)`.
-            _inner_it_val = gen._materialize_as_list(_inner_it_type, _inner_it_val)
-        gen._compr_enumerate_loop(node, gen0, res, res_type, _inner_it_val, _start_val)
+        if _inner_it_type == 'MojoList *':
+            gen._compr_enumerate_loop(node, gen0, res, res_type, _inner_it_val, _start_val)
+        else:
+            gen._emit(f"  /* TODO: enumerate comprehension over {_inner_it_type} */")
         return res_type, res
 
     is_range = (isinstance(gen0.iterable, gimple_ctypes.CallExpr) and

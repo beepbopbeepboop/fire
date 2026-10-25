@@ -356,72 +356,6 @@ def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None):
     return bool(result) if isinstance(result, (bool, int)) else None
 
 
-# The tri-state answer as an INT: 1 (true), 0 (false), -1 (not a compile-time
-# constant). `eval_const_bool`'s `bool | None` cannot carry three states once
-# this file is compiled by the self-hosted compiler: its value model spells
-# None as the zero word, which is also False, so "not foldable" read as
-# "false". Every caller that branches on the answer -- a module-level `if
-# __name__ == '__main__':` the global scan resolves, a `comptime if` -- then
-# took the else-branch of a condition nobody could decide, and the stage2
-# binary dropped the whole `if __name__` body from the module's globals.
-CONST_TRUE = 1
-CONST_FALSE = 0
-CONST_UNKNOWN = -1
-
-
-def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
-    """Is `node` a compile-time constant at all? Decided from the SHAPE of
-    the expression and the names bound, never from a folded value, so the
-    answer survives the compiled value model (see CONST_UNKNOWN). Mirrors
-    the cases `eval_const` / `eval_const_int` fold; anything else is not
-    foldable. A call is foldable only when the backend's hook can run it,
-    which is the one case that has to evaluate to find out."""
-    if isinstance(node, (BoolLiteral, IntLiteral, StringLiteral)):
-        return True
-    if isinstance(node, IdentExpr):
-        return node.name in bindings
-    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and node.obj.name == 'sys' and node.member == 'platform'):
-        return True
-    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
-            and node.obj.name == 'sys' and node.member == 'byteorder'):
-        # Foldable only where `eval_const` really can read the host value:
-        # in the self-hosted binary `sys` binds the compiled stdlib's, which
-        # exposes no byteorder, the fold declines, and a shape-only "yes"
-        # would then read as CONST_FALSE and drop the live branch.
-        return eval_const(node, bindings) is not None
-    if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
-        return _const_foldable(node.operand, bindings, call_hook)
-    if isinstance(node, BinaryOp):
-        return (_const_foldable(node.left, bindings, call_hook)
-                and _const_foldable(node.right, bindings, call_hook))
-    if isinstance(node, CompareChain):
-        for _operand in node.operands:
-            if not _const_foldable(_operand, bindings, call_hook):
-                return False
-        return True
-    if (call_hook is not None and isinstance(node, CallExpr)
-            and isinstance(node.func, IdentExpr)):
-        return eval_const_int(node, bindings, call_hook) is not None
-    return False
-
-
-def eval_const_bool_state(node, bindings: dict, call_hook=None,
-                          platform: str = None) -> int:
-    """`eval_const_bool` as CONST_TRUE / CONST_FALSE / CONST_UNKNOWN.
-
-    Foldability comes first and from the expression's shape
-    (`_const_foldable`); only a foldable condition is evaluated. A foldable
-    shape whose fold still fails (`1 // 0`) answers false rather than
-    unknown -- the one place the two spellings differ, and a condition that
-    divides by zero at compile time has no meaningful branch either way."""
-    if not _const_foldable(node, bindings, call_hook):
-        return CONST_UNKNOWN
-    if eval_const_bool(node, bindings, call_hook, platform):
-        return CONST_TRUE
-    return CONST_FALSE
-
-
 # ── The STATEMENT-level comptime rules ────────────────────────────────────
 #
 # Everything below is a language decision, not a code-generation decision:
@@ -599,14 +533,14 @@ def resolve_if(stmt, bindings: dict, platform: str = None,
     'then' / ('elif', i) / 'else' mean "emit only that branch"; None means the
     condition is not statically known and the backend must emit a runtime
     branch — same observable behaviour, no silent miscompile."""
-    val = eval_const_bool_state(stmt.condition, bindings, call_hook,
-                                platform=platform)
-    if val == CONST_TRUE:
+    val = eval_const_bool(stmt.condition, bindings, call_hook,
+                         platform=platform)
+    if val is True:
         return 'then'
-    if val == CONST_FALSE:
+    if val is False:
         for i, (cond, _body) in enumerate(getattr(stmt, 'elifs', None) or []):
-            if eval_const_bool_state(cond, bindings, call_hook,
-                                     platform=platform) == CONST_TRUE:
+            if eval_const_bool(cond, bindings, call_hook,
+                               platform=platform) is True:
                 return ('elif', i)
         return 'else'
     return None

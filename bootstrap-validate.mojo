@@ -78,7 +78,7 @@ def main():
     # Verify stage directories exist
     for stage in ("stage1", "stage2", "stage3"):
         if not os.path.isdir(stage):
-            print("ERROR: " + stage + " directory not found - run make bootstrap first")
+            print("ERROR: " + stage + "/ directory not found — run 'make bootstrap' first")
             sys.exit(1)
 
     sources = collect_sources()

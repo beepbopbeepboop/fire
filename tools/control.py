@@ -28,6 +28,11 @@ Layout
   ../work-N/exitcode    written by the launcher wrapper when the worker exits
   <common-git-dir>/control/tasks.json   the registry (shared by all worktrees)
 
+Sessions that work from a checkout OTHER than the one the fleet runs in (a clone, a hand-run
+agent) must point control.py at the fleet's registry with CONTROL_CTL_DIR=<abs path to that
+checkout's .git/control>; the default resolves relative to the checkout they are in, which in a
+clone is a private, empty registry that the fleet never reads.
+
 Claims are how two workers are kept off the same problem. A claim is a string:
 `module:os`, `bug:CODEGEN_foo`, or a repo path (`tools/formal_sweep.py`). Two
 claims conflict when they are equal or one is a path-prefix of the other, and
@@ -56,8 +61,30 @@ def git(*a, cwd=MAIN, check=True):
     return r.stdout.strip()
 
 
+_CTL_WARNED = []
+
+
 def ctl_dir():
-    d = os.path.join(os.path.realpath(os.path.join(MAIN, git("rev-parse", "--git-common-dir"))), "control")
+    """Where the shared registry lives.
+
+    The registry is FLEET state, not checkout state: it lives in the
+    <git-common-dir>/control of the checkout the fleet runs from. A session working from ANOTHER
+    checkout (a clone, e.g. .fire-fire, whose own .git/control is an empty private copy) must set
+    CONTROL_CTL_DIR to the ABSOLUTE path of the fleet's control dir; otherwise this checkout would
+    read/write its own empty registry and its claims would be invisible to the fleet (and vice
+    versa), silently defeating the whole claim system. The warning below exists because exactly
+    that split was hit on 2026-10-25: `control.py claims` in a clone printed nothing while four
+    workers were live in the other tree's registry."""
+    env = os.environ.get("CONTROL_CTL_DIR")
+    if env:
+        d = os.path.realpath(env)
+    else:
+        d = os.path.join(os.path.realpath(os.path.join(MAIN, git("rev-parse", "--git-common-dir"))), "control")
+        if not _CTL_WARNED and not any(os.path.exists(os.path.join(d, f)) for f in ("tasks.json", "external.json", "feed.json")):
+            _CTL_WARNED.append(1)
+            sys.stderr.write("warning: control registry %s is empty. If the fleet runs from another "
+                             "checkout, set CONTROL_CTL_DIR to that checkout's .git/control, or your "
+                             "claims will not be seen by its workers.\n" % d)
     os.makedirs(d, exist_ok=True)
     return d
 

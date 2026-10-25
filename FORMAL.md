@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (576 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (552 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **713** | `fire_runtime.h` 610, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **295** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **418** | a box crosses the boundary — in an argument, in the return, or both |
+| entry points across **11** headers | **698** | `fire_runtime.h` 595, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **285** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **413** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **295 of 713 (40.8%)** is the reachable-surface ceiling. The previous
+So **285 of 698 (40.8%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **418** non-word entry points of §2.2 are not merely unwired — they have
+So the **413** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,14 +418,14 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 418
+Under (c) alone, the formal target's containers stay frame blobs and the 413
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 418 become callable **incrementally, one entry point at a time, each with
+and the 413 become callable **incrementally, one entry point at a time, each with
 its own proof** — rather than in one change to the value model that would disturb
 a proof library which is currently **hole-free**: zero `sorry`, zero `axiom` and
 zero vacuous declarations across all five `lib/` modules, measured by
@@ -524,7 +524,7 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 295 | 295 |
+| word-shaped entry points (`runtime_abi`) | 285 | 285 |
 | …of which the runtime dylib actually **exports** | 228 | 228 |
 | …reachable with no heap handle the formal path cannot obtain | **188** | **188** |
 
@@ -546,13 +546,13 @@ was written, and not the 219 (now 285) of §2.2. The two gaps between the
 
 The two architectures agree exactly, which is the property phase 2 was for.
 
-**The twenty-two this table gained since it was first published are named, not
+**The eleven this table gained since it was first published are named, not
 counted**, because a count that moves is a row nobody can check and an export
 nobody reaches is a promise the runtime makes and the link line does not keep.
-All twenty-two are declared in `runtime/fire_runtime.h`, defined in
+All eleven are declared in `runtime/fire_runtime.h`, defined in
 `runtime/fire_runtime.c`, word-shaped, and **none of them takes a `void *`** —
 so each one landed in all three rows at once, which is why the deltas are the
-same 22 and not three different numbers:
+same 11 and not three different numbers:
 
 | entry point | signature | landed |
 |---|---|---|
@@ -568,17 +568,6 @@ same 22 and not three different numbers:
 | `mojo_str_rfind_from` | `int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_startswith_from` | `int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
-| `mojo_struct_tag_register` | `void mojo_struct_tag_register(int64_t tag)` | ″ |
-| `mojo_word_eq` | `int mojo_word_eq(int64_t a, int64_t b)` | ″ |
-| `int_normpath` | `int64_t int_normpath(int64_t marker, int64_t path)` | ″ |
-| `mojo_word_slice` | `int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)` | ″ |
-| `mojo_str_startswith_word` | `int mojo_str_startswith_word(char *s, int64_t p)` | ″ |
-| `mojo_str_endswith_word` | `int mojo_str_endswith_word(char *s, int64_t p)` | ″ |
-| `mojo_box_word` | `int64_t mojo_box_word(int64_t v)` | ″ |
-| `mojo_truthy_word` | `int mojo_truthy_word(int64_t w)` | ″ |
-| `int_samefile` | `int int_samefile(char *a, char *b)` | ″ |
-| `mojo_make_int_base` | `int64_t mojo_make_int_base(char *s, int64_t base)` | ″ |
-| `int_relpath` | `char *int_relpath(char *path, char *start)` | ″ |
 
 **The `40` gap did not move, and the `56` moved to `65`, and both are facts
 rather than coincidences**: the eleven above added no `void *` parameter, so
@@ -790,7 +779,7 @@ and made the optional units link on the gimple path ([1]: a program calling
 **The step that was still missing then has since landed, so the "0" this
 paragraph used to publish is wrong.** The formal path is now opted into the
 dylib: a formal image that names a word-shaped runtime entry point carries the
-per-architecture library on its link line, and the measured surface is **184
+per-architecture library on its link line, and the measured surface is **177
 callable entry points, identically on both architectures** (§6 phase 2 has the
 three-row table and where the other 96 go). `test_formal_runtime_link.py` is
 what measures it, and it goes further than "is not refused": it builds, links

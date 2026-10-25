@@ -51,8 +51,6 @@ from __future__ import annotations
 
 import re
 
-import mojo.middle.types as gimple_ctypes
-
 # ── the dependent-return annotation shapes (measured, closed set) ──────────
 #
 # One wrapper mention with ONE type argument, in exactly one of three forms:
@@ -283,11 +281,10 @@ def _struct_block(src: str, tname: str) -> str | None:
     column-0 line — which, once the head is consumed, is genuinely a new
     top-level statement (the measured stdlib indents docstring content, so
     no column-0 line hides inside the body's docstring)."""
-    _spans = gimple_ctypes.source_decl_spans(src, ['struct'], tname, '[', True)
-    if not _spans:
+    m = re.search(rf'^struct\s+{re.escape(tname)}\s*\[', src, re.M)
+    if not m:
         return None
-    _m_start = int(_spans[0][0])
-    i = _matching_bracket(src, int(_spans[0][1]) - 1)
+    i = _matching_bracket(src, m.end() - 1)
     if i is None:
         return None
     j = i + 1
@@ -316,10 +313,10 @@ def _struct_block(src: str, tname: str) -> str | None:
     body_start = j + 1
     eol = src.find('\n', body_start)
     if eol == -1:
-        return src[_m_start:]
+        return src[m.start():]
     nxt = re.search(r'^\S', src[eol:], re.M)
     end = eol + nxt.start() if nxt else len(src)
-    return src[_m_start:end]
+    return src[m.start():end]
 
 
 def iter_type_rhs(container_src: str, tname: str, kind: str) -> str | None:
@@ -387,15 +384,14 @@ def expand_inner(container_src: str, inner_base: str, rhs: str,
     stdlib does not write survives — a parameter left unbound with no
     default, or a `Self.` member no rule covers — and the caller then
     refuses rather than guessing."""
-    _spans = gimple_ctypes.source_decl_spans(container_src, ['struct'],
-                                             inner_base, '[', True)
-    if not _spans:
+    m = re.search(rf'^struct\s+{re.escape(inner_base)}\s*\[',
+                  container_src, re.M)
+    if not m:
         return None
-    _m_end = int(_spans[0][1])
-    close = _matching_bracket(container_src, _m_end - 1)
+    close = _matching_bracket(container_src, m.end() - 1)
     if close is None:
         return None
-    head = container_src[_m_end:close]
+    head = container_src[m.end():close]
     # Parameter NAMES in order. The `//` marker (a line of its own or inline)
     # separates the derived prefix from the explicit parameters —
     # `_ListIter[mut: Bool, //, T, origin, forward]` is called with the three
@@ -462,14 +458,13 @@ def _header_params(src: str, sname: str) -> list | None:
     `(name, default)` pairs (default is the empty string when absent), or
     None when the header is not found or its brackets do not close. The `//`
     derived-parameter separator is skipped like a parameter with no name."""
-    _spans = gimple_ctypes.source_decl_spans(src, ['struct'], sname, '[', True)
-    if not _spans:
+    m = re.search(rf'^struct\s+{re.escape(sname)}\s*\[', src, re.M)
+    if not m:
         return None
-    _m_end = int(_spans[0][1])
-    close = _matching_bracket(src, _m_end - 1)
+    close = _matching_bracket(src, m.end() - 1)
     if close is None:
         return None
-    head = src[_m_end:close]
+    head = src[m.end():close]
     out = []
     for p in _split_top_commas(head):
         p = p.strip()

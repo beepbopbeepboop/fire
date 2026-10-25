@@ -7598,76 +7598,6 @@ def main():
             print(f"PASS  {name}  ({len(paths)} modules)")
             _PASS += 1
 
-    def test_func_state_snapshot_covers_reset_func():
-        """`emit_infra.save_func_state` captures every field `_reset_func`
-        resets, and `restore_func_state` puts every one of them back.
-
-        A lambda is lifted in the middle of its enclosing function, through
-        `_reset_func`, so the parent's per-function state survives only
-        what the snapshot carries. It used to be a hand-kept list in
-        `_lower_LambdaExpr` that was meant to agree "name for name" with
-        `_reset_func` and covered ~20 of its ~70 fields; the measured loss
-        was `sorted(d.items(), key=lambda kv: kv[1])` forgetting the pair
-        record of the list it sorted, which put the self-hosted compiler's
-        string-pool registration out of order in every stage2 `.ci`. Read off
-        the SOURCE with `ast`, so a field added to `_reset_func` fails here
-        rather than in the next parent of a lambda."""
-        global _PASS, _FAIL
-        name = "func_state_snapshot_covers_reset_func"
-        import ast
-        import os as _os
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        path = _os.path.join(here, 'mojo', 'backend_gimple', 'emit_infra.py')
-        with open(path, encoding='utf-8') as f:
-            tree = ast.parse(f.read(), filename=path)
-
-        def _gen_fields(fn, want_clear):
-            out = set()
-            for s in ast.walk(fn):
-                tgts = []
-                if isinstance(s, ast.Assign):
-                    tgts = s.targets
-                elif isinstance(s, ast.AnnAssign):
-                    tgts = [s.target]
-                elif (want_clear and isinstance(s, ast.Call)
-                        and isinstance(s.func, ast.Attribute)
-                        and s.func.attr == 'clear'):
-                    tgts = [s.func.value]
-                for t in tgts:
-                    if (isinstance(t, ast.Attribute)
-                            and isinstance(t.value, ast.Name)
-                            and t.value.id == 'gen'):
-                        out.add(t.attr)
-            return out
-
-        def _st_reads(fn):
-            out = set()
-            for s in ast.walk(fn):
-                if (isinstance(s, ast.Attribute) and isinstance(s.value, ast.Name)
-                        and s.value.id == 'gen'):
-                    out.add(s.attr)
-            return out
-
-        fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-        reset = _gen_fields(fns['_reset_func'], True)
-        saved = _st_reads(fns['save_func_state'])
-        restored = _gen_fields(fns['restore_func_state'], False)
-        problems = []
-        for f in sorted(reset - saved):
-            problems.append(f"_reset_func resets gen.{f} but save_func_state "
-                            f"does not capture it")
-        for f in sorted(reset - restored):
-            problems.append(f"_reset_func resets gen.{f} but "
-                            f"restore_func_state does not put it back")
-        if problems:
-            print(f"FAIL  {name}")
-            for pr in problems:
-                print(f"      {pr}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}  ({len(reset)} fields)")
-            _PASS += 1
-
     def test_every_funcptr_initializer_has_a_definition():
         """Every `_funcptr_X = (void *)X` initializer in the output must have a
         matching `X` DEFINITION in the same file.
@@ -12526,7 +12456,6 @@ print(run('x/y.txt'))
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_no_name_is_defined_twice_in_a_codegen_class()
-    test_func_state_snapshot_covers_reset_func()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
     test_callable_return_type_survives_its_carrier()

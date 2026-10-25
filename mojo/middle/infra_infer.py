@@ -313,16 +313,10 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # unanimity contract (Pass 1.3d in module_gen.py) and by the
     # string-only-evidence rules below, so removing the entry trades a crash
     # for nothing at all.
-    #
-    # `str` removed for the same reason as `print`: `str(x)` accepts a value
-    # of any type, and inferring a 32-bit `int` from it truncated every
-    # pointer that reached such a parameter -- `_elem_ann_consider(out, tgt,
-    # ann)`, whose only use of `ann` is `str(ann)`, received the annotation
-    # string's address cut to 32 bits, and the compiled compiler recovered no
-    # GimpleGen set/list field element type at all.
     BUILTIN_PARAM_TYPES = {
         'open': 'char *',
         'mojo_open_file': 'char *',
+        'str': 'int',
     }
 
 
@@ -345,8 +339,13 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # `py_tokenize_replace_multiline_strings`, with the faulting address
     # literally spelling out the first bytes of the source file's text —
     # proof `src`'s raw string bytes were being read as a pointer.
-    # The set itself is `mojo.middle.types.is_string_only_method`'s, shared
-    # with the codegen's method dispatch on an unknown-kind receiver.
+    STRING_ONLY_METHODS = {
+        'find', 'rfind', 'startswith', 'endswith', 'strip', 'lstrip',
+        'rstrip', 'split', 'rsplit', 'splitlines', 'replace', 'lower',
+        'upper', 'format', 'isalnum', 'isdigit', 'isspace', 'isupper',
+        'islower', 'isalpha', 'zfill', 'capitalize', 'title', 'join',
+        'partition', 'rpartition', 'swapcase', 'expandtabs', 'casefold',
+    }
 
     # Methods that exist ONLY on Python dict (never on list/set), so a
     # `param.method(...)` call using one of these unambiguously identifies
@@ -862,7 +861,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # comment above: unambiguous evidence param is a string,
                     # even if it's also subscripted elsewhere.
                     if (_efunc_obj_name == param_name
-                            and gimple_ctypes.is_string_only_method(_efunc.member)):
+                            and _efunc.member in STRING_ONLY_METHODS):
                         _F['is_string_method'] = True
                     # param.<bytes-only-method>(...) — unambiguous "param is
                     # bytes" (see BYTES_ONLY_METHODS).
@@ -877,7 +876,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     if (_meth_recv is not _efunc_obj
                             and isinstance(_meth_recv, gimple_ctypes.IdentExpr)
                             and _as_ident_node(_meth_recv).name == param_name
-                            and gimple_ctypes.is_string_only_method(_efunc.member)):
+                            and _efunc.member in STRING_ONLY_METHODS):
                         _F['is_string_method'] = True
                     # param.<dict-only-method>(...) — same unambiguous
                     # "param is a dict" evidence (see DICT_ONLY_METHODS).
@@ -2477,61 +2476,6 @@ def _prepass_list_elem(gen, elements) -> str | None:
         types.append(le if le is not None else gen._quick_type(e))
     return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
 
-def opaque_container_locals(body: list) -> set:
-    """The locals of `body` bound (anywhere in it, closures included) to a
-    value that is NOT a container display (`{...}`/`[...]`/`{a, b}`) or
-    `None`: a copy of an untyped dict (`dict(info or {})`), a call result, a
-    parameter, an attribute read.
-
-    Such a container's EXISTING contents are of a kind nothing recorded, so
-    one `d[k] = <str>` store into it is not evidence about its other values.
-    Both value-type recorders -- this pre-pass's `d[k] = v` arm and the
-    codegen-time store in `_gen_stmt_AssignStmt` -- used to treat it as
-    such, and a later `d.get(k2)` was then read through the `char *`
-    accessor: `funcs_shared.register_imported_symbol`'s
-    `_info = dict(info or {}); _info['original_name'] = _orig` made every
-    `_info.get('c_parameters')` a string, and the compiled compiler iterated
-    the LIST's header bytes as characters (five garbage parameter types for a
-    zero-parameter import)."""
-    out: set = set()
-
-    def walk(stmts):
-        for n in (stmts or []):
-            if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
-                _v = n.value
-                if not (isinstance(_v, (gimple_ctypes.DictExpr, gimple_ctypes.ListExpr,
-                                        gimple_ctypes.SetExpr, gimple_ctypes.NoneLiteral))
-                        or (isinstance(_v, gimple_ctypes.IdentExpr) and _v.name == 'None')):
-                    out.add(_as_str(n.target.name))
-            if isinstance(n, gimple_ctypes.IfStmt):
-                walk(n.then_body)
-                if isinstance(n.else_body, list):
-                    walk(n.else_body)
-                for _cond, _eb in (n.elifs or []):
-                    walk(_eb)
-            elif isinstance(n, gimple_ctypes.TryStmt):
-                walk(n.body)
-                for _h in (n.handlers or []):
-                    _hb = getattr(_h, 'body', None)
-                    if isinstance(_hb, list):
-                        walk(_hb)
-                if isinstance(n.else_body, list):
-                    walk(n.else_body)
-                if isinstance(n.finally_body, list):
-                    walk(n.finally_body)
-            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt,
-                                gimple_ctypes.WithStmt, gimple_ctypes.FunctionDef)):
-                _b = getattr(n, 'body', None)
-                if isinstance(_b, list):
-                    walk(_b)
-                _eb2 = getattr(n, 'else_body', None)
-                if isinstance(_eb2, list):
-                    walk(_eb2)
-
-    walk(body)
-    return out
-
-
 def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
     """Best-effort static element-type map for local containers in a body.
 
@@ -2568,9 +2512,6 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
     elem: dict[str, str] = {}
     nested: dict[str, str] = {}
     dict_val: dict[str, str] = {}
-    # See `opaque_container_locals`: a store into one of these is not
-    # evidence about the dict's other values.
-    _opaque = opaque_container_locals(body)
 
     def note_list_literal(v: str, lit: gimple_ctypes.ListExpr):
         _e = gen._infer_list_elem_type(lit.elements)
@@ -2643,7 +2584,7 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
                 v = n.target.obj.name
                 vt = gen._quick_type(n.value)
-                if v not in _opaque and vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
                            or vt.endswith(' *')):
                     dict_val.setdefault(v, vt)
                     # `lst[i] = <float>` is a LIST store when the key is
@@ -2965,17 +2906,10 @@ def _bound_names_in(x, out: set) -> None:
         _bound_names_in(x.elements, out)
 
 def _int_dict_scan(node, ok: set, other: set) -> None:
-    """Every node under `node` through `_walk_ast`, not a recursion over
-    `node.__dict__.values()`: the compiled compiler has no instance
-    `__dict__`, so there the scan saw the function node alone and no local
-    was ever int-keyed (`_generator_fns: dict[int, FunctionDef]` iterated its
-    keys as strings)."""
-    for _n in gimple_exprtypes._walk_ast(node):
-        _int_dict_note(_n, ok, other)
-
-
-def _int_dict_note(node, ok: set, other: set) -> None:
-    """`_int_dict_scan`'s per-node half: what ONE node binds."""
+    if isinstance(node, (list, tuple)):
+        for e in node:
+            _int_dict_scan(e, ok, other)
+        return
     if isinstance(node, VarDecl):
         if ',' not in node.name and _is_int_keyed_dict_annotation(node.type_ann):
             ok.add(node.name)
@@ -3008,6 +2942,11 @@ def _int_dict_note(node, ok: set, other: set) -> None:
     elif hasattr(node, 'handlers'):
         for h in node.handlers:
             _bound_names_in(h.name, other)
+    if not hasattr(node, '__dict__'):
+        return
+    for v in node.__dict__.values():
+        if isinstance(v, (list, tuple)) or hasattr(v, '__dict__'):
+            _int_dict_scan(v, ok, other)
 
 def _compute_int_keyed_dicts(fn) -> set:
     """The locals/params of `fn` that are provably `Dict[Int, V]`: every place

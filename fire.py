@@ -357,9 +357,8 @@ def _sorry_note(result) -> str:
     n = result.get("proof_sorries")
     if not n:
         return ""
-    n_str = str(n)
-    sorry_str = "  [{n_str} declaration(s) ADMITTED a sorry - the file typechecks,"                 + " it is not a proof]"
-    return sorry_str
+    return (f"  [{n} declaration(s) ADMITTED a sorry — the file typechecks, "
+            f"it is not a proof]")
 
 
 def _trust_note(result) -> str:
@@ -393,15 +392,14 @@ def _trust_note(result) -> str:
     lines = []
     for c in admitted:
         if c.get("error"):
-            lines.append(f"  {c.get('name')} - COULD NOT BE READ: {c['error']}")
+            lines.append(f"  {c.get('name')} — COULD NOT BE READ: {c['error']}")
         elif c.get("assumes"):
-            lines.append(f"  {c.get('name')} - assumes of the host: {c['assumes']}")
+            lines.append(f"  {c['name']} — assumes of the host: {c['assumes']}")
         else:
-            src = c.get("source") or "unknown"
-            ln = c.get("line") if c.get("line") else 0
-            lines.append("  %s - (no assumption text; see %s:%d)" % (c.get("name"), src, ln))
-    head = ("trust: " + str(len(admitted)) + " admitted host contract(s) - a claim of "
-            "trust, not a proof:")
+            lines.append(f"  {c['name']} — (no assumption text; see "
+                         f"{c.get('source')}:{c.get('line')})")
+    head = (f"trust: {len(admitted)} admitted host contract(s) — a claim of "
+            f"trust, not a proof:")
     return "\n".join([head] + lines)
 
 
@@ -498,17 +496,13 @@ def _contract_note(result: dict, checked: bool) -> str:
         extra = ""
         if "counterexample_inputs" in e:
             extra = f" at {e['counterexample_inputs']}"
-            lines.append("  %s %s %s" % (head, extra, e.get("why", "")))
+        lines.append(f"  {head}{extra} — {e['why']}")
     # The mode line is DERIVED from the entries, not from the flag alone.  A
     # flag says what was asked for and the entries say what was done, and on
     # the library path the two differ -- `dylib --formal --check-contracts`
     # checks at run time and emits no theorem -- so a line derived from the flag
     # would claim "and in the proof" for a path that wrote none.
-    partial = False
-    for _e in entries:
-        if _e.get("status") == "not-applicable":
-            partial = True
-            break
+    partial = any(e.get("status") == "not-applicable" for e in entries)
     if not checked:
         mode = ("NOT checked in the image; pass --check-contracts for that, "
                 "which also makes a REFUTED one fail the build. The search "
@@ -557,18 +551,21 @@ def _loop_note(result: dict, checked: bool) -> str:
             bits.append("no decreasing affine variant")
         if r.get("precondition"):
             bits.append(f"precondition `{r['precondition']}`")
-        joined = "; ".join(bits)
         closed = len(r.get("discharged") or [])
         total = len(r.get("obligations") or [])
-        lines.append("  %s - %s; %d/%d obligation(s) closed by the ladder" % (head, joined, closed, total))
+        lines.append(f"  {head} — {'; '.join(bits)}; {closed}/{total} "
+                     f"obligation(s) closed by the ladder")
         for ob in r.get("obligations") or []:
             if ob["status"] != "proved":
-                lines.append("      %s - %s: %s" % (ob.get("status", "").upper(), ob.get("name"), ob.get("detail")))
-    if checked:
-        mode = "discharged with the ladder"
-    else:
-        mode = "SYNTHESISED only - pass --loop-invariants to discharge the obligations with the ladder, which costs one lean run per source. Every status below is UNKNOWN until then, and UNKNOWN is not a pass"
-    return "loop invariants: %d loop(s) (%s):\n" % (len(rows), mode) + "\n" + "\n".join(lines)
+                lines.append(f"      {ob['status'].upper()} {ob['role']} "
+                             f"{ob['name']}: {ob['detail']}")
+    mode = ("discharged with the ladder"
+            if checked else
+            "SYNTHESISED only — pass --loop-invariants to discharge the "
+            "obligations with the ladder, which costs one lean run per source. "
+            "Every status below is UNKNOWN until then, and UNKNOWN is not a pass")
+    return (f"loop invariants: {len(rows)} loop(s) ({mode}):\n"
+            + "\n".join(lines))
 
 
 def _formal_run_argv(path: str, arch: str) -> list:
@@ -1020,7 +1017,7 @@ def build_executable(input_file: str, src: str, output: str = None,
         else:
             c_code = gimple_codegen.compile_to_gimple_cached(
                 src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-        ci_file = basename + ".ci"
+        ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
 
@@ -1359,7 +1356,8 @@ def main():
         dylib_output = _pop_flag_value(sys.argv, '-o')
         dylib_inputs = sys.argv[1:]
         if formal_test_input is not None:
-            print("%s dylib --formal: -n does not apply - a dylib has no entry stub to pass an argument to" % _tool_name(), file=sys.stderr)
+            print(f"{_tool_name()} dylib --formal: -n does not apply — a dylib "
+                  "has no entry stub to pass an argument to", file=sys.stderr)
             sys.exit(2)
         if not dylib_inputs:
             print(f"{_tool_name()} dylib: at least one .mojo file is required",
@@ -1549,21 +1547,30 @@ def main():
         if backend == 'arm64':
             # arm64 formal backend: no gimple .ci artifact. Emit a small
             # listing so callers still get a backend-specific .ci-shaped file.
-            stmts = _parse_arm64_module(src, input_file)
-            funcs = [s.name for s in stmts if type(s).__name__ == 'FunctionDef']
-            with open(basename + ".ci", "w") as f:
-                f.write(f"# arm64 backend dump-full\n")
-                func_str = ", ".join(funcs) if funcs else "(none)"
-                f.write("# functions: " + func_str + "\n")
-            print("✓ Generated " + basename + ".ci (arm64 backend listing)", file=sys.stderr)
+            try:
+                stmts = _parse_arm64_module(src, input_file)
+                funcs = [s.name for s in stmts if type(s).__name__ == 'FunctionDef']
+                with open(f"{basename}.ci", "w") as f:
+                    f.write(f"# arm64 backend dump-full\n")
+                    f.write(f"# functions: {', '.join(funcs) if funcs else '(none)'}\n")
+                print(f"✓ Generated {basename}.ci (arm64 backend listing)",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"Error generating --dump-full (arm64): {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
             return
-        import gimple_codegen
-        c_code = gimple_codegen.compile_to_gimple(
-            src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-        f_out = open(basename + ".ci", "w")
-        f_out.write(c_code)
-        f_out.close()
-        print("✓ Generated " + basename + ".ci (transitive closure)", file=sys.stderr)
+        try:
+            import gimple_codegen
+            c_code = gimple_codegen.compile_to_gimple(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            with open(f"{basename}.ci", "w") as f:
+                f.write(c_code)
+            print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
+        except Exception as e:
+            print(f"Error generating --dump-full: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
@@ -1598,8 +1605,8 @@ def main():
                 from fire_compiler import py_tokenize
                 tokens = py_tokenize(src)
             except Exception as e:
-                print("Warning: Could not generate .tok: " + str(e), file=sys.stderr)
-                print("Warning: Could not generate .ast: " + str(e), file=sys.stderr)
+                print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
+                print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
                 any_failed = True
                 tokens = None
 
@@ -1610,19 +1617,19 @@ def main():
                     # `tok.kind` as the string it is).
                     from fire_compiler import format_token
                     formatted = [format_token(t) for t in tokens]
-                    with open(basename + ".tok", "w") as f:
+                    with open(f"{basename}.tok", "w") as f:
                         f.write("[" + ", ".join(formatted) + "]")
                 except Exception as e:
-                    print("Warning: Could not generate .tok: " + str(e), file=sys.stderr)
+                    print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
                     any_failed = True
 
                 try:
                     from fire_compiler import Parser
                     ast = Parser(tokens).with_filename(input_file).parse_module()
-                    with open(basename + ".ast", "w") as f:
+                    with open(f"{basename}.ast", "w") as f:
                         f.write(repr(ast))
                 except Exception as e:
-                    print("Warning: Could not generate .ast: " + str(e), file=sys.stderr)
+                    print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
                     any_failed = True
 
             # Generate C intermediate (with transitive imports)
@@ -1636,32 +1643,31 @@ def main():
                         src, do_imports=False, filename=input_file,
                         auto_gpu=auto_gpu)
                 except Exception as e:
-                    print("compile_to_gimple failed: " + str(e), file=sys.stderr)
+                    print(f"compile_to_gimple failed: {e}", file=sys.stderr)
                     import traceback; traceback.print_exc(file=sys.stderr)
                     c_code = ''
                     any_failed = True
-                with open(basename + ".ci", "w") as f:
+                with open(f"{basename}.ci", "w") as f:
                     f.write(c_code)
             else:
                 # arm64 formal backend: .ci is a small function listing, not C.
                 try:
                     stmts = _parse_arm64_module(src, input_file)
                     funcs = [s.name for s in stmts if type(s).__name__ == 'FunctionDef']
-                    with open(basename + ".ci", "w") as f:
+                    with open(f"{basename}.ci", "w") as f:
                         f.write(f"# arm64 backend dump\n")
-                        func_str = ", ".join(funcs) if funcs else "(none)"
-                    f.write("# functions: " + func_str + "\n")
+                        f.write(f"# functions: {', '.join(funcs) if funcs else '(none)'}\n")
                 except Exception as e:
-                    print("arm64 .ci generation failed: " + str(e), file=sys.stderr)
+                    print(f"arm64 .ci generation failed: {e}", file=sys.stderr)
                     import traceback; traceback.print_exc(file=sys.stderr)
                     any_failed = True
 
             # Generate Python interface stub
-            with open(basename + ".pyi", "w") as f:
-                f.write("# Type stubs for " + basename + "\n")
+            with open(f"{basename}.pyi", "w") as f:
+                f.write(f"# Type stubs for {basename}\n")
 
         except Exception as e:
-            print("Error generating dump files: " + str(e), file=sys.stderr)
+            print(f"Error generating dump files: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
             any_failed = True

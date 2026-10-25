@@ -199,7 +199,7 @@ class RewriteRule:
 # dispatch. Only covers the node classes any *pattern* actually references
 # today (P.ident/member/call/subscript/binop) — extend this list when a new
 # pattern constructor needs to match on a node type not listed here.
-def _node_type_name(node: object):
+def _node_type_name(node):
     if isinstance(node, IdentExpr):
         return 'IdentExpr'
     if isinstance(node, MemberExpr):
@@ -238,9 +238,7 @@ _NODE_TYPE_CODES = {
 }
 
 
-def _node_type_code(node: object):
-    # `node: object` -- any value; see `match_pattern`'s `term` for why the
-    # annotation and not call-site inference must say so.
+def _node_type_code(node):
     if isinstance(node, IdentExpr):
         return _NODE_TYPE_IDENT
     if isinstance(node, MemberExpr):
@@ -345,14 +343,7 @@ def _match_node_fields(fields, term, bindings):
     return bindings
 
 
-def match_pattern(pat, term: object, bindings):
-    # `term: object` -- it IS any AST value (a node, a string, an int, None,
-    # a list), and saying so is what keeps the self-hosted backend from
-    # inferring one kind from its call sites: unannotated, the string a
-    # `_match_one_field` caller passes made it `char *`, and every
-    # `isinstance(term, <node>)` below then folded to False, so no rule ever
-    # matched in the compiled compiler. An `object` parameter is an
-    # unknown-kind word there, so `term == pat.value` compares values.
+def match_pattern(pat, term, bindings):
     if bindings is None:
         return None
     if isinstance(pat, Var):
@@ -378,20 +369,28 @@ def match_pattern(pat, term: object, bindings):
             return None
         return _match_node_fields(pat.fields, term, bindings)
     if isinstance(pat, Seq):
-        # `term` is an `object` word (see the parameter's note), so the
-        # runtime's registry answers `isinstance(term, list)` and the typed
-        # view `_as_list` is then sound -- every list operation below reads
-        # it, not the word.
-        if not isinstance(term, list):
-            return None
-        _tl = _as_list(term)
-        if len(_tl) < len(pat.items):
+        # NOTE (still open, see selfhost-dump-full-module-drop.md):
+        # `match_pattern`'s own `term` parameter is shared across every
+        # call site in this file (dataclass nodes, strings, ints, None,
+        # lists, ...), and self-hosted whole-program parameter-type
+        # unification pulled its declared ctype down to the common
+        # int64_t -- so `isinstance(term, list)` here reads false even
+        # for a genuinely-real list argument (confirmed: a one-element
+        # `args` list). Forcing it with `_as_list(term)` instead of
+        # checking crashed with a real Bus error (SIGBUS) rather than
+        # just mismatching -- the erased int64_t bits are apparently NOT
+        # a valid MojoList* to begin with, so this needs the real
+        # underlying `getattr`/list-field dispatch fixed, not just a
+        # static-view cast at this point of use. Left as a safe,
+        # non-matching `isinstance` check (falls through to the pattern
+        # not matching, same as before) rather than risk a crash.
+        if not isinstance(term, list) or len(term) < len(pat.items):
             return None
         for i in range(len(pat.items)):
-            bindings = match_pattern(pat.items[i], _tl[i], bindings)
+            bindings = match_pattern(pat.items[i], term[i], bindings)
             if bindings is None:
                 return None
-        rest = _tl[len(pat.items):]
+        rest = term[len(pat.items):]
         if pat.tail is None:
             if len(rest) == 0:
                 return bindings
@@ -504,13 +503,6 @@ def _term_discriminator(term, path) -> list:
     (os.environ.get(...), sys.stdin.read(), subprocess.run(...), ...).
     A list return, like this codebase's other `_as_X`-cast fixes for
     multi-return-path functions, keeps element types intact."""
-    # The walk holds NODES; the final hop's value -- a node, or a leaf
-    # string/int -- gets its OWN local (`leaf`). One local for both used to
-    # make the compiled `node` a `char *` (an `_as_str` assignment joined
-    # with the node it started as), which typed `_node_type_code`'s parameter
-    # `char *` from this call site and folded every `isinstance(node, <AST
-    # node>)` in it to False -- so the self-hosted compiler's pattern matcher
-    # never recognised a node and no rewrite rule ever fired.
     node = term
     _last_i = len(path) - 1
     for _pi in range(len(path)):
@@ -519,17 +511,27 @@ def _term_discriminator(term, path) -> list:
             return ['MISS', '']
         if not hasattr(node, fname):
             return ['MISS', '']
+        # `_as_str` on ONLY the final hop's result, not every hop: an
+        # intermediate hop's result must stay a real (dataclass-checkable)
+        # struct pointer for the NEXT loop iteration's `dataclasses.
+        # is_dataclass(node)` test, but the LAST hop, when it lands on a
+        # scalar field (IdentExpr.name, MemberExpr.member, ...), goes
+        # through the same generic/dynamic `getattr` dispatch as every
+        # other boxed field read in this codebase — its result needs the
+        # explicit static-view cast right here, at the point of the
+        # `getattr` call itself, the same way `discs[_di][n]`-style
+        # element extraction needed it (a later `isinstance(node, str)`
+        # check on the ALREADY-erased value did not recover it: e.g.
+        # IdentExpr.name == "os" printed as a decimal address even after
+        # that isinstance guard).
         if _pi == _last_i:
-            leaf = getattr(node, fname)
-            if dataclasses.is_dataclass(leaf):
-                return ['TYPE', str(_node_type_code(leaf))]
-            # `str()` of an untyped attribute read is the runtime's own
-            # string-or-int answer in the compiled compiler, and `str` of a
-            # str is itself under CPython.
-            return ['LIT', str(leaf)]
-        node = getattr(node, fname)
+            node = _as_str(getattr(node, fname))
+        else:
+            node = getattr(node, fname)
     if dataclasses.is_dataclass(node):
         return ['TYPE', str(_node_type_code(node))]
+    if isinstance(node, str):
+        return ['LIT', node]
     return ['LIT', str(node)]
 
 

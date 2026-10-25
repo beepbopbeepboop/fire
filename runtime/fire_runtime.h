@@ -637,11 +637,6 @@ int mojo_boxed_is_str(int64_t v);
  * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
  * .c for the discriminator this feeds. */
 void mojo_str_register(char *s);
-/* A codegen-emitted struct type tag (see `_reg_struct_tag`): struct handles
- * are never strings to `mojo_boxed_is_str`. */
-void mojo_struct_tag_register(int64_t tag);
-/* `==` between two words of unknown kind (see the definition). */
-int mojo_word_eq(int64_t a, int64_t b);
 int mojo_is_registered_dict(int64_t addr);
 /* Set-shaped sibling of the list/dict registries — see mojo_set_new. */
 int mojo_is_registered_set(int64_t addr);
@@ -727,13 +722,6 @@ char *mojo_list_repr_elem(MojoList *l, int64_t v);
 #define MOJO_KIND_STR     'p'
 #define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
 #define MOJO_KIND_NONE    'n'
-#define MOJO_KIND_OBJ     'o'   /* an OBJECT word: a local that may hold None
-                                 * or any handle (`default = None`, later maybe
-                                 * a node). The value model spells that None
-                                 * as the NULL word, so the NULL word renders
-                                 * as None; any other word is read exactly as
-                                 * an 'i' slot is (the int accessor, the
-                                 * caller's own dispatch for a handle). */
 #define MOJO_KIND_BOOL    'b'   /* a Python bool, 0/1 — the SAME
                                  * int64_t as MOJO_KIND_INT, so only the byte
                                  * separates them. Neither `TypeLattice.
@@ -756,18 +744,6 @@ int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
-/* The box's OWN word for every kind that has one — a str/bytes/list box gives
- * back its pointer, a None box the NULL word that IS None in this value model,
- * an int/bool box its integer — and the box itself, unchanged, for a float
- * (which has no int64_t spelling) or for anything that is not a box. What a
- * possibly-boxed slot read becomes when it is BOUND to a name: a local that
- * kept the box answered `is None` false for a None slot and handed every
- * consumer the box's address instead of the value. */
-int64_t     mojo_box_word(int64_t v);
-/* Python truthiness of a word whose kind only the runtime knows (an
- * unannotated parameter, an untyped attribute read): an empty container or
- * string is false, None is false, 0 is false, anything else is true. */
-int         mojo_truthy_word(int64_t w);
 char       *mojo_repr_boxed(int64_t v);
 /* `id(x)`, as the integer CPython says it is: an interned box holding the
  * word, so every classifier here reads the token as an integer rather than as
@@ -863,9 +839,6 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
-/* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
- * value, decided by the value itself. See the definition. */
-int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
@@ -890,10 +863,6 @@ double      mojo_str_to_float(MojoStr *s);
  * the whole source against a one-character prefix. */
 int mojo_str_startswith(char *s, char *prefix);
 int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop);
-/* `s.startswith(p)` / `s.endswith(p)` where `p` is a WORD: a tuple of
- * strings (any of them matches) or a string. See the definitions. */
-int mojo_str_startswith_word(char *s, int64_t p);
-int mojo_str_endswith_word(char *s, int64_t p);
 int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_endswith_from(char *s, char *suffix, int64_t start, int64_t stop);
 int64_t mojo_str_find(char *s, char *needle);
@@ -1503,14 +1472,6 @@ void        mojo_module_not_compiled(char *module, char *member);
  * fires when the template is a string LITERAL in the source; this covers
  * the real-world remainder — templates read from data/parameters
  * (`text % dict(prog=...)`, `readme % textvars`). */
-/* `tmpl.format(*args, **kwargs)`: `args` / `kwargs` hold WORDS (an int, a
- * string pointer, or a value the caller already rendered to a string).
- * See the definition for the replacement-field subset. */
-char       *mojo_str_format_words(char *tmpl, MojoList *args, MojoDict *kwargs);
-/* `tmpl.format(*xs)`: append every element of `src` to `dst` as such a word
- * -- an int or a string slot as itself, any other kind rendered with str()
- * from its slot kind, which the list still knows. */
-void        mojo_format_words_extend(MojoList *dst, MojoList *src);
 char       *mojo_str_format_dict(char *fmt, MojoDict *vals,
                                     char *(*dict_str)(MojoDict *));
 /* `dict_str` is how an UNKEYED spec renders the mapping. CPython's rule is
@@ -1637,13 +1598,6 @@ MojoSet *mojo_set_copy(MojoSet *s);
 void     mojo_set_update(MojoSet *dst, MojoSet *src);
 void     mojo_set_discard_int(MojoSet *s, int64_t v);
 void     mojo_set_discard_str(MojoSet *s, char *v);
-/* A WORD of unknown kind (an `int64_t` the codegen could not type: a
- * value read out of a heterogeneous dict, an untyped loop variable). A
- * word that is soundly a string (`mojo_boxed_is_str`) is the string's own
- * element; anything else is the int element. See the definitions. */
-void     mojo_set_add_word(MojoSet *s, int64_t w);
-int      mojo_set_contains_word(MojoSet *s, int64_t w);
-void     mojo_set_discard_word(MojoSet *s, int64_t w);
 
 int64_t *mojo_set_order_indices(MojoSet *s);
 
@@ -1879,11 +1833,6 @@ void *mojo_make_dict(void);
 void *mojo_make_set(void);
 void *mojo_make_tuple(void);
 int64_t mojo_make_int(char *s);
-/* `int(s, base)`: CPython's parse of a str in an explicit base (2..36, or 0
- * for "read the prefix like a literal") -- surrounding whitespace, one sign,
- * single underscores between digits, and the base's own optional 0x/0o/0b
- * prefix. Anything else raises a catchable ValueError with CPython's text. */
-int64_t mojo_make_int_base(char *s, int64_t base);
 double mojo_make_float(char *s);
 int mojo_make_bool(int val);
 double mojo_div_double(double a, double b);
@@ -2159,7 +2108,6 @@ char *int64_t_basename(char *path);    /* basename() from os.path */
 char *int64_t_splitext(char *path);    /* splitext() from os.path */
 char *int64_t_expanduser(char *path);  /* expanduser() from os.path */
 char *int64_t_realpath(char *path);    /* Path.resolve()-style realpath (strict=False) */
-int int_samefile(char *a, char *b);    /* os.path.samefile: same st_dev/st_ino; raises when a path cannot be stat'ed */
 int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 /* str.replace() — macro to suppress implicit int/pointer conversion warnings */
 #define char_replace(s, old, new) _char_replace_impl((int64_t)(s), (int64_t)(old), (int64_t)(new))
@@ -2199,7 +2147,6 @@ int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
 int int_isfile(int64_t marker, int64_t path);          /* os.path.isfile */
 int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
 int64_t int_normpath(int64_t marker, int64_t path);    /* os.path.normpath */
-char *int_relpath(char *path, char *start);            /* os.path.relpath (start NULL = cwd) */
 int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
 int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */

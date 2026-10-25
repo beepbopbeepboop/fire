@@ -27,10 +27,10 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
+    py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node, _as_int,
     desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
-from module_loader import load_module, get_symbol_type, compiler_source_dir
+from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import ownership_check
 import mlir
@@ -196,7 +196,6 @@ _RUNTIME_FUNCS: dict[str, str] = {
     # set
     'mojo_set_new':               'MojoSet *',
     'mojo_set_contains_int':      'int',
-    'mojo_set_contains_word':     'int',
     'mojo_set_contains_str':      'int',
     'mojo_set_add_bytes':         'void',
     'mojo_set_contains_bytes':    'int',
@@ -416,17 +415,7 @@ from mojo.middle.exprtypes import (
 )
 
 
-# `compiler_source_dir` (module_loader), not `dirname(abspath(__file__))`:
-# the self-hosted binary's `__file__` is `<bootstrap>`, and the bare form
-# answered the process CWD, so every compiler-source decision keyed on this
-# directory (the self-host struct layouts, the GimpleGen function index) said
-# "not compiler source" when `stage2/mojo` ran from `stage2/`. See there.
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
-if __file__ == '<bootstrap>':
-    # The `os.path` spelling above is what the self-host global tables
-    # recognise as a path-string global (module_shared's
-    # `_selfhost_modglobal_is_pathcall`); the correction is a reassignment.
-    _SELFHOST_DIR = compiler_source_dir(__file__)
 
 
 def _selfhost_impl_py_files(sd: str) -> list[str]:
@@ -676,10 +665,7 @@ def _selfhost_syms():
 # check-selfhost's own compile of this file's `_AMBIGUOUS_FUNC_HOME =
 # object()` tried to lower it as a call to an undefined C symbol `_object`,
 # per this project's "self-host every codegen-affecting change" gate).
-# `\x1f`-delimited, never NUL: the compiled compiler's literal for a
-# NUL-led string is the EMPTY string, which then compared equal to every
-# unset qualifier.
-_AMBIGUOUS_FUNC_HOME = '\x1f__SB1_AMBIGUOUS_FUNC_HOME__\x1f'
+_AMBIGUOUS_FUNC_HOME = '\x00__SB1_AMBIGUOUS_FUNC_HOME__\x00'
 
 # Matches a literal `sys.path.insert(<int>, "<string>")` / `(..., '...')` call
 # in Mojo source text. This compiler never executes anything, so a runtime
@@ -905,11 +891,7 @@ class GimpleGen:
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
-        # `set[str]`, not a bare `set`: the self-hosted compiler adds words
-        # read out of heterogeneous dicts (`m['body_name']` in coro.register)
-        # and asks `name in` with a `char *`; only a typed field puts both
-        # under the string tag.
-        self._extra_no_mangle: set[str] = set(no_mangle)
+        self._extra_no_mangle: set = set(no_mangle)
         # (struct name, method name) pairs that are OVERLOADED in this compile —
         # declared more than once on one struct. The UNSUFFIXED C symbol for
         # such a pair is defined by NEITHER overload (each carries a hash of its
@@ -1645,13 +1627,6 @@ class GimpleGen:
         # slot types to a call site EMITTED LATER, which a per-function
         # reset would erase between the two.
         self._return_slot_types: dict[str, list] = {}
-        # Callee key -> per-slot C types its `-> tuple[...]` ANNOTATION
-        # states; see funcs_shared.record_annotated_tuple_slots. Module scope
-        # for the same reason as `_return_slot_types`.
-        self._return_ann_slot_types: dict[str, list] = {}
-        # The protected regions (`try` / `with` bodies) whose exits rewrite
-        # emitted lines; see emit_infra.EmitFrame.
-        self._emit_frames: list = []
         # Device kernels this module offloaded, and their MSL. Filled by
         # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
         # the very end of the module; module scope because the MSL is only
@@ -1841,12 +1816,7 @@ class GimpleGen:
         # inner dict's value type fell back to a generic default and the
         # write lowered as `mojo_list_set_int`, SIGBUS. Confirmed via lldb.
         self._class_attrs: dict[str, dict[str, str]] = {}
-        # Nested-annotated for the same reason as `_class_attrs` just above:
-        # bare `dict` left the inner value kind unknown, so the compiled
-        # compiler read `self._func_attrs[fn][attr]` through
-        # `mojo_list_get_int` on the inner DICT and SIGSEGV'd emitting the
-        # `_funcattr_` decls for jit/arm64.py's `_toolchain_id._cached`.
-        self._func_attrs: dict[str, dict[str, str]] = {}
+        self._func_attrs: dict = {}
         self._emitted_funcattr_decls: set = set()
         self._class_attr_inits: list = []
         # Set when a `type(x).__name__` call was actually lowered (see
@@ -2886,9 +2856,6 @@ class GimpleGen:
         self._selfhost_gimplegen_extra_fields: dict[str, str] = {}
         self._selfhost_gimplegen_sigs = None
         self._selfhost_gimplegen_dict_vts: dict = {}
-        # field -> the ELEMENT annotation of a `set[X]` / `list[X]` field
-        # (see emit_funcs._selfhost_gimplegen_elem_anns).
-        self._selfhost_gimplegen_elem_anns: dict[str, str] = {}
         self._selfhost_gimplegen_registered = False
         self._selfhost_src_dir = ""
         # Imported struct local name -> its home module's C-symbol qualifier
@@ -3281,7 +3248,6 @@ class GimpleGen:
         '_mojo_dispatch_fields':     ('MojoList *', ['void *']),
         '_mojo_dispatch_asdict':     ('MojoDict *', ['void *']),
         '_mojo_dispatch_is_dataclass': ('int',     ['void *']),
-        '_mojo_dispatch_shallow_copy': ('int64_t', ['void *']),
         '_mojo_dispatch_repr':       ('char *',    ['void *']),
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
@@ -3294,8 +3260,6 @@ class GimpleGen:
         'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_box_double':           ('double',    ['int64_t']),
         'mojo_box_int':              ('int64_t',   ['int64_t']),
-        'mojo_box_word':             ('int64_t',   ['int64_t']),
-        'mojo_truthy_word':          ('int',       ['int64_t']),
         'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
@@ -3428,8 +3392,6 @@ class GimpleGen:
         'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
         'int64_t_expanduser':    ('char *',    ['char *']),  # os.path.expanduser(path)
         'int64_t_realpath':      ('char *',    ['char *']),  # os.path.realpath(path)
-        'int_samefile':          ('int',       ['char *', 'char *']),  # os.path.samefile(a, b)
-        'int_relpath':           ('char *',    ['char *', 'char *']),  # os.path.relpath(p, start)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
         'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)
@@ -3495,13 +3457,6 @@ class GimpleGen:
         'mojo_set_new':          ('MojoSet *', []),
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
-        'mojo_set_add_word':     ('void',      ['MojoSet *', 'int64_t']),
-        'mojo_word_slice':       ('int64_t',   ['int64_t', 'int64_t', 'int64_t']),
-        'mojo_str_format_words': ('char *',    ['char *', 'MojoList *', 'MojoDict *']),
-        'mojo_str_startswith_word': ('int',    ['char *', 'int64_t']),
-        'mojo_str_endswith_word': ('int',      ['char *', 'int64_t']),
-        'mojo_set_contains_word': ('int',      ['MojoSet *', 'int64_t']),
-        'mojo_set_discard_word': ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
         'mojo_set_contains_bytes': ('int',      ['MojoSet *', 'MojoBytes *']),
         'mojo_set_clear':        ('void',      ['MojoSet *']),
@@ -4360,25 +4315,6 @@ class GimpleGen:
     def _lower_builtin_dir(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dir(self, node)
 
-    def _lower_call_args(self, args: list) -> list:
-        # A delegate so the struct-method and overload-candidate argument
-        # builders (emit_methods, mojo/middle/calls_shared) expand `*t` the
-        # same way `_lower_named_call` does, without a module-qualified call
-        # across the emit_* import cycle.
-        return ggc.lower_call_args(self, args)
-
-    def _is_dyn_word(self, node, val: str) -> bool:
-        # A delegate for the same import-cycle reason as the one below.
-        return ggc._is_dyn_word_operand(self, node, val)
-
-    def _resolve_container_kind(self, at: str, av: str) -> tuple[str, str]:
-        # A delegate, not a `ggc.` call from emit_exprs: emit_exprs and
-        # emit_calls import each other, and a module-qualified call across
-        # that cycle is a weak "unavailable in compiled mode" stub in the
-        # self-hosted binary (it returned 0 and every BinaryOp result type
-        # came out as the empty string).
-        return ggc._resolve_container_kind(self, at, av)
-
     def _lower_builtin_sorted(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_sorted(self, node)
 
@@ -4991,19 +4927,14 @@ class GimpleGen:
         return gst._gen_stmt_AssertStmt(self, node)
     def _gen_stmt_RaiseStmt(self, node):
         return gst._gen_stmt_RaiseStmt(self, node)
-    def _handler_exc_name(self, h) -> str:
+    def _handler_exc_name(self, h):
         return gst._handler_exc_name(self, h)
     def _handler_exc_all_names(self, h):
         return gst._handler_exc_all_names(self, h)
-    def _handler_bind_name(self, h) -> str:
+    def _handler_bind_name(self, h):
         return gst._handler_bind_name(self, h)
     def _emit_except_handler(self, handler, node, bb_after: str):
         return gst._emit_except_handler(self, handler, node, bb_after)
-    def _with_emit_exits(self, ex_ts: list, ex_vs: list, ex_sns: list,
-                         ex_gbases: list, ex_gvs: list) -> None:
-        # A delegate: emit_infra's frame emitter runs a `with` frame's
-        # teardown, and emit_infra/emit_stmts import each other.
-        return gst._with_emit_exits(self, ex_ts, ex_vs, ex_sns, ex_gbases, ex_gvs)
     def _loop_continue_bb(self) -> str:
         return gst._loop_continue_bb(self)
     def _loop_break_bb(self) -> str:
@@ -5413,18 +5344,18 @@ class GimpleGen:
         return ginf._elaborate_overload_call(self, node)
     def _maybe_lower_mlir_op(self, node: CallExpr):
         return ginf._maybe_lower_mlir_op(self, node)
-    def _compr_range_loop(self, node, gen0, res: str, res_type: str):
+    def _compr_range_loop(self, node, gen0, res, res_type):
         return ginf._compr_range_loop(self, node, gen0, res, res_type)
-    def _compr_list_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_list_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_list_loop(self, node, gen0, res, res_type, it_val)
 
-    def _compr_cursor_loop(self, node, gen0, res: str, res_type: str, rec):
+    def _compr_cursor_loop(self, node, gen0, res, res_type, rec):
         return ginf._compr_cursor_loop(self, node, gen0, res, res_type, rec)
-    def _compr_generator_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_generator_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_generator_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_dict_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_dict_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_dict_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_set_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_set_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
@@ -5480,8 +5411,6 @@ class GimpleGen:
         return ggc._lower_next_iter_cursor(self, node, rec, args)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
-    def _eval_const_bool_state(self, node) -> int:
-        return ginf._eval_const_bool_state(self, node)
     def _eval_const_bool(self, node) -> bool | None:
         return ginf._eval_const_bool(self, node)
     def _split_top_level_comma(self, s: str) -> list[str]:
@@ -5597,12 +5526,11 @@ class GimpleGen:
         return grsl._is_none_literal(el)
     def _literal_elements_include_none(self, elements: list) -> bool:
         return grsl._literal_elements_include_none(self, elements)
-    def _compr_enumerate_loop(self, node, gen0, res: str, res_type: str, it_val: str,
-                              start_val: str | None):
+    def _compr_enumerate_loop(self, node, gen0, res, res_type, it_val, start_val):
         return grsl._compr_enumerate_loop(self, node, gen0, res, res_type, it_val, start_val)
-    def _compr_str_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_str_loop(self, node, gen0, res, res_type, it_val):
         return grsl._compr_str_loop(self, node, gen0, res, res_type, it_val)
-    def _compr_cstr_loop(self, node, gen0, res: str, res_type: str, it_val: str):
+    def _compr_cstr_loop(self, node, gen0, res, res_type, it_val):
         return grsl._compr_cstr_loop(self, node, gen0, res, res_type, it_val)
     def _gen_compr_append(self, node: Comprehension, gen0, res: str, res_type: str, bb_skip: str):
         return grsl._gen_compr_append(self, node, gen0, res, res_type, bb_skip)
@@ -5686,7 +5614,6 @@ def _selfhost_register_gimplegen(gen):
         gfn._selfhost_gimplegen_field_types(_cls, gen._selfhost_src_dir or None)
     gen._selfhost_gimplegen_sigs = gfn._selfhost_gimplegen_frozen_sigs(gen, _cls)
     gen._selfhost_gimplegen_dict_vts = gfn._selfhost_gimplegen_dict_val_types(_cls)
-    gen._selfhost_gimplegen_elem_anns = gfn._selfhost_gimplegen_elem_anns(_cls)
     # Seed `struct_field_types['GimpleGen']` from the extracted-helper field
     # scan HERE, unconditionally, exactly once (this function itself only
     # runs once per top-level compile) — NOT inside `gen_module_impl`'s

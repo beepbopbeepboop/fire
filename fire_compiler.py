@@ -707,12 +707,7 @@ class FunctionDef:
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
-    # `repr=False`: its members are `id()`s -- addresses, different on every
-    # run and meaningless in the compiled compiler -- so a `.ast` dump that
-    # printed them could never equal another run's, let alone the self-hosted
-    # binary's. The compiled repr skips it too (module_gen's
-    # `_REPR_HIDDEN_FIELDS`).
-    yield_bearing_node_ids: object = field(default=None, repr=False)  # frozenset of id() of every statement/expression
+    yield_bearing_node_ids: object = None  # frozenset of id() of every statement/expression
         # node in this function's own body (same nested-scope exclusion as is_generator)
         # whose subtree contains a YieldExpr/YieldFromExpr. None for non-generator functions.
         # Lets a later milestone's generator-execution pass cheaply ask "does this specific
@@ -2983,24 +2978,7 @@ def _inline_safe_outer_iterable(node, module_names: set, rebound_module: set) ->
     if isinstance(node, IdentExpr):
         return node.name in module_names and node.name not in rebound_module
     if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
-        # The ARGUMENTS have to be inline-safe too: they are what the
-        # hoisted body re-evaluates, and the free names of the outermost
-        # iterable are not captured (see `desugar`). `enumerate(params)` over
-        # an enclosing LOCAL `params` was inlined with `params` unbound in
-        # the hoisted function -- a 0 the generator then iterated as empty
-        # (the self-hosted compiler's coroutine trampolines lost every
-        # start-function parameter that way).
-        if node.func.name not in _PURE_ITER_CALLS:
-            return False
-        for _a in node.args:
-            if not _inline_safe_outer_iterable(_a, module_names, rebound_module):
-                return False
-        for _kw in (node.kwargs or []):
-            if not _inline_safe_outer_iterable(_kw[1], module_names, rebound_module):
-                return False
-        return True
-    if isinstance(node, (IntLiteral, FloatLiteral, BoolLiteral, NoneLiteral)):
-        return True
+        return node.func.name in _PURE_ITER_CALLS
     return False
 
 
@@ -3031,15 +3009,7 @@ def genexp_body(expr, outer_iterable) -> list:
         iterable = gen.iterable
         if i == 0:
             iterable = outer_iterable
-        # A comprehension clause spells a tuple target bare (`i, ct`); a
-        # `for` statement spells it parenthesised (`(i, ct)`), and that is
-        # the form every `for` lowering reads -- the enumerate one took the
-        # bare spelling for ONE name `i, ct` and left both targets unbound.
-        target = gen.target
-        if (isinstance(target, str) and for_target_is_tuple(target)
-                and _target_group_inner(target.strip()) is None):
-            target = '(' + target.strip() + ')'
-        body = [ForStmt(target=target, iterable=iterable, body=inner,
+        body = [ForStmt(target=gen.target, iterable=iterable, body=inner,
                         else_body=None, is_async=False,
                         line=gen.line, col=gen.col)]
         i = i - 1
@@ -3302,20 +3272,9 @@ class _GenexpDesugarer:
         typed_param = ''
         if isinstance(outer, IdentExpr) and fn_params:
             typed_param = _container_annotation(fn_params.get(outer.name))
-        # A pure iterable-building call over names of the ENCLOSING scope
-        # (`enumerate(params)`, `zip(a, b)`): the call is inlined like any
-        # inline-safe outer iterable, and the names it reads are captured
-        # as parameters like every other free name -- the value is bound
-        # when the generator is created, which is when Python evaluates the
-        # outermost iterable.
-        capture_outer = False
         if not typed_param and not _inline_safe_outer_iterable(
                 outer, self.module_names, self.rebound_module):
-            if (isinstance(outer, CallExpr) and isinstance(outer.func, IdentExpr)
-                    and outer.func.name in _PURE_ITER_CALLS):
-                capture_outer = True
-            else:
-                return node
+            return node
 
         bound: set = set()
         for gen in gens:
@@ -3333,10 +3292,6 @@ class _GenexpDesugarer:
                 _collect_free_names(gen.iterable, bound, free)
             for cond in gen.conditions:
                 _collect_free_names(cond, bound, free)
-        if capture_outer:
-            # Evaluated OUTSIDE the generator's own bindings: its loop
-            # targets do not shadow names in it.
-            _collect_free_names(outer, set(), free)
 
         captures: list = []
         rebound: list = []
@@ -5284,21 +5239,12 @@ class Parser:
             return UnaryOp(op="*", operand=self._parse_unary())
         return self._parse_postfix()
 
-    def _parse_subscript_item(self) -> object:
+    def _parse_subscript_item(self):
         """Parse one subscript element: a slice (`start:stop:step`, every part
         optional) or a plain expression. Slices are returned as a SliceExpr with
         obj=None (the caller attaches the object); plain indices are returned as
         the bare expression node. Used for both 1-D and multi-dim (`a[0:2, ::]`)
-        indexing.
-
-        `-> object` because that is what it returns: a function-type index
-        comes back as the annotation STRING `_parse_type_ann` produced, every
-        other item as an AST node. Unannotated, the compiled path joined the
-        returns to `char *` (the string absorbs every other pointer in the
-        return-type lattice), so the caller's `items` list was a list of
-        strings and its `isinstance(only, SliceExpr)` folded to False: every
-        `x[a:b]` the self-hosted binary parsed stayed a `SubscriptExpr` around
-        a bare slice (the stage1-vs-stage2 `.ast` divergence)."""
+        indexing."""
         start = None
         if self._peek().kind != "COLON":
             # A FUNCTION TYPE in index position: `unsafe_bitcast[def(*a: *T)
@@ -5309,14 +5255,7 @@ class Parser:
             # `(*a: *T)` annotation colon is not an expression at all, so the
             # expression parse died on it before the ARROW handling below could
             # ever run.
-            # Only when a parameter list follows: `fn` is an ordinary NAME in
-            # Python source, and `found[fn] = ft` (module_shared's struct-field
-            # scan) parsed its index as the annotation string "fn" -- the
-            # store then lowered with no key at all, and every class whose
-            # fields come from `self.x = ...` got one field named `0` in the
-            # self-hosted binary.
-            if (self._peek().kind == "KW" and self._peek().value in ("def", "fn")
-                    and self._peek(1).kind == "LPAREN"):
+            if self._peek().kind == "KW" and self._peek().value in ("def", "fn"):
                 start = self._parse_type_ann()
                 self._skip_fn_quals()
                 if self._peek().kind == "ARROW":

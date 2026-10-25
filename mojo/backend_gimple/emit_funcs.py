@@ -738,22 +738,20 @@ def _gen_stmt_FromImportStmt(gen, node):
 
 
 def _gen_stmt_ComptimeIfStmt(gen, node):
-    # The int tri-state, not `_eval_const_bool`'s `bool | None`: compiled, the
-    # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
-    val = gen._eval_const_bool_state(node.condition)
-    if val == 1:
+    val = gen._eval_const_bool(node.condition)
+    if val is True:
         for s in node.then_body:
             gen.gen_stmt(s)
         return
-    if val == 0:
+    if val is False:
         # Try each elif branch before falling to else
         for elif_cond, elif_body in (getattr(node, 'elifs', None) or []):
-            elif_val = gen._eval_const_bool_state(elif_cond)
-            if elif_val == 1:
+            elif_val = gen._eval_const_bool(elif_cond)
+            if elif_val is True:
                 for s in elif_body:
                     gen.gen_stmt(s)
                 return
-            if elif_val == 0:
+            if elif_val is False:
                 continue
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)
@@ -1461,55 +1459,6 @@ def _dvt_consider(_out, _tgt, _ann):
 
 
 
-def _elem_ann_consider(out: dict, tgt, ann) -> None:
-    """One `set[X]` / `list[X]` field annotation into `out` (field -> `X`)."""
-    fname = None
-    if (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
-            and tgt.obj.name == 'self'):
-        fname = _as_str(tgt.member)
-    elif isinstance(tgt, IdentExpr):
-        fname = _as_str(tgt.name)
-    if fname is None or fname in out or ann is None:
-        return
-    a = _as_str(str(ann)).strip()
-    lb = a.find('[')
-    if lb <= 0 or not a.endswith(']'):
-        return
-    head = a[:lb].strip()
-    if head not in ('set', 'Set', 'frozenset', 'list', 'List'):
-        return
-    inner = a[lb + 1:-1].strip()
-    if inner == '' or ',' in inner:
-        return
-    out[fname] = inner
-
-
-def _selfhost_gimplegen_elem_anns(gg_cls) -> dict:
-    """`{field_name: element_annotation}` for every `class GimpleGen` field
-    annotated `set[X]` / `list[X]` -- the element-type half of what
-    `_selfhost_gimplegen_dict_val_types` recovers for dicts, for the same
-    reason: a nested temp_gen compiling a backend module never sees `class
-    GimpleGen`'s StructDef, so `gen.<field>` read there carried no element
-    type, and `gen._extra_no_mangle.add(m['body_name'])` put a string word
-    under the INT tag where `name in gen._extra_no_mangle` (a `char *`
-    probe) could never find it -- every generator body the self-hosted
-    compiler emitted was then overload-mangled under a name its trampoline
-    does not call."""
-    out: dict = {}
-    if gg_cls is None:
-        return out
-    for _fld in getattr(gg_cls, 'fields', []):
-        if isinstance(_fld, AssignStmt):
-            _elem_ann_consider(out, _fld.target, getattr(_fld, 'type_ann', None))
-        elif isinstance(_fld, VarDecl) and _fld.name:
-            _elem_ann_consider(out, IdentExpr(_fld.name), getattr(_fld, 'type_ann', None))
-    for _m in getattr(gg_cls, 'methods', []):
-        for _n in gimple_exprtypes._walk_ast(_m.body):
-            if isinstance(_n, AssignStmt) and getattr(_n, 'type_ann', None):
-                _elem_ann_consider(out, _n.target, str(_n.type_ann))
-    return out
-
-
 def _selfhost_gimplegen_dict_val_types(gg_cls) -> dict:
     """`{field_name: (outer_val_ctype, nested_val_ctype_or_None, raw_ann)}` for every
     `class GimpleGen` instance/class field annotated `dict[K, V]` (or
@@ -1751,16 +1700,8 @@ def overload_suffix_for(c_param_types) -> str:
     codegen. The 6 hex digits are built with `chr()` (a per-digit 1-char
     string) rather than indexing a hex-alphabet string — compiled char*
     subscription yields the byte's integer value, not a 1-char string."""
-    if not c_param_types:
+    if not c_param_types or any('...' in p for p in c_param_types):
         return ''
-    # An explicit loop over `_as_str` views, not `any(<genexp>)`: the
-    # elements are type strings read out of an untyped list, and the compiled
-    # compiler answered the generator form False for a variadic `...`
-    # signature, so it suffixed `_mojo_iota` (`*args`) where the reference
-    # compiler left it bare -- a different symbol for the same definition.
-    for _cpt in c_param_types:
-        if '...' in _as_str(_cpt):
-            return ''
     # Hand-rolled polynomial hash over the joined string's bytes — same
     # `while i < n` + `if isinstance(c, str): c = ord(c)` shape as
     # `_struct_type_id`. Neither hashlib.md5 NOR zlib.crc32 is available in
@@ -1817,7 +1758,7 @@ def dup_def_signature_key(fn) -> tuple:
     return (tuple(key), tuple(getattr(fn, 'comptime_params', None) or ()))
 
 
-def _local_def_pts(gen, bare_name: str) -> list | None:
+def _local_def_pts(gen, bare_name: str):
     """BUG-2026-019 helper: THIS compile unit's own ctypes for `bare_name`,
     resolved lazily from the module's own FunctionDef node (see gen_module's
     seeding comment for why lazily — struct-typed params need the struct
@@ -2055,7 +1996,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str) -> list | None:
+def _imported_def_pts(gen, bare_name: str):
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2144,7 +2085,7 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     return None
 
 
-def _effective_param_types(gen, bare_name: str) -> list | None:
+def _effective_param_types(gen, bare_name: str):
     """The parameter ctypes a reference to `bare_name` in THIS compile unit
     must honor — the single source of truth for BOTH halves of a mangled
     free-function symbol: `_overload_suffix` hashes this list, and
@@ -3444,7 +3385,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     # (Elaborator.elaborate_generic_struct) this narrow, non-generic-only
     # materialization deliberately doesn't attempt to replace.
     _imp_path0, _imp_src0, _imp_mod0 = gen._parsed_import(module)
-    if _imp_src0 and gimple_ctypes.source_declares(_imp_src0, ['struct'], nm, '['):
+    if _imp_src0 and gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(nm)}\s*\[', _imp_src0):
         return False
     # Fixed-size-array fields (`var x: [ElemType; N]`, BUG-2026-008's own
     # shape) need the SAME "ElemCtype[N]" marker string the own-module
@@ -3995,7 +3936,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
                 continue
             if st.name in gen._imported_generic_structs or st.name in gen.struct_field_types:
                 continue
-            if not gimple_ctypes.source_declares(_own_src, ['struct'], st.name, '['):
+            if not gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(st.name)}\s*\[', _own_src):
                 continue
             gen._imported_generic_structs.setdefault(st.name, gen._current_filename)
 

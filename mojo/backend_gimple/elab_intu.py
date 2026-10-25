@@ -136,52 +136,28 @@ _IN_TU_ITER_BODIES = ('_ListIter', '_ListIterOwned', '_TakeIterator',
 
 # ── small AST helpers ──────────────────────────────────────────────────────
 
-def _children(n) -> list:
-    """Every AST value reachable from `n` one level down, without the Nones.
-
-    Plain loops into a list, not a generator expression: this module is in
-    the self-host closure, whose compiled subset has no generators -- the
-    `tuple(getattr(n, f.name) for f in dataclasses.fields(n))` spelling lost
-    the `fields()` loop's name tracking there and read `.name` off a field
-    NAME (an AttributeError). Until `isinstance(n, int)` asked the runtime,
-    that never ran, because every node in the untyped `n` answered `int` and
-    the compiled walk saw no children at all."""
-    out: list = []
-    if n is None or isinstance(n, (str, int, float, bool)):
-        return out
+def _children(n):
+    """Every AST value reachable from `n` one level down."""
+    if isinstance(n, (str, int, float, bool)) or n is None:
+        return ()
     if isinstance(n, (list, tuple)):
-        for x in n:
-            if x is not None:
-                out.append(x)
-        return out
+        return tuple(x for x in n if x is not None)
     if dataclasses.is_dataclass(n) and not isinstance(n, type):
-        for f in dataclasses.fields(n):
-            v = getattr(n, f.name, None)
-            if v is not None:
-                out.append(v)
-        return out
+        return tuple(getattr(n, f.name, None) for f in dataclasses.fields(n))
     d = getattr(n, '__dict__', None)
     if isinstance(d, dict):
-        for v in d.values():
-            if v is not None:
-                out.append(v)
-    return out
+        return tuple(d.values())
+    return ()
 
 
 def _walk(nodes, visit):
     """Depth-first, iterative, over every node reachable from `nodes`."""
-    stack: list = []
-    if isinstance(nodes, (list, tuple)):
-        for n0 in nodes:
-            if n0 is not None:
-                stack.append(n0)
-    elif nodes is not None:
-        stack.append(nodes)
-    while len(stack) > 0:
+    stack = [n for n in (nodes if isinstance(nodes, (list, tuple)) else [nodes])
+             if n is not None]
+    while stack:
         n = stack.pop()
         visit(n)
-        for c in _children(n):
-            stack.append(c)
+        stack.extend(c for c in _children(n) if c is not None)
 
 
 def _get(holder, attr):
@@ -841,7 +817,8 @@ def _container_home(gen, tname):
             path, src, _m = gen._parsed_import(cand)
         except Exception:
             continue
-        if path and src and gimple_ctypes.source_declares(src, ['struct'], tname, '['):
+        if path and src and re.search(
+                r'\bstruct\s+' + re.escape(tname) + r'\s*\[', src):
             return path, src
     return None, None
 
@@ -947,8 +924,7 @@ def _collect_locals(node, out):
             nm = getattr(n, 'name', None)
             if nm and nm not in out:
                 out[nm] = n
-        for c in _children(n):
-            stack.append(c)
+        stack.extend(c for c in _children(n) if c is not None)
 
 
 def _walk_scoped(stmts, visit):
@@ -2851,7 +2827,7 @@ def _register_named(gen, src_path, names):
     except OSError:
         return
     for n in todo:
-        if gimple_ctypes.source_declares(text, ['struct'], n, '[:'):
+        if re.search(rf'\bstruct\s+{re.escape(n)}\s*[\[:]', text):
             gen._imported_generic_structs.setdefault(n, src_path)
 
 

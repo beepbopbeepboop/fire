@@ -25,28 +25,6 @@ _C_KEYWORDS = frozenset({
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def compiler_source_dir(module_file: str) -> str:
-    """The directory holding this compiler's own source, for the module whose
-    `__file__` is `module_file`.
-
-    Under CPython that is simply the module's directory. The self-hosted
-    binary has no source location of its own -- `__file__` is the
-    `<bootstrap>` placeholder in every compiled module, so `dirname(abspath(
-    __file__))` answers the process CWD, and every "is this the compiler's
-    own source?" decision then depended on where the binary was run (the
-    bootstrap stages run it from `stage2/`/`stage3/`). `MOJO_HOME` is the
-    project root every runner of the binary names; it is honoured there and
-    only there, and the CWD answer stands when it is unset. ONE function, so
-    `gimple_codegen._SELFHOST_DIR` and this module's own gate cannot
-    disagree."""
-    _d = os.path.dirname(os.path.abspath(module_file))
-    if module_file == '<bootstrap>':
-        _mh = os.environ.get('MOJO_HOME', '')
-        if _mh:
-            _d = os.path.abspath(_mh)
-    return _d
-
-
 def _ml_parse_var_global(text: str) -> list:
     """`[name, annotation, rhs]` for a top-level `var NAME[: ANN][= RHS]` line
     (already stripped), or `[]` when the line is not that shape.
@@ -94,160 +72,6 @@ def _ml_parse_var_global(text: str) -> list:
     elif rest != '':
         return []
     return [name, ann, rhs]
-
-
-def _ml_is_space(c) -> bool:
-    """`c` is one of the characters a regex `\\s` matches in this compiler's
-    own sources."""
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\f' or c == '\v'
-
-
-def _ml_ident_end(text: str, i: int) -> int:
-    """The end of the identifier starting at `i` (`[A-Za-z_][A-Za-z0-9_]*`),
-    or `i` itself when none starts there."""
-    n = len(text)
-    if i < n and (text[i].isalpha() or text[i] == '_'):
-        j = i + 1
-        while j < n and (text[j].isalnum() or text[j] == '_'):
-            j += 1
-        return j
-    return i
-
-
-def _ml_set_global_name(line: str) -> str:
-    """NAME for a column-0 `NAME = frozenset(...)` / `NAME = set(...)` line,
-    else '' -- what `^NAME\\s*=\\s*(?:frozenset|set)\\s*\\(` matched."""
-    k = _ml_ident_end(line, 0)
-    if k == 0:
-        return ''
-    n = len(line)
-    j = k
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    if j >= n or line[j] != '=':
-        return ''
-    j += 1
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    if line.startswith('frozenset', j):
-        j += 9
-    elif line.startswith('set', j):
-        j += 3
-    else:
-        return ''
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    if j < n and line[j] == '(':
-        return line[:k]
-    return ''
-
-
-def _ml_ann_char(c) -> bool:
-    """`c` may continue a container-global annotation (`[\\w.\\[\\], ]`)."""
-    return c.isalnum() or c == '_' or c == '.' or c == '[' or c == ']' or c == ',' or c == ' '
-
-
-def _ml_container_global(line: str) -> list[str]:
-    """`[name, annotation, opener]` for a column-0 `NAME[: ANN] = {` or `= [`
-    line, else `[]` -- what `^NAME\\s*(?::\\s*ANN)?\\s*=\\s*([\\{\\[])` matched,
-    ANN being `[A-Za-z_][\\w.\\[\\], ]*` (returned stripped)."""
-    k = _ml_ident_end(line, 0)
-    if k == 0:
-        return []
-    n = len(line)
-    j = k
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    ann: str = ''
-    if j < n and line[j] == ':':
-        j += 1
-        while j < n and _ml_is_space(line[j]):
-            j += 1
-        a0 = j
-        if not (j < n and (line[j].isalpha() or line[j] == '_')):
-            return []
-        while j < n and _ml_ann_char(line[j]):
-            j += 1
-        ann = line[a0:j].strip()
-        while j < n and _ml_is_space(line[j]):
-            j += 1
-    if j >= n or line[j] != '=':
-        return []
-    j += 1
-    while j < n and _ml_is_space(line[j]):
-        j += 1
-    out: list[str] = []
-    if j < n and (line[j] == '{' or line[j] == '['):
-        # Built by appends into a `list[str]`, not returned as a 3-element
-        # display: per-slot types inferred off the display disagreed with
-        # the annotation's element type between the two compilers.
-        out.append(line[:k])
-        out.append(ann)
-        out.append(line[j:j + 1])
-    return out
-
-
-def _ml_from_imports(content: str) -> list[str]:
-    """`[module, names_blob, module, names_blob, ...]` for every column-0
-    `from MOD import (a, b)` (the blob is what the parentheses hold, which may
-    span lines), followed by every column-0 `from MOD import a, b` (the rest of
-    the line, which may not contain `(`) -- the two `re.MULTILINE` scans this
-    replaced, in the same order."""
-    out_paren: list = []
-    out_plain: list = []
-    n = len(content)
-    pos = 0
-    while pos < n:
-        eol = content.find('\n', pos)
-        if eol < 0:
-            eol = n
-        if content.startswith('from', pos):
-            j = pos + 4
-            j0 = j
-            while j < n and _ml_is_space(content[j]):
-                j += 1
-            m0 = j
-            if j > j0 and j < n and (content[j].isalpha() or content[j] == '_'):
-                while j < n and (content[j].isalnum() or content[j] == '_' or content[j] == '.'):
-                    j += 1
-                mod = content[m0:j]
-                j1 = j
-                while j < n and _ml_is_space(content[j]):
-                    j += 1
-                if j > j1 and content.startswith('import', j):
-                    j += 6
-                    j2 = j
-                    while j < n and _ml_is_space(content[j]):
-                        j += 1
-                    if j > j2 and j < n:
-                        if content[j] == '(':
-                            close = content.find(')', j + 1)
-                            if close >= 0:
-                                out_paren.append(mod)
-                                out_paren.append(content[j + 1:close])
-                        elif j < eol:
-                            blob = content[j:eol]
-                            if blob.find('(') < 0:
-                                out_plain.append(mod)
-                                out_plain.append(blob)
-        pos = eol + 1
-    return out_paren + out_plain
-
-
-def _ml_idents(text: str) -> list[str]:
-    """Every `[A-Za-z_][A-Za-z0-9_]*` in `text`, in order."""
-    out: list = []
-    n = len(text)
-    i = 0
-    while i < n:
-        c = text[i]
-        if c.isalpha() or c == '_':
-            j = _ml_ident_end(text, i)
-            out.append(text[i:j])
-            i = j
-        else:
-            i += 1
-    return out
 
 
 def _ml_number_kind(s: str) -> int:
@@ -879,7 +703,7 @@ class ModuleLoader:
             # int64_t extern here would CONFLICT with, so they are left out
             # (they weren't the crash and their undeclared->0 fallback, while
             # imprecise, is not a hard failure).
-            _selfhost_dir = compiler_source_dir(__file__)
+            _selfhost_dir = os.path.dirname(os.path.abspath(__file__))
             # STILL OPEN (see bugs/CODEGEN_selfhost_actual_types_identifier_
             # field_key.md's "module_loader.py" section for the full trail):
             # the original `os.path.dirname(os.path.abspath(path)) ==
@@ -949,10 +773,13 @@ class ModuleLoader:
             except OSError:
                 _selfhost_gate = False
             if path.endswith('.py') and _selfhost_gate:
+                import re as _re_py
                 _pydir = os.path.dirname(path)
                 # `NAME = frozenset(...)` / `set(...)` -> boxed int64_t accessor
                 # (Phase 1.7 doesn't classify a `frozenset(...)` CALL, so the
                 # home emits an int64_t accessor and this extern must match).
+                _SET_GLOBAL_RE = _re_py.compile(
+                    r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:frozenset|set)\s*\(')
                 # `NAME: set = {...}` / `NAME = {x, ...}` / `NAME: dict = {...}`
                 # / `NAME = {k: v}` / `NAME: list = [...]` / `NAME = [...]` — a
                 # container LITERAL global. The home compile's Phase 1.7 gives
@@ -975,33 +802,26 @@ class ModuleLoader:
                 # 'gimple_codegen__mojo_global_get__RUNTIME_FUNCS'`.
                 _scan_container_literals = (
                     os.path.basename(path) == 'generated_dispatch.py')
+                _CONTAINER_GLOBAL_RE = _re_py.compile(
+                    r'^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][\w.\[\], ]*?))?\s*=\s*([\{\[])')
                 _local_set_globals = set()
                 for _line in content.split('\n'):
                     if not _line or _line[0] in ' \t#':
                         continue
                     _ls = _line.rstrip()
-                    # Plain scanners (`_ml_set_global_name`,
-                    # `_ml_container_global`, `_ml_from_imports`,
-                    # `_ml_idents`), not the `import re as _re_py` patterns
-                    # they replace: the self-hosted compiler runs no regex
-                    # through a function-local alias, so this whole block
-                    # raised there and every generated_dispatch table
-                    # global (`_BIN_OPS`, ...) went unexported.
-                    _sgn = _ml_set_global_name(_ls)
-                    if _sgn and _sgn not in exports:
-                        _local_set_globals.add(_sgn)
-                        exports[_sgn] = {
+                    _m = _SET_GLOBAL_RE.match(_ls)
+                    if _m and _m.group(1) not in exports:
+                        _local_set_globals.add(_m.group(1))
+                        exports[_m.group(1)] = {
                             'kind': 'global_var', 'c_return_type': 'int64_t',
                             'home_module_path': path}
                         continue
                     if not _scan_container_literals:
                         continue
-                    _cm = _ml_container_global(_ls)
-                    if not _cm or _cm[0] in exports:
+                    _cm = _CONTAINER_GLOBAL_RE.match(_ls)
+                    if not _cm or _cm.group(1) in exports:
                         continue
-                    _nm = _ml_as_str(_cm[0])
-                    _ann = _ml_as_str(_cm[1])
-                    _open = _ml_as_str(_cm[2])
+                    _nm, _ann, _open = _cm.group(1), (_cm.group(2) or '').strip(), _cm.group(3)
                     _annb = _ann.split('[', 1)[0].strip().lower()
                     if _annb in ('dict', 'mapping'):
                         _crt = 'MojoDict *'
@@ -1037,15 +857,17 @@ class ModuleLoader:
                 # Re-exports: `from SIBLING import (a, b)` — a set global not
                 # defined locally but surfaced through this module carries the
                 # sibling's own home accessor.
-                _reexp = _ml_from_imports(content)
-                for _rxi in range(0, len(_reexp) - 1, 2):
-                    _srcmod = _ml_as_str(_reexp[_rxi])
-                    _names_blob = _ml_as_str(_reexp[_rxi + 1])
+                _reexp = _re_py.findall(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+\(([^)]*)\)',
+                    content, _re_py.MULTILINE)
+                _reexp += [(m.group(1), m.group(2)) for m in _re_py.finditer(
+                    r'^from\s+([A-Za-z_][\w.]*)\s+import\s+([^\n(]+)$', content, _re_py.MULTILINE)]
+                for _srcmod, _names_blob in _reexp:
                     _sib = os.path.join(_pydir, _srcmod.split('.')[-1] + '.py')
                     if not os.path.isfile(_sib) or _sib == path:
                         continue
                     _sib_exp = self.load_module_from_path(_sib)
-                    for _nm in _ml_idents(_names_blob):
+                    for _nm in _re_py.findall(r'[A-Za-z_][A-Za-z0-9_]*', _names_blob):
                         _si = _sib_exp.get(_nm)
                         if (isinstance(_si, dict) and _si.get('kind') == 'global_var'
                                 and _si.get('c_return_type') in (
@@ -1374,4 +1196,3 @@ def load_module_from_path(path: str) -> dict:
 def get_symbol_type(module_name: str, symbol_name: str) -> str:
     """Get the inferred type of an imported symbol."""
     return _module_loader.get_symbol_type(module_name, symbol_name)
-

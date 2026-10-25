@@ -1226,28 +1226,6 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # A slot read that may be a BOX (`mojo_list_get_boxed`: `v = t[1]` off
-        # a tuple whose kinds are only known at run time) is unwrapped when it
-        # is bound to a name. The temp is tracked in `_boxed_vals`; the local
-        # is not, so a local that kept the box answered `v is None` false for
-        # a None slot (the box is a non-NULL heap cell) and handed every later
-        # consumer the box's address. The compiled compiler did exactly that
-        # in `_mojo_classattr_init`'s `v = _cfd[1]` (`_class_field_decl`'s
-        # `(name, None)`), dropping every no-initializer container class
-        # attribute the reference emits. `mojo_box_word` keeps a float box (no
-        # int64_t spelling) and returns every other kind's own word, so the
-        # local is a word of unknown kind -- which is what `_dyn_word_locals`
-        # records, so its `str()`/`==` ask the runtime.
-        if vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
-            _bw = gen._new_temp('int64_t')
-            gen._emit(f'  {_bw} = mojo_box_word ({v});')
-            v = _bw
-            gen._dyn_word_vals.add(v)
-        # A word of unknown kind bound to a local makes the LOCAL one too
-        # (`leaf = getattr(node, fname)`): its later `str()` / `==` have to ask
-        # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
-        if v in gen._dyn_word_vals:
-            gen._dyn_word_locals.add(_as_str(tname))
         # Rebinding a genexp-materialised local to a non-genexp value (the
         # RHS was just lowered above, still seeing the list-typed window)
         # ends that window — later reads use the slot's own declared type.
@@ -1570,16 +1548,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # name, and a tuple built from it records a str kind (whose null
             # word reprs as None) instead of an int kind (which reprs the same
             # word as `0`).
-            #
-            # `str | None` / `Optional[str]` say the same thing and are the
-            # spelling a None-initialised accumulator naturally carries
-            # (`acc_val: str | None = None` in the `%`-format and f-string
-            # lowerings, whose slot the pre-pass otherwise joined to the
-            # int64_t box and the compiled compiler then formatted as a
-            # decimal address into `mojo_str_cat (<addr>, ...)`).
-            _ann_s = _as_str(getattr(node, 'type_ann', None))
-            if ((_ann_s in ('str', 'String')
-                    or (_ann_s and gimple_ctypes._mojo_type(_ann_s) == 'char *'))
+            if (_as_str(getattr(node, 'type_ann', None)) in ('str', 'String')
                     and (isinstance(node.value, gimple_ctypes.NoneLiteral)
                          or (isinstance(node.value, gimple_ctypes.IdentExpr)
                              and node.value.name == 'None'))):
@@ -2014,9 +1983,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                    or vtype.endswith(' *'))
-                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
+            if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *') or vtype.endswith(' *'):
                 gen._dict_val_types[obj_v] = vtype
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
@@ -2934,19 +2901,6 @@ def _ensure_bool_cond(gen, ctype: str, val: str) -> str:
         gen._emit(f"  {zero} = (int64_t)0;")
         gen._emit(f"  {b} = {ip} != {zero};")
         return b
-    if ctype == 'int64_t' and (
-            val in gen._dyn_word_vals or val in gen._dyn_word_locals
-            or val in getattr(gen, '_cur_untyped_params', ())):
-        # A word of unknown kind: Python truthiness depends on WHAT it is (an
-        # empty container or string is false, None is false, 0 is false), and
-        # only the runtime knows. `word != 0` called every empty `{}`/`[]`/""
-        # true -- the compiled compiler's `if _sib_qualifier and not
-        # sym_info:` never fired for an import its exports did not name, and
-        # it emitted `extern int64_t NonlocalStmt (...)` for a class.
-        n = gen._call_expr('int', 'mojo_truthy_word', [('int64_t', val)])
-        b = gen._new_temp('_Bool')
-        gen._emit(f"  {b} = {n} != 0;")
-        return b
     if ctype == 'int64_t':
         # PART 6 (2026-10-22, family C): a temp holding a READ of a tagged
         # Optional field tests the is_some side-band, not the raw word —
@@ -3582,19 +3536,6 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             pass  # complex multi-assign target: no-op
 
 
-def _range_neg_one():
-    """`-1` as `UnaryOp('-', IntLiteral(1))`, NOT `IntLiteral(-1)`:
-    `_gen_for_range` special-cases the UnaryOp form for a negative step, and a
-    bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
-    expression before '-' token")."""
-    return gimple_ctypes.UnaryOp('-', gimple_ctypes.IntLiteral(1))
-
-
-def _range_minus_one(e):
-    """`e - 1`, for `reversed(range(...))`'s rewritten bounds."""
-    return gimple_ctypes.BinaryOp('-', e, gimple_ctypes.IntLiteral(1))
-
-
 def _gen_stmt_ForStmt(gen, node):
     # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
     # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
@@ -3631,19 +3572,22 @@ def _gen_stmt_ForStmt(gen, node):
             and isinstance(_riter.args[0].func, gimple_ctypes.IdentExpr)
             and _riter.args[0].func.name == 'range'):
         _rng = _riter.args[0]
-        # Module-level builders, not `_IL = gimple_ctypes.IntLiteral` aliases
-        # called from lambdas: a CLASS bound to a local is a value the
-        # compiled path does not model (`_IL` lowered to 0, so the lambdas
-        # called address 0), and whether such a lambda captured the alias at
-        # all differed between the reference and the compiled compiler.
+        _IL = gimple_ctypes.IntLiteral
+        _BO = gimple_ctypes.BinaryOp
+        # `-1` as UnaryOp('-', IntLiteral(1)), NOT IntLiteral(-1): _gen_for_range
+        # explicitly special-cases the UnaryOp form for a negative step, and a
+        # bare negative IntLiteral lowers to invalid `-fgimple` C ("expected
+        # expression before '-' token" / "non-trivial conversion in integer_cst").
+        _neg1 = lambda: gimple_ctypes.UnaryOp('-', _IL(1))
+        _minus1 = lambda e: _BO('-', e, _IL(1))
         _ra = _rng.args
         _new_args = None
         if len(_ra) == 1:
-            _new_args = [_range_minus_one(_ra[0]), _range_neg_one(), _range_neg_one()]
+            _new_args = [_minus1(_ra[0]), _neg1(), _neg1()]
         elif len(_ra) == 2:
-            _new_args = [_range_minus_one(_ra[1]), _range_minus_one(_ra[0]), _range_neg_one()]
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
         elif len(_ra) == 3 and isinstance(_ra[2], gimple_ctypes.IntLiteral) and _ra[2].value == 1:
-            _new_args = [_range_minus_one(_ra[1]), _range_minus_one(_ra[0]), _range_neg_one()]
+            _new_args = [_minus1(_ra[1]), _minus1(_ra[0]), _neg1()]
         if _new_args is not None:
             _desc = gimple_ctypes.ForStmt(
                 node.target,
@@ -3907,19 +3851,6 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
             gen._lower_builtin_list(node.value)
             return
-        # A statement `setattr(obj, name, v)` / `delattr(obj, name)`: the same
-        # lowering the expression form gets in `_lower_call`, which stores
-        # through the struct's own field dispatch (`_mojo_dispatch_setattr`).
-        # The generic path below mapped the name through BUILTIN_VALUE_MAP to
-        # the runtime's side-table `mojo_setattr`, so a store to a REAL field
-        # went to a table no field read consults -- the self-hosted
-        # compiler's `ast_rewriter._rewrite_node` replaced every rewritten
-        # child that way, and none of the replacements was ever seen.
-        if (raw_name in ('setattr', 'delattr')
-                and len(node.value.args) >= (3 if raw_name == 'setattr' else 2)
-                and not gen._locally_binds_name(raw_name)):
-            gen._lower_call(node.value)
-            return
         # Recursive call from inner function to itself. Bare-statement
         # twin of _lower_recursive_self_call — routed through
         # _emit_call (like the sibling-closure-call branch just below)
@@ -3937,13 +3868,47 @@ def _gen_stmt_ExprStmt(gen, node):
             return
         # Check closure call (nested function defined in this scope)
         if raw_name in gen._closure_envs:
-            # The statement-level closure call is `_lower_closure_call` with
-            # its value discarded -- ONE binding of positional / keyword /
-            # default arguments (`_bind_closure_kwargs`). This used to be a
-            # third copy that padded against `func_param_types[lifted]` minus
-            # one for the env, and the compiled compiler padded every
-            # `_mkrf(a, b, c, d)` with a fifth argument there.
-            gen._lower_closure_call(raw_name, node.value)
+            lifted   = f"{gen.current_func_name}_{raw_name}"
+            env_var  = gen._closure_envs[raw_name]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
+            # Handle kwargs for closure calls
+            kwargs = getattr(node.value, 'kwargs', []) or []
+            kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+            # Pad kwargs to expected arity
+            # Note: expected_params[0] is the env pointer, which gets prepended separately
+            expected_params = gen.func_param_types.get(lifted, [])
+            # Subtract 1 for the env pointer that will be prepended
+            user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
+            if expected_params and len(arg_pairs) < user_param_count:
+                # Pad with the closure's own declared defaults before
+                # falling back to a bare 0 -- see the registration in
+                # the closure-scan pass (Pass 3) and _lower_closure_
+                # call's identical padding for the expression-context
+                # twin of this same call shape.
+                _dflts = gen._func_param_defaults.get(lifted) or []
+                while len(arg_pairs) < user_param_count:
+                    _pos = len(arg_pairs)
+                    _pname = _dflts[_pos][0] if _pos < len(_dflts) else None
+                    if _pname is not None and _pname in kwarg_dict:
+                        arg_pairs.append(kwarg_dict[_pname])
+                    elif _pos < len(_dflts):
+                        # See _lower_closure_call's identical choice of
+                        # self.lower_expr over _default_expr_to_pair:
+                        # closure defaults commonly reference the
+                        # OUTER function's own live variables
+                        # (`iterator=iterator`), which needs real
+                        # expression lowering in the current (outer)
+                        # scope, not literal-only handling.
+                        arg_pairs.append(gen.lower_expr(_dflts[_pos][1]))
+                    else:
+                        arg_pairs.append(('int', '0'))
+            fname_c  = gimple_ctypes._safe_name(lifted)
+            if env_var:
+                env_type = gen.func_param_types.get(lifted, ['void *'])[0]
+                full_arg_pairs = [(env_type, env_var)] + arg_pairs
+            else:
+                full_arg_pairs = arg_pairs
+            gen._emit_call('void', '', fname_c, full_arg_pairs)
             return
         # Sibling-closure call, bare-statement twin of _lower_call's
         # identical `_lambda_outer_closures` fallback a few hundred
@@ -4574,6 +4539,9 @@ def _gen_stmt_TryStmt(gen, node):
 
     gen._emit_label(bb_try)
     _had_terminal = False
+    _return_value = None
+    _return_type = None
+    _saw_return = [False]   # list so the nested intercepted_emit can set it
     # Save/restore the protected-region list around this body rather than a
     # bare append/pop: a nested function or nested try compiled from this
     # body can leave the list in a different state (a stray pop) before
@@ -4583,25 +4551,55 @@ def _gen_stmt_TryStmt(gen, node):
     _saved_tfb = list(gen._try_finally_bodies)
     gen._try_loop_protect.append(_entry_loop_depth)
     gen._try_finally_bodies.append(node.finally_body if node.finally_body else None)
-    # Every line the body emits passes through this region's frame: an early
-    # `return` becomes `mojo_exc_pop (); goto {bb_finally};` (or the return
-    # itself, after the pop, when there is no `finally`), and the value is
-    # kept for the deferred return below. break/continue out of the region
-    # are `_emit_try_loop_exit_exc_pops`' job (they read `_try_loop_protect`).
-    # See emit_infra.EmitFrame for why this is a frame and not an emitter
-    # override.
-    _frame = ginf.new_emit_frame('try')
-    if bb_finally:
-        _frame.bb_finally = bb_finally
-    ginf.push_emit_frame(gen, _frame)
     for s in node.body:
+        # Temporarily override _emit to intercept return statements
+        original_emit = gen._emit
+        def intercepted_emit(line, rv=None, rt=None):
+            nonlocal _return_value, _return_type
+            stripped = line.strip()
+            if stripped.startswith('return ') or stripped == 'return;':
+                # Extract return value if any
+                if stripped.startswith('return ') and stripped != 'return;':
+                    _return_value = stripped[7:].rstrip(';').strip()
+                    _return_type = 'int64_t'  # Simplified
+                else:
+                    _return_value = None
+                _saw_return[0] = True
+                # An early return leaves the try block's protected region
+                # just as much as falling off the end of it does — it
+                # must pop the exception stack (_mojo_exc_top) the same
+                # way the normal-exit path below does. Omitting this
+                # leaked one _mojo_exc_top level per early return with no
+                # matching pop: harmless for a single try, but a whole
+                # self-hosted compiler run has many `try: ... return ...`
+                # sites, so _mojo_exc_top crept up across the run and
+                # eventually walked off the end of the fixed-size
+                # _mojo_exc_stack[MOJO_EXC_STACK_MAX] array — silent OOB
+                # writes that corrupted nearby memory, surfacing much
+                # later as a longjmp into a garbage jmp_buf.
+                original_emit("  mojo_exc_pop ();")
+                # Emit goto to finally instead of return
+                if node.finally_body:
+                    original_emit(f"  goto {bb_finally};")
+                else:
+                    original_emit(line)
+                gen._last_was_terminal = True
+                return
+            # break/continue jumping out of this try's protected region is
+            # handled in _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt via
+            # `_emit_try_loop_exit_exc_pops` (which reads
+            # `gen._try_loop_protect`), NOT here — the former interception
+            # of the `goto <loop label>;` line was a nested-closure
+            # `gen._emit` override the self-hosted backend did not run.
+            original_emit(line)
+
+        gen._emit = intercepted_emit
         gen.gen_stmt(s)
+        gen._emit = original_emit  # Restore
+
         if gen._last_was_terminal:
             _had_terminal = True
             break
-    ginf.pop_emit_frame(gen)
-    _return_value = _frame.return_value if _frame.has_return_value else None
-    _saw_return = [_frame.saw_return]
 
     gen._try_loop_protect = _saved_tlp
     gen._try_finally_bodies = _saved_tfb
@@ -5279,21 +5277,23 @@ def _gen_stmt_WithStmt(gen, node):
                 _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
                                  _gctx_bases, _gctx_vs)
                 _teardown_done[0] = True
-            # A break/continue out of the body pops the region and runs the
-            # teardown first: this region's frame does it (emit_infra.
-            # EmitFrame -- a frame, not an emitter override, for the reason
-            # recorded there).
-            _wframe = ginf.new_emit_frame('with')
-            _wframe.ctx_ts = _ctx_ts
-            _wframe.ctx_vs = _ctx_vs
-            _wframe.ctx_sns = _ctx_sns
-            _wframe.gctx_bases = _gctx_bases
-            _wframe.gctx_vs = _gctx_vs
-            ginf.push_emit_frame(gen, _wframe)
+            original_emit = gen._emit
+            def intercepted_emit(line, rv=None, rt=None):
+                stripped = line.strip()
+                if gen.loop_stack and stripped in (
+                    f"goto {gen._loop_continue_bb()};",
+                    f"goto {gen._loop_break_bb()};",
+                ):
+                    original_emit("  mojo_exc_pop ();")
+                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                     _gctx_bases, _gctx_vs)
+                    _teardown_done[0] = True
+                    original_emit(line)
+                    return
+                original_emit(line)
+            gen._emit = intercepted_emit
             gen.gen_stmt(s)
-            ginf.pop_emit_frame(gen)
-            if _wframe.teardown_done:
-                _teardown_done[0] = True
+            gen._emit = original_emit
         # Only emit cleanup and goto if the with body didn't end with a
         # return — but an early return still leaves the protected region
         # and must pop the exception stack (_mojo_exc_top) exactly like

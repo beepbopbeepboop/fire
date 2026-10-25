@@ -491,7 +491,7 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 610),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 595),   # --fix writes the live figure
     # 593 -> 594 (2026-10-23, part 6 family S): `mojo_str_first_codepoint`
     # — the 1/2/3/4-byte lead-byte decode (NUL/empty -> 0) the spelling+
     # arity-gated `Codepoint.ord(<string>)` branch reaches, so `ord` on a

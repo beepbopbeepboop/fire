@@ -204,7 +204,7 @@ def compiler_fingerprint() -> str:
                     h.update(name.encode())
                     h.update(f.read())
             except FileNotFoundError:
-                h.update(b'\x1fmissing:' + name.encode())
+                h.update(b'\0missing:' + name.encode())
         # Environment variables that change the GENERATED CODE.
         #
         # These are invisible to a content-addressed cache by construction: the
@@ -222,7 +222,7 @@ def compiler_fingerprint() -> str:
         # change the generated C, so it is deliberately absent -- adding it
         # would invalidate the cache on every threshold experiment for nothing.
         for _var in ('MOJO_GEMM_TENSOR_CORES', 'MOJO_GEMM_FUSE'):
-            h.update(b'\x1fenv:' + _var.encode() + b'='
+            h.update(b'\0env:' + _var.encode() + b'='
                      + os.environ.get(_var, '').encode())
 
         # Fold in the compiler version as a coarse epoch + safety net: a new
@@ -230,7 +230,7 @@ def compiler_fingerprint() -> str:
         # a relevant file were missing from the list above.
         try:
             import version as _v
-            h.update(b'\x1fversion:' + _v.version().encode())
+            h.update(b'\0version:' + _v.version().encode())
         except Exception:
             pass
         _compiler_fp_cache = h.hexdigest()
@@ -313,10 +313,10 @@ def selfhost_fingerprint() -> str:
                     h.update(name.encode())
                     h.update(f.read())
             except (FileNotFoundError, NotADirectoryError):
-                h.update(b'\x1fmissing:' + name.encode())
+                h.update(b'\0missing:' + name.encode())
         try:
             import version as _v
-            h.update(b'\x1fversion:' + _v.version().encode())
+            h.update(b'\0version:' + _v.version().encode())
         except Exception:
             pass
         _selfhost_fp_cache = h.hexdigest()
@@ -577,7 +577,7 @@ def stdlib_fingerprint() -> str:
                                 h.update(os.path.relpath(p, root).encode())
                                 h.update(f.read())
                         except OSError:
-                            h.update(b'\x1funreadable:' + p.encode())
+                            h.update(b'\0unreadable:' + p.encode())
         _stdlib_fp_cache = h.hexdigest()
     return _stdlib_fp_cache
 
@@ -601,7 +601,7 @@ def runtime_fingerprint() -> str:
             with open(os.path.join(HERE, name), 'rb') as f:
                 parts += [name, f.read()]
         except FileNotFoundError:
-            parts += [name, b'\x1fmissing']
+            parts += [name, b'\0missing']
     return _hash('mojo-runtime-fp-v1', *parts)
 
 
@@ -642,7 +642,7 @@ def formal_fingerprint() -> str:
                 with open(os.path.join(HERE, name), 'rb') as f:
                     parts += [name, f.read()]
             except (FileNotFoundError, IsADirectoryError):
-                parts += [name, b'\x1fmissing']
+                parts += [name, b'\0missing']
         _formal_fp_cache = _hash('mojo-formal-fp-v1', *parts)
     return _formal_fp_cache
 
@@ -799,7 +799,7 @@ def dylib_link_key(obj_paths: list, reflect_src: str,
     builds for different architectures would share one entry and the second
     would be served the first's bytes. `toolchain_fingerprint` above folds the
     HOST, which is the wrong fact for this purpose for the same reason."""
-    obj_digests = '\x1f'.join(
+    obj_digests = '\0'.join(
         f'{os.path.basename(p)}={file_digest(p)}'
         for p in sorted(obj_paths)
     )
