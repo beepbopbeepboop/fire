@@ -346,7 +346,16 @@ def strip_prose(src: str) -> str:
 # Measured: f7a073a0 (the 17 baseline) scans 17 under the same strip_prose +
 # CAST_RE; the current tree scans 19, and the two deltas above are the only
 # added non-prose matches (verified against the diff's added lines).
-BASELINE_COUNT = 19
+#
+# 2026-10-25 (bootstrap series merge with master): 19 -> 24. Five casts came
+# in with the bootstrap-verify commits, none a container-kind INFERENCE:
+#   * `emit_calls.py`: `{_res} = (MojoDict *){_dvp};` -- the word was proven a
+#     dict by the preceding `mojo_is_registered_dict` runtime dispatch.
+#   * `module_gen.py`: the emitted-C `copy.copy` word helper's four arms
+#     (`mojo_is_tuple` / `_registered_dict` / `_registered_set` / list), each
+#     cast guarded by the registry predicate that selects the arm.
+# Both are the "kind proven by a measured dispatch" class, not a static guess.
+BASELINE_COUNT = 24
 
 
 def count_casts() -> int:
