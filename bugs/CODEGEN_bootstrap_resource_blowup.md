@@ -1,5 +1,16 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-10-25 — correctness CLOSED, resource cost OPEN)
+
+`make bootstrap` is green: stage1 == stage2 == stage3 for all 184 generated
+files (`tools/bootstrap_verify.py`: 0 stage1-vs-stage2 diffs, 0 stage2-vs-stage3
+diffs), so the four `.ci` divergences recorded below are gone. What remains of
+this doc is the RESOURCE cost, measured on the same run: `stage2-transitive`
+448 s / 12.2 GB peak and `stage3-transitive` 450 s / 14.6 GB peak (whole bucket
+1052 s wall), against the 3-4 GB standard of
+`bugs/PERF_memory_over_4gb_is_a_bug.md`. The historical text below (45 GB /
+32 min) is the pre-fix measurement.
+
 ## Status (2026-09-25 — OPEN, measured; print/comptime fixes landed, native Stage 2 remains unstable)
 
 A full `make bootstrap` completed after approximately 32 minutes. Peak memory

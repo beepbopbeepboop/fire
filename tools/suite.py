@@ -422,7 +422,7 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-20, master 8e449ed3, per-job peaks from the '
+MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from the '
                 'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
@@ -455,9 +455,9 @@ MEASURED_PEAK_GB = {
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
-    'bootstrap-stage1-transitive': (1.6, 'measured'),
-    'bootstrap-stage2-cc':         (1.9, 'measured'),
-    'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
+    'bootstrap-stage1-transitive': (2.2, 'measured'),
+    'bootstrap-stage2-cc':         (2.3, 'measured'),
+    'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
@@ -465,9 +465,9 @@ MEASURED_PEAK_GB = {
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
-    'bootstrap-stage2-transitive': (30, 'measured'),    # the binary's whole-closure dump
-    'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
-    'bootstrap-stage3-transitive': (30, 'derived'),     # from stage2-transitive (same binary shape)
+    'bootstrap-stage2-transitive': (12.2, 'measured'),    # the binary's whole-closure dump
+    'bootstrap-stage3-dumps':      (0.7, 'measured'),    # from stage2-dumps
+    'bootstrap-stage3-transitive': (14.6, 'measured'),     # from stage2-transitive (same binary shape)
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
     # is memcap's own poll of the whole process tree (`procrun.tree_rss`, the
@@ -2288,69 +2288,12 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# HISTORY OF THE MARKER ON THIS CLASS, because it moved twice and both moves are
-# the anti-rot discipline rather than bookkeeping.
-#
-# `bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("the self-hosted binary
-# segfaults on any input, exit 139"). That was MEASURED FALSE on 2026-09-27 and
-# corrected rather than left to rot: the original SIGSEGV is fixed (BLOW.md §0),
-# `./mojoc --dump-full` on a two-line program is exit 0 / 12.1 MB / 94.6 M
-# instructions. It was replaced with `SELFHOST_STAGE2_STALL`, whose point was
-# that a marker saying "segfault" would hide the real class — a
-# `mojo_unsupported_iter` no-op the runner flags per sub-job and no exit code
-# reports.
-#
-# 2026-10-03: that marker was STALE and the runner said so (a marker whose test
-# passes is a FAILURE). Not because the class is fixed — because this fanout
-# cannot see it. `reject=` is a regex over a child's output, the 47 sub-jobs no
-# longer emit `mojo_unsupported_iter`, and `--dump` on the compiled binary now
-# writes an EMPTY `.ci` while exiting 0, which prints nothing for a regex to
-# match. So the marker moved to `bootstrap-verify` and `bootstrap-validate`,
-# which compare the stage trees and therefore DO see it, and the fanout carries
-# a comment saying so instead of a marker that would have to be a lie in one
-# direction or the other. See `SELFHOST_STAGE2_EMPTY_DUMP` below and
-# bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
-#
-# RETIRED as a marker 2026-10-03, and NOT because the class is fixed. The
-# marker said the per-item fanout "returns `mojo_unsupported_iter` no-ops or a
-# wrong dump"; measured on that gate, the `mojo_unsupported_iter` half is GONE —
-# which is why `bootstrap-stage2-dumps` passed and the runner correctly reported
-# a marker whose test passes as a FAILURE. The "wrong dump" half is exactly what
-# `bootstrap-verify` reports in the same run (87 stage1-vs-stage2 diffs, most of
-# them a 0-byte `.ci`), so the class did not go away: its DETECTOR in this job
-# went away with it. `reject=` is a regex over a child's OUTPUT and a child that
-# writes nothing prints nothing, so this fanout cannot see an empty artifact
-# however it is spelled.
-#
-# So the marker moves to the two jobs that DO compare what was produced, which
-# is where a reader of the tally will actually see this. The constant is kept,
-# renamed, because its text is still the truest short description of the class
-# in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
-#
-# 2026-10-04: and now the fanout is RED and carries a marker again, for a
-# reason worth writing down, because it is the THIRD move of this marker and
-# the rule that produced it. What the 2026-10-03 entry above reasoned about
-# was a fanout that could not see the class: the compiled binary wrote an
-# EMPTY `.ci` and exited 0, so `reject=` had nothing to match and the per-item
-# exit code said 0. That is no longer the shape. gatefix8 fixed the tokenizer
-# and the parser, so `.tok`/`.ast` are now byte-identical to stage1's and the
-# failure has moved INTO the compiled codegen, where it is no longer silent:
-# `compile_to_gimple` raises `TypeError: unhashable type: 'list'`, or the
-# parser refuses with `SEMICOLON`, or the binary dies on SIGSEGV/SIGBUS.
-# 45 of the 46 items now exit non-zero and only `mojo_failures.mojo` passes.
-#
-# So the general rule the three moves add up to: "this job cannot SEE the
-# defect" was true on 2026-10-03 and stopped being true on 2026-10-04, and the
-# honest response to a job that has become RED is a marker on THAT job — not a
-# comment explaining why it is not red, and not a marker left off because the
-# defect "really" belongs to a sibling job. A RED job with no marker is a hole
-# in the gate: nothing reports it, and `expect=` costs 4 s here.
-SELFHOST_STAGE2_EMPTY_DUMP = (
-    'the compiled binary dumps every single-module input (46 of 46, `.tok` '
-    'byte-identical) but cannot yet compile its own closure: '
-    '`bootstrap-stage2-transitive` is disabled (it does not finish), so the '
-    'stage3 trees these compare do not exist. See '
-    'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
+# `bootstrap-verify` and `bootstrap-validate` (below) are the jobs that compare
+# what the stages PRODUCED, which is what makes them the only ones that can see
+# a compiled-codegen divergence: `reject=` on the fanouts is a regex over a
+# child's output and a child that writes a wrong artifact prints nothing.
+# Since 2026-10-25 they pass (184 files identical across the three stage trees)
+# and carry no marker.
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0). Their corpora legitimately trigger this compiler's
 # self-hosting bootstrap pre-pass (a genuine, do_imports=True sibling-import
@@ -2686,7 +2629,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
+     driver='mem', mem='module', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2700,35 +2643,16 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
+     driver='mem', mem='module', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
 
-# These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
-# names, and they became visible for a structural reason worth recording: they
-# used to SKIP, because `bootstrap-stage2-dumps` failed and a failed dep skips
-# its dependents. Its detector was then removed (the `mojo_unsupported_iter`
-# no-op it rejected for is gone), so the fanout passed, and these two ran for the
-# first time and reported the divergence the whole cluster exists to find.
-#
-# `expect=` and not `disabled=`, and the rule that decides it is cost: neither
-# job is in `MEASURED_PEAK_GB` (both are in the unmeasured list, so they keep
-# the default class) and both took 0.6 s in the 2026-10-03 gate — they are three
-# `os.listdir`s and a byte compare, and all of their cost is in
-# `bootstrap-stage3-transitive`. A known failure that is cheap runs, so that its
-# anti-rot ("marked expect= but it PASSES") is alive on every gate; `disabled=`
-# would buy nothing here and cost the machine a reservation to be told what the
-# doc already says. The markers state NO count on purpose: 87 diffs / 256
-# mismatches is a census of a class that shrinks as it is fixed, and a marker
-# that pinned a number would fire the moment one file was repaired.
 test('bootstrap-verify', [PY, 'tools/bootstrap_verify.py'],
      deps=['bootstrap-stage3-transitive'],
-     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='stage1 == stage2 == stage3 for every generated file')
 test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
      deps=['bootstrap-stage3-transitive'],
-     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='bootstrap-validate.mojo over the three stage trees')
 
 # ── formal ───────────────────────────────────────────────────────────────────
