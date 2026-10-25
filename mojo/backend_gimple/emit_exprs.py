@@ -763,6 +763,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a compiled generator/coroutine": every
+        # consumer of the handle (`.close()`, `next()`, `for`) recovers the
+        # resume/value/destroy api by looking up the VALUE it was handed, so
+        # the fresh read-back temp needs the entry the store recorded on the
+        # NAME. A poisoned name (rebound, or stored from a function) has no
+        # single api, so it gets none and keeps the honest refusal. See
+        # `emit_stmts._note_global_generator_store`.
+        if (name in gen._global_generator_api
+                and name not in gen._global_generator_api_poisoned):
+            gen._generator_var_api[t] = gen._global_generator_api[name]
         # …and "this global holds a plain integer" (`gen._int_word_vals`), the
         # same hop and the same reason for the same reason-as-the-three-above:
         # reading a global mints a FRESH temp, and the dict-key decision is
@@ -876,6 +886,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
             vp = gen._new_val('void *', f'(void *){raw_ptr}')
             gen._emit(f'  {t} = (int64_t){vp};')
+        elif ctype == 'MojoGenerator *' and c_decl_type == 'int64_t':
+            # The reverse of the branch above: a generator/coroutine handle
+            # global is a BOXED `int64_t` field (see the early cdecl seeding in
+            # `gen_module_impl`), so load the word and unbox it through
+            # `void *` — GIMPLE rejects a direct int64_t -> pointer assignment.
+            raw_word = gen._new_val('int64_t', f'{field_ref}')
+            vp = gen._new_val('void *', f'(void *){raw_word}')
+            gen._emit(f'  {t} = (MojoGenerator *){vp};')
         else:
             # Global is int64_t or same type as ctype — direct assignment is valid.
             gen._emit(f'  {t} = {field_ref};')

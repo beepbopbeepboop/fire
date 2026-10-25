@@ -11911,7 +11911,18 @@ def gen_module_impl(self, stmts):
             self._global_c_decl_types[_gn] = _forced
         elif _gn in self._global_c_decl_types:
             continue
-        elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoGenerator *'):
+            # A compiled generator/coroutine handle is a heap handle like the
+            # containers, so it is BOXED the same way: an `int64_t` struct
+            # field, semantic type kept in `_global_var_types`. Copying the
+            # pointer type through here declared the emission-time type
+            # `MojoGenerator *` while `_gscan_declare_global` (which runs
+            # later and does not know a generator-start call) froze the field
+            # as `int64_t`, so `g = count()` at module scope stored a pointer
+            # into an `int64_t` field with no cast. The field could not simply
+            # be declared `MojoGenerator *` instead: the globals struct is
+            # emitted before the `MojoGenerator` typedef. The read path
+            # unboxes it (`_lower_IdentExpr`'s global-read arm).
             self._global_c_decl_types[_gn] = 'int64_t'  # boxed by default
         else:
             self._global_c_decl_types[_gn] = _gt
