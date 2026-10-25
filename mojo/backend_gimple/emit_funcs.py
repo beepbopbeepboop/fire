@@ -1834,14 +1834,100 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
 
     The spelling RULE is `module_qualifier` (one copy, see its docstring);
     this call is about picking the RIGHT module, not sanitizing a fifth way.
-    Never overwrites an existing entry: the first definition to publish wins,
-    matching the memoized `pts` this is always called with anyway."""
+
+    FIRST-WINS is deliberate and is the GUESS half of the discipline pair —
+    the AUTHORITATIVE half is `_commit_home_def_pts`, called from gen_func
+    at the moment the definition is EMITTED, which plain-assigns the exact
+    param types the emitted symbol/prototype consumed. Together they give
+    the invariant importers need: once the definition has been emitted, the
+    store holds the emitted signature, and no later write can disturb it —
+    a later importer's re-compile of the same module (in a flattened
+    do_imports TU the defining module is compiled once per importer, each
+    with its own per-instance `_inferred_param_types`) only GUESSES, and its
+    first-wins write is a no-op against the committed key.
+
+    Neither half alone suffices — both were measured 2026-10-25, row
+    COMPILE_FAIL_zipfile___init__ (class B):
+
+    * First-wins alone froze the FIRST compile's answer and the emitting
+      compile's publish was a no-op, so importers hashed a stale suffix.
+      `import posixpath` + `posixpath.dirname(s.rstrip("/"))` in
+      zipfile/_path/__init__.py: the first inlined compile froze the
+      unannotated `p` to char * (suffix d719e0); the compile that emitted
+      the definition refined it to MojoList * and emitted
+      `int64_t posixpath_dirname_815e8f (MojoList * p)`; the call sites
+      emitted `posixpath_dirname_d719e0 (...)` — "implicit declaration of
+      function 'posixpath_dirname_d719e0'; did you mean
+      'posixpath_dirname_815e8f'". The emit commit fixes this: it lands
+      after the stale guess and overwrites it.
+
+    * Blanket LAST-WINS (the 2026-10-25 first attempt) fixed the dirname
+      half (there the emitting compile happened to be the LAST writer) but
+      broke the mirror case: for `_bootstrap._verbose_message`, the FIRST
+      compile of importlib/_bootstrap.py is the one that emits the
+      definition (inferred param 1 = char *, prototype
+      `void _bootstrap__verbose_message (char *, MojoList *, int64_t)`),
+      and a LATER importer's non-emitting re-compile re-inferred param 1 as
+      int64_t — last-wins let that guess clobber the emitted signature, and
+      _bootstrap_external.py's call sites boxed their char * argument 1 to
+      int64_t: 15 `passing argument 1 of '_bootstrap__verbose_message'
+      makes pointer from integer without a cast`. The emit commit fixes
+      this too: the committed key is immune to later guesses, and the emit
+      is the last plain-assignment write to a key (one definition is
+      emitted per (qualifier, name))."""
     store = getattr(gen, '_home_def_param_types', None)
     if store is None or not pts:
         return
     key = _pair_key(_func_qualifier(gen, bare_name), bare_name)
     if key not in store:
         store[key] = list(pts)
+
+
+def _commit_home_def_pts(gen, node) -> None:
+    """Commit the EMITTING compilation's own signature into the shared
+    `_home_def_param_types` store — the authoritative twin of
+    `_record_home_def_pts` (a first-wins guess until this commit).
+
+    Called from gen_func BEFORE `safe = gen._func_csym(node.name)` builds
+    the emitted definition's symbol, with the function node, and commits
+    `gen._signature_ctypes(node.params, node)` — the SAME refined,
+    emit-time param ctypes the emitted prototype's parameters were built
+    from (the *args slot keeps the '...' packing sentinel, so the
+    overload suffix stays variadic). After the commit:
+
+    * every importer whose tier-2 `_imported_def_pts` hits this key hashes
+      the suffix AND coerces its argument types against EXACTLY the
+      signature the definition emitted — agreement by construction;
+    * the tier-1 local snapshot is corrected IN PLACE to the same value
+      first (the same discipline `func_return_types[bare_name]` follows —
+      its return-type twin documents the in-place correction), so the
+      definition's OWN suffix read through tier 1 inside `_func_csym`
+      hashes the committed value, not the registration-time snapshot.
+
+    The commit value must be the SIGNATURE, not the tier-1 snapshot
+    `_effective_param_types` reads: the two disagree in the measured
+    failure case (2026-10-25, row COMPILE_FAIL_zipfile___init__, class B).
+    The adopting compile of importlib/_bootstrap.py refined param 1 of
+    `_verbose_message` to char * for the emitted prototype
+    (`void _bootstrap__verbose_message (char *, MojoList *, int64_t)`)
+    while its registration-time tier-1 snapshot still said int64_t —
+    committing the snapshot made every importer box its char * argument 1
+    to int64_t (15+ `makes pointer from integer without a cast` in
+    importlib/_bootstrap_external.py AND in _bootstrap.py's own in-module
+    call). See `_record_home_def_pts`'s docstring for the companion
+    failure (a later NON-EMITTING re-compile clobbering the emitted
+    value) that rules out blanket last-wins."""
+    sig = gen._signature_ctypes(node.params, node)
+    if not sig:
+        return
+    store = getattr(gen, '_home_def_param_types', None)
+    if store is None:
+        return
+    local = getattr(gen, '_local_def_param_types', None)
+    if local is not None and node.name in local:
+        local[node.name] = list(sig)
+    key = _pair_key(_func_qualifier(gen, node.name), node.name)
+    store[key] = list(sig)
 
 
 def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
@@ -2930,6 +3016,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     if has_varargs:
         gen.func_param_types[node.name] = gen._signature_ctypes(node.params, node)
         gen._note_vararg_trailing_param_types(node)
+    # The emit is the authority for the shared signature store: commit the
+    # exact param types this definition's symbol/prototype were built from,
+    # BEFORE the symbol is resolved, so the def's own suffix (tier 1) and
+    # every importer's tier-2 hash agree by construction (see
+    # _commit_home_def_pts).
+    _commit_home_def_pts(gen, node)
     safe = gen._func_csym(node.name)
 
     # For main (in main module only), call class-attr initializer first
