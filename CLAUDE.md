@@ -514,3 +514,15 @@ and the two answers cannot share a ceiling — and it is a registered gate job
 (`doc-refs`, in `check`) — so the corpus of dangling citations can only shrink
 from here, and it grew from 309 to 480 while nothing was watching it. To bank a
 sweep, `--write-baseline` regenerates both ceilings and prints what moved.
+
+DEBUGGING METHOD (recorded 2026-10-24 after merge fix):
+- Tool used: lldb (arm64 macOS; gdb not installed, gcc-15 lacks ASan lib)
+- Strategy for self-host GIMPLE crash: source-level fprintf instrumentation in
+  runtime/fire_runtime.c (mojo_dict_items, mojo_dict_get_int, mojo_list_get_int)
+  + disassemble of generated C via objdump/nm to locate exact instruction offset
+- Key finding for bootstrap-stage2-dump-is-empty: deterministic corrupt dict
+  value (MojoList with bad data pointer 0x74736f78) inside GimpleGen member
+  table (435-entry dict, key = _lower_set_literal etc., value = corrupt pair).
+- ASan attempt blocked: gcc-mp-15 has no libasan; clang rejects gcc-extension
+  bare-`...` vararg stubs in generated fire.ci. Workaround: instrumentation
+  + manual disassembly.

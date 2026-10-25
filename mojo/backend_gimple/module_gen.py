@@ -4785,7 +4785,13 @@ def gen_module_impl(self, stmts):
             _cur = _gg_ft.get(_f)
             if _cur is None or (_cur in ('int', 'int64_t', '_Bool') and _c.endswith(' *')):
                 _gg_ft[_f] = _c
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
+        for _mangled, _gg_sig in _gg_sigs.items():
+            # Explicit-index value access — NOT for-clause tuple destructuring
+            # `for _mangled, (_rc, _pcs, _dflts) in ...` (the boxing bug: the
+            # for-clause pair-unpack on the self-hosted path returns [pair, 2]).
+            _rc = _gg_sig[0]
+            _pcs = _gg_sig[1]
+            _dflts = _gg_sig[2]
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             self._mangled_signature_ctypes[_mangled] = list(_pcs)
@@ -8294,7 +8300,10 @@ def gen_module_impl(self, stmts):
     # passes (they run between the early apply above and here and rewrite
     # `func_param_types` / `func_return_types` from local inference).
     if _gg_sigs:
-        for _mangled, (_rc, _pcs, _dflts) in _gg_sigs.items():
+        for _mangled, _gg_sig in _gg_sigs.items():
+            _rc = _gg_sig[0]
+            _pcs = _gg_sig[1]
+            _dflts = _gg_sig[2]
             self.func_param_types[_mangled] = list(_pcs)
             self.func_return_types[_mangled] = _rc
             if _dflts:
