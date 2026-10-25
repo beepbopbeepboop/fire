@@ -7598,6 +7598,33 @@ def main():
             print(f"PASS  {name}  ({len(paths)} modules)")
             _PASS += 1
 
+    def test_bracket_mentions_matches_the_regex_it_replaced():
+        """`elab_intu._bracket_mentions` is the run-time-regex-free form of
+        `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` (a pattern built around a name
+        is a stub in the compiled compiler). It must agree with the regex on
+        word boundaries, inner whitespace and multi-argument mentions."""
+        global _PASS, _FAIL
+        name = "bracket_mentions_matches_the_regex_it_replaced"
+        import re as _re
+        from mojo.backend_gimple.elab_intu import _bracket_mentions
+        srcs = ["x = Foo[3] + Foo [ 1, 2 ] + XFoo[9] + Foo[a] + FooBar[1]",
+                "Foo[1,2,3]\nFoo\t[ x ]  Foo_[1] _Foo[2]", "Foo", "", "Foo[",
+                "Foo[]", "a.Foo[Int, String]"]
+        bad = []
+        for src in srcs:
+            want = []
+            for m in _re.finditer(r'\bFoo\s*\[\s*([^\]]+)\s*\]', src):
+                want.append('\x1f'.join(x.strip() for x in m.group(1).split(',')))
+            got = _bracket_mentions(src, 'Foo')
+            if got != want:
+                bad.append((src, got, want))
+        if bad:
+            print(f"FAIL  {name}: {bad}")
+            _FAIL += 1
+        else:
+            print(f"PASS  {name}")
+            _PASS += 1
+
     def test_func_state_snapshot_covers_reset_func():
         """`emit_infra.save_func_state` captures every field `_reset_func`
         resets, and `restore_func_state` puts every one of them back.
@@ -12526,6 +12553,7 @@ print(run('x/y.txt'))
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_no_name_is_defined_twice_in_a_codegen_class()
+    test_bracket_mentions_matches_the_regex_it_replaced()
     test_func_state_snapshot_covers_reset_func()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
