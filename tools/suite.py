@@ -422,7 +422,7 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-22, master f7a073a0, per-job peaks from the '
+MEASURED_RUN = ('a full `gate`, 2026-10-24, master d20e7984, per-job peaks from the '
                 'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
@@ -451,10 +451,10 @@ MEASURED_RUN = ('a full `gate`, 2026-10-22, master f7a073a0, per-job peaks from 
 MEASURED_PEAK_GB = {
     'native-dumpfull':             (31.3, 'measured'),
     'ab-native':                   (20.5, 'measured'),
-    'selfhost':                    (4.6, 'measured'),
+    'selfhost':                    (4.4, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    'sqliteruntime':               (0.8, 'measured'),
+    'sqliteruntime':               (2.4, 'measured'),
     'bootstrap-stage1-transitive': (1.4, 'measured'),
     'bootstrap-stage2-cc':         (1.9, 'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
@@ -731,12 +731,12 @@ MEASURED_PEAK_GB = {
     'gimplegenerators':                       (0.2, 'measured'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
-    'linkmode':                               (0.4, 'measured'),
-    'nonlocal':                               (0.4, 'measured'),
+    'linkmode':                               (0.1, 'measured'),
+    'nonlocal':                               (0.1, 'measured'),
     'refusal-taxonomy':                       (0.2, 'measured'),
     'runner':                                 (0.1, 'measured'),
     'runtimedylib':                           (0.4, 'measured'),
-    'silentnoop':                             (0.4, 'measured'),
+    'silentnoop':                             (0.1, 'measured'),
     'suite-self-test':                        (0.6, 'measured'),
     # Added by --apply-peaks (see MEASURED_RUN for the run).
     'comptime-parity':                        (0.3, 'measured'),
