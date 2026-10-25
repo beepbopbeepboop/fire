@@ -1367,27 +1367,39 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     the entry was `int64_t f (void)` (measured on os.py itself: the
     61-entry scan carried `fsdecode`/`fsencode` as `(void)`; the
     fixed scan is 55 entries). (2) The build-level same-name shadow —
-    the exact os.py shape — builds (the binary exists) and its runtime
-    is the MEASURED shadowing class, pinned as MEASURED behavior: the
-    call dies on SIGSEGV with no output (rc == -11, stdout empty).
-    Pre-fix the build itself died at gcc with `too many arguments to
-    function 'a_os_f'; expected 0, have 1` (build/remes/fsdec_
-    osname_prefix_765117ff.log). The module-side half of this class —
-    the enclosing `return f` resolving to the module GLOBAL `f` (the
-    emitted C showed `_mk` reading `_root_globals.f`) — is FIXED
-    2026-10-24 (assert (4) below; the C pair
-    build/remes/shadow_modulefix_{prefix,postfix}_d20e7984.ci shows the
-    body move from the global read to `_funcptr__mk_f`). Re-measured
-    with that fix in: the binary STILL segfaults with no output, and
-    the remaining defect is the ENTRY-side call site — `a_os.f(41)`
-    lowers to a NULL fnptr call (`_t2 = (int64_t)0; /* ct param or
-    undeclared: f */` then `mojo_fnptr_call_1(NULL, 41)`) — the
-    function-object-value call-site class (assert (3)'s cousin), not
-    the module's name resolution. This pin marks a known-bad loud
-    outcome the way the suite's EXPECTED markers do: the call-site
-    class is the named next blocker, and the moment the shape stops
-    crashing the pin must be re-measured against CPython (42) before
-    it is believed. (3) The non-shadow shape (`g = _mk()`, the call
+    the exact os.py shape — builds and RUNS, now asserting CPython's
+    real answer (42) for BOTH halves of the class. Pre-module-fix the
+    build itself died at gcc with `too many arguments to function
+    'a_os_f'; expected 0, have 1` (build/remes/fsdec_
+    osname_prefix_765117ff.log). The module-side half — the enclosing
+    `return f` resolving to the module GLOBAL `f` (the emitted C
+    showed `_mk` reading `_root_globals.f`) — is FIXED 2026-10-24 in
+    `module_shared.bare_global_read_plan` (assert (4) below; the C
+    pair build/remes/shadow_modulefix_{prefix,postfix}_d20e7984.ci
+    shows the body move to `_funcptr__mk_f`). Re-measured with that
+    fix in, the binary STILL segfaulted with no output — the
+    ENTRY-side call site: `a_os.f(41)` lowered to a NULL fnptr call
+    (`_t2 = (int64_t)0; /* ct param or undeclared: f */` then
+    `mojo_fnptr_call_1(NULL, 41)`). The function-object-value
+    call-site half is FIXED 2026-10-24 in emit_methods' `_mgc` path:
+    when the receiver module is compiled into the binary and the
+    attribute is a `void *` (fnptr) global of that module, the call
+    registers the module's synthesized
+    `_<mod>__mojo_global_get_<attr>` accessor (the
+    `_imported_global_accessors` table `_lower_IdentExpr` checks
+    before the NULL placeholder) instead of the bare reconstruction
+    falling to the placeholder — the postfix C pair for the current
+    tree shows `_t2 = a_os__mojo_global_get_f ();` then
+    `mojo_fnptr_call_1(_t2, _t3)`. This was the pin's known-bad
+    crash-outcome; per the suite's pin rule the moment the shape
+    stopped crashing the assertion flipped to CPython's value (42),
+    re-measured against the CPython reference — a pin still asserting
+    a crash on a non-crashing tree would be a false green in reverse.
+    What this test does NOT yet cover: the non-shadow FROM-import
+    spelling (`from a_ns import g; g(41)`) answers a silent 0 (weak
+    extern stub) where CPython prints 42 — the false-green policy for
+    that spelling is an owner decision, deliberately left unchanged.
+    (3) The non-shadow MEMBER spelling (`g = _mk()`, the call
     `a_ns.g(41)`) must stay on the loud dispatch refusal — exit 1,
     stdout empty, stderr `Unhandled exception: NotImplementedError:
     ... not compiled into this binary` — and never on a silent
@@ -1436,7 +1448,8 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
                  and exports.get('ctrl') is not None
                  and exports.get('m') is not None)
     # (4) Module-side name resolution, fixed 2026-10-24 on tree d20e7984
-    # (this assert is NEW with that fix; (2) below still pins the runtime):
+    # (this assert is NEW with that fix; (2) below pins the runtime —
+    # since the 2026-10-24 dispatch arm it asserts CPython's 42):
     # a bare read of a name locally bound by a nested `def` in the
     # ENCLOSING function itself must resolve to the nested def (its lifted
     # closure), not to a same-named module global. Measured pre-fix: the
@@ -1481,7 +1494,11 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     with tempfile.TemporaryDirectory() as td:
         rc, stdout = _build_and_run(pkg, 'main.py', td)
         binary_exists = os.path.exists(os.path.join(td, 'prog'))
-    build_ok = rc == -11 and stdout.strip() == '' and binary_exists
+    # Re-measured 2026-10-24 after the entry-side dispatch arm landed
+    # (pre-arm on the current tree: rc == -11, no output — the crash
+    # pin this assertion used to be): the shape no longer crashes, so
+    # per the pin rule the assertion is CPython's real value (42).
+    build_ok = rc == 0 and stdout.strip() == '42' and binary_exists
     pkg_ns = {'a_ns.py': shadow_src.replace('f = _mk()', 'g = _mk()'),
               'main_ns.py': 'import a_ns\nprint(a_ns.g(41))\n'}
     err_ns = ''

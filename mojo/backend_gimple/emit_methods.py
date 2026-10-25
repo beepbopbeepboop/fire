@@ -3011,6 +3011,53 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             gen._register_imported_symbol(
                                 method_name, _mgc_entry, method_name,
                                 write_param_types=True)
+                    # The factory-value shape (the 2026-10-24 os.py shadow
+                    # class, its ENTRY-side half): `f = _mk()` is a VALUE,
+                    # not a top-level `def`, so the export scan carries no
+                    # entry for it (`_mgc_raw` is None and nothing
+                    # registered above) and the bare reconstruction below
+                    # used to lower `f` to the "ct param or undeclared"
+                    # NULL placeholder — `mojo_fnptr_call_1(NULL, 41)`, the
+                    # measured SIGSEGV (`import a_os; a_os.f(41)`, rc 139,
+                    # no output; the prefix C pair for the current tree
+                    # shows `_t2 = (int64_t)0; /* ct param or undeclared:
+                    # f */` immediately before the fnptr call). When the
+                    # receiver module IS compiled into this binary (inlined:
+                    # its `_<mod>_toplev` globals struct and the synthesized
+                    # `_<mod>__mojo_global_get_<attr>` accessor live in this
+                    # same translation unit, the getter defined before the
+                    # entry code that calls it) and the attribute is a
+                    # function-pointer-typed global of that module (a
+                    # `void *` field, written by the factory), register the
+                    # accessor in `_imported_global_accessors` — the table
+                    # `_lower_IdentExpr` checks BEFORE the NULL placeholder
+                    # (its BUG-2026-009 branch) and the exact registration
+                    # the other two cross-module global-read paths use (the
+                    # module_loader path in emit_infra and the kind-2
+                    # reflection path in emit_resolve). The bare
+                    # reconstruction then lowers `f` to the accessor call —
+                    # a real `void *` function value — and the call
+                    # machinery's fnptr guard emits `mojo_fnptr_call_N`,
+                    # the same convention the already-correct `from a_os
+                    # import f; f(41)` spelling lowers to (measured 42;
+                    # CPython 42). Deliberately narrow: only the
+                    # unregistered shape (a registered export keeps its
+                    # measured byte-for-byte path), only `void *` fields (a
+                    # non-fnptr unexported value keeps today's placeholder
+                    # behavior), and first-wins on the accessor table, the
+                    # same policy as the other two registration sites.
+                    _mg_ft = None
+                    if (not _mgc_raw
+                            and method_name not in gen.imported_symbols
+                            and _mgc_sub_ref in getattr(gen, '_compiled_modules', ())):
+                        _mg_ft = gen._module_global_field_type(
+                            _mgc_sub_ref, method_name)
+                    if (_mg_ft is not None and _mg_ft[0] == 'void *'
+                            and method_name not in gen._imported_global_accessors):
+                        _mg_csym = (f"{gimple_ctypes._c_field_name(str(_mgc_sub_ref))}"
+                                    f"__mojo_global_get_"
+                                    f"{gimple_ctypes._c_field_name(method_name)}")
+                        gen._imported_global_accessors[method_name] = ('void *', _mg_csym)
                     _mgc_bare_node = gimple_ctypes.CallExpr(
                         func=gimple_ctypes.IdentExpr(
                             name=method_name, line=getattr(node, 'line', 0)),
