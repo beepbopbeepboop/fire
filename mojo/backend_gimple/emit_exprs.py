@@ -5880,6 +5880,16 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     per_element = (('str' in scalar_sufs and scalar_sufs != {'str'})
                    or ('double' in scalar_sufs and scalar_sufs != {'double'}))
 
+    # For a literal containing a spread, record its statically-known PREFIX
+    # kinds BEFORE the spread extends the list, so the runtime can append the
+    # spread's tail kinds to them (extend reads the destination's current
+    # kinds). Computed here because `_literal_slot_kinds` only needs `lowered`.
+    _prefix_kinds = _literal_slot_kinds(gen, lowered)
+    _has_spread_here = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    if _has_spread_here and _prefix_kinds:
+        gen._emit_call('void', '', 'mojo_list_set_kinds',
+                       [('MojoList *', t),
+                        ('const char *', gen._intern_string(_prefix_kinds))])
     for el, et, ev in lowered:
         # Spread element (*seq): extend the list instead of appending
         if _is_star_spread(el):
@@ -5949,7 +5959,18 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # registered containers still records nothing: the generic walker names
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(gen, elem, _kinds, lowered):
+    _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A literal that contains a spread must record its statically-known
+    # prefix so the runtime can append the spread's tail kinds to it; the
+    # usual `_literal_needs_kinds` gate keys off the joined element type,
+    # which for a mixed `[0, *s]` is `char *` and would drop an int prefix.
+    _force_record = _has_spread and bool(_kinds)
+    if _force_record and 'i' in _kinds:
+        for _pl in lowered:
+            if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
+                _force_record = False
+                break
+    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _kinds, lowered) or _force_record):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
@@ -5963,7 +5984,10 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # printed `8.0`). The kinds row alone is what a container that walks the
     # value later (a dict display) needs; only a genuinely mixed or
     # `None`-bearing literal needs the read-side marker too.
-    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
+    # A literal that CONTAINS a spread ends up heterogeneous at runtime (the
+    # prefix plus the spread's tail), so its read-side access must also ask the
+    # runtime rather than trust the single prefix accessor.
+    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds or _has_spread):
         gen._maybe_kinds_vals.add(t)
     # Record how to REPR one element, for the same reason and independently of
     # the kinds above: a list of a REGISTERED STRUCT has one element ctype, so
@@ -6535,6 +6559,12 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
                 continue
             _slot_ts.append(_as_str(_slt[1]))
         gen._tuple_slot_types[t] = _slot_ts
+    # Record prefix kinds before any spread extends the tuple.
+    _prefix_tkinds = _literal_slot_kinds(gen, lowered)
+    if _has_spread and _prefix_tkinds:
+        gen._emit_call('void', '', 'mojo_list_set_kinds',
+                       [('MojoList *', t),
+                        ('const char *', gen._intern_string(_prefix_tkinds))])
     for _lwi in range(len(lowered)):
         _el = lowered[_lwi][0]
         et = _as_str(lowered[_lwi][1])
@@ -6633,7 +6663,13 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # display rendered `(None, 1)` — for the reason that predicate's own
     # docstring gives, and it is the same rule the list lowering applies.
     _tkinds = _literal_slot_kinds(gen, lowered)
-    if _literal_needs_kinds(gen, elem, _tkinds, lowered):
+    _force_record_t = _has_spread and bool(_tkinds)
+    if _force_record_t and 'i' in _tkinds:
+        for _pl in lowered:
+            if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
+                _force_record_t = False
+                break
+    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _tkinds, lowered) or _force_record_t):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])
@@ -6642,7 +6678,10 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # homogeneous scalar one does not (its accessor is exact); see the list
     # lowering's identical split for the `print(u[0]+1)` -> `8.0` regression
     # that coupling them caused.
-    if _tkinds and len(set(_tkinds)) > 1:
+    # A literal that CONTAINS a spread ends up heterogeneous at runtime (the
+    # prefix plus the spread's tail), so its read-side access must also ask the
+    # runtime rather than trust the single prefix accessor.
+    if _tkinds and (len(set(_tkinds)) > 1 or _has_spread):
         gen._maybe_kinds_vals.add(t)
     return 'MojoList *', t
 
