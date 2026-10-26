@@ -6016,6 +6016,15 @@ char *mojo_dict_iter_key(MojoDictIter *it)
     return _slot_key(&it->dict->slots[it->order[it->pos]]);
 }
 
+/* The current key's DOMAIN (see `_DictSlot.keykind`): 0 = str, 1 = bytes,
+   2 = int, 3+ = container. Used by the codegen's starless-dict unpack
+   path to refuse non-str keys, matching CPython's
+   `cannot unpack non-iterable <type> object`. */
+int64_t mojo_dict_iter_key_kind(MojoDictIter *it)
+{
+    return it->dict->slots[it->order[it->pos]].keykind;
+}
+
 /* The current key as an INTEGER, for a loop over a Dict[Int, V]. An integer
  * slot (keykind 2) holds it directly; any other slot is a key that was never
  * canonical decimal, so parse what it holds rather than invent a value. */
