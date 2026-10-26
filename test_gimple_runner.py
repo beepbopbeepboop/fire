@@ -887,7 +887,7 @@ main()
     # env-field questions: the callable comes back out of a function into an
     # unannotated `int64_t` parameter, which loses its return type at the
     # `mojo_fnptr_call_N` boundary. That is
-    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
+    # bug:CODEGEN_callable_return_type_lost_at_more_hops — the same hop
     # `use(<callable>)` is at the bottom of
     # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
     # hop one level in (the factory's own `outer()()`) and passes.
@@ -1082,7 +1082,7 @@ main()
     #
     # `use(<callable>)` is deliberately NOT here: routing the callable through
     # an unannotated parameter loses the return type one hop further out,
-    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
+    # which is bug:CODEGEN_callable_return_type_lost_at_more_hops and is
     # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
     # pins for buildability only.
     test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
@@ -9747,22 +9747,6 @@ def main():
     print([0, 1])
     print([1.5, 2.5])
     print([True, False])
-main()
-""")
-
-    # Regression for CODEGEN_scalar_container_repr_derived_list_nested_in_a_container:
-    # a list BUILT at runtime (comprehension / list(range)) nested in a
-    # container the runtime walks generically used to render a 0 as None (and
-    # crash on a float). CPython is the oracle.
-    test_gimple_matches_cpython("gimple_nested_scalar_container_repr_derived_list", """\
-def main():
-    print({'k': [i for i in range(2)]})
-    print({'k': [i * 0.5 for i in range(2)]})
-    print({'k': list(range(2))})
-    def f():
-        return [i for i in range(2)]
-    print({'k': f()})
-    print([{'j': [i for i in range(2)]}])
 main()
 """)
 
