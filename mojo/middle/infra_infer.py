@@ -3145,6 +3145,57 @@ def _lambda_owned(body, name: str) -> bool:
     except Exception:
         return False
 
+
+def _no_closure_escapes(fn) -> bool:
+    """True iff no closure created in `fn` can outlive the call, i.e. every
+    lambda binding is owned (`lambda_value_owned`) and every nested `def`'s
+    environment is owned (`nested_def_env_owned`). When True, a function's
+    `{mut}`-captured locals' heap boxes (whose lifetime is the CLOSURE's)
+    may be freed at the function's exit, since no closure survives to
+    dereference them. Fail-closed: any unanalysable or escaping closure
+    keeps the boxes alive (today's leak, never a use-after-free)."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return False
+    try:
+        for nm in _lambda_bindings(fn):
+            if _lambda_binding_count(fn, nm) != 1:
+                return False
+            if not _lambda_owned(fn.body, nm):
+                return False
+        # Nested defs: every one's environment must be owned. A nested def
+        # that is returned/stored/captured is not owned -> boxes must stay.
+        nd_names = set()
+        for n in gimple_exprtypes._walk_ast(fn.body):
+            if isinstance(n, FunctionDef) and isinstance(getattr(n, 'name', None), str):
+                nd_names.add(n.name)
+        for nm in nd_names:
+            if not ownership_destruct.nested_def_env_owned(fn.body, nm):
+                return False
+        # Any lambda that is not a binding (e.g. returned directly or stored
+        # in a container) is an escape we cannot prove safe.
+        for n in gimple_exprtypes._walk_ast(fn.body):
+            if isinstance(n, LambdaExpr):
+                # Allow only lambdas that are the RHS of an owned binding or an
+                # immediate call's callee. A conservative check: if it is not a
+                # binding, treat as escape.
+                pass
+        # Count unbound lambdas: if any lambda node is not the value of a
+        # VarDecl/AssignStmt binding, be conservative.
+        bound_lambda_ids = set()
+        for n in gimple_exprtypes._walk_ast(fn.body):
+            if isinstance(n, (VarDecl, AssignStmt)):
+                v = getattr(n, 'value', None)
+                if isinstance(v, LambdaExpr):
+                    bound_lambda_ids.add(id(v))
+        for n in gimple_exprtypes._walk_ast(fn.body):
+            if isinstance(n, LambdaExpr) and id(n) not in bound_lambda_ids:
+                # immediate call `lambda(...)` is allowed
+                # detect by parent? We don't have parent; be conservative.
+                return False
+        return True
+    except Exception:
+        return False
+
 def _list_elements_ok(body, name: str) -> bool:
     """A list local that owns its own string elements (a `split()` result) may
     be freed WITH them only if no element of it is ever named — see
