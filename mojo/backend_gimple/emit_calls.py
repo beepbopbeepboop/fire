@@ -5141,6 +5141,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     # bits and parses as gimple.
     boxed = gen._new_val('int64_t', raw)
     gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', boxed)])
+    gen._void_call('mojo_mark_as_tuple', [('MojoList *', pair)])
     # The pair's SECOND slot holds the element, so record its type or a
     # consumer reads a string back as a raw integer.
     if elem and elem != 'int64_t':
@@ -5392,6 +5393,23 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
                        [('MojoList *', res), ('MojoList *', _copy_src)])
         if _copy_src in gen._maybe_kinds_vals:
             gen._maybe_kinds_vals.add(res)
+        # Carry the compile-time element / nested-element typing across the
+        # copy too: `mojo_list_inherit_kinds` only copies the RUNTIME kinds
+        # string, and `_list_repr_fn` consults these compile-time tables to
+        # route to the pair-aware helpers. Without this, a runtime-built pair
+        # list copied through `list(...)` loses its 2-slot spec and prints
+        # indices as `None` / pair pointers as decimals.
+        if _copy_src in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_copy_src]
+        if _copy_src in gen._nested_elem_types:
+            gen._nested_elem_types[res] = gen._nested_elem_types[_copy_src]
+        else:
+            # An opaque/boxed source (e.g. a zip handle) carries no compile-time
+            # nested spec; the copy's elements are whatever the source yields at
+            # runtime (often marked tuple-pairs), so do not let a stray int64
+            # record route the copy's repr through the int helper.
+            gen._elem_types.pop(res, None)
+            gen._nested_elem_types.pop(res, None)
     # `tuple(x)` builds a TUPLE, and the marker is the only thing that makes
     # a value one (see mojo_mark_as_tuple's doc comment). Applied AFTER the
     # comprehension is complete, which is required: every mutating MojoList

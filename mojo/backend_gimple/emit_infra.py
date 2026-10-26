@@ -4527,8 +4527,11 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
         # same pair tracking the `_Enumerate` branch sets, with the pair's
         # own per-slot element types from the tuple struct's field map.
         gen._elem_types[out] = 'MojoList *'
-        gen._nested_elem_types[out] = list(
-            (gen.struct_field_types.get(_ret) or {}).values())
+        _fld_types = list((gen.struct_field_types.get(_ret) or {}).values())
+        if len(_fld_types) == 2:
+            gen._nested_elem_types[out] = _fld_types
+        else:
+            gen._nested_elem_types[out] = ['int64_t', 'int64_t']
     else:
         gen._elem_types[out] = 'int64_t'
     return out
