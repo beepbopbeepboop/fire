@@ -6905,6 +6905,25 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     # leaving it set would make the NEXT comprehension in the same function
     # extend with a stale remainder.
     gen._compr_pending_inner = None
+    # A list built at runtime (comprehension / list(range)) has no per-slot
+    # kinds row, but its element type is known here. Tell the runtime walker
+    # how to render one element, so a scalar 0 (int/float/bool) nested in a
+    # container the runtime walks generically does not mis-render as `None`
+    # (or fault on a double's bit pattern). Mirrors `_lower_list_literal`'s
+    # `mojo_list_set_elem_repr` call for struct elements.
+    if res_type == 'MojoList *':
+        _et = gen._elem_types.get(res)
+        _shim = None
+        if _et == 'int64_t':
+            _shim = 'mojo_repr_int'
+        elif _et == 'double':
+            _shim = 'mojo_repr_list_elem_double'
+        elif _et == '_Bool':
+            _shim = 'mojo_repr_list_elem_bool'
+        if _shim is not None:
+            gen._emit_call('void', '', 'mojo_list_set_elem_repr',
+                           [('MojoList *', res),
+                            ('void *', ginf.elem_repr_operand(gen, _shim))])
     gen._note_fresh_result(res)
     return res_type, res
 

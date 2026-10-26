@@ -11327,6 +11327,17 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
    exist, and a bool argument arrives as 0/1 anyway. */
 char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
 
+/* Element-repr shims for homogeneous scalar lists built at runtime
+ * (comprehensions / list(range)): the generic container walker consults
+ * `mojo_list_repr_elem` per slot, which has the right signature
+ * `char *(*)(int64_t)`. These adapt the scalar repr functions to it. */
+char *mojo_repr_list_elem_double(int64_t v) {
+    return mojo_repr_float(mojo_double_from_bits(v));
+}
+char *mojo_repr_list_elem_bool(int64_t v) {
+    return mojo_repr_bool((int)v);
+}
+
 /* The TRANSIENT decimal strings of `mojo_cstr_or_int_str` (an Int dict key or
  * compare operand) are blocks from this small free list: one per access,
  * released the moment the call that consumed it returns
