@@ -6836,6 +6836,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._compr_dict_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoSet *':
         gen._compr_set_loop(node, gen0, res, res_type, it_val)
+    elif it_type == 'MojoBytes *':
+        _bytes_list = gen._materialize_as_list(it_type, it_val)
+        gen.var_types[_bytes_list] = 'MojoList *'
+        gen._compr_list_loop(node, gen0, res, res_type, _bytes_list)
     elif it_type == 'MojoGenerator *':
         gen._compr_generator_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'int64_t' or it_type == 'int' or it_type == 'void *':
