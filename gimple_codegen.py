@@ -4906,8 +4906,8 @@ class GimpleGen:
         return glo._gen_for_bytes(self, var, it_val, body)
     def _gen_for_memoryview(self, var: str, it_val: str, body: list):
         return glo._gen_for_memoryview(self, var, it_val, body)
-    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False, split_key: bool=True):
-        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys, split_key)
+    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False):
+        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:
