@@ -864,6 +864,21 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
 
+    # `for it in <str param>:` inside a generator body: the parameter crosses
+    # the stack-switch ABI as an untyped int64_t slot, but `_static_env` proved
+    # it is a string. Treat the boxed value as a `char *` and iterate it as a
+    # C string rather than falling through to the runtime container dispatch
+    # (which has no string arm and would run zero times).
+    _str_params = getattr(gen, '_coro_str_params', {}).get(
+        getattr(gen, 'current_func_name', None), ())
+    if (isinstance(it, gimple_ctypes.IdentExpr)
+            and it.name in _str_params
+            and it_type in ('int', 'int64_t', 'void *')):
+        _it64 = gen._to_int64(it_type, it_val)
+        _strp = gen._coerce_to_type('int64_t', 'char *', _it64)
+        gen._gen_for_cstr(var, _strp, node.body)
+        return
+
     # `for c in <bytes-subclass instance>:` iterates its backing MojoBytes
     # payload (each `c` an int 0-255). See COMPILE_FAIL_zipfile___init__.md.
     if gen._bytes_subclass_of(it_type):

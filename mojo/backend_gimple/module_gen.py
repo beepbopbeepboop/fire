@@ -8523,6 +8523,7 @@ def gen_module_impl(self, stmts):
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, False)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
+    self._coro_str_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -8601,6 +8602,11 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+        _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
+        if _ps_body:
+            _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
+            for _ps_k in _ps_body:
+                _ps_d.add(_as_str(_ps_k))
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params
