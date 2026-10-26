@@ -666,22 +666,33 @@ def _gen_stmt_VarDecl(gen, node):
         _et_noinit = _annotation_container_elem_type(gen, node.type_ann, ctype)
         if _et_noinit:
             gen._elem_types[node.name] = _et_noinit
-        # Auto-allocate an empty container for a no-initializer binding
-        # whose annotation resolves to a container pointer type -- both
-        # the "()"-suffix idiom (`var x: list()`) and the bracketed
-        # typed spelling (`var x: List[Int]`, `var x: Dict[K, V]`,
-        # `var x: Set[T]`). The interpreter binds a fresh empty
-        # container for every such no-initializer List/Dict/Set binding
-        # (see `_container_field_default`), and the struct-FIELD half of
-        # this same root cause is already seeded the same way; leaving
-        # the pointer unallocated here made the first use (append,
-        # subscript, len, ...) dereference garbage and SIGSEGV on the
-        # compiled path. A local must be fresh per call, so this uses the
-        # per-binding `gen._new_val(ctype, _alloc)` emission (NOT the
-        # field fix's per-class global). Module-level globals take the
-        # same branch via `_in_toplevel_gen` and are handled by the
-        # `actual_dst` global coercion below.
-        if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        # `var x: list()` / `var x: dict()` / `var x: set()` -- a bare
+        # call-shaped annotation with NO initializer (see _mojo_type's
+        # matching "()"-suffix branch for the full story: this project's
+        # own "declare + implicitly construct an empty dynamic
+        # container" idiom, e.g. `var g_item_ids: list()` in box.3d/
+        # game/lib/recipes.mojo). `_declare_var` above only emits the
+        # bare C POINTER DECLARATION -- `_mojo_type` now resolves the
+        # annotation to the right pointer type, but the pointer itself
+        # is never actually allocated, so the first `.append()`/
+        # subscript/read dereferences whatever garbage bits happen to
+        # be sitting in that slot: a deterministic SIGSEGV (bisected
+        # via box.3d/game/DYLIB_string_copy_append_return_segv
+        # -- despite the bug report's title, this reproduces identically
+        # in `fire build`'s linked-executable path too, nothing to do
+        # with dylib mode; the report's own p2/global-`list()` repro
+        # was simply never re-tested in build mode). Auto-allocate here,
+        # mirroring exactly what `var x = list()` (a real initializer)
+        # already does via `_lower_call`'s `list()`/`dict()`/`set()`
+        # handling.
+        #
+        # Deliberately scoped to ONLY this "()"-suffix annotation shape
+        # -- a bracketed `var x: List[T]` (no initializer) is real
+        # Mojo's own explicit "must assign before use" form, not this
+        # project's implicit-construct idiom, and auto-allocating THAT
+        # too would silently paper over genuine definite-assignment
+        # bugs instead of fixing this one, narrowly-reported gap.
+        if isinstance(node.type_ann, str) and node.type_ann.endswith('()') and '[' not in node.type_ann:
             _alloc = {'MojoList *': 'mojo_list_new ()',
                       'MojoDict *': 'mojo_dict_new ()',
                       'MojoSet *': 'mojo_set_new ()'}.get(ctype)
@@ -1321,6 +1332,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # `src`) — so that case still falls through to the regular local
         # path below, and must not be redirected to any global struct.
         if gen._in_toplevel_gen and tname in gen._global_var_types:
+            import sys; print('TOPLEVEL-GLOBAL', repr(tname), 'vtype=', vtype, 'dst=', gen._global_dst_ctype(tname), file=sys.stderr)
             safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
             field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
             # See the _func_declared_globals branch above: coerce to the
@@ -2833,9 +2845,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._callable_ret_types:
             gen._return_callable_ret_types[gen.current_func_name] = \
                 gen._callable_ret_types[v]
-        if gen.current_func_name and v in gen._func_value_names:
-            gen._return_func_value_names[gen.current_func_name] = \
-                gen._func_value_names[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)

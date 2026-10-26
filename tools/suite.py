@@ -422,7 +422,7 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from the '
+MEASURED_RUN = ('a full `gate`, 2026-10-20, master 8e449ed3, per-job peaks from the '
                 'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
@@ -449,15 +449,15 @@ MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from 
 #             sources. Labelled rather than silently merged, because "derived"
 #             is a weaker claim and a reader is entitled to see which is which.
 MEASURED_PEAK_GB = {
-    'native-dumpfull':             (10.4, 'measured'),
+    'native-dumpfull':             (31.3, 'measured'),
     'ab-native':                   (20.5, 'measured'),
     'selfhost':                    (4.4, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
-    'bootstrap-stage1-transitive': (2.2, 'measured'),
-    'bootstrap-stage2-cc':         (2.3, 'measured'),
-    'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
+    'bootstrap-stage1-transitive': (1.6, 'measured'),
+    'bootstrap-stage2-cc':         (1.9, 'measured'),
+    'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
@@ -466,7 +466,7 @@ MEASURED_PEAK_GB = {
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
     'bootstrap-stage2-transitive': (30, 'measured'),    # the binary's whole-closure dump
-    'bootstrap-stage3-dumps':      (0.7, 'measured'),    # from stage2-dumps
+    'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
     'bootstrap-stage3-transitive': (30, 'derived'),     # from stage2-transitive (same binary shape)
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
@@ -2288,35 +2288,95 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# `bootstrap-verify` and `bootstrap-validate` (below) are the jobs that compare
-# what the stages PRODUCED, which is what makes them the only ones that can see
-# a compiled-codegen divergence: `reject=` on the fanouts is a regex over a
-# child's output and a child that writes a wrong artifact prints nothing.
-# Since 2026-10-25 they pass (184 files identical across the three stage trees)
-# and carry no marker.
-# `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
-# BLOW.md §0) but are STILL red for a different, real reason: their corpora
-# legitimately trigger this compiler's self-hosting bootstrap pre-pass
-# (a genuine, do_imports=True sibling-import compile whose sources live in a
-# per-run scratch directory under the worktree — see test_ab_native.py's
-# module docstring; they used to be placed in the repo root on purpose, which
-# is what raced the fan-out enumeration and is no longer the case), and that
-# pre-pass itself is extremely expensive per call
-# (~15-30 GB, ~15-25s — see BLOW.md §0's "NOT closed" addendum for the
-# measured repro and hot-stack profile: mojo_cstr_region_eq/
-# mojo_set_add_int/_set_grow dominating, the same signature as the original
-# bug this doc fixed, just now correctly SCOPED to only the cases that
-# should trigger it at all). Update this reason (not just delete it) once
-# that per-call cost is actually brought down — see BLOW.md for the
-# specific next-step suggestions (cross-call caching across the three
-# `_selfhost_*` seed passes within one process; degenerate-hashing check on
-# the tokenizer's `MojoSet` usage).
+# HISTORY OF THE MARKER ON THIS CLASS, because it moved twice and both moves are
+# the anti-rot discipline rather than bookkeeping.
 #
-# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
-# registration below for why that one is not switched too. This constant is
-# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
-# every `expect=` job in the registry with its measured peak, its class and its
-# reservation, and a recommendation each.
+# `bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("the self-hosted binary
+# segfaults on any input, exit 139"). That was MEASURED FALSE on 2026-09-27 and
+# corrected rather than left to rot: the original SIGSEGV is fixed (BLOW.md §0),
+# `./mojoc --dump-full` on a two-line program is exit 0 / 12.1 MB / 94.6 M
+# instructions. It was replaced with `SELFHOST_STAGE2_STALL`, whose point was
+# that a marker saying "segfault" would hide the real class — a
+# `mojo_unsupported_iter` no-op the runner flags per sub-job and no exit code
+# reports.
+#
+# 2026-10-03: that marker was STALE and the runner said so (a marker whose test
+# passes is a FAILURE). Not because the class is fixed — because this fanout
+# cannot see it. `reject=` is a regex over a child's output, the 47 sub-jobs no
+# longer emit `mojo_unsupported_iter`, and `--dump` on the compiled binary now
+# writes an EMPTY `.ci` while exiting 0, which prints nothing for a regex to
+# match. So the marker moved to `bootstrap-verify` and `bootstrap-validate`,
+# which compare the stage trees and therefore DO see it, and the fanout carries
+# a comment saying so instead of a marker that would have to be a lie in one
+# direction or the other. See `SELFHOST_STAGE2_EMPTY_DUMP` below and
+# bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
+#
+# RETIRED as a marker 2026-10-03, and NOT because the class is fixed. The
+# marker said the per-item fanout "returns `mojo_unsupported_iter` no-ops or a
+# wrong dump"; measured on that gate, the `mojo_unsupported_iter` half is GONE —
+# which is why `bootstrap-stage2-dumps` passed and the runner correctly reported
+# a marker whose test passes as a FAILURE. The "wrong dump" half is exactly what
+# `bootstrap-verify` reports in the same run (87 stage1-vs-stage2 diffs, most of
+# them a 0-byte `.ci`), so the class did not go away: its DETECTOR in this job
+# went away with it. `reject=` is a regex over a child's OUTPUT and a child that
+# writes nothing prints nothing, so this fanout cannot see an empty artifact
+# however it is spelled.
+#
+# So the marker moves to the two jobs that DO compare what was produced, which
+# is where a reader of the tally will actually see this. The constant is kept,
+# renamed, because its text is still the truest short description of the class
+# in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
+#
+# 2026-10-04: and now the fanout is RED and carries a marker again, for a
+# reason worth writing down, because it is the THIRD move of this marker and
+# the rule that produced it. What the 2026-10-03 entry above reasoned about
+# was a fanout that could not see the class: the compiled binary wrote an
+# EMPTY `.ci` and exited 0, so `reject=` had nothing to match and the per-item
+# exit code said 0. That is no longer the shape. gatefix8 fixed the tokenizer
+# and the parser, so `.tok`/`.ast` are now byte-identical to stage1's and the
+# failure has moved INTO the compiled codegen, where it is no longer silent:
+# `compile_to_gimple` raises `TypeError: unhashable type: 'list'`, or the
+# parser refuses with `SEMICOLON`, or the binary dies on SIGSEGV/SIGBUS.
+# 45 of the 46 items now exit non-zero and only `mojo_failures.mojo` passes.
+#
+# So the general rule the three moves add up to: "this job cannot SEE the
+# defect" was true on 2026-10-03 and stopped being true on 2026-10-04, and the
+# honest response to a job that has become RED is a marker on THAT job — not a
+# comment explaining why it is not red, and not a marker left off because the
+# defect "really" belongs to a sibling job. A RED job with no marker is a hole
+# in the gate: nothing reports it, and `expect=` costs 4 s here.
+SELFHOST_STAGE2_EMPTY_DUMP = (
+    'the compiled binary dumps every single-module input (46 of 46, `.tok` '
+    'byte-identical) but cannot yet compile its own closure: '
+    '`bootstrap-stage2-transitive` is disabled (it does not finish), so the '
+    'stage3 trees these compare do not exist. See '
+    'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
+# `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
+# BLOW.md §0). Their corpora legitimately trigger this compiler's
+# self-hosting bootstrap pre-pass (a genuine, do_imports=True sibling-import
+# compile whose sources live in a per-run scratch directory under the
+# worktree — see test_ab_native.py's module docstring; they used to be placed
+# in the repo root on purpose, which is what raced the fan-out enumeration and
+# is no longer the case), and that pre-pass is expensive per call
+# (~15-30 GB, ~15-25s — BLOW.md §2: a never-frees accumulator, localised, not
+# fixed; the measured repro and hot-stack profile are there:
+# mojo_cstr_region_eq/mojo_set_add_int/_set_grow dominating, the same
+# signature as the original bug, now correctly SCOPED to only the cases that
+# should trigger it at all). As of 2026-10-26 the two jobs sit in different
+# states, so they no longer share a reason constant:
+#   * `native-dumpfull` is GREEN — measured twice that day, both runs wrote a
+#     byte-identical fire.ci and exited 0 (38.3 GB in the gate, which included
+#     a memslot wait; 13.9 GB in a solo run). Its check asserts the ARTIFACT
+#     and the exit code, never the cost: the survival + correct-write fixes
+#     closed it, and the cost did not come down (the two peaks are the
+#     accumulator's, and their variance is the signature). BLOW.md §0's
+#     premise "the pre-pass cost has to come down for them to go green" was
+#     wrong for this check. The cost stays tracked in its `program` (55 GB)
+#     class and in BLOW.md, not in a marker.
+#   * `ab-native` is doc-disabled (bugs/CODEGEN_ab_native_fails.md) while its
+#     peak drifts against the 8 GB ceiling; §4 of that doc tables every such
+#     job with its measured peak, its class and its reservation, and a
+#     recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
 # whole-closure self-compile AND the `gcc -O2 -fgimple` over the resulting
 # 40 MB translation unit, and it used to be given the class documented on the
@@ -2386,20 +2446,27 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
      disabled='bugs/CODEGEN_ab_native_fails.md',
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
-# NOT switched, deliberately, and the reason is per job rather than per
-# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
-# blowup in their `expect=` reason and are the owner's call, because both are
-# also the jobs whose runs produce the measurements the blowup work is steered
-# by — a marker that cannot be observed going green is weak, and this is the
-# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
-# with their peak, class and reservation and a recommendation each, so the
-# choice is a line rather than an investigation.
+# The `expect=` marker that sat here until 2026-10-26 was dropped on a
+# measurement, not a whim: two completed runs that day (the gate and a solo)
+# both wrote a byte-identical fire.ci and exited 0 — 38.3 GB and 13.9 GB.
+# The check asserts the artifact and the exit code, never the cost, so it
+# went green on the survival + correct-write fixes while the pre-pass cost
+# (BLOW.md §2, still open) stays tracked in the `program` class and in
+# BLOW.md §0 rather than in a marker. `bootstrap-stage2-dumps` (the other
+# job of the §4 table in bugs/CODEGEN_ab_native_fails.md) is disabled with
+# the rest of the stage2 chain, not marked.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='module',
-     memwhy='measured 10.4 GB (2026-10-25, the full gate): the self-hosting '
-            'bootstrap pre-pass this corpus legitimately triggers, still over '
-            'the 4 GB line - see ' + MEM_DEBT_DOC + '. The job PASSES now '
-            '(its `expect=` came off the day the bootstrap chain went green).',
+     mem='program',
+     memwhy='measured 31.3 GB — the largest job in the registry that still '
+            'completes, for the same pre-pass (BLOW.md section 2). '
+            '1.5x is 47 GB, so `program` is the class the ratchet assigns; the '
+            'class is already correct and the reason is recorded because it is '
+            'over the 4 GB line — see ' + MEM_DEBT_DOC + '. The 2026-10-07 gate '
+            'measured 1.4 GB, but `mojoc --dump-full` died early (TypeError, no '
+            '.ci): how far it got, not what it needs. The 2026-10-26 runs '
+            'measured 38.3 GB (gate, including a memslot wait) and 13.9 GB '
+            '(solo) on the SAME check that now passes — the variance is the '
+            'accumulator, so 38.3 stays the number the class covers.',
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 # Peak-memory budgets for the self-hosted binary, as numbers (see the module
 # docstring of test_selfhost_memory.py). `selfhost-memory` is the fixed cost of
@@ -2410,18 +2477,34 @@ test('selfhost-memory', [PY, 'test_selfhost_memory.py', 'snippet'], driver='mem'
      mem='small', deps=['mojoc'], extra=['test_selfhost_memory.py'],
      desc='peak RSS of one self-hosted --dump-full (fixed cost), under budget')
 test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='mem',
-     mem='module', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
-     memwhy='measured 12.2 GB when it last ran (doc/MEMORY.html section 11: '
-            'the type-scan scratch pool and the shared one-character strings '
-            'took the self-hosted compiler compiling fire.py from 34-47 GB to '
-            '12.2 GB), so `module` (24) is the smallest class that covers it and '
-            '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
-            'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
-            'because at this size it is alone on the machine by arithmetic, not '
-            'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
-            '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
-            'asserts the peak, not the exit code; 12.2 stays the last real '
-            'measurement.',
+     mem='program', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
+     memwhy='drift, measured 2026-10-26: first RESOURCE-capped at the '
+            '`module` (24 GB) ceiling twice (24.1 GB at 293 s in the gate and '
+            'at 341 s in an exclusive solo run, both still allocating at the '
+            'cap), then COMPLETED at 38.8 GB in 356 s under the raised class '
+            '— over the test self-host_memory fire case 16 GB budget, so the '
+            'test itself fails; that failure is the tripwire working, and it '
+            'is the state the BLOW.md section-2 accumulator workstream owns. '
+            'The last budget-PASSING measurement is 12.2 GB, 2026-09-30 '
+            '(doc/MEMORY.html section 11: the type-scan scratch pool and the '
+            'shared one-character strings took this exact job from 34-47 GB '
+            'to 12.2 GB). Same direction as the ab-native peak drift in '
+            'BLOW.md section 0; the signature is the section-2 never-frees '
+            'accumulator (localised, not fixed), not a new leak hunt. '
+            '`program` (55) covers the measured 38.8 GB at 1.42x, not the '
+            '1.5x the ratchet asks for (which is `stage`, 96 GB): reserving '
+            'the whole machine for a job with a known unfixed leak is a '
+            'different trade than variance headroom, and the stdlib-tests '
+            'registration above makes the same choice with its documented '
+            'reason. When the accumulator work lands, the job passes its '
+            'budget again, --apply-peaks records the true lower peak, and the '
+            'class comes back down. The failed run peak is deliberately NOT '
+            'in MEASURED_PEAK_GB: trusted_peaks only trusts PASS lines, and '
+            'locking the leak number in as the measured baseline would steal '
+            'the ratchet input the fix is supposed to produce. Over the 4 GB '
+            'line and therefore a debt — see '
+            'bugs/PERF_memory_over_4gb_is_a_bug.md. `excl` because it is the '
+            'largest reservation in the gate.',
      desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -2622,11 +2705,30 @@ test('bootstrap-stage3-transitive',
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
 
+# These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
+# names, and they became visible for a structural reason worth recording: they
+# used to SKIP, because `bootstrap-stage2-dumps` failed and a failed dep skips
+# its dependents. Its detector was then removed (the `mojo_unsupported_iter`
+# no-op it rejected for is gone), so the fanout passed, and these two ran for the
+# first time and reported the divergence the whole cluster exists to find.
+#
+# `expect=` and not `disabled=`, and the rule that decides it is cost: neither
+# job is in `MEASURED_PEAK_GB` (both are in the unmeasured list, so they keep
+# the default class) and both took 0.6 s in the 2026-10-03 gate — they are three
+# `os.listdir`s and a byte compare, and all of their cost is in
+# `bootstrap-stage3-transitive`. A known failure that is cheap runs, so that its
+# anti-rot ("marked expect= but it PASSES") is alive on every gate; `disabled=`
+# would buy nothing here and cost the machine a reservation to be told what the
+# doc already says. The markers state NO count on purpose: 87 diffs / 256
+# mismatches is a census of a class that shrinks as it is fixed, and a marker
+# that pinned a number would fire the moment one file was repaired.
 test('bootstrap-verify', [PY, 'tools/bootstrap_verify.py'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='stage1 == stage2 == stage3 for every generated file')
 test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='bootstrap-validate.mojo over the three stage trees')
 
 # ── formal ───────────────────────────────────────────────────────────────────

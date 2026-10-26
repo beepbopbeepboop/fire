@@ -644,21 +644,8 @@ def _quick_type(gen, node) -> str:
                         'encode', 'decode', 'join', 'group'):
                 return 'char *'
             if mod == 're' and meth == 'sub':    return 'char *'
-            # The match object is the runtime's universal int64_t scalar —
-            # its 0 is the `None` result, and the emitter's own
-            # `int64_t.<m>() stubbed` arm yields an int64_t identity of the
-            # receiver — NOT a 32-bit `int`. Declaring the receiving local
-            # `int` narrows the store (`_m = (int)_t`), and the stubbed
-            # `.group()` result inherits that narrow type: elab_intu's
-            # `re.escape(_m.group(1))` then lowered the 32-bit value
-            # straight to `char *` — a "cast to pointer from integer of
-            # different size" warning under the self-host's gcc, and the
-            # same 32-bit truncation a real 64-bit match-object value would
-            # hit. `int64_t` joins identically everywhere (signed vs
-            # signed, wider wins), so every other consumer of this answer
-            # is untouched.
-            if mod == 're' and meth == 'match':  return 'int64_t'
-            if mod == 're' and meth == 'search': return 'int64_t'
+            if mod == 're' and meth == 'match':  return 'int'
+            if mod == 're' and meth == 'search': return 'int'
             if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
             if mod == 'os' and meth == 'listdir': return 'MojoList *'
             if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
@@ -729,23 +716,7 @@ def _quick_type(gen, node) -> str:
         elif (isinstance(node.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
-            if node.func.member in ('join', 'basename', 'expanduser'):
-                # `join` included (measured flip): without a row here the
-                # answer fell to the chained `.join` row below, which fires
-                # only while `_quick_type(os.path)` is `char *` — and that
-                # receiver's answer is `_known_field_type('path')`, an
-                # unambiguous-member search over the registered struct fields
-                # that flips to None as more unrelated structs register a
-                # `path` field. Measured: `RUNTIME = os.path.join(HERE,
-                # 'runtime')` (defined at top level in monomorphize.py,
-                # imports.py, build_stdlib_dylib.py, driver.py, comptime.py)
-                # inferred `char *` in an early gen_module pass and `int64_t`
-                # in a later one, so the registration loop's (name, c_type,
-                # g_mtype) dedup appended BOTH triples and the C struct got
-                # two `RUNTIME` members ("duplicate member 'RUNTIME'"). The
-                # lowering (`int_join` -> char*) and exprtypes' os.path row
-                # both answer char* for join; this makes this estimator agree
-                # with them unconditionally.
+            if node.func.member in ('basename', 'expanduser'):
                 return 'char *'
             if node.func.member in ('splitext', 'split', 'splitdrive', 'splitroot'):
                 # All string-tuple results in this codegen's model —
