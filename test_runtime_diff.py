@@ -1281,7 +1281,7 @@ BUILTIN_PROGRAMS = {
     # (`{'x': 1} | {'y': 's'}`), which this dict representation — one
     # int64_t slot plus a `kind` tag — has no static type for; those stay
     # unrecorded rather than being mis-typed, and that gap is tracked in
-    # bugs/BUGFIX_ROADMAP.md item 2.
+    # the remaining heterogeneous dict-union gap.
     "dict_union_get_value_type": textwrap.dedent("""\
         def main():
             a = {"A": "1"}
