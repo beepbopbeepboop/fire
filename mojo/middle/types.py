@@ -2248,3 +2248,65 @@ def _declared_vars_body(stmts) -> set[str]:
     return result
 _CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
 _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+# The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
+# parameter list (`int64_t... a` has no `a[0]`), so a lambda's `*a` / `**k`
+# parameter is modeled as a single CONTAINER parameter, mirroring the plain
+# (lifted-function) GIMPLE path's convention — `*args` packed into a
+# `MojoList *`, `**kwargs` into a `MojoDict *` — and the value's nameable
+# declared type is the std::function of that fixed signature. The call-site
+# packing (the `mojo_list_new` / `mojo_dict_set_*` IIFE) lives in
+# cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
+# c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
+# occurrence; see bugs/hard/
+# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+_CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
+_CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
+_CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'
+
+
+def _cpp_lambda_ctype(lam):
+    """The callable-value declared ctype for a coroutine-body `lambda`
+    literal, or None when the shape is not admitted.
+
+    One source of truth shared by `_cpp_expr`'s own VALUE emission
+    (cpp_core) and the AssignStmt first-assignment typing (cpp_async's
+    `_cpp_is_callable_value_expr`): the two must agree which shape has
+    which nameable type, and this file used to encode that agreement as
+    two separately-edited predicates.
+
+    Admitted: no parameters; ONE plain parameter with no default; a bare
+    `*args`; a bare `**kwargs`; and the `*args, **kwargs` pair. Everything
+    else is None — the emitter refuses honestly rather than guess a
+    signature: a plain parameter LEADING a `*args`, a DEFAULT on any
+    parameter (filling an omitted argument would need call-site padding
+    this emitter does not have), a plain keyword-only parameter, or two
+    `*args`/`**kwargs`. The parser records the starred names `*a`/`**k`
+    with the prefix, so the C parameter takes the stripped name (`a`/`k`)
+    — the one the body references.
+    """
+    params = lam.params or []
+    _plain = []
+    _star = []
+    _kw = []
+    for _p in params:
+        _n = _p[0]
+        _d = _p[1]
+        if _d is not None:
+            return None
+        if _n.startswith('**'):
+            _kw.append(_n)
+        elif _n.startswith('*'):
+            _star.append(_n)
+        else:
+            _plain.append(_n)
+    if len(params) == 0:
+        return _CPP_CALLABLE_CTYPE
+    if len(_plain) == 1 and not _star and not _kw:
+        return _CPP_CALLABLE_CTYPE_1ARG
+    if len(_star) == 1 and not _plain and not _kw:
+        return _CPP_CALLABLE_CTYPE_STARARGS
+    if len(_kw) == 1 and not _plain and not _star:
+        return _CPP_CALLABLE_CTYPE_KWARGS
+    if len(_star) == 1 and len(_kw) == 1 and not _plain:
+        return _CPP_CALLABLE_CTYPE_STAR_KW
+    return None
