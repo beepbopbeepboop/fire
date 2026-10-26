@@ -101,19 +101,21 @@ def _cpp_struct_ptr_local(gen, name: str) -> str | None:
 
 
 def _cpp_is_callable_value_expr(gen, node) -> bool:
-    """True for a coroutine-body expression this codegen's one
-    callable-value declared-type category (`_CPP_CALLABLE_CTYPE`) can
-    represent: a zero-argument `lambda` literal, or a bound-method-as-
-    VALUE read (`self.<method>` / `<struct-pointer local>.<method>`,
-    NOT immediately called) off a struct whose methods this compile
-    already knows how to dispatch through. Used by `_cpp_stmt`'s
-    AssignStmt case to give a first-assigned local the right declared
-    type — mirrors (and must stay in sync with) `_cpp_expr`'s own
-    LambdaExpr/MemberExpr cases, the single source of truth for the
-    actual VALUE emission this type just needs to agree with. See
+    """True for a coroutine-body expression this codegen's callable-value
+    declared-type family can represent: an admitted-shape `lambda`
+    literal — the shape decision is `gimple_ctypes._cpp_lambda_ctype`,
+    the SAME helper `_cpp_expr`'s own LambdaExpr value emission asks, so
+    the two cannot drift apart — or a bound-method-as-VALUE read
+    (`self.<method>` / `<struct-pointer local>.<method>`, NOT immediately
+    called) off a struct whose methods this compile already knows how to
+    dispatch through. Used by `_cpp_stmt`'s AssignStmt case to give a
+    first-assigned local the right declared type — mirrors (and must stay
+    in sync with) `_cpp_expr`'s own LambdaExpr/MemberExpr cases, the
+    single source of truth for the actual VALUE emission this type just
+    needs to agree with. See
     bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md."""
     if isinstance(node, gimple_ctypes.LambdaExpr):
-        return not node.params
+        return gimple_ctypes._cpp_lambda_ctype(node) is not None
     if isinstance(node, gimple_ctypes.MemberExpr):
         # `_struct_method_names` (real method names straight off the
         # struct's own AST) is the sole authoritative signal — NOT

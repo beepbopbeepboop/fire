@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _FLOAT_TYPES
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -1022,7 +1022,20 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
                 if _is_known_struct_ptr_ctype(rt, known_structs):
                     return rt
         if known is not None and e.func.name in known:
-            if known[e.func.name] == _CPP_CALLABLE_CTYPE:
+            if known[e.func.name] in (_CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG,
+                                      _CPP_CALLABLE_CTYPE_STARARGS,
+                                      _CPP_CALLABLE_CTYPE_KWARGS,
+                                      _CPP_CALLABLE_CTYPE_STAR_KW):
+                # A call through a DECLARED callable-value local yields the
+                # model's int64 result box, whatever the callable's shape —
+                # NOT the local's own ctype: a `std::function<...>`-typed
+                # yield-value or assignment target is invalid C on the
+                # consumer side (the zero-arg shape got this mapping first;
+                # every other callable ctype fell through to the callable
+                # type itself, so `yield e(4, 5)` through a 1-arg/`*args`
+                # local declared the consumer's loop variable a std::
+                # function — an undecodable C declaration, refused only as
+                # a g++ syntax error).
                 return 'int64_t'
             return known[e.func.name]
         if fn_return_types is not None:

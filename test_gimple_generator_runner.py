@@ -1551,9 +1551,191 @@ main()
 """, "/r/a\n")
 
 
+def run_variadic_lambda_value_tests():
+    # The `*args`/`**kwargs` lambda-VALUE family in a compiled coroutine
+    # body — the shape `Tools/c-analyzer/c_common/fsutil.py`'s `iter_files`
+    # reaches for (`get_files = lambda *a, **k: ...`) and this tree used to
+    # refuse in the C++ path ("a `lambda` with more than one parameter, a
+    # `*/**-forwarding parameter, or a parameter default is not supported")
+    # while the A3 path had already admitted it in October. The C++ model
+    # (see `gimple_ctypes._cpp_lambda_ctype`'s docstring): each `*`/`**`
+    # parameter is one CONTAINER parameter (`MojoList *`/`MojoDict *`), and
+    # the call site packs the arguments into that container in an IIFE.
+    # Every probe below uses the `*, start=[]` kwonly-list-literal default
+    # to force the C++ coroutine path (A3 refuses the unrepresentable
+    # kwonly default; without it these bodies would lower via A3 and the
+    # C++ emitter would never run).
+    # The body reads `a[i]`/`k['x']` through the int64-box getters (this
+    # narrow model tracks no per-container element KIND for a lambda's
+    # *args/**kwargs), so the round-trip the tests pin is the INT one:
+    # the str/double kinds are refused at the call site instead of packed
+    # (a pointer/bit pattern would come back as a silent decimal — the
+    # exact failure class the refusal messages below assert on).
+    test_generator_stdout("cpp_coroutine_starargs_lambda_value", """\
+def probe(*, start=[]):
+    e = lambda *a: a[0] + a[1]
+    yield e(4, 5)
+
+def main():
+    for v in probe():
+        print(v)
+""", "9\n")
+    test_generator_stdout("cpp_coroutine_kwargs_lambda_value", """\
+def probe(*, start=[]):
+    e = lambda **k: k['x'] * 2
+    yield e(x=7)
+
+def main():
+    for v in probe():
+        print(v)
+""", "14\n")
+    test_generator_stdout("cpp_coroutine_starargs_kwargs_lambda_value", """\
+def probe(*, start=[]):
+    e = lambda *a, **k: a[0] + k['v']
+    yield e(1, v=5)
+
+def main():
+    for v in probe():
+        print(v)
+""", "6\n")
+    # Bool round-trips the int64 box arithmetically (True+1 == 2 in both
+    # CPython and the compiled body), so a bool positional is packable.
+    test_generator_stdout("cpp_coroutine_starargs_lambda_bool_arg", """\
+def probe(*, start=[]):
+    e = lambda *a: a[0] + a[1]
+    yield e(True, 1)
+
+def main():
+    for v in probe():
+        print(v)
+""", "2\n")
+    # Consumption through the eager-materializing `map()`: the synthesized
+    # comprehension calls the held local per element, one positional arg
+    # packed into the *args list per call.
+    test_generator_stdout("cpp_coroutine_starargs_lambda_via_map", """\
+def probe(*, start=[]):
+    xs = [1, 2, 3]
+    double = lambda *a: a[0] * 2
+    ys = map(double, xs)
+    yield ys[0] + ys[1] + ys[2]
+
+def main():
+    for v in probe():
+        print(v)
+""", "12\n")
+    # ...and through `filter()`, whose guard keeps the callable's own
+    # operator-bool() when the local's declared type is a known
+    # callable-value ctype (the three new shapes had to be added to that
+    # accepted tuple or a stored callable would be judged as a bare
+    # element).
+    test_generator_stdout("cpp_coroutine_starargs_lambda_via_filter", """\
+def probe(*, start=[]):
+    xs = [1, 2, 3, 4]
+    keep = lambda *a: a[0] > 2
+    ys = filter(keep, xs)
+    yield ys[0] + ys[1]
+
+def main():
+    for v in probe():
+        print(v)
+""", "7\n")
+    # The local survives across branches: the FIRST assignment declares it
+    # (and only the first — the second branch reuses the declared local),
+    # so both branches must emit values of the same shape's declared type.
+    test_generator_stdout("cpp_coroutine_starargs_lambda_rebound_across_branches", """\
+def probe(*, start=[]):
+    if 1:
+        e = lambda *a: a[0] * 10
+    else:
+        e = lambda *a: a[0] + 1
+    yield e(3)
+
+def main():
+    for v in probe():
+        print(v)
+""", "30\n")
+    # Honest refusals — the shape is admitted, the VALUE KIND is not:
+    # a str/double slot would come back through the int64-box getters as
+    # a pointer/bit pattern (a silent decimal), so the call site refuses
+    # instead of packing.
+    test_generator_refused(
+        "cpp_coroutine_starargs_lambda_str_arg_refused", """\
+def probe(*, start=[]):
+    e = lambda *a: a[0]
+    yield e('hi')
+
+def main():
+    for v in probe():
+        print(v)
+""", "cannot be packed into the `*args`")
+    test_generator_refused(
+        "cpp_coroutine_starargs_lambda_double_arg_refused", """\
+def probe(*, start=[]):
+    e = lambda *a: a[0]
+    yield e(1.5)
+
+def main():
+    for v in probe():
+        print(v)
+""", "cannot be packed into the `*args`")
+    test_generator_refused(
+        "cpp_coroutine_kwargs_lambda_str_value_refused", """\
+def probe(*, start=[]):
+    e = lambda **k: k['x']
+    yield e(x='hi')
+
+def main():
+    for v in probe():
+        print(v)
+""", "cannot be packed into the `**kwargs`")
+    # A call whose ARGUMENT KIND does not match the local's shape at all.
+    test_generator_refused(
+        "cpp_coroutine_kwargs_only_local_positional_call_refused", """\
+def probe(*, start=[]):
+    e = lambda **k: k['x']
+    yield e(7)
+
+def main():
+    for v in probe():
+        print(v)
+""", "a call with positional arguments is not supported")
+    test_generator_refused(
+        "cpp_coroutine_starargs_only_local_kwarg_call_refused", """\
+def probe(*, start=[]):
+    e = lambda *a: a[0]
+    yield e(v=7)
+
+def main():
+    for v in probe():
+        print(v)
+""", "a call with keyword arguments is not supported")
+    # And the lambda SHAPES that have no nameable declared type at all.
+    test_generator_refused(
+        "cpp_coroutine_lambda_param_default_refused", """\
+def probe(*, start=[]):
+    e = lambda x=3: x
+    yield e()
+
+def main():
+    for v in probe():
+        print(v)
+""", "Unsupported shape(s): probe:")
+    test_generator_refused(
+        "cpp_coroutine_lambda_plain_then_starargs_refused", """\
+def probe(*, start=[]):
+    e = lambda f, *a: f
+    yield e(1)
+
+def main():
+    for v in probe():
+        print(v)
+""", "Unsupported shape(s): probe:")
+
+
 def run_tests():
     run_callable_param_tests()
     run_lambda_capture_tests()
+    run_variadic_lambda_value_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()

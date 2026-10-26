@@ -1016,6 +1016,29 @@ def _cpp_expr_static_ctype(gen, e):
     if isinstance(e, gimple_ctypes.StringLiteral):
         return 'char *'
     if isinstance(e, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
+        # A subscript on a DECLARED `MojoList *`/`MojoDict *` local is NOT
+        # a string: `_cpp_expr`'s own SubscriptExpr branch reads those
+        # through the int64-box getters (`mojo_list_get_*` /
+        # `mojo_dict_get_int`), so answering 'char *' here would make the
+        # mixed-pointerness comparison guard cast an int64 operand to
+        # `char *` (`mojo_list_get_int(a, 0) > (char *)(2)` — g++ rejects
+        # a pointer/integer comparison) and the `not`/truthiness branch
+        # run `mojo_strlen` over a reinterpreted integer. Mirror the
+        # getter choice: a list local whose ELEMENT kind is tracked as
+        # char* (or double) still reads back that kind.
+        if (isinstance(e, gimple_ctypes.SubscriptExpr)
+                and isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None):
+            _dct = gen._cpp_declared.get(e.obj.name)
+            if _dct == 'MojoDict *':
+                return 'int64_t'
+            if _dct == 'MojoList *':
+                _leet = getattr(gen, '_cpp_list_local_elem_types', {}).get(e.obj.name)
+                if _leet == 'char *':
+                    return 'char *'
+                if _leet == 'double':
+                    return 'double'
+                return 'int64_t'
         return 'char *'
     if isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr):
         if e.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
@@ -1959,26 +1982,38 @@ def _cpp_expr(gen, e) -> str:
         # `co_yield` suspension points, e.g. `_genops`' own
         # `pos = getpos()` on the very next loop iteration).
         #
-        # The zero-Python-argument shape (`_CPP_CALLABLE_CTYPE`) and a
-        # SINGLE plain parameter, no `*`/`**`/default (`_CPP_CALLABLE_
-        # CTYPE_1ARG` — added for enum.py's `key=lambda m: m._sort_
-        # order_`, a `sorted(..., key=...)` comparator) are the only
-        # shapes supported — anything wider (2+ params, or a `*a`/`**k`
-        # forwarding param like fsutil.py's `lambda *a, **k: _walk(*a,
-        # walk=_files, **k)`) is refused honestly rather than guessing a
-        # signature; the fsutil.py occurrence is additionally blocked by
-        # the separate, deliberately unfixed bugs/hard/CODEGEN_args_
-        # kwargs_signature_assumed_forwarding_only.md gap regardless.
-        if len(e.params) > 1 or (e.params and (
-                e.params[0][0].startswith('*') or e.params[0][1] is not None)):
+        # The admitted shapes, each with its own nameable declared
+        # ctype, are decided by the one shared helper
+        # `gimple_ctypes._cpp_lambda_ctype` (see its docstring): no
+        # parameters (`_CPP_CALLABLE_CTYPE`); a SINGLE plain parameter,
+        # no `*`/`**`/default (`_CPP_CALLABLE_CTYPE_1ARG` — added for
+        # enum.py's `key=lambda m: m._sort_order_`, a `sorted(...,
+        # key=...)` comparator); and the `*args` / `**kwargs` family — a
+        # bare `*args`, a bare `**kwargs`, and the pair — modeled as one
+        # CONTAINER parameter per `*`/`**` (a `MojoList *` / `MojoDict
+        # *`), mirroring the plain (lifted-function) GIMPLE path's own
+        # convention, because C++ cannot subscript a native variadic
+        # parameter list at all (`int64_t... a` has no `a[0]`).
+        # Everything else is refused honestly rather than guessing a
+        # signature: a plain parameter LEADING a `*args`, a DEFAULT on
+        # any parameter, a plain keyword-only parameter, or two
+        # `*args`/`**kwargs`. `Tools/c-analyzer/c_common/fsutil.py`'s
+        # `get_files = lambda *a, **k: _walk(*a, walk=_files, **k)` is
+        # the motivating shape; its BODY additionally needs the star/
+        # kwargs call FORWARDING through a polymorphic local, a
+        # separate, still-open gap — that occurrence is refused there.
+        _lam_ctype = gimple_ctypes._cpp_lambda_ctype(e)
+        if _lam_ctype is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a `lambda` with more than one parameter, a `*`/`**`"
-                "-forwarding parameter, or a parameter default is not "
-                "supported as a value inside a compiled generator/"
-                "coroutine body (only a zero-argument lambda or a "
-                "single plain-parameter lambda, e.g. `lambda: None` / "
-                "`lambda x: x`, is supported)")
-        if e.params:
+                "a `lambda` with more than one plain parameter, a "
+                "plain parameter leading a `*`/`**` parameter, a "
+                "parameter default, or a plain keyword-only parameter "
+                "is not supported as a value inside a compiled "
+                "generator/coroutine body (supported: a zero-argument "
+                "lambda, a single plain-parameter lambda, e.g. "
+                "`lambda: None` / `lambda x: x`, or a bare `*args` / "
+                "`**kwargs` / `*args, **kwargs`)")
+        if _lam_ctype == gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG:
             _pname = e.params[0][0]
             _hint = gen._cpp_pending_lambda_param_ctype
             gen._cpp_pending_lambda_param_ctype = None
@@ -2011,6 +2046,46 @@ def _cpp_expr(gen, e) -> str:
             return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG})"
                     f"([&](int64_t {_boxed}) -> int64_t "
                     f"{{ {_cast} return (int64_t)({_body}); }}))")
+        if _lam_ctype != gimple_ctypes._CPP_CALLABLE_CTYPE:
+            # The `*args`/`**kwargs` family: each `*`/`**` parameter
+            # becomes a real C++ parameter of its container ctype under
+            # the STRIPPED name — the parser records `*a`/`**k` with the
+            # prefix, the body references the bare `a`/`k` — declared
+            # for the duration of the body lowering exactly like the
+            # 1-arg case's hinted parameter, so a body subscript
+            # (`a[0]` / `k['x']`) lowers through the same
+            # `MojoList *`/`MojoDict *`-declared-local branch the rest
+            # of this emitter uses for ordinary container locals.
+            _declared_here = gen._cpp_declared
+            _saved = {}
+            if _declared_here is not None:
+                for _pn, _pd in e.params:
+                    _stripped = _pn[2:] if _pn.startswith('**') else _pn[1:]
+                    _saved[_stripped] = (_stripped in _declared_here,
+                                         _declared_here.get(_stripped))
+                    _declared_here[_stripped] = (
+                        'MojoDict *' if _pn.startswith('**') else 'MojoList *')
+            try:
+                _body = gen._cpp_expr(e.body)
+            finally:
+                if _declared_here is not None:
+                    for _stripped, (_had_prev, _prev) in _saved.items():
+                        if _had_prev:
+                            _declared_here[_stripped] = _prev
+                        else:
+                            del _declared_here[_stripped]
+            _params = ', '.join(
+                f"{'MojoDict *' if _pn.startswith('**') else 'MojoList *'} "
+                f"{_pn[2:] if _pn.startswith('**') else _pn[1:]}"
+                for _pn, _pd in e.params)
+            # The `(int64_t)(intptr_t)` double cast, not a bare
+            # `(int64_t)`: the body may hand back a container/string
+            # POINTER, whose ADDRESS is the one thing an int64_t box can
+            # carry faithfully (the 1-arg path's bare cast only ever
+            # carries an int64_t or a struct pointer its hint named).
+            return (f"(({_lam_ctype})"
+                    f"([&]({_params}) -> int64_t "
+                    f"{{ return (int64_t)(intptr_t)({_body}); }}))")
         _body = gen._cpp_expr(e.body)
         return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                 f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
@@ -3480,7 +3555,10 @@ def _cpp_expr(gen, e) -> str:
                             and gen._cpp_declared is not None):
                         _func_ctype = gen._cpp_declared.get(_func_arg.name)
                     if _func_ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE,
-                                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+                                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG,
+                                        gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                                        gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                                        gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
                         _cond = gimple_ctypes.TernaryExpr(
                             condition=_func_arg, then_val=_call_truthy,
                             else_val=_truthy(_elem), line=e.line, col=e.col)
@@ -3628,6 +3706,21 @@ def _cpp_expr(gen, e) -> str:
                 # key= generator regardless of element type, this hint is
                 # only for the narrower "read a struct field on the sort
                 # key parameter" refinement).
+                if isinstance(_key_node, gimple_ctypes.LambdaExpr) \
+                        and gimple_ctypes._cpp_lambda_ctype(_key_node) is not \
+                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG:
+                    # A `key=` LITERAL lambda must be the 1-arg shape: the
+                    # comparator below is stored in a
+                    # `_CPP_CALLABLE_CTYPE_1ARG`-typed local and invoked
+                    # `_mg_key(_mg_a)` with ONE element — a
+                    # `*args`/`**kwargs`/zero-arg lambda value has a
+                    # DIFFERENT std::function type, which C++ would
+                    # reject at the assignment; refuse here with a real
+                    # message instead of letting g++ name the shape.
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        "sorted(..., key=...) accepts only a single "
+                        "plain-parameter lambda (one element per call) "
+                        "in a compiled generator/coroutine body")
                 if _elem_ctype is not None and _elem_ctype.endswith(' *') \
                         and _elem_ctype[:-2] in gen.struct_field_types:
                     gen._cpp_pending_lambda_param_ctype = _elem_ctype
@@ -3795,6 +3888,123 @@ def _cpp_expr(gen, e) -> str:
                         gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
                 cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
                 return f"{cpp_fname}({', '.join(args)})"
+            # A call through a DECLARED `*args`/`**kwargs`-family
+            # callable-value local (`e(4, 5)` after
+            # `e = lambda *a: a[0] + a[1]`): the local's declared
+            # std::function takes a CONTAINER (see
+            # `gimple_ctypes._cpp_lambda_ctype`'s docstring), so this
+            # call site packs the positional arguments into a fresh
+            # `MojoList *` and the keyword arguments into a fresh
+            # `MojoDict *` — the same value convention as the plain
+            # (lifted-function) GIMPLE path's own `*args`/`**kwargs`
+            # call lowering — inside an IIFE whose temporaries live
+            # exactly as long as this expression (the established
+            # pattern of the sorted()/struct-constructor cases above).
+            _call_local_ctype = (gen._cpp_declared.get(fname)
+                                 if gen._cpp_declared is not None else None)
+            if _call_local_ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                                     gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                                     gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
+                _pack_wants_list = _call_local_ctype in (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+                _pack_wants_dict = _call_local_ctype in (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+                if e.args and not _pack_wants_list:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        "a call with positional arguments is not supported "
+                        "through the `**kwargs`-only callable-value local "
+                        f"{fname!r} in a compiled generator/coroutine body")
+                if e.kwargs and not _pack_wants_dict:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        "a call with keyword arguments is not supported "
+                        "through the `*args`-only callable-value local "
+                        f"{fname!r} in a compiled generator/coroutine body")
+                _pack_stmts = []
+                _call_args = []
+                if _pack_wants_list:
+                    _listvar = gen._cpp_fresh_name('_cl')
+                    _pack_stmts.append(f"MojoList * {_listvar} = mojo_list_new();")
+                    for _i, _anode in enumerate(e.args):
+                        _act = gimple_exprtypes._infer_simple_expr_ctype(
+                            _anode, gen._cpp_declared,
+                            getattr(gen, '_cpp_gen_self_fields', None),
+                            gen._async_api,
+                            fn_return_types=_cpp_trusted_fn_return_types(gen),
+                            module_global_types=getattr(
+                                gen, '_cpp_module_global_ctypes', None))
+                        if _act in ('int64_t', 'int', '_Bool', 'bool'):
+                            _pack_stmts.append(
+                                f"mojo_list_append_int({_listvar}, "
+                                f"(int64_t)({args[_i]}));")
+                        else:
+                            # The body reads `a[i]` through the int64-box
+                            # getter (this narrow model tracks no
+                            # per-container element KIND for a lambda's
+                            # `*args`): a non-scalar slot value would come
+                            # back as a pointer/bit pattern — a silent
+                            # decimal, not an error — so refuse it here
+                            # instead of packing it.
+                            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                                "a positional argument of inferred type "
+                                f"{_act!r} cannot be packed into the "
+                                f"`*args` of the callable-value local "
+                                f"{fname!r} in a compiled generator/"
+                                "coroutine body (the lambda body reads "
+                                "`*args` through the int64 box; str/"
+                                "double/container arguments are not "
+                                "tracked for a lambda's *args)")
+                    _call_args.append(_listvar)
+                if _pack_wants_dict:
+                    _dictvar = gen._cpp_fresh_name('_ck')
+                    _pack_stmts.append(f"MojoDict * {_dictvar} = mojo_dict_new();")
+                    for _kwn, _kwv in e.kwargs:
+                        _key = _cpp_string_literal_expr(gen, _kwn, '')
+                        _vct = gimple_exprtypes._infer_simple_expr_ctype(
+                            _kwv, gen._cpp_declared,
+                            getattr(gen, '_cpp_gen_self_fields', None),
+                            gen._async_api,
+                            fn_return_types=_cpp_trusted_fn_return_types(gen),
+                            module_global_types=getattr(
+                                gen, '_cpp_module_global_ctypes', None))
+                        if (isinstance(_kwv, gimple_ctypes.IdentExpr)
+                                and _kwv.name == 'None'):
+                            # `None` slot = 0 is the documented absent-box
+                            # convention of `mojo_dict_get_int` itself.
+                            _pack_stmts.append(
+                                f"mojo_dict_set_none({_dictvar}, {_key});")
+                        elif _vct in ('_Bool', 'bool') or isinstance(
+                                _kwv, gimple_ctypes.BoolLiteral):
+                            _pack_stmts.append(
+                                f"mojo_dict_set_bool({_dictvar}, {_key}, "
+                                f"(int)({gen._cpp_expr(_kwv)}));")
+                        elif _vct in ('int64_t', 'int'):
+                            _pack_stmts.append(
+                                f"mojo_dict_set_int({_dictvar}, {_key}, "
+                                f"(int64_t)({gen._cpp_expr(_kwv)}));")
+                        else:
+                            # The body reads `k['x']` through
+                            # `mojo_dict_get_int` (the int64 box — the
+                            # declared-`MojoDict *`-local subscript has no
+                            # value-kind tracking): a str/double slot
+                            # value would come back as a pointer/bit
+                            # pattern. Refuse instead of packing it.
+                            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                                "an argument of inferred type "
+                                f"{_vct!r} cannot be packed into the "
+                                f"`**kwargs` of the callable-value local "
+                                f"{fname!r} in a compiled generator/"
+                                "coroutine body (the lambda body reads "
+                                "`**kwargs` through the int64 box; str/"
+                                "double/container arguments are not "
+                                "tracked for a lambda's **kwargs)")
+                    _call_args.append(_dictvar)
+                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                return (f"[&]() -> int64_t {{ "
+                        + ' '.join(_pack_stmts)
+                        + f" return (int64_t)(intptr_t)({cpp_fname}"
+                          f"({', '.join(_call_args)})); }}()")
             # A call to a nested NON-CAPTURING sync helper `def` that
             # `_cpp_compile_nested_sync_helpers` (gimple_cpp_async.py)
             # already compiled into a `static` C++ function ahead of this
@@ -5024,15 +5234,25 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     gen._cpp_generator_var_api[s.value.args[0].name].get('value_ctype')
                     or 'int64_t')
             elif gen._cpp_is_callable_value_expr(s.value):
-                # A zero-arg `lambda` / bound-method-as-value RHS (see
-                # `_cpp_is_callable_value_expr`'s docstring) — give the
-                # local this coroutine model's one callable-value
-                # declared type instead of letting it fall through
-                # `_infer_simple_expr_ctype` (which has no notion of
-                # either shape) to the int64_t default below, which
-                # would mismatch the real `std::function<...>`-
-                # convertible value `_cpp_expr` actually emits for it.
-                ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+                # An admitted-shape `lambda` / bound-method-as-value RHS
+                # (see `_cpp_is_callable_value_expr`'s docstring) — give
+                # the local its callable-value declared type instead of
+                # letting it fall through `_infer_simple_expr_ctype`
+                # (which has no notion of either shape) to the int64_t
+                # default below, which would mismatch the real
+                # `std::function<...>`-convertible value `_cpp_expr`
+                # actually emits for it. A LAMBDA gets its OWN shape's
+                # ctype from the same helper its value emission asks —
+                # a 1-arg/`*args`/`**kwargs` lambda is NOT the zero-arg
+                # `_CPP_CALLABLE_CTYPE`, and a local declared the wrong
+                # std::function type would mismatch the value's real
+                # type at the call site; the bound-method-as-value RHS
+                # keeps the zero-arg shape it is modeled as.
+                if isinstance(s.value, gimple_ctypes.LambdaExpr):
+                    ctype = (gimple_ctypes._cpp_lambda_ctype(s.value)
+                             or gimple_ctypes._CPP_CALLABLE_CTYPE)
+                else:
+                    ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
             elif _cpp_exc_ctor_value(gen, s.value):
                 # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
                 # the exception's MESSAGE (see its exception-constructor
