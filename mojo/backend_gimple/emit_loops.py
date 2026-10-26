@@ -43,7 +43,6 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
-import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.loops_shared via explicit imports.
@@ -196,8 +195,6 @@ def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
 
 def _get_actual_type(gen, ctype: str, val: str) -> str:
     """Get actual type, checking _actual_types for int64_t-stored pointers."""
-    if _as_str(val) in getattr(gen, '_gen_handle_word_locals', ()):
-        return ctype   # also bound to a generator handle: no single container kind
     if ctype == 'int64_t' and val in gen._actual_types:
         return gen._actual_types[val]
     if val in gen.var_types and gen.var_types[val] == 'int64_t' and val in gen._actual_types:
@@ -551,30 +548,15 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         raise ValueError('findall() call expected')
     if len(it.kwargs or []) > 0:
         raise ValueError('findall() keyword arguments (incl. flags=) are not lowered')
-    # The METHOD spelling on a module-level compiled pattern --
-    # `_TOK = re.compile(r'...')` ... `for w in _TOK.findall(s):` -- is the
-    # same scan as `re.findall(PATTERN, s)`, with the pattern string recorded
-    # at the `re.compile` assignment (`gen._regex_patterns`, the table
-    # `.finditer()` is lowered from). It used to emit `mojo_unsupported_iter`
-    # and run zero times: the compiled compiler's own
-    # `infra_infer._bound_names_in` loops this way, so its int-keyed-dict scan
-    # saw no bound names at all once that scan started running there.
-    _recv = it.func.obj if isinstance(it.func, gimple_ctypes.MemberExpr) else None
-    if (len(it.args) == 1 and isinstance(_recv, gimple_ctypes.IdentExpr)
-            and _recv.name in gen._regex_patterns):
-        pattern = gen._regex_patterns[_recv.name]
-        text_node = it.args[0]
-    else:
-        if len(it.args) != 2:
-            raise ValueError(
-                f'findall() with {len(it.args)} positional arguments is not lowered '
-                f'(a third argument is a flags argument)')
-        pattern = gen._try_const_fold_str(it.args[0])
-        if pattern is None:
-            raise ValueError('findall() pattern is not a compile-time-known string')
-        text_node = it.args[1]
+    if len(it.args) != 2:
+        raise ValueError(
+            f'findall() with {len(it.args)} positional arguments is not lowered '
+            f'(a third argument is a flags argument)')
+    pattern = gen._try_const_fold_str(it.args[0])
+    if pattern is None:
+        raise ValueError('findall() pattern is not a compile-time-known string')
 
-    text_type, text_val = gen.lower_expr(text_node)
+    text_type, text_val = gen.lower_expr(it.args[1])
     if text_type != 'char *':
         text_val = gen._new_val(
             'char *', f'(char *){gen._ensure_local(text_type, text_val)}')
@@ -722,42 +704,16 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     `double` element against a `char *` dict key, "pointer value used where a
     floating-point was expected").
 
-    A list of INTS needs a second, separate source of evidence: an `int64_t`
-    in `_elem_types` is the "nothing known" default, so a list whose element
-    type is int is not distinguishable there. A coroutine body's list param
-    whose unanimous call-site contract is int (`_coro_int_list_params`, the
-    same per-body table `_coro_str_params` is) is that evidence, and it
-    takes the same skip with `int64_t` as the element type. Without it the
-    dict arm declared the loop variable `char *` and `t += x` printed a
-    pointer's bits (`async def total(*xs)`, `gen_add([4, 5])`).
-
     Returns None for the untyped case, and the caller falls back to emitting
     the dispatch exactly as before.
     """
     if lst_type not in ('int', 'int64_t', 'void *'):
         return None
-    # A local that is ALSO bound to a generator handle somewhere (`dirs = _iglob(..)` /
-    # `dirs = [d]`): the list evidence of one binding says nothing about the other.
-    if _as_str(lst_val) in getattr(gen, '_gen_handle_word_locals', ()):
+    elem = gen._elem_of(lst_val)
+    if not elem or elem == 'int64_t':
         return None
-    _int_lists = getattr(gen, '_coro_int_list_params', {}).get(
-        getattr(gen, 'current_func_name', None), ())
-    if _as_str(lst_val) in _int_lists:
-        elem = 'int64_t'
-    else:
-        elem = gen._elem_of(lst_val)
-        if not elem or elem == 'int64_t':
-            return None
     lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
     gen._elem_types[lp] = elem
-    # The nested half rides along: the loop reads the iterable's nested
-    # element ctype from the pointer it is HANDED (`_carry_nested_elem`), which
-    # is this fresh temp, not the parameter name the contract was recorded
-    # under -- so a list of lists lost its inner type here and `for cell in
-    # row:` read the inner elements as int64_t.
-    _lp_nested = gen._nested_elem_types.get(_as_str(lst_val))
-    if _lp_nested is not None:
-        gen._nested_elem_types[lp] = _lp_nested
     return lp
 
 
@@ -843,10 +799,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._emit(f"  {cvn} = {av};")
                 else:
                     gen._safe_coerce_emit(at, gen.var_types[vn], av, cvn)
-            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 gen.gen_stmt(s)
-            ginf._close_block_scope(gen, _bscope)
         return
 
     var = node.target
@@ -894,31 +848,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             it_type, it_val = _lower_int_dict_items(gen, _int_recv)
         elif _int_mode:
             it_type, it_val = gen.lower_expr(_int_recv)
-        elif (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
-                and it.func.name in gen.var_types and it.func.name not in gen.func_return_types
-                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')):
-            # `for x in f(args):` where `f` is a callable VARIABLE or PARAMETER (`for check in
-            # checks: for d, e in check(a):`). The callee may be a compiled GENERATOR, whose
-            # call yields a live handle only when dispatched by `mojo_dyn_call` (a plain
-            # fnptr call returns it un-noted); the runtime's view of the result
-            # (`mojo_iter_word`: a list, or a noted handle drained to one) is what is iterated.
-            # This shape reached `mojo_unsupported_iter`: a diagnostic, and a body that ran
-            # zero times.
-            _cf_t, _cf_v = gen.lower_expr(it.func)
-            _cr_t, _cr_v = ggc._lower_fnptr_spread_call(gen, _cf_t, _cf_v, it)
-            it_val = gen._call_expr('MojoList *', 'mojo_iter_word',
-                                    [('int64_t', gen._to_int64(_cr_t, _cr_v))])
-            it_type = 'MojoList *'
-            # What the callee yielded carries its own per-slot kinds (a string, a None, a
-            # float beside an int), which only a boxed read recovers.
-            gen._maybe_kinds_vals.add(it_val)
         else:
             it_type, it_val = gen.lower_expr(node.iterable)
     except Exception:
         if is_dataclass_fields_loop:
             gen._dataclass_fields_vars.discard(var)
         raise
-    ggc._refuse_namedtuple_tuple_use(gen, it_type, 'iterating over')
 
     # `for x in <fresh container>:` (a display, a comprehension, a slice, a
     # `.split()`/`.keys()` result): nothing else can reference the iterable, so
@@ -928,30 +863,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
 
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
-
-    # `for x in it:` where `it = iter(<list>)` was bound to a runtime list-iterator
-    # WORD because it is handed to another function (see itcursor): the loop takes
-    # whatever the callee left, and the iterator is exhausted afterwards.
-    if (isinstance(it, gimple_ctypes.IdentExpr) and it_type == 'int64_t'
-            and gen.var_types.get(it.name) == 'int64_t'
-            and itc.name_is_escaping_iter(gen._cur_func_body, it.name)):
-        it_val = gen._call_expr('MojoList *', 'mojo_iter_word', [('int64_t', it_val)])
-        it_type = 'MojoList *'
-
-    # `for it in <str param>:` inside a generator body: the parameter crosses
-    # the stack-switch ABI as an untyped int64_t slot, but `_static_env` proved
-    # it is a string. Treat the boxed value as a `char *` and iterate it as a
-    # C string rather than falling through to the runtime container dispatch
-    # (which has no string arm and would run zero times).
-    _str_params = getattr(gen, '_coro_str_params', {}).get(
-        getattr(gen, 'current_func_name', None), ())
-    if (isinstance(it, gimple_ctypes.IdentExpr)
-            and it.name in _str_params
-            and it_type in ('int', 'int64_t', 'void *')):
-        _it64 = gen._to_int64(it_type, it_val)
-        _strp = gen._coerce_to_type('int64_t', 'char *', _it64)
-        gen._gen_for_cstr(var, _strp, node.body)
-        return
 
     # `for c in <bytes-subclass instance>:` iterates its backing MojoBytes
     # payload (each `c` an int 0-255). See COMPILE_FAIL_zipfile___init__.md.
@@ -1094,8 +1005,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # class_value.md.
                 destroy_after = isinstance(node.iterable, gimple_ctypes.CallExpr)
                 gen._gen_for_generator_iter(var, it_val, api, node.body,
-                                              destroy_after=destroy_after,
-                                              shadow_name=shadow_name)
+                                              destroy_after=destroy_after)
             else:
                 gimple_ctypes._debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
                 gen._emit_unsupported_iter(it_type, node)
@@ -1174,10 +1084,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # `_param_elem_types` -> `gen_func`. See
             # CODEGEN_coro_yield_kind_unresolved_callsite.
             _lp_known = _boxed_list_ptr(gen, it_type, it_val)
-            if (isinstance(node.iterable, gimple_ctypes.IdentExpr)
-                    and _as_str(node.iterable.name) in getattr(gen, '_gen_handle_word_locals', ())):
-                # also bound to a generator handle: the list evidence is one binding's
-                _lp_known = None
             if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
@@ -1239,19 +1145,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                         gimple_ctypes._c_escape("object is not iterable")))])
                 gen._emit(f"  goto {bb_nonnum};")
                 gen._emit_label(bb_nonnum)
-                # A pointer-range word no registry claims may still be a
-                # GENERATOR HANDLE returned by a call through a function value
-                # (`for v in make(3)(4)`, `mojo_dyn_call` records the handle):
-                # drain it into the list its signature reads. Anything else
-                # answers NULL and keeps the unsupported-iterable abort.
-                bb_gen = gen._new_bb(); bb_nogen = gen._new_bb()
-                _gl = gen._call_expr('MojoList *', 'mojo_iter_gen_handle',
-                                     [('int64_t', it64)])
-                _gl64 = gen._to_int64('MojoList *', _gl)
-                _gz = gen._new_val('int64_t', '0')
-                _gnull = gen._new_val('_Bool', f'{_gl64} == {_gz}')
-                gen._emit(f"  if ({_gnull}) goto {bb_nogen}; else goto {bb_gen};")
-                gen._emit_label(bb_nogen)
                 gen._emit_unsupported_iter(it_type, node)
                 gen._emit(f"  goto {bb_after};")
                 # `for item in <x>.items():` — even when `x`'s type is
@@ -1281,10 +1174,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # recorded as an unknown-kind word, which `_isinstance_one_type`
                 # answers at run time whatever its C type. (Declaring the
                 # shared variable `int64_t` instead was tried and corrupted
-                # loops whose bodies rely on the `char *` key.) For a TUPLE
-                # target the same first-decl-wins runs per slot: the dict arm
-                # must declare the non-key slots the way the body's list stores
-                # need them (int64_t), hence `split_key=False` below.
+                # loops whose bodies rely on the `char *` key.)
                 if not for_target_is_tuple(var) and not _it_is_items:
                     gen._dyn_word_locals.add(_as_str(var))
                 gen._emit_label(bb_dict)
@@ -1298,7 +1188,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._dict_items_val_elems[_pairs] = 'int64_t'
                     gen._gen_for_list(var, _pairs, node.body, share_var_with_sibling_arm=True)
                 else:
-                    gen._gen_for_dict(var, dp, node.body, split_key=False)
+                    gen._gen_for_dict(var, dp, node.body)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_list)
                 lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
@@ -1314,47 +1204,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                          [('MojoSet *', _for_set_ptr)])
                 gen._gen_for_list(var, _set_lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
-                # The generator-handle arm is lowered LAST: the dict arm's
-                # `char *` declaration of the shared loop variable must stay
-                # the first one (first-decl-wins, see above), and a handle's
-                # list is read by the same slot accessor as the other arms.
-                gen._emit_label(bb_gen)
-                # What a drained handle yields is uniform (the signature's one
-                # value kind, recorded on the list), so ONE runtime kind probe
-                # picks the arm whose loop variable has the right C type: a
-                # string slot is a `char *`, anything else the int word. The body is lowered once per arm, which is the
-                # price of keeping each element a plain typed value.
-                _k0 = gen._call_expr('char', 'mojo_list_slot_kind',
-                                     [('MojoList *', _gl), ('int64_t', gen._new_val('int64_t', '0'))])
-                _kp = gen._new_val('char', "(char)'p'")
-                _isp = gen._new_val('_Bool', f'{_k0} == {_kp}')
-                bb_gp = gen._new_bb(); bb_gi = gen._new_bb()
-                _arms = [(bb_gp, 'char *'), (bb_gi, 'int64_t')]
-                if gen._has_double_generator:
-                    # A signature whose value kind is `double` drains a list of
-                    # doubles; reading it through the int arm printed the bit
-                    # pattern (`for v in f(3, **kw): print(v)` gave
-                    # 4612811918334230528). Only where the module has such a
-                    # generator (see `_has_double_generator`).
-                    _kd = gen._new_val('char', "(char)'d'")
-                    _isd = gen._new_val('_Bool', f'{_k0} == {_kd}')
-                    bb_gd = gen._new_bb(); bb_gnp = gen._new_bb()
-                    gen._emit(f"  if ({_isp}) goto {bb_gp}; else goto {bb_gnp};")
-                    gen._emit_label(bb_gnp)
-                    gen._emit(f"  if ({_isd}) goto {bb_gd}; else goto {bb_gi};")
-                    _arms.insert(1, (bb_gd, 'double'))
-                else:
-                    gen._emit(f"  if ({_isp}) goto {bb_gp}; else goto {bb_gi};")
-                for _bb, _et in _arms:
-                    gen._emit_label(_bb)
-                    _al = gen._new_val('MojoList *', _gl)
-                    gen._elem_types[_al] = _et
-                    # NOT a sibling-sharing arm: each sub-arm lowers the body
-                    # afresh and rebinds the loop variable to its own element
-                    # type (a retype mints a fresh C variable), which is the
-                    # only way a string and an int body can both be right.
-                    gen._gen_for_list(var, _al, node.body)
-                    gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_after)
             else:
                 gimple_ctypes._debug_note('for loop dropped (unsupported iterable)', it_type)
@@ -1641,16 +1490,8 @@ def _gen_for_zip_longest(gen, node):
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
     # wins semantics preserved — later loops over the same names reuse
     # these real types instead of inheriting an int64_t lock-in).
-    # A padded struct-pointer (or any pointer-typed) slot can hold the
-    # model's NULL `None`, so the loop variable is nullable: a member read
-    # on it must take the None-aware dynamic path instead of a raw `->`
-    # dereference.  Recorded per local for `_lower_MemberExpr`.
-    gen._nullable_ptrs = getattr(gen, "_nullable_ptrs", set())
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
-        force = gen.var_types.get(vn) not in (None, elem)
-        gen._declare_var(vn, elem, force=force)
-        if "*" in str(elem):
-            gen._nullable_ptrs.add(vn)
+        gen._declare_var(vn, elem)
 
     len_ts = []
     for ptr, _elem in seqs:
@@ -1881,7 +1722,6 @@ def _gen_for_zip(gen, node):
     seq_elems = []
     for _ai in range(len(args)):
         st, sv = gen.lower_expr(args[_ai])
-        ggc._refuse_namedtuple_tuple_use(gen, st, 'zipping')
         st = gen._get_actual_type(st, sv)
         # A zip() argument need not be a statically-known MojoList* — a
         # dict-subscript/`.get()` result (e.g. `zip(d.get('parameters') or
@@ -1919,12 +1759,9 @@ def _gen_for_zip(gen, node):
             # holding this slot's own element — zip yields one tuple per
             # iteration, so the remainder after `a` is exactly this slot.
             # Declared as the list it is; `_zip_bind_slot` below fills it.
-            star_name = starred_slot_name(vn)
-            force = gen.var_types.get(star_name) not in (None, 'MojoList *')
-            gen._declare_var(star_name, 'MojoList *', force=force)
+            gen._declare_var(starred_slot_name(vn), 'MojoList *')
             return
-        force = gen.var_types.get(vn) not in (None, elem)
-        gen._declare_var(vn, elem, force=force)
+        gen._declare_var(vn, elem)
 
     for _di in range(len(tgt_names)):
         _declare_zip_slot(tgt_names[_di], seq_ptrs[_di], seq_elems[_di])
@@ -2052,7 +1889,6 @@ def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
     lst_type, lst_val = gen.lower_expr(lst_arg)
-    ggc._refuse_namedtuple_tuple_use(gen, lst_type, 'enumerating')
     lst_type = gen._get_actual_type(lst_type, lst_val)
 
     # `enumerate(lst, start)` — the optional 2nd arg was previously
@@ -2172,7 +2008,7 @@ def _gen_for_enumerate(gen, node):
             list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
-    gen._declare_var(idx_var, 'int64_t', force=gen.var_types.get(idx_var) not in (None, 'int64_t'))
+    gen._declare_var(idx_var, 'int64_t')
     star_elem = None
     if val_is_star:
         # The starred slot is a LIST of what follows the index, not the
@@ -2185,9 +2021,7 @@ def _gen_for_enumerate(gen, node):
             'str': 'char *', 'double': 'double'}.get(
                 gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
     elif not val_is_tuple:
-        val_ctype = elem if elem else 'int64_t'
-        force = gen.var_types.get(val_var) not in (None, val_ctype)
-        gen._declare_var(val_var, val_ctype, force=force)
+        gen._declare_var(val_var, elem if elem else 'int64_t')
         # An element of a sequence whose element kind nothing recorded is a
         # word of unknown kind (see `_dyn_word_locals`): `f'{ct}'` over
         # `enumerate(params)` of an untyped `params` has to ask the runtime
@@ -2243,8 +2077,7 @@ def _gen_for_enumerate(gen, node):
             if vname == '_':
                 continue
             cv = gen._cname(vname)
-            force = gen.var_types.get(vname) not in (None, pair_elem)
-            gen._declare_var(vname, pair_elem, force=force)
+            gen._declare_var(vname, pair_elem)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':
@@ -2454,16 +2287,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # BEFORE the body is generated below, so a loop over `var` INSIDE the
         # body sees the inner element type. The doc's placement note.
         _carry_nested_elem_type(gen, var, it_val, _fl_ctype)
-        # A loop over a kind-MIXED list of lists (`_nested_mixed_names`, seeded
-        # from the call sites that disagree): each inner list may hold a
-        # string or an int, so the target is a kinds-varying value. Marking it
-        # makes the loop over the target read through `mojo_list_get_boxed`
-        # (the `_maybe_kinds_vals` arm above and below), which answers each
-        # slot by the kind the inner list recorded -- where the join used to
-        # answer the int64_t default for all of them.
-        if (not share_var_with_sibling_arm
-                and _as_str(it_val) in gen._nested_mixed_names):
-            gen._maybe_kinds_vals.add(_as_str(var))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -2503,10 +2326,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # _tuple_slot_types / _nested_elem_types inputs — one computation
         # shared with the declarations there).
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
-        _tuple_boxed_slots = (it_val in getattr(gen, '_maybe_kinds_vals', ())
-                              or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
 
-        def _emit_target_assign(ptr, vn, i, slot_elem, boxed_slots):
+        def _emit_target_assign(ptr, vn, i, slot_elem):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
             which may itself be a parenthesized nested tuple target
             (`(old_mode, old_file)`), in which case the slot is read as an
@@ -2519,7 +2340,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 nested_ptr = gen._coerce_to_type(rt, 'MojoList *', nested_raw)
                 nested_names = gen._split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
-                    _emit_target_assign(nested_ptr, nn, j, pair_elem, False)
+                    _emit_target_assign(nested_ptr, nn, j, pair_elem)
                 return
             gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
@@ -2544,13 +2365,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     # f-strings, method args) — otherwise the char* boxed
                     # into the int64_t loop var reads as %ld (decimal addr).
                     gen._actual_types[vn] = 'char *'
-            elif boxed_slots and vt == 'int64_t':
-                # The tuples of this list record their own per-slot kinds (what a call through
-                # a function value yielded: a None, a string, a float beside an int): read the
-                # slot BOXED so the target is spelled by its kind.
-                raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({_as_str(ptr)}, {i})")
-                gen._boxed_vals.add(cvn)
-                gen._emit(f"  {cvn} = {raw};")
             else:
                 raw = gen._new_val('int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})")
                 if vt == 'int64_t':
@@ -2588,9 +2402,9 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
             if vn.startswith('(') and vn.endswith(')'):
-                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t', False)
+                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t')
                 continue
-            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i], _tuple_boxed_slots)
+            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i])
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2764,12 +2578,11 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    gen._declare_var(var, 'char', force=(var == shadow_name)
-                     or gen.var_types.get(var, 'char') != 'char')
+    gen._declare_var(var, 'char', force=(var == shadow_name))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {len64} = mojo_str_codepoint_len (mojo_str_data({it_val}));")
+    gen._emit(f"  {len64} = mojo_str_len ({it_val});")
     gen._emit(f"  {len_t} = {len64};")
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
@@ -2782,7 +2595,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str_cp (mojo_str_data({it_val}), {idx_t});")
+    gen._emit(f"  {gen._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -2799,7 +2612,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
 def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     """`for x in b:` where `b` is a `MojoBytes *` — x is an int 0-255.
     Mirrors _gen_for_cstr's index-loop shape over mojo_bytes_len/_get."""
-    gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
+    gen._declare_var(var, 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_bytes_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2831,7 +2644,7 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
 def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     """`for x in mv:` — x is an int (1-D byte view). Same index-loop shape
     as _gen_for_bytes over mojo_memoryview_len/_get."""
-    gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
+    gen._declare_var(var, 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_memoryview_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2900,7 +2713,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     # (`any(c in ('t','T','f','F') for c in prefix)`), which compares the
     # target against 1-char STRING literals and so could never match a
     # code.
-    gen._declare_var(var, 'char *', force=gen.var_types.get(var, 'char *') != 'char *')
+    gen._declare_var(var, 'char *')
     len_t = gen._new_val('int64_t', f"mojo_strlen ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2914,7 +2727,18 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str_cp ({it_val}, {idx_t});")
+    # `mojo_char_at_str(s, i)` rather than
+    # `mojo_char_to_str(*_mojo_at_char(s, i))`: gimple REFUSES a `char`-typed
+    # argument ("invalid argument to gimple call" / "non-trivial conversion in
+    # 'integer_cst'") because a char is promoted to int64_t and the conversion
+    # is not trivial to it, so the two-step spelling is not available at all.
+    # `mojo_cstr_slice(s, i, i+1)` was the workaround that did lower — and it
+    # allocated a 1-char string per character that nobody freed, which was the
+    # whole of the char-scan residual (1226 bytes a pass, measured).
+    # The helper takes a pointer and an index instead, so it lowers cleanly AND
+    # lands in the immortal table `mojo_char_to_str` already keeps. As above,
+    # no `_mojo_at_char` is requested: the helper is not called from here.
+    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str ({it_val}, {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -2929,22 +2753,8 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 
 
 def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
-                  int_keys: bool = False, split_key: bool = True):
-    """for k in dict — iterates over keys as char *.
-
-    `split_key=False` is the boxed runtime-dispatch call site only: there the
-    iterable's type is unknown, BOTH a dict arm and a list arm are emitted,
-    and the ONE shared body was written for the list arm. A tuple target's
-    non-key slots must then keep the pre-split shape (slot 0 the key, the
-    rest int64_t) and the pre-split binding, or the body's own list stores
-    (`dirnames[:] = ...` in build_stdlib_dylib's os.walk loop) see their
-    shared variable first-declared `char *` and are refused as
-    slice-assignment to a string. That refusal cascaded: the import fell
-    back to source, the closure re-compiled, and a global whose inferred
-    type differed between passes (`RUNTIME = os.path.join(...)`) registered
-    a second, conflicting struct field ("duplicate member 'RUNTIME'"). A
-    loop that KNOWN-Y iterates a dict (the direct `MojoDict *` arms) splits
-    the key into characters, the CPython shape."""
+                  int_keys: bool = False):
+    """for k in dict — iterates over keys as char *."""
     # Handle tuple target like '(name, alias)' — declare each name
     # separately. `for_target_is_tuple`, so the 1-tuple `for (k,) in d.items()`
     # unpacks and the parenthesised single name `for (k) in d` does not; see
@@ -3010,22 +2820,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `vtype = (char *)0;` into an `int64_t vtype;` declaration — a
         # hard -Wint-conversion error (real: gimple_gen_funcs.py's
         # `for vname, vtype in ci.captures:`).
-        #
-        # `_slot_cnames` records each slot's C identifier AT ITS OWN
-        # declaration moment, before a LATER slot can re-point the shared
-        # name: a DUPLICATE target name (`for _, _ in ...`) makes slot 1's
-        # declaration force=True (its requested ctype differs from the
-        # first-decl-wins one), which mints a fresh `_shadowN_n` and
-        # overwrites `gen._c_names[name]` — so an assignment resolved through
-        # `gen._cname(name)` at emission time would route EVERY slot's store
-        # into the LAST slot's variable. The dict arm's boxed binding then
-        # wrote slot 0's `char *` key into the slot-1 `int64_t` variable
-        # (`assignment to 'int64_t' from 'char *'` — real: test_grapheme's
-        # `for _, _ in StringSlice("").grapheme_indices():`, the only
-        # duplicate-named target this sweep reaches, and a hard gcc error
-        # while every other stdlib file passed).
         _slot_ctypes = []
-        _slot_cnames = []
         for i, vn in enumerate(var_names):
             if i == star_idx:
                 # A starred slot holds a LIST of the remaining CHARACTERS of the
@@ -3040,24 +2835,16 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                                          starred_slot_name(vn), 'MojoList *')
                 gen._elem_types[starred_slot_name(vn)] = 'char *'
                 _slot_ctypes.append('MojoList *')
-                _slot_cnames.append(gen._cname(starred_slot_name(vn)))
                 continue
             # With a star, every slot is a CHARACTER of the key, so `char *` —
             # including the ones after the star, which the starless lowering
             # declares `int64_t` and stores a literal 0 into.
             if int_keys:
                 _want = 'int64_t'
-            elif star_idx < 0 and not split_key:
-                # The boxed runtime-dispatch arm: the starless slots keep the
-                # pre-split shape (slot 0 the key, the rest int64_t) because
-                # the shared body was written for the sibling list arm — see
-                # the `split_key` note on this function.
-                _want = 'char *' if i == 0 else 'int64_t'
             else:
                 _want = 'char *'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
-                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars) \
-                or (gen.var_types.get(vn, _want) != _want)
+                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
             if i == 0:
                 if int_keys:
@@ -3065,7 +2852,6 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 else:
                     gen._int_key_loop_vars.discard(vn)
             _slot_ctypes.append(gen.var_types.get(vn, _want))
-            _slot_cnames.append(gen._cname(vn))
     elif int_keys:
         # The key is an integer: retype a name an earlier loop declared as a
         # string rather than let first-decl-wins keep the pointer type.
@@ -3076,8 +2862,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # ...and the reverse: a name an Int-keyed loop declared int64_t must
         # become a string again, not box the string pointer into an integer.
         gen._declare_var(var, 'char *', force=(var == shadow_name)
-                         or var in gen._int_key_loop_vars
-                         or gen.var_types.get(var, 'char *') != 'char *')
+                         or var in gen._int_key_loop_vars)
         gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
@@ -3189,7 +2974,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 _chr = gen._new_val('char *',
                                     f"mojo_cstr_slice ((char *) {key_tmp}, "
                                     f"{_as_str(_pos)}, {_as_str(_plus)})")
-                gen._emit(f"  {_slot_cnames[_si]} = {_chr};")
+                gen._emit(f"  {gen._cname(_svn)} = {_chr};")
         else:
             # A starless tuple target over a DICT unpacks the KEY, and a
             # key is a string, so this loop's arity is the key's LENGTH and
@@ -3261,11 +3046,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # `TypeError: cannot unpack non-iterable <type> object`. Refuse
             # at runtime via the slot's keykind rather than stringify/slice.
             _kk = gen._new_val('int64_t', f"mojo_dict_iter_key_kind ({iter_t})")
-            # `0LL`, not `0`: `mojo_dict_iter_key_kind` returns int64_t, and a
-            # bare int `0` makes this `int64_t != int` — a "mismatching
-            # comparison operand types" refusal under the self-host's
-            # `gcc -fgimple` (the int64_t key-kind temp vs the int literal).
-            _notstr = gen._new_val('_Bool', f"{_kk} != 0LL")
+            _notstr = gen._new_val('_Bool', f"{_kk} != 0")
             _kb = gen._new_bb(); _ko = gen._new_bb()
             gen._emit(f'  if ({_notstr}) goto {_kb}; else goto {_ko};')
             gen._emit_label(_kb)
@@ -3274,49 +3055,17 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                                'cannot unpack non-iterable int object'))])
             gen._emit(f'  goto {_ko};')
             gen._emit_label(_ko)
-            if split_key:
-                # Split the key into one character per slot, the way CPython
-                # unpacks a str — `for a, b in {"ab": 1}` binds a='a', b='b'.
-                # The arity check above already guarantees len(key) == nslots.
-                for _si, _svn in enumerate(var_names):
-                    _cvn = _slot_cnames[_si]
-                    _from = gen._new_val('int64_t', f"{_si}LL")
-                    _to = gen._new_val('int64_t', f"{_si + 1}LL")
-                    _chr = gen._new_val('char *',
-                                        f"mojo_cstr_slice ((char *) {key_tmp}, "
-                                        f"{_from}, {_to})")
-                    gen._emit(f"  {_cvn} = {_chr};")
-            else:
-                # The boxed runtime-dispatch arm: the pre-split binding —
-                # slot 0 the whole key, the rest zero. The char-split stores
-                # would write `char *` into the int64_t non-key slots (a
-                # pointer-into-integer C error) and re-type the shared
-                # variable as a string, which is what refused the body.
-                # `_slot_cnames`, not a fresh `_cname` lookup: a duplicate
-                # target name (`for _, _ in ...`) makes a LATER slot's
-                # force-declaration re-point `_c_names[name]`, so resolving
-                # here would route slot 0's `char *` key store into the
-                # slot-1 `int64_t` variable (measured: test_grapheme's
-                # `assignment to 'int64_t' from 'char *'` gcc error).
-                vn0 = var_names[0]
-                cvn0 = _slot_cnames[0]
-                vt0 = _slot_ctypes[0]
-                if vt0 in ('int64_t', 'int', 'int32_t'):
-                    vp = gen._new_val('void *', f'(void *){key_tmp}')
-                    box = gen._new_val('int64_t', f'(int64_t){vp}')
-                    gen._emit(f"  {cvn0} = {box};")
-                else:
-                    gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-                for _vi in range(1, len(var_names)):
-                    vn = var_names[_vi]
-                    cvn = _slot_cnames[_vi]
-                    vt = _slot_ctypes[_vi]
-                    if vt in ('int64_t', 'int', 'int32_t'):
-                        gen._emit(f"  {cvn} = (int64_t)0;")
-                    elif vt.endswith(' *'):
-                        gen._emit(f"  {cvn} = ({vt})0;")
-                    else:
-                        gen._emit(f"  {cvn} = (char *)0;")
+            # Split the key into one character per slot, the way CPython
+            # unpacks a str — `for a, b in {"ab": 1}` binds a='a', b='b'.
+            # The arity check above already guarantees len(key) == nslots.
+            for _si, _svn in enumerate(var_names):
+                _cvn = gen._cname(_svn)
+                _from = gen._new_val('int64_t', f"{_si}LL")
+                _to = gen._new_val('int64_t', f"{_si + 1}LL")
+                _chr = gen._new_val('char *',
+                                    f"mojo_cstr_slice ((char *) {key_tmp}, "
+                                    f"{_from}, {_to})")
+                gen._emit(f"  {_cvn} = {_chr};")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
@@ -3445,7 +3194,6 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     _sv_strelem_vals = gen._owned_str_elem_vals
     _sv_closure_names = gen._owned_closure_names
     _sv_env_names = gen._owned_env_names
-    _sv_box_names = gen._owned_box_names
     gen._reset_no_candidates()
     _code = _gen_lifted_closure_body(gen, ci, outer_name)
     gen._owned_free_candidates = _sv_cands
@@ -3463,7 +3211,6 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen._owned_str_elem_vals = _sv_strelem_vals
     gen._owned_closure_names = _sv_closure_names
     gen._owned_env_names = _sv_env_names
-    gen._owned_box_names = _sv_box_names
     return _code
 
 
@@ -3545,7 +3292,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # case that used to default to `int64_t` and turn a real string argument
     # into a decimal address (`sorted(names, key=lambda s: k3(s))` — see
     # `ci.call_site_param_types`'s own comment).
-    _call_site_types = dict(ci.call_site_param_types)
+    _call_site_types = dict(ci.call_site_param_types) if not ci.env_struct else {}
     for pname, ptype in node.params:
         if pname in _lambda_capture_types:
             gen.var_types[pname] = _lambda_capture_types[pname]
@@ -3689,7 +3436,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # allocate each box once in the prologue.
     gen._seed_mut_captured_local_types(ci.lifted_name)
     gen._seed_addressed_locals(node.body)
-    gen._emit_mut_local_box_allocs(node)
+    gen._emit_mut_local_box_allocs()
 
     # A lifted closure is an ordinary function and owes the same per-function
     # local-type pre-pass a top-level `def` gets (`gen_module`'s Pass 1.3b,
@@ -3748,8 +3495,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
 
 
 def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_ptr: str,
-                                 nested_flags: list | None = None,
-                                 slot_elems: list | None = None) -> None:
+                                 nested_flags: list | None = None) -> None:
     """Unpacks a boxed-tuple `MojoList *` (produced by a tuple-yielding
     compiled generator's `_cpp_yield_tuple` boxing — see that method's
     docstring for the producer side) into `var_names`, one runtime
@@ -3788,20 +3534,6 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._tagged_gen_tuple_locals = set()
             gen._tagged_gen_tuple_locals.add(vn)
             continue
-        if slot_elem == 'MojoList *':
-            # A list-valued slot (`coro._tuple_slot_kind`'s 'list:<elem>'):
-            # read the pointer bits back as the list, and record its element
-            # type so `for x in <vn>` reads the elements with the right
-            # accessor (`_elem_of`), not as int64_t words.
-            gen._declare_var(vn, 'MojoList *')
-            cvn = gen._cname(vn)
-            pv = gen._coerce_to_type(
-                'int64_t', 'MojoList *',
-                gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})"))
-            gen._emit(f"  {cvn} = {pv};")
-            if slot_elems and i < len(slot_elems) and slot_elems[i]:
-                gen._elem_types[vn] = slot_elems[i]
-            continue
         gen._declare_var(vn, slot_elem)
         cvn = gen._cname(vn)
         suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
@@ -3824,15 +3556,6 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._emit(f"  {cvn} = {dv};")
             else:
                 gen._safe_coerce_emit('double', vt, dv, cvn)
-        elif vt == 'int64_t' and suf != 'str':
-            # A slot whose static type is only the int64_t default: the yielded tuple records the
-            # slot's kind at run time (a string, a None, a float box -- the stack-switch yield
-            # boxes through `mojo_list_append_word`), so read it BOXED. An integer slot comes back
-            # as the same raw word it always did; a None / string slot is spelled by its kind
-            # instead of printing as 0 / a pointer's decimal.
-            raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({list_ptr}, {i})")
-            gen._boxed_vals.add(cvn)
-            gen._emit(f"  {cvn} = {raw};")
         else:
             raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
             if vt == 'int64_t':
@@ -3842,7 +3565,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
 
 
 def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
-                            destroy_after: bool = True, shadow_name=None):
+                            destroy_after: bool = True):
     """for x in <supported generator call>(): ... — <base>_resume()/
     <base>_value() deliberately mirror _gen_for_struct_iter's existing
     __has_next__/__next__ convention immediately below (resume both
@@ -3861,17 +3584,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     read again afterward — destroying it unconditionally there is a
     real use-after-free the first time that variable is consumed a
     second time. See the call site in _gen_for_iter for the full
-    rationale.
-
-    `shadow_name`: the iterable's own name when it is the loop target too
-    (`for g in g:`) -- see `_gen_for_iter`'s snapshot.
-
-    The loop target is retyped when an earlier sibling loop already declared
-    the same name with a different yield kind (`for v in gen_bool():` then
-    `for v in gen_float():`). `_declare_var` is first-decl-wins, so without
-    `force` the second loop stored a `double` into the first loop's `_Bool`.
-    The list/dict/set loops make the same choice (`force=` on the
-    `var_types` mismatch); this is that rule for generators."""
+    rationale."""
     base, vct = api['base'], api['value_ctype']
     # `for a, b in <tuple-yielding generator>():` — `var` arrives as
     # the literal string "(a, b)" (see _gen_for_list's identical
@@ -3885,7 +3598,6 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
-    tuple_slot_elems = api.get('tuple_slot_elems')
     is_tuple_target = (for_target_is_tuple(var)
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
@@ -3921,13 +3633,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
                 f"{api.get('base')}(...)`): the generator yields one value per "
                 "resume, and unpacking that value needs a runtime iterator "
                 "protocol this scalar generator model does not have")
-        # Retype a name a sibling loop already declared with another kind
-        # (see the docstring); `force` mints a fresh C name and rebinds every
-        # later read of `var` in this body to it. Same rule as the list arm
-        # of `_gen_for_list`.
-        gen._declare_var(var, vct,
-                         force=(var == shadow_name)
-                         or gen.var_types.get(var) not in (None, vct))
+        gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()
@@ -3941,32 +3647,10 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     val = gen._new_val(vct, f"{base}_value ({gen_val})")
-    if api.get('boxed_container'):
-        gen._boxed_container_vals.add(val)
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested,
-                                         tuple_slot_elems)
-        # A generator that iterates a kind-mixed list parameter yields BOXES in
-        # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
-        # the unpacked names must resolve them at each use.
-        if api.get('mixed_slots'):
-            for _mvn in var_names:
-                if gen.var_types.get(_mvn) == 'int64_t':
-                    gen._boxed_vals.add(gen._cname(_mvn))
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
-        if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
-            # A tagged word, exactly as `next(g)` binds one (emit_calls):
-            # rendered by kind, and the operator lowering reads its kind
-            # (`_tagged_arith_select`). Without the tagged mark `x * 2` took
-            # the plain box-as-double arm and printed `2.0` for an int yield.
-            gen._boxed_vals.add(gen._cname(var))
-            gen._tagged_word_vals.add(gen._cname(var))
-        elif vct == 'int64_t' and gen.var_types.get(var) == 'int64_t':
-            # An int64_t value slot may carry a string pointer the kind analysis could
-            # not prove (a word read out of a runtime-kinded list): the loop variable
-            # is a word of unknown kind, so print / str / ==  ask the run time.
-            gen._dyn_word_locals.add(_as_str(var))
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -4111,8 +3795,6 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     val = gen._new_val(vct, f"{base}_value ({gen_val})")
-    if api.get('boxed_container'):
-        gen._boxed_container_vals.add(val)
     gen._emit(f"  {cidx} = {ctr};")
     gen._emit(f"  {cval} = {val};")
     gen.loop_stack.append((bb_post, bb_after))
@@ -4167,14 +3849,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             if (_frec is not None and _frec.get('multi_args')
                     and len(_frec['multi_args']) == len(_tnames)):
                 _slot_ctypes = []
-                # `_ainfs` mirrors `_slot_ctypes`: the loop below reads the
-                # per-slot factory-record dict by SUBSCRIPT (`_ainfs[_i]`),
-                # NOT through the `zip(...)` tuple unpack — see that loop's
-                # comment. Subscript reads cast to the target's declared kind;
-                # the unpack's typed getters did not.
-                _ainfs = []
                 for _ainf in _frec['multi_args']:
-                    _ainfs.append(_ainf)
                     _tc = _ainf['elem_ctype']
                     # PART 6 (2026-10-23, family D piece 2): a STRUCT slot
                     # (a bare-ctor list literal feeding the product —
@@ -4352,20 +4027,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                          'int64_t': 'mojo_list_get_int',
                          '_Bool': 'mojo_list_get_bool',
                          'double': 'mojo_list_get_double'}
-            # Index, don't unpack: `zip(_tnames, _slot_ctypes, _frec['multi_args'])`
-            # emits a typed `mojo_list_get_*` per row element with NO cast to
-            # the target's declared kind — the `_tc`/`_ainf` targets (char*,
-            # hoisted from the loop above's dict-key use) then receive a raw
-            # int64 word and gcc rejects "assignment to 'char *' makes pointer
-            # from integer without a cast". Reading each of the three parallel
-            # lists by SUBSCRIPT instead emits a word read + cast to the
-            # target's declared kind (the proven shape `_slot_ctypes` already
-            # relies on), and the values are identical (slot i of each list =
-            # argument i of the factory record).
-            for _i in range(len(_tnames)):
-                _tn = _tnames[_i]
-                _tc = _slot_ctypes[_i]
-                _ainf = _ainfs[_i]
+            for _i, (_tn, _tc, _ainf) in enumerate(
+                    zip(_tnames, _slot_ctypes, _frec['multi_args'])):
                 _acc = _slot_acc.get(_tc)
                 if _acc is None and isinstance(_tc, str) \
                         and _tc.endswith(' *'):

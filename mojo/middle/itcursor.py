@@ -55,7 +55,6 @@
 from __future__ import annotations
 
 import mojo.middle.types as gimple_ctypes
-import mojo.middle.exprtypes as gimple_exprtypes
 from fire_compiler import _as_str
 
 
@@ -75,13 +74,6 @@ def slot_ctype(elem):
         return 'double'
     if elem == 'char *':
         return 'char *'
-    # Container elements (pair-lists from enumerate/zip, nested lists/dicts)
-    # store their pointer as an int64_t word; the cursor must present them
-    # typed as the container, not as a bare integer.
-    if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
-                 'MojoSet *' in elem or 'MojoBytes *' in elem or
-                 'MojoStr *' in elem or elem.endswith(' *')):
-        return elem
     return 'int64_t'
 
 
@@ -128,31 +120,8 @@ def read_at(gen, rec, idx):
         return vct, gen._new_val(vct, f"(*{_as_str(addr)})")
     _src2 = _as_str(rec['src'])
     _idx2 = _as_str(idx)
-    elem = rec.get('elem')
-    suf = (gimple_ctypes.TypeLattice.list_suffix(elem)
-           if elem else 'int')
-    # Container elements (MojoList *, MojoDict *, etc.) store their pointer as
-    # an int64_t word. `mojo_list_get_int` reads the word, and a cast applied
-    # directly to a call result in an assignment RHS is rejected by
-    # gcc -fgimple, so read through a temp: first grab the int word, then cast
-    # the temp (not a call rhs).
-    #
-    # `suf == 'int'` is the guard that keeps the branch honest: it fires
-    # exactly when the per-slot getter reads a WORD. `char *` is a pointer
-    # element that ends in ` *` but is NOT a container — its slots hold the
-    # string pointer itself and `list_suffix` gives it the 'str' getter
-    # (`mojo_list_get_str`), which returns the pointer, not a word. Letting
-    # `endswith(' *')` route it here declared the word temp `int64_t` and
-    # gcc refused the `char *`-into-`int64_t` assignment (measured 2026-10-27
-    # on test/iter/test_next.mojo's `assert_equal(next(it2), "hi")` over
-    # `l2 = ["hi", "hey", "hello"]` — the sweep's only next()-over-a-string-
-    # list; the pre-merge build read it as a plain `char *` via the final
-    # return below). Every container the branch was written for (MojoList *,
-    # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
-    # `suf == 'int'`, so this changes nothing for them.
-    if elem and elem.endswith(' *') and suf == 'int':
-        raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
-        return elem, gen._new_val(elem, f"({elem}){raw}")
+    suf = (gimple_ctypes.TypeLattice.list_suffix(rec['elem'])
+           if rec.get('elem') else 'int')
     return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
 
 
@@ -187,69 +156,3 @@ def remaining(gen, rec):
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return out
-
-# ── An iterator that crosses a call ─────────────────────────────────────────
-# A cursor is a C-local temp, so it cannot be handed to another function. When
-# `it = iter(<list>)` is passed to a user function (`_parse_varint(it)` in
-# Lib/dis.py), `it` is bound to a runtime list-iterator WORD instead
-# (`mojo_listiter_new`; `next`/`for` consume it through `mojo_next_word` /
-# `mojo_iter_word`). The caller's binding (emit_stmts) and the callee's
-# parameter typing (module_gen's call-site contract) must agree on which names
-# those are, so both ask this one function.
-
-# Calls that look at an iterator without keeping it or consuming it elsewhere.
-ITER_NON_ESCAPING_CALLS = frozenset((
-    'next', 'iter', 'list', 'tuple', 'set', 'dict', 'len', 'sum', 'min', 'max', 'sorted',
-    'enumerate', 'zip', 'any', 'all', 'print', 'reversed', 'map', 'filter', 'str', 'repr'))
-
-
-# Per-body memo: `escaping_iter_names(body)` is asked once per CALL ARGUMENT of a
-# module (module_gen's call-site contract) and once per `iter(...)` binding, and a
-# walk of the whole body each time is quadratic in the module's size (it made
-# `fire.py --dump-full` several times slower). Keyed by id(body): a body list
-# lives for the whole compile and is never mutated in the passes that ask.
-_ESCAPING_ITER_CACHE: dict = {}
-
-
-def escaping_iter_names(body) -> set:
-    """Names bound by `name = iter(...)` in `body` that also appear as a bare
-    argument of a call to a function other than the builtins above."""
-    key = id(body)
-    hit = _ESCAPING_ITER_CACHE.get(key)
-    if hit is not None and hit[0] is body:
-        return hit[1]
-    bound: set = set()
-    passed: set = set()
-    for _n in gimple_exprtypes._walk_ast(body or []):
-        _tn = type(_n).__name__
-        if (_tn == 'AssignStmt' and type(_n.target).__name__ == 'IdentExpr'
-                and type(_n.value).__name__ == 'CallExpr'
-                and type(_n.value.func).__name__ == 'IdentExpr'
-                and _as_str(_n.value.func.name) == 'iter'):
-            bound.add(_as_str(_n.target.name))
-        elif (_tn == 'CallExpr' and type(_n.func).__name__ == 'IdentExpr'
-                and _as_str(_n.func.name) not in ITER_NON_ESCAPING_CALLS):
-            for _a in _n.args:
-                if type(_a).__name__ == 'IdentExpr':
-                    passed.add(_as_str(_a.name))
-    out = bound & passed
-    _ESCAPING_ITER_CACHE[key] = (body, out)
-    return out
-
-
-def iter_name_escapes_into_call(body, name):
-    """True when `name` appears as a bare argument of a call to some function
-    other than the builtins above, anywhere in `body`. (Callers that have also
-    established the binding use `name_is_escaping_iter`.)"""
-    for _n in gimple_exprtypes._walk_ast(body or []):
-        if (type(_n).__name__ == 'CallExpr' and type(_n.func).__name__ == 'IdentExpr'
-                and _as_str(_n.func.name) not in ITER_NON_ESCAPING_CALLS):
-            for _a in _n.args:
-                if type(_a).__name__ == 'IdentExpr' and _as_str(_a.name) == name:
-                    return True
-    return False
-
-
-def name_is_escaping_iter(body, name):
-    """`name` is bound by `name = iter(...)` in `body` AND escapes into a call."""
-    return name in escaping_iter_names(body)

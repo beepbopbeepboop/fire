@@ -2,8 +2,7 @@
 """Task controller: dispatch work items to opencode workers, one git worktree each.
 
     control.py spawn NAME --claim KEY [--claim KEY ...] (--task TEXT | --task-file F)
-    control.py status [--all] [-v] # one line per task that still matters (finished-and-gone ones are hidden; --all lists them)
-    control.py prune [--dry-run]   # drop finished-and-gone entries (terminal, no worktree, nothing outside master) from the registry
+    control.py status              # one line per task: state, commits, tree, last log line
     control.py claims              # every live claim (workers read this before starting)
     control.py claim NAME --claim KEY ... [--who WHO] [--pid P | --hours H]   # register work done OUTSIDE control (a Claude
                                    # agent, a hand-run opencode, a local model); exits 1 if a live claim conflicts
@@ -17,7 +16,7 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
-    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them), then prunes finished registry entries (--no-prune keeps them)
+    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them)
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -30,8 +29,9 @@ Layout
   <common-git-dir>/control/tasks.json   the registry (shared by all worktrees)
 
 Sessions that work from a checkout OTHER than the one the fleet runs in (a clone, a hand-run
-agent) still reach the fleet's registry: the default is the fleet checkout's .git/control,
-overridable with CONTROL_CTL_DIR=<abs path to that checkout's .git/control>.
+agent) must point control.py at the fleet's registry with CONTROL_CTL_DIR=<abs path to that
+checkout's .git/control>; the default resolves relative to the checkout they are in, which in a
+clone is a private, empty registry that the fleet never reads.
 
 Claims are how two workers are kept off the same problem. A claim is a string:
 `module:os`, `bug:CODEGEN_foo`, or a repo path (`tools/formal_sweep.py`). Two
@@ -50,41 +50,7 @@ from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(MAIN)
-POOL_FILE = os.environ.get("CONTROL_POOL_FILE", os.path.join(MAIN, "tools", "pool.json"))
-
-
-def load_pool():
-    """The worker pool (tools/pool.json): named slots, each pinned to ONE model with a fixed count. There is no
-    fallback between slots: a task belongs to the slot it was queued for and waits there if that slot is full or banned."""
-    return json.load(open(POOL_FILE))
-
-
-def pool_slot(name):
-    for sl in load_pool()["slots"]:
-        if sl["name"] == name:
-            return sl
-    sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
-
-
-GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
-
-
-def gates_cfg():
-    """tools/gates.json: what a landing must pass, how often the full gate runs, and which gates are OFF for a backlog.
-    An OFF gate is a regex over test names; it is skipped by every gate run, and it must name the doc and the worker
-    working the backlog (`control.py gate off`), so no gate is ever dropped silently."""
-    return json.load(open(GATES_FILE))
-
-
-def gate_skip_args():
-    out = []
-    for pat in gates_cfg().get("off", {}):
-        out += ["--skip", pat]
-    return out
-
-
-def pool_total():
-    return sum(sl["count"] for sl in load_pool()["slots"])
+MODEL = os.environ.get("CONTROL_MODEL", "opencode-go/deepseek-v4.1-flash")
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -101,22 +67,19 @@ _CTL_WARNED = []
 def ctl_dir():
     """Where the shared registry lives.
 
-    The registry is FLEET state, not checkout state. The default is the
-    fleet's own registry (the checkout the fleet runs from); the fleet also
-    lands here because it IS that checkout. Override with
-    CONTROL_CTL_DIR=<abs path to a .git/control> when the fleet runs from
-    a different checkout than this default. The warning below covers the
-    default itself pointing at a missing/moved registry. (The previous
-    default was this checkout's own .git/control, which in a clone is a
-    private, empty registry the fleet never reads — exactly the split that
-    was hit on 2026-10-25: `control.py claims` in a clone printed nothing
-    while four workers were live in the other tree's registry.)"""
+    The registry is FLEET state, not checkout state: it lives in the
+    <git-common-dir>/control of the checkout the fleet runs from. A session working from ANOTHER
+    checkout (a clone, e.g. .fire-fire, whose own .git/control is an empty private copy) must set
+    CONTROL_CTL_DIR to the ABSOLUTE path of the fleet's control dir; otherwise this checkout would
+    read/write its own empty registry and its claims would be invisible to the fleet (and vice
+    versa), silently defeating the whole claim system. The warning below exists because exactly
+    that split was hit on 2026-10-25: `control.py claims` in a clone printed nothing while four
+    workers were live in the other tree's registry."""
     env = os.environ.get("CONTROL_CTL_DIR")
     if env:
         d = os.path.realpath(env)
     else:
-        d = os.path.realpath(os.path.expanduser(
-            "~/net/chatgpt/claude/mojo-reference/.git/control"))
+        d = os.path.join(os.path.realpath(os.path.join(MAIN, git("rev-parse", "--git-common-dir"))), "control")
         if not _CTL_WARNED and not any(os.path.exists(os.path.join(d, f)) for f in ("tasks.json", "external.json", "feed.json")):
             _CTL_WARNED.append(1)
             sys.stderr.write("warning: control registry %s is empty. If the fleet runs from another "
@@ -191,18 +154,6 @@ def questions(t):
     return re.findall(r"^\s*QUESTION:\s*(.+)$", txt, re.M)
 
 
-def holds_claims(t):
-    """Whether task T still holds its bug claims. Only work holds: a live worker, or commits that have not landed. A
-    dead worker that committed nothing holds nothing, so a retry of the same bug is never refused by it (2026-11-01:
-    23 such entries, all with no commits, refused every retry for days)."""
-    st = state_of(t)
-    if st in TERMINAL:
-        return False
-    if st == "running":
-        return True
-    return ahead(t) > 0
-
-
 def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
@@ -215,13 +166,7 @@ def next_slot():
 
 
 def cmd_spawn(a):
-    """Start a worker. A task runs on a POOL SLOT (tools/pool.json): its model and runner come from the slot, and it
-    never moves to another model. `--model` (a bare model, no slot) is for hand-run experiments only."""
-    if getattr(a, "pool", None) is None and getattr(a, "model", None) is None:
-        a.pool = load_pool()["default_slot"]          # callers that build a Namespace by hand (autointegrate) pass None
-    sl = pool_slot(a.pool) if getattr(a, "pool", None) else None
-    a.model = sl["model"] if sl else a.model
-    kind = sl["kind"] if sl else "opencode"
+    a.model = a.model or MODEL            # callers that build a Namespace by hand (autointegrate) pass None
     task = a.task if a.task is not None else open(a.task_file).read()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.name):
         sys.exit("NAME must be lowercase-kebab")
@@ -229,13 +174,12 @@ def cmd_spawn(a):
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
         for other, t in tasks.items():
-            if not holds_claims(t):
+            if state_of(t) in TERMINAL:
                 continue
             for c in a.claim:
                 for oc in t["claims"]:
                     if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
-                            c, oc, other, state_of(t), ahead(t)))
+                        sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
         ext = external_conflicts(a.claim)
         if ext:
             sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
@@ -249,28 +193,18 @@ def cmd_spawn(a):
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)
-        instr = "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt
-        if kind == "claude":
-            # Claude Code, headless: the paid Claude tokens. Edits and the shell are allowed inside the worker's own
-            # worktree (the prompt confines it there); there is no interactive permission prompt to answer.
-            cmd = ["claude", "-p", instr, "--model", a.model, "--permission-mode", "acceptEdits",
-                   "--allowedTools", "Read Edit Write Grep Glob Bash"]
-        else:
-            # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
-            cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
+        cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name,   # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
+               "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
-        # the worker runs under a CPU ceiling (tools/cpu_cap.py): a runaway loop stops itself, and its CPU is recorded
-        capped = [sys.executable, os.path.join(MAIN, "tools", "cpu_cap.py"), "wrap", "--name", a.name, "--"] + cmd
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
-            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, capped)))
+            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
         open(os.path.join(wt, "work.log"), "a").write("=== control: spawned %s on %s at %s ===\n" % (
             a.name, a.model, time.strftime("%F %T")))
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # a pipe to the caller must not outlive spawn
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
-                             model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
-                             started=time.strftime("%F %T"),
-                             base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
+                             model=a.model, pid=p.pid, started=time.strftime("%F %T"),
+                             base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -302,67 +236,21 @@ def sh(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def unmerged_branches():
-    """Branches under refs/heads/ with commits that are NOT in master, in ONE git call (a per-task
-    `rev-list` over hundreds of tasks is what made status take minutes)."""
-    out = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
-                         capture_output=True, text=True, cwd=MAIN).stdout
-    return set(out.split())
-
-
-def done_and_gone(t, unmerged):
-    """A finished task with nothing left to look at: terminal state, no worktree directory, and no commits
-    outside master (its branch is merged or deleted). Such an entry holds no claim (terminal claims are
-    ignored), no process and no work, so `status` hides it and `prune` may drop it."""
-    return (t.get("state") in TERMINAL and not os.path.isdir(t["worktree"])
-            and t.get("branch") not in unmerged)
-
-
 def cmd_status(a):
-    reg = load()
-    unmerged = unmerged_branches()
-    items = sorted(reg.items(), key=lambda kv: kv[1]["slot"])
-    shown = [(n, t) for n, t in items if a.all or not done_and_gone(t, unmerged)]
-
-    def row(nt):
-        name, t = nt
+    for name, t in sorted(load().items(), key=lambda kv: kv[1]["slot"]):
         st = state_of(t)
         dirty = len(git("status", "--short", cwd=t["worktree"], check=False).splitlines()) \
             if os.path.isdir(t["worktree"]) else -1
         last = ""
         lp = os.path.join(t["worktree"], "work.log")
         if os.path.exists(lp):
-            with open(lp, errors="replace") as f:
-                lines = [l for l in f.read().splitlines() if l.strip()]
+            lines = [l for l in open(lp, errors="replace").read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
-        return st, v, n_ahead, dirty, last
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        rows = list(ex.map(row, shown))
-    for (name, t), (st, v, n_ahead, dirty, last) in zip(shown, rows):
-        print("%-20s work-%-3d %-14s %-10s +%d commits, %d dirty | %s" % (name, t["slot"], st, v or "-", n_ahead, dirty, last))
+        print("%-20s work-%-3d %-14s %-10s +%d commits, %d dirty | %s" % (name, t["slot"], st, v or "-", ahead(t), dirty, last))
         if a.verbose and v == "NEEDS-INFO":
             for q in questions(t):
                 print("      QUESTION: " + q)
-    if len(shown) < len(items):
-        print("+%d finished tasks hidden (status --all to list)" % (len(items) - len(shown)))
-
-
-def cmd_prune(a):
-    """Drop DONE-AND-GONE entries (see done_and_gone) from the registry so tasks.json stops growing.
-    Never touches a task that is running, has a worktree, has commits outside master, or is in a
-    non-terminal state."""
-    unmerged = unmerged_branches()
-    with registry() as tasks:
-        gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
-        if not a.dry_run:
-            for n in gone:
-                del tasks[n]
-        kept = len(tasks) - (len(gone) if a.dry_run else 0)
-    print("%s %d finished registry entries; %d kept" % ("would prune" if a.dry_run else "pruned", len(gone), kept))
-    return gone
 
 
 def external_path():
@@ -381,7 +269,7 @@ def external():
 
 
 def norm_claim(c):
-    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
+    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
     if ":" in c:
         return c
     m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
@@ -430,9 +318,6 @@ def cmd_mark(a):
     with registry() as tasks:
         if a.name not in tasks:
             sys.exit("no such task")
-        if a.state == "integrated" and ahead(tasks[a.name]) > 0:
-            sys.exit("%s is not integrated: branch %s has %d commit(s) master lacks (land it, or mark it superseded/abandoned)"
-                     % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
 
@@ -466,16 +351,15 @@ def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
-    # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
-                cls=getattr(a, "cls", None))
+                added=time.time(), model=a.model)
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
-                       r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
+                       r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+FREE_BUCKET = re.compile(r"Free usage limit", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -490,158 +374,50 @@ def breaker_until():
         return 0
 
 
-# A usage limit is per MODEL: it bans that model for the slot's recovery time (tools/pool.json). A second limit within a
-# day means the next block is the long one (the paid plan's 30-day window), so the ban escalates to long_recover_days.
-LEDGER = "dead_models.json"
+# A usage limit is per MODEL and long: the paid "Go" plan takes a month to recover, a free model about a day. So a limit
+# is not a reason to wait 30 minutes and retry the same model (that is what minted 2,000 empty branches): it marks the
+# model dead for its recovery time and the work moves to the next model that is not.
+FALLBACKS = os.environ.get("CONTROL_FALLBACKS", "opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free,"
+                           "opencode/minimax-m3.1-flash-free,opencode/mimo-v2.6-flash-free,opencode/nemotron-3-ultra-free,"
+                           "opencode/beam-free,opencode/longcat-2.5-preview-free").split(",")
 
 
-def _ledger():
-    try:
-        raw = json.load(open(os.path.join(ctl_dir(), LEDGER)))
-    except (OSError, ValueError):
-        return {}
-    # the older format stored a bare `until` timestamp per model
-    return {m: (e if isinstance(e, dict) else {"until": e, "strikes": 1, "last": 0}) for m, e in raw.items()}
+def recovery_days(model):
+    return 1 if "free" in model else 15   # Go: the owner measured ~15 days to the next window (2026-10-24)
+
+
+def provider(model):
+    return model.split("/")[0] if "/" in model else model
 
 
 def dead_models():
-    """{model: until} for every model whose ban has not expired."""
-    return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
-
-
-RESET_MARGIN_S = 300   # a ban that ends at the printed reset time lifts five minutes after it, so the limit has really cleared
-RESET_RE = re.compile(r"resets (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_/+-]+)\)", re.I)
-
-
-def next_wall_time(hour, minute, tz, now=None):
-    """The epoch time of the next HH:MM in zone TZ strictly after NOW (tomorrow if today's has passed)."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    now = time.time() if now is None else now
-    t = datetime.fromtimestamp(now, ZoneInfo(tz)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if t.timestamp() <= now:
-        t += timedelta(days=1)
-    return t.timestamp()
-
-
-def replenish_at(sl, now=None):
-    """When a daily free tier gets its tokens back: the slot's `replenish` time plus its margin, or None when the slot
-    has no daily replenish. pool.json: "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}."""
-    r = sl.get("replenish")
-    if not r:
-        return None
-    hh, mm = (int(x) for x in r["at"].split(":"))
-    return next_wall_time(hh, mm, r["tz"], now) + r.get("margin_min", 1) * 60
-
-
-def reset_at(text, now=None):
-    """The epoch time of the NEXT reset the claude CLI printed in a limit line ("resets 11am (America/Los_Angeles)"),
-    or None when the text carries no reset. The next occurrence of that wall-clock time in that zone, strictly after now."""
-    m = RESET_RE.search(text or "")
-    if not m:
-        return None
-    hour, minute = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
-    return next_wall_time(hour, minute, m.group(4), now)
-
-
-def limit_reset(t):
-    """The reset time of the limit that stopped worker T, read from its own log; None if its log names none."""
-    lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return None
-    return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
-
-
-def mark_dead(model, sl, until=None, now=None):
-    """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
-    the second limit inside a day uses the long window."""
-    d, now = _ledger(), time.time() if now is None else now
-    prev = d.get(model, {})
-    strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    if until and until > now:
-        end = until + RESET_MARGIN_S
-    elif replenish_at(sl, now):
-        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
-    else:
-        hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-        end = now + hours * 3600
-    hours = (end - now) / 3600
-    d[model] = {"until": end, "strikes": strikes, "last": now}
-    json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
-    return hours
-
-
-PROBE_EVERY_S = 12 * 3600   # a banned daily free tier is asked one word at most this often: they refill once a day
-PROBE_TIMEOUT_S = 180
-
-
-def probe_model(model):
-    """True when MODEL answers a one-word prompt. A limit's refusal, a timeout or a missing CLI is no answer."""
     try:
-        r = subprocess.run(["opencode", "run", "--model", model, "Reply with the single word PONG."],
-                           capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
-    return r.returncode == 0 and "PONG" in out and not LIMIT_ERR.search(out)
+        d = json.load(open(os.path.join(ctl_dir(), "dead_models.json")))
+    except (OSError, ValueError):
+        return {}
+    return {m: u for m, u in d.items() if u > time.time()}
 
 
-def probe_free_bans(now=None, probe=probe_model):
-    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
-    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
-    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
-    now = time.time() if now is None else now
-    d = _ledger()
-    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
-    lifted, changed = [], False
-    for m, e in d.items():
-        if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
-            continue
-        e["probed"] = now
-        changed = True
-        if probe(m):
-            e["until"] = now
-            lifted.append(m)
-            print("probe: %s answers; its ban is lifted" % m, flush=True)
-        else:
-            print("probe: %s still refuses; next probe in %d s" % (m, PROBE_EVERY_S), flush=True)
-    if changed:
-        json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
-    return lifted
+def mark_dead(model):
+    d = dead_models()
+    d[model] = time.time() + recovery_days(model) * 86400
+    json.dump(d, open(os.path.join(ctl_dir(), "dead_models.json"), "w"), indent=1)
 
 
-def cmd_probe_free(a):
-    probe_free_bans()
-
-
-def running_by_slot(tasks=None):
-    """Running workers per pool slot. A worker started before slots existed has no `pool`: it is counted against the
-    slot that owns its model, so a slot is never over-filled by workers it does not know about."""
-    by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
-    n = {}
-    for t in (tasks or load()).values():
-        if state_of(t) == "running":
-            slot = t.get("pool") or by_model.get(t.get("model"))
-            n[slot] = n.get(slot, 0) + 1
-    return n
-
-
-def slot_free(sl, busy):
-    """A slot takes a task when it has room (count) and its model is not banned."""
-    return busy.get(sl["name"], 0) < sl["count"] and sl["model"] not in dead_models()
+def pick_model(preferred):
+    """The first of PREFERRED then FALLBACKS whose limit has not been hit, or None when every one is out."""
+    dead = dead_models()
+    dead_providers = {provider(m) for m in dead if "free" not in m}   # a paid plan's limit covers all its models
+    for m in [preferred] + FALLBACKS:
+        if m and m not in dead and (provider(m) not in dead_providers or "free" in m):
+            return m
+    return None
 
 
 def limit_hit(t):
-    """True only when the worker's own error lines say so: an `Error:` line from the model/provider. A worker that
-    READ a file mentioning a rate limit or a quota is not limited (2026-10-28: a read of coro.py marked OpenRouter's
-    free router dead for a day)."""
     lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return False
-    lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
-    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)
-            or re.match(r"\s*You've hit your", l)]   # the claude CLI's own limit line
-    return any(LIMIT_ERR.search(l) for l in errs)
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]) if os.path.exists(lp) else ""
+    return bool(LIMIT_ERR.search(tail))
 
 
 def dead_on_arrival(t):
@@ -668,43 +444,25 @@ def bounce(name, t):
     extra = [l[3:] for l in st.splitlines() if not (l[3:] in mine or l[3:].startswith(".tmp/"))]
     if extra:
         return False
-    if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
+    model = t.get("model")
+    if model and limit_hit(t):
+        mark_dead(model)
+        if "free" in model and FREE_BUCKET.search(open(os.path.join(wt, "work.log"), errors="replace").read()[-3000:]):
+            for m in FALLBACKS:   # "Free usage limit reached" is ONE bucket for every free model, not this model's
+                mark_dead(m)
+        model = pick_model(None)   # None (all out) -> refill's own pick decides when one recovers
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
-                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
-                cls=t.get("cls"))
+                files=t.get("files", []), needs=[], added=time.time(), model=model)
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
     return True
 
 
-def pick_slot(item, busy):
-    """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
-    pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
-    if item.get("only"):                       # pinned: its slot or nothing
-        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
-    slots = load_pool()["slots"]
-    if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
-        slots = [x for x in slots if slot_class(x) == item["cls"]]
-    pref = item.get("pool")
-    order = [x for x in slots if x["name"] == pref] + [x for x in slots if x["name"] != pref]
-    return next((x for x in order if slot_free(x, busy)), None)
-
-
-FORMAL_LANE = ("formal",)   # task-name prefixes that belong to the owner's FORMAL lane, never dispatched here
-CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a slot without a class is easy
-
-
-def slot_class(sl):
-    return sl.get("class", "easy")
-
-
 def cmd_refill(a):
-    """Fill the pool: each slot in tools/pool.json takes queued tasks, oldest first, up to its own count, and a slot
-    whose model is banned takes nothing. --target caps the total across slots (default: the pool's total).
+    """Keep --target workers running: start queued tasks, oldest first, while slots are free.
     A task is skipped (stays queued) if a task it needs is not integrated yet, or its claims conflict.
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
@@ -716,43 +474,29 @@ def cmd_refill(a):
                   open(breaker_path(), "w"))
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
-    items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
-    if items_all and not any(slot_free(sl, running_by_slot()) for sl in load_pool()["slots"]):
-        print("%s refill: every slot with queued work is full or banned (%s), starting nothing" % (
-            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u)))
-                                           for m, u in dead_models().items()) or "no bans"), flush=True)
+    if not any(pick_model(i["model"] or MODEL) for i in (json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json"))):
+        print("%s refill: every queued task's model is out of quota (%s), starting nothing" % (
+            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u))) for m, u in dead_models().items())), flush=True)
         return
     if time.time() < breaker_until():
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
     tasks = load()
-    if a.target is None:
-        a.target = pool_total()
-    busy = running_by_slot(tasks)
-    live = sum(busy.values())
-    items = sorted(items_all, key=lambda i: i["added"])
+    live = sum(1 for t in tasks.values() if state_of(t) == "running")
+    items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
+                   key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
-    # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
-    # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
-    items = [i for i in items if not i["name"].startswith(FORMAL_LANE)]
     for it in items:
-        if live + started >= a.target and not it["name"].startswith("fix-landed"):
-            continue                      # a red master is repaired at once, whatever the slot count
+        if live + started >= a.target:
+            break
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
-        # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
-        # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
-        sl = pick_slot(it, busy)
-        if sl is None:
-            continue                      # every slot is full or banned: the task waits
-        # a queued name can collide with a registry entry from an earlier attempt of the same chain (2026-10-30: two fixers
-        # were skipped on every pass as "already exists"); the task starts under a fresh name instead
-        name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
-        ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
-        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
+        ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
+                                file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL))
+        if not ns.model:
+            continue                      # this task's model (and every fallback) is out of quota; others may not be
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -763,28 +507,6 @@ def cmd_refill(a):
     waiting = len(items) - started
     print("%s refill: %d running, started %d, %d still queued (target %d)" % (
         time.strftime("%T"), live, started, waiting, a.target), flush=True)
-
-
-def cmd_gate(a):
-    """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
-    cfg = gates_cfg()
-    if a.action == "list":
-        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
-        for pat, e in cfg.get("off", {}).items():
-            print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
-        return
-    if a.action == "off":
-        if not (a.reason and a.doc and a.worker):
-            sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
-        if not os.path.exists(os.path.join(MAIN, a.doc)):
-            sys.exit("no such doc: %s" % a.doc)
-        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
-                                                  since=time.strftime("%F %T"))
-    else:
-        if cfg.get("off", {}).pop(a.pattern, None) is None:
-            sys.exit("no OFF gate %r" % a.pattern)
-    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
-    print("gate %s %s" % (a.action, a.pattern))
 
 
 def priority_list():
@@ -854,7 +576,7 @@ def cmd_guard(a):
     fan-out width, kill the largest such process whenever their SUM passes --total-gb. Says so in the log.
 
     Why: the gate's own jobs run under tools/memcap.py, but a worker's direct `fire.py build` / self-host
-    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/mid/CODEGEN_bootstrap_resource_blowup.md).
+    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/CODEGEN_bootstrap_resource_blowup.md).
     2026-09-29 the user had to kill a 200 GB+ mojo compile by hand. The default limit is above the 55 GB the
     `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
     OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process
@@ -1044,8 +766,6 @@ def cmd_cleanup(a):
             for i in range(0, len(gone), 200):
                 subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
             print("deleted %d merged work/* branches" % len(gone))
-    if a.prune:
-        cmd_prune(a)
 
 
 def cmd_memtrim(a):
@@ -1108,8 +828,7 @@ def restart(name, why, model=None):
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
-    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"],
-                            model=None, pool=t.get("pool"), cls=t.get("cls"))
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=model or t["model"])
     cmd_spawn(ns)
     return new
 
@@ -1166,25 +885,6 @@ def cmd_unstick_dead(a):
                 print("   restarted as", restart(name, "died of a network error"))
 
 
-def descendants(pid):
-    """Every process under PID (its children, their children, and so on), from the live process table. A job a worker's
-    shell started (a test, a build) is one of these while the worker lives; once its parent dies the job is reparented
-    to launchd and the walk loses it, which is why reap also matches on the worktree (below)."""
-    out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
-    kids = {}
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
-            kids.setdefault(int(f[1]), []).append(int(f[0]))
-    found, todo = [], [pid]
-    while todo:
-        for k in kids.get(todo.pop(), []):
-            if k not in found:
-                found.append(k)
-                todo.append(k)
-    return found
-
-
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -1193,6 +893,7 @@ def cmd_reap(a):
     processes, 4-6 h old, from three long-finished workers, took a third of the machine and pushed the gate's
     jobs past their timeouts). Only trees of tasks that are NOT running are touched; anything else on the
     machine (another session's processes) is left alone."""
+    live = {os.path.realpath(t["worktree"]) for t in load().values() if state_of(t) == "running"}
     dead = {os.path.realpath(t["worktree"]): n for n, t in load().items() if state_of(t) != "running"}
     out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
     pid, victims = None, []
@@ -1204,14 +905,6 @@ def cmd_reap(a):
             for root, name in dead.items():
                 if (cwd == root or cwd.startswith(root + os.sep)) and pid != os.getpid():
                     victims.append((pid, name))
-    # the tree of each dead task's worker: a job its shell started, in any directory, while the worker still lived
-    for n, t in load().items():
-        if state_of(t) == "running" or not t.get("pid"):
-            continue
-        for k in descendants(int(t["pid"])):
-            if k != os.getpid():
-                victims.append((k, n))
-    victims = list(dict.fromkeys(victims))
     for pid, name in victims:
         cmd = subprocess.run(["ps", "-o", "etime=,command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:110]
         print("%s pid %d: %s" % ("would kill" if a.dry_run else "kill", pid, name + " | " + cmd))
@@ -1244,14 +937,9 @@ def main():
     g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[], help="copy into the worker's .tmp/ (workers cannot read outside their tree)")
     s.add_argument("--base", default="master", help="branch to start from (a fix task starts from the failed task's branch)")
-    s.add_argument("--pool", default=None, help="the pool slot to run on (default: the pool's default_slot)")
-    s.add_argument("--model", default=None, help="a bare model, outside the pool (hand-run experiments only)")
-    s.set_defaults(f=cmd_spawn)
-    s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_status)
+    s.add_argument("--model", default=MODEL); s.set_defaults(f=cmd_spawn)
+    s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
-    s = sub.add_parser("gate"); s.add_argument("action", choices=["list", "off", "on"]); s.add_argument("pattern", nargs="?", default="")
-    s.add_argument("--reason", default=""); s.add_argument("--doc", default=""); s.add_argument("--worker", default="")
-    s.set_defaults(f=cmd_gate)
     s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
     s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)
@@ -1260,11 +948,9 @@ def main():
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
     s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true")
-    s.add_argument("--no-prune", dest="prune", action="store_false", help="keep finished registry entries")
     s.add_argument("--no-branches", dest="branches", action="store_false", help="keep merged work/* branches")
     s.add_argument("-j", "--jobs", type=int, default=16, help="parallel `git status` checks")
     s.set_defaults(f=cmd_cleanup)
-    s = sub.add_parser("prune"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_prune)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
     s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
     s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")
@@ -1274,12 +960,8 @@ def main():
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
-    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
-    s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
-    s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
-    s.set_defaults(f=cmd_enqueue)
-    sub.add_parser("probe-free", help="lift the ban on any daily free tier that answers a one-word prompt").set_defaults(f=cmd_probe_free)
-    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
+    s.add_argument("--needs", nargs="*"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_enqueue)
+    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8)
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
     sub.add_parser("queue").set_defaults(f=cmd_queue)

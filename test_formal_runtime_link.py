@@ -75,11 +75,6 @@ sys.path.insert(0, HERE)
 
 import formal.build as B
 import formal.model as M
-from exec_budget import RUN_TIMEOUT_S
-
-# `otool -L` is a host-tool probe, not a child of this file's build or run; it
-# is not a stale budget, and it is named so the census does not read it as one.
-OTOOL_TIMEOUT_S = 60
 
 RESULTS = []
 
@@ -134,7 +129,7 @@ def build_expecting_refusal(source, name, **kw):
     return ''
 
 
-def run(result, timeout=RUN_TIMEOUT_S):
+def run(result, timeout=60):
     """(exit code, stdout) for a built image, or (None, detail) if it would not
     start at all -- which is its own answer and has to be distinguishable from
     a wrong one."""
@@ -206,7 +201,7 @@ def test_image_carries_the_load_command():
     r = build(STR_CALL, 'otool')
     try:
         p = subprocess.run(['otool', '-L', r["path"]], capture_output=True,
-                           text=True, timeout=OTOOL_TIMEOUT_S)
+                           text=True, timeout=60)
     except OSError:
         report('otool is unavailable; the load-command check is skipped')
         return
@@ -470,7 +465,7 @@ def test_link_line_is_the_dylibs_exports():
         check(len(extra) >= 4,
               f'{arch}: the dylib exports names no header declares',
               str(sorted(extra)))
-        # …and the seven that are LEFT are named rather than counted, because
+        # …and the four that are LEFT are named rather than counted, because
         # this is the ceiling-2 remainder and it used to be six: `mojo_open` and
         # `mojo_close` were exported by the library and declared by no header,
         # so nothing could put them on a formal link line, and they are declared
@@ -478,18 +473,10 @@ def test_link_line_is_the_dylibs_exports():
         # `note_list_literal` and `compile_to_gimple` are not in the
         # `mojo_*` namespace, so `is_gimple_runtime_builtin` answers False for
         # them and they take the ordinary extern path — they are listed only
-        # because the map carries them. `Python`, `PythonObject` and
-        # `int64_t_as_unsafe_any_origin` are the 2026-10-21 CPython-interop box
-        # primitives (`runtime/fire_runtime.c`'s "PythonObject box
-        # primitives"): the codegen emits them as bare externs and the
-        # definitions are the runtime answer, but no header declares them — the
-        # CPython-bound call sites are stubbed at the codegen level
-        # (`int64_t.cpython() stubbed`), so nothing on this path dereferences
-        # them, and they are listed for the same reason the four above are.
-        check(extra == ['MojoParser', 'Python', 'PythonObject',
-                        'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
-                        'note_list_literal', 'scan_expr'],
-              f'{arch}: …and the seven that remain are the whole of ceiling 2, '
+        # because the map carries them.
+        check(extra == ['MojoParser', 'compile_to_gimple', 'note_list_literal',
+                        'scan_expr'],
+              f'{arch}: …and the four that remain are the whole of ceiling 2, '
               'not a count that can drift', str(extra))
         check(all(n in amap for n in extra),
               f'{arch}: and the link line offers them anyway — it is the '
@@ -802,7 +789,7 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
     a kind tag beside every element, which is what FORMAL.md §5 converges on —
     written, compiled into the runtime dylib and exported, and refused by
     `gimple_runtime_callable` for want of a DECLARATION.  That is the whole of
-    ceiling 2 in `bugs/formal/FORMAL_runtime_library_on_the_link_line.md`, and it is a
+    ceiling 2 in `bugs/FORMAL_runtime_library_on_the_link_line.md`, and it is a
     header gap rather than a capability limit: five of the six are word-shaped
     and were callable the moment a header said so.
 
@@ -992,7 +979,7 @@ def test_a_void_return_is_a_legal_call_and_an_illegal_value():
     **`'void'` is in `_WORD_SCALARS` for a POINTER's sake** — `MojoFileHandle`
     and `mojo_coro_handle` are both `typedef void*`, and reading either as the
     bare spelling `void` is what made nine entry points look like by-value
-    aggregates (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
+    aggregates (`bugs/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
     that membership into RETURN position made **68** entry points word-shaped
     whose callee writes nothing to the return register, so any of them could be
     bound to whatever the call sequence happened to leave there.

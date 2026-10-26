@@ -84,10 +84,6 @@ from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-# Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
-_SELF_ASSIGN_MEMO: dict = {}
-# Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
-_SELF_ASSIGN_MEMO: dict = {}
 
 def _selfhost_modglobal_is_pathcall(_v) -> bool:
     """`os.path.<fn>(...)` (any nesting) — a char*-producing path expression."""
@@ -146,7 +142,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     tokenized and parsed three times AND all three AST copies stayed live
     for the life of the process. That is both the repeated work and a
     contributor to the never-frees accumulation measured in
-    `bugs/mid/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
+    `bugs/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
     the instructions and ~1/3 the retained AST nodes.
 
     The cache is keyed PER FILE on `(path, mtime)`, not on the whole file
@@ -385,7 +381,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
 # `os.linesep` to `0` (an empty string) while the ordinary path in the same
 # program read `'\n'`, and the only thing that kept the coroutine body off
 # the compiled path was the mixed-yield refusal that difference caused
-# (bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
+# (bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
 #
 # The POSIX-only half of `signal` is deliberate: only the numbers identical
 # across every POSIX platform this runtime targets are listed, so a
@@ -488,7 +484,7 @@ def module_qualifier(q) -> str:
     return q.lstrip('.').replace('.', '_').replace('-', '_')
 
 
-def _collect_import_modules(modules_to_compile: dict, node_list: list):
+def _collect_import_modules(modules_to_compile: dict, node_list):
     """Populate `modules_to_compile` with every module named by an import
     anywhere in `node_list` — top level and nested inside function bodies,
     if/try/loop blocks. Deliberately a module-level function taking the
@@ -510,7 +506,7 @@ def _collect_import_modules(modules_to_compile: dict, node_list: list):
     index) -> SIGBUS, wildly out of bounds. The annotation pins the ctype."""
     _collect_import_modules_rec(modules_to_compile, node_list, 0)
 
-def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _depth: int):
+def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int):
     # Depth cap: on the self-hosted path a mis-lowered `isinstance(stmt,
     # (WhileStmt, ForStmt, TryStmt))` tuple-isinstance or an aliased `.body`
     # can make this recurse without bound (observed as a multi-GB memory
@@ -917,7 +913,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
         self._note_own_func_home(_sk, _qual)
 
-def _gmi_prefold_toplevel_comptime(self, _node_list: list):
+def _gmi_prefold_toplevel_comptime(self, _node_list):
     """Hoisted out of `gen_module_impl` (module-level, not a nested,
     RECURSIVE closure) — a real --dump-full fire.py determinism diff
     showed this closure (and several siblings in the same ~8000-line
@@ -944,7 +940,7 @@ def _gmi_prefold_toplevel_comptime(self, _node_list: list):
             for _h in (_cn.handlers or []):
                 _gmi_prefold_toplevel_comptime(self, getattr(_h, 'body', None) or [])
 
-def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
+def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. This one had DEFAULT PARAMETERS bound to
     captured values (`_target=_iname, _out=_found`) — exactly the shape
@@ -971,8 +967,7 @@ def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
             for _h in (_cn.handlers or []):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
-def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
-                                 _store_hits: dict) -> None:
+def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
     annotated per the hoist GOTCHA.
@@ -1008,17 +1003,6 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
     argument resolves the same way it does in every other method.
     """
     for _n in _node_list:
-        if (isinstance(_n, AssignStmt)
-                and isinstance(_n.target, SubscriptExpr)
-                and isinstance(_n.target.obj, IdentExpr)):
-            # `d[k] = v` into a bare name: the dict analogue of the append
-            # record below, keyed on the same bare name. A name this
-            # function binds locally (parameter or local) is a different
-            # variable and is not the module global, so it records nothing.
-            _p17_dname = _as_str(_n.target.obj.name)
-            if _p17_dname not in self.var_types:
-                _store_hits.setdefault(_p17_dname, []).append(
-                    self._quick_type(_n.value))
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
@@ -1069,7 +1053,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
                     if _p17_pt:
                         self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
                 _gmi_phase17_collect_appends(
-                    self, _p17_m.body or [], _append_hits, _store_hits)
+                    self, _p17_m.body or [], _append_hits)
                 self.var_types = _p17_saved
                 self._scan_scratch_top = _p17_mark
             continue
@@ -1083,29 +1067,29 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
             for _lname, _ltype in self._infer_local_var_types(_as_funcdef_node(_n)).items():
                 if _lname not in self.var_types:
                     self.var_types[_lname] = _ltype
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             self.var_types = _saved
             self._scan_scratch_top = _scratch_mark_17
         elif isinstance(_n, IfStmt):
-            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
             if _n.else_body:
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
             for _cond2, _ebody2 in (_n.elifs or []):
-                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits)
         elif isinstance(_n, (WhileStmt, ForStmt)):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             if getattr(_n, 'else_body', None):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
         elif isinstance(_n, TryStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             for _h in (_n.handlers or []):
-                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits)
             if isinstance(_n.else_body, list):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
             if isinstance(getattr(_n, 'finally_body', None), list):
-                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits)
         elif isinstance(_n, WithStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
 
 def _gmi_container_ctype(v):
     """Container C type a container LITERAL expression provably evaluates
@@ -1184,39 +1168,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
     fields. The descent below walks into `if`/`else`/`try`/`match`/nested-
     `def` bodies, so this is read at every level of that descent rather than
     captured once."""
-    # Memo (PERF_struct_self_assign_scan_uncached): `_walk_ast` is already
-    # memoized on node identity, but this whole scan was re-run on the SAME
-    # method body once per consumer pass and once per import level of the
-    # closure — 26,080 calls / 7.5% of a 23.3s profiled n=160 chain for the
-    # assigns half alone. The body list is the stable key: each method body is
-    # a single AST list object with a stable identity, and `param_types`
-    # (_sname) is rebuilt per method so it is part of the answer rather than the
-    # key. Cache the RAW SYNTACTIC SHAPE (the (field, ctype) pairs + side notes
-    # this pass emits) keyed on `id(body)` + the per-method inputs, replayed
-    # into the caller's `found`/`self.*` tables on every call. Invalidated by
-    # `_walk_ast_invalidate` at every struct-field mutation site (the only
-    # place `self.struct_field_types`/`self.struct_bool_fields` move under a
-    # body that was already scanned) — see the three `_walk_ast_invalidate(s)`
-    # calls in `_emit_struct_method`. A fresh walk is still the source of truth
-    # for the pinning test `every_ast_mutation_site_invalidates_the_walk_memo`-
-    # style guard in test_gimple.py.
-    _key = (id(body), id(param_types), str(_sname))
-    _hit = _SELF_ASSIGN_MEMO.get(_key)
-    if _hit is not None:
-        _updates, _bool_hits, _dv_hits, _et_hits = _hit
-        for fn, ft in _updates:
-            found[fn] = ft
-        for fn, bv in _bool_hits:
-            self.struct_bool_fields.setdefault(_sname, set()).add(fn) if bv else None
-        for fn, dv in _dv_hits:
-            self._field_dict_val_types.setdefault(_sname, {})[fn] = dv
-        for fn, et in _et_hits:
-            self._field_elem_types.setdefault(_sname, {})[fn] = et
-        return
-    _updates: list = []
-    _bool_hits: list = []
-    _dv_hits: list = []
-    _et_hits: list = []
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -1378,7 +1329,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                         ft = _UNKNOWN_FIELD_CTYPE
                 else:
                     ft = _UNKNOWN_FIELD_CTYPE
-                _updates.append((fn, ft))
+                found[fn] = ft
                 # `self._str_pool: dict[str, str] = {}` in
                 # __init__: capture the dict VALUE type from the
                 # annotation so `for k, v in self._str_pool.
@@ -1388,7 +1339,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
                     _dv_sa = self._annotation_dict_val_type(node.type_ann)
                     if _dv_sa is not None:
-                        _dv_hits.append((fn, _dv_sa))
+                        self._field_dict_val_types.setdefault(
+                            _sname, {})[fn] = _dv_sa
                 # `self._struct_allocs_needed: set[str] = set()` /
                 # `self._x: list[Foo] = []` in __init__ — seed the
                 # element type from the annotation, mirroring the
@@ -1403,7 +1355,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                     if _li_sa:
                         _et_sa = self._resolve_type(_li_sa[0].strip())
                         if _et_sa and _et_sa != 'int64_t':
-                            _et_hits.append((fn, _et_sa))
+                            self._field_elem_types.setdefault(
+                                _sname, {})[fn] = _et_sa
         elif isinstance(node, MultiAssignStmt):
             for tgt in node.targets:
                 fn = _gmi_self_member(tgt)
@@ -1464,20 +1417,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
         elif isinstance(_nn, MatchStmt):
             for _ci in range(len(_nn.cases)):
                 _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
-    # Apply the updates to the caller's tables BEFORE memoizing
-    for fn, ft in _updates:
-        found[fn] = ft
-    for fn, bv in _bool_hits:
-        self.struct_bool_fields.setdefault(_sname, set()).add(fn) if bv else None
-    for fn, dv in _dv_hits:
-        self._field_dict_val_types.setdefault(_sname, {})[fn] = dv
-    for fn, et in _et_hits:
-        self._field_elem_types.setdefault(_sname, {})[fn] = et
-    # Memoize the raw syntactic shape (PERF_struct_self_assign_scan_uncached)
-    # AFTER the descent, so the cache holds the full answer for this body.
-    _SELF_ASSIGN_MEMO[_key] = (_updates, _bool_hits, _dv_hits, _et_hits)
 
-def _gmi_scan_import_modules(mod_stmts: list, all_modules: dict) -> None:
+def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /
     `from m import ...` in `mod_stmts` into `all_modules` (a str->bool
     dict). Hoisted out of `gen_module_impl` (see its call site) so the
@@ -1604,7 +1545,7 @@ def _gmi_tuple_target_rows(tgt, value, out: list) -> None:
             _gmi_tuple_target_rows(e, v, out)
 
 
-def _gmi_collect_global_stmts(stmt_list: list) -> list:
+def _gmi_collect_global_stmts(stmt_list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
     result = []
@@ -1668,7 +1609,7 @@ def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
                 if isinstance(hb, list):
                     _gmi_collect_return_values(acc_rt, hb)
 
-def _gmi_scan_try_imports(self, _phase17_mod, stmt_list: list):
+def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _s in stmt_list:
@@ -1897,7 +1838,7 @@ def bare_global_read_plan(self, name):
         _global_owner_mod)
 
 
-def _gmi_scan_imported_global_homes(self, stmt_list: list) -> None:
+def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
     """Record every bare name THIS module's own top-level `from b import K`
     binds, together with the module whose `_<mod>_globals` struct declares
     the field, so a later BARE read of that name loads the OWNER's field
@@ -2025,7 +1966,7 @@ def _gmi_scan_imported_global_homes(self, stmt_list: list) -> None:
             fields[_local] = _iname
 
 
-def _gmi_scan_cpp_nested_imports(self, stmt_list: list):
+def _gmi_scan_cpp_nested_imports(self, stmt_list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _gi in stmt_list:

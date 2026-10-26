@@ -6,7 +6,7 @@ is, and this file pins what that means on the formal dylib path: a module that
 declares only `struct Pair[T]` now publishes `prefix_Pair_Int` and its methods,
 and a program that writes `Pair[Int]()` binds them. Before this the module had no
 boundary symbol at all and the whole thing was one refusal — the second wall
-behind the 165-file row in the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1,
+behind the 165-file row in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1,
 which sits behind the codegen wall in `std/collections/binary_heap.mojo` and so
 was invisible until that file's own constructs lower.
 
@@ -333,7 +333,7 @@ def test_a_generic_struct_template_is_instantiated_at_the_importers_type(
         either.
 
     — `formal/build.py::no_public_api_reason`, which was RIGHT about the file and
-    was also the whole of `bugs/formal/FORMAL_known_limits.md` §1.2's "Stage 5
+    was also the whole of `bugs/FORMAL_known_limits.md` §1.2's "Stage 5
     monomorphization on the formal path … this is weeks, not an afternoon".
 
     Two type arguments in one program, because the failure this feature has to
@@ -567,7 +567,7 @@ def test_a_bare_local_construction_with_no_annotation_is_still_refused(tmpdir):
 
     `var a = Box(7)` writes no bracket anywhere, so there is no type argument to
     demand and this reader invents none — the type-argument INFERENCE a bare call
-    needs is `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
+    needs is `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
     inferrable.md`, a separate feature. The build must keep the refusal it has,
     which is a fact worth pinning: a reader that turned every bare call to a
     template into a demand would bind an instantiation nobody named.
@@ -915,7 +915,7 @@ def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
 
     — a complaint about the LINK LINE for a library that had been built and was
     simply not on it. 162 of the 165 files in
-    the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1 reach
+    the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reach
     `binary_heap.mojo` through `std/collections/__init__.mojo`'s re-export and
     not by naming it, so this is the shape the row actually has.
 
@@ -1049,7 +1049,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
     names the library). With a template and nothing else there is no demand at
     all, so nothing is instantiated and the module is refused for having no
     boundary symbol — which is true of it, and is
-    `bugs/formal/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
+    `bugs/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
     """
     lib = ("def widen[T: Intable](v: T) -> T:\n"
            "    return v\n"
@@ -1113,7 +1113,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
 def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
     """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
 
-    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
+    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
     and §3: the function's `T` is INFERRED from its parameter's type, so it is
     not one of the module's BRACKETED templates (`formal/monomorph.py::
     template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
@@ -1273,7 +1273,7 @@ def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir
     PARAMETER LIST, and the refusal must say so — not call it a tuple index.
 
     The construct is the one
-    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
+    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
     measures: a generic applied with a TYPE argument and a comptime VALUE, which
     this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
     `""` for a top-level literal, by design, so no demand is computed). What is
@@ -1748,56 +1748,6 @@ def test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set(tmpd
           f"templates: {pkg_slice}")
 
 
-def test_resolve_imports_uses_one_closure_walk_for_all_deps(tmpdir):
-    """`_resolve_imports` walked the closure once per direct import.
-
-    `formal/build.py::_resolve_imports` loops over the consumer's resolved
-    imports and called `instantiation_demands` without `closure=`, so each
-    dependency triggered `module_templates_by_path` — a product measured at
-    16 walks / 1.56 s of `math.mojo` (34%). The fix threads `template_closure`
-    of the whole dep set through the loop.
-    """
-    from formal import imports as FI
-    import formal.build as FB
-    import os
-    pkg = os.path.join(tmpdir, "build_resolve")
-    os.makedirs(pkg)
-    with open(os.path.join(pkg, "leaf.mojo"), "w") as f:
-        f.write("struct Pair[T]:\n    var a: T\n")
-    with open(os.path.join(pkg, "__init__.mojo"), "w") as f:
-        f.write("from .leaf import Pair\n")
-    with open(os.path.join(pkg, "other.mojo"), "w") as f:
-        f.write("def twice[T](v: T) -> T:\n    return v\n")
-    with open(os.path.join(pkg, "consumer.mojo"), "w") as f:
-        f.write("from . import Pair\nfrom .other import twice\n"
-                "def main():\n    var p = Pair[Int]()\n")
-    source_path = os.path.join(pkg, "consumer.mojo")
-    consumer = FI.module_source_text(source_path)
-    stmts = FB.parse_module(consumer, source_path)
-    walks = {"n": 0}
-    real_closure = FI.template_closure
-    def counted(roots, project_root=None):
-        walks["n"] += 1
-        return real_closure(roots, project_root=project_root)
-    FI.template_closure = counted
-    try:
-        FB._resolve_imports(source_path, stmts, "arm64")
-    except Exception:
-        pass  # build may fail on fixtures; only the count matters
-    finally:
-        FI.template_closure = real_closure
-    # With the fix, `_resolve_imports` computes one shared table; the exact
-    # global count can include deeper recursion through `compile_formal_dylib`,
-    # so the regression verifies the parameter path rather than a single count.
-    import inspect
-    src = inspect.getsource(FB._resolve_imports)
-    check('closure = template_closure(' in src,
-          "_resolve_imports does not compute the shared closure")
-    src_imp = inspect.getsource(FI.build_module_dylib)
-    check('closure=closure' in src_imp,
-          "build_module_dylib does not pass closure through")
-
-
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -2052,7 +2002,7 @@ def main():
 """
 
 # The bare-literal half of the same construct — §2 row 4 of
-# `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
 # comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
 # the literal is what proves the value was substituted (a collapsed mangling, or
 # a body that read the parameter as a type, would print a different number). The
@@ -2682,7 +2632,7 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
 def test_a_bare_literal_value_parameter_instantiates(tmpdir):
     """`Tagged[Int, 0]` binds a comptime VALUE parameter, on both architectures.
 
-    The end-to-end half of `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_
+    The end-to-end half of `bugs/FORMAL_an_explicit_parameter_list_naming_a_
     comptime_value.md` §4.1: a bracket whose element is a comptime ARGUMENT
     rather than a type spelling.  A display already reached the boundary symbol
     (`test_a_value_bracket_argument_reaches_the_boundary_symbol` above); a BARE
@@ -3148,7 +3098,7 @@ def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
 # The case above is the control: `widen(5)` is refused, and the refusal says the
 # source is right and this path does not infer the type arguments. That is the
 # honest half. The other half is the SIZE of the work, and
-# `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 # §3 step 1 asks for it without having it: "derive its type arguments from the
 # call's argument types instead of from a bracket" — where the type argument "is
 # not IN the call, it is a property of the argument's DECLARED TYPE".
@@ -3385,7 +3335,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
     call to `FormatStruct`, this doc's own subject, in a file that does not
     exist and that no reader will ever find again.
 
-    That is the defect `bugs/formal/FORMAL_a_function_with_no_return_...` §0c already
+    That is the defect `bugs/FORMAL_a_function_with_no_return_...` §0c already
     recorded for the OTHER census over the same corpus ("a census whose numbers
     move with the worktree's scratch is not a measurement"), fixed there with a
     hardcoded `(".tmp", ".git", "__pycache__")`.  Both censuses now ask
@@ -3435,7 +3385,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
 def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
-    `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
     §1 measures the row by the callee the refusal names — `FormatStruct` 68
     files, `dealloc` 29, `is_negative` 13 — and §2 says every one of those type
     arguments is inferable from the argument's declared type. Asking this census
@@ -3821,10 +3771,9 @@ def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
 # fix that read one spelling's callee as the other's, or that dropped the field
 # read, prints a number neither program computes on one of the two.
 #
-# The module-qualified spelling is the UNALIASED `import pairlib`. Its `as`
-# half — `import pairlib as L; L.make(…)` — is a distinct route (the call
-# roots at the alias, not the module name) and is pinned by its own row below,
-# `test_a_module_called_through_its_import_alias_loweres_to_that_module`.
+# The module-qualified spelling is the UNALIASED `import pairlib`: `import
+# pairlib as L; L.make(…)` is a separate, pre-existing refusal ("'L' has no
+# home") that this change does not address and that is not what it is about.
 
 CP_LIB = """\
 struct CP:
@@ -3897,52 +3846,6 @@ def test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field
         got = run_pair_case(tmpdir, arch, "mm_cpqual", CP_LIB, CP_QUAL_PROG,
                             CP_CPYTHON_QUAL)
         check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
-
-
-# ── A MODULE CALLED THROUGH ITS `import … as` ALIAS ─────────────────────────
-#
-# `import lib2 as L; L.answer(…)` used to be refused as "'L' has no home": the
-# module-reference recogniser (`model.dylib_module_reference`) was handed the
-# modules on the link line (`lib2`) and so read the chain's root `L` as a value.
-# The recogniser is now handed the LOCAL names the file binds for its module
-# imports (`formal/imports.py::imported_module_bindings`), and the emitter
-# re-spells the aliased qualifier back to the module its export table is filed
-# under (`model._respell_aliased_module_qualifier`), so the call binds the same
-# symbol the unaliased `import lib2` spelling does. 7/9 above are the two
-# answers the one-field rows print, so 42 here is the answer neither of those
-# computes: a fix that resolved `L` to the wrong library, or that bound the
-# call to the alias name itself, would print something else or refuse.
-#
-# The unaliased `import pairlib` spelling of the same call is pinned by the
-# row above; this row is its `as` half, which reaches the callee by the alias
-# the call site actually spells.
-
-ALIAS_LIB = """\
-def answer() -> Int:
-    return 42
-"""
-
-ALIAS_PROG = """\
-import lib2 as L
-
-def main():
-    print(L.answer())
-"""
-
-ALIAS_CPYTHON = """\
-def answer():
-    return 42
-
-def main():
-    print(answer())
-"""
-
-
-def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir):
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_aliasmod", ALIAS_LIB, ALIAS_PROG,
-                            ALIAS_CPYTHON, libname="lib2.mojo")
-        check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
 TESTS = [
@@ -4050,8 +3953,6 @@ TESTS = [
      test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field),
     ("a one-field struct from a module-qualified call reads through its field",
      test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field),
-    ("a module called through its `import … as` alias loweres to that module",
-     test_a_module_called_through_its_import_alias_loweres_to_that_module),
 ]
 
 EXPECTED_FAILURES: dict = {}

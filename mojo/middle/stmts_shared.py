@@ -167,7 +167,7 @@ def _iter_ast(n):
     suspended onto its own separate fiber stack, so a `mojo_raise()`
     firing while this walk is mid-iteration can longjmp across that fiber
     boundary — undefined behavior. Found via bugs/
-    commit e8a7135b8: a zip()-nested-
+    CODEGEN_noshim_dumpfull_preexisting_divergence.md: a zip()-nested-
     tuple ValueError (gimple_gen_loops.py's `_gen_for_zip`, meant to be
     caught locally by `_gen_stmt_ForStmt`'s try/except and fall back
     gracefully) instead escaped to the module-level handler ONLY when
@@ -275,16 +275,6 @@ def _seed_genexp_list_narrowing(gen, func_node):
         if ok_iter:
             gen._genexp_narrow_names.add(name)
 
-def _note_rtobj_binding(gen, name, vtype, val):
-    """A local bound to a class made at run time, or to an instance of one, keeps that kind
-    (`gen._rtobj_kinds`); any other value rebinding the name drops it, because the name is no
-    longer known to hold one."""
-    kind = gen._rtobj_kinds.get(('v', val))
-    if kind is not None and vtype == 'int64_t':
-        gen._rtobj_kinds[('l', name)] = kind
-    else:
-        gen._rtobj_kinds.pop(('l', name), None)
-
 def _assign_target(gen, tgt, et, ev):
     """Assign a lowered value (et, ev) to one unpack target, which may be a
     plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
@@ -326,7 +316,6 @@ def _assign_target(gen, tgt, et, ev):
         # that word now (see `_dyn_word_locals`).
         if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
             gen._dyn_word_locals.add(tgt.name)
-        _note_rtobj_binding(gen, tgt.name, et, ev)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` (a var-type-inference join with
         # another branch's plain fn-pointer / lambda value collapsed it to
@@ -404,7 +393,7 @@ def _is_except_as_member_target(gen, obj_node) -> bool:
     accidentally match an ordinary string variable that merely happens
     to share a name — an ordinary string is never added to
     `_except_as_names` in the first place. See bugs/hard/
-    commit 272f268b2's "Residual gap"
+    CODEGEN_dynamic_attribute_on_generic_object.md's "Residual gap"
     section for why the type-keyed alternative was rejected."""
     return (isinstance(obj_node, gimple_ctypes.IdentExpr)
             and obj_node.name in gen._except_as_names)

@@ -346,8 +346,7 @@ GIMPLE_SOURCES = (
 #            ledger for one job and make it unadmittable on a 64 GB budget.
 #            That exception is `CLASS_ABOVE_PEAK`, with its reason, and the
 #            measurement that would settle it is
-#            measurement that would settle it is the unique-memory instrument
-#            (procrun.tree_usage_unique, fixed by the work on formal's peak).
+#            bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. The
 #            rung stays because MEMLIMIT_GB=96 has to mean something.
 #
 # `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
@@ -385,7 +384,7 @@ MEMCLASS = {
 # comment is a promise nobody checks, and this one is the difference between a
 # reservation and a wish.
 MEM_DEBT_GB = 4.0
-MEM_DEBT_DOC = 'doc/POLICY_memory_over_4gb.md'
+MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
 
 
 def needs_memwhy(spec) -> bool:
@@ -423,7 +422,7 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from the '
+MEASURED_RUN = ('a full `gate`, 2026-10-20, master 8e449ed3, per-job peaks from the '
                 'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
@@ -450,15 +449,15 @@ MEASURED_RUN = ('a full `gate`, 2026-10-25, master 66e3005e, per-job peaks from 
 #             sources. Labelled rather than silently merged, because "derived"
 #             is a weaker claim and a reader is entitled to see which is which.
 MEASURED_PEAK_GB = {
-    'native-dumpfull':             (10.4, 'measured'),
+    'native-dumpfull':             (31.3, 'measured'),
     'ab-native':                   (20.5, 'measured'),
     'selfhost':                    (4.4, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
     'sqliteruntime':               (2.3, 'measured'),
-    'bootstrap-stage1-transitive': (2.2, 'measured'),
-    'bootstrap-stage2-cc':         (2.3, 'measured'),
-    'bootstrap-stage2-dumps':      (0.7, 'measured'),   # per item
+    'bootstrap-stage1-transitive': (1.6, 'measured'),
+    'bootstrap-stage2-cc':         (1.9, 'measured'),
+    'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
     'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
@@ -467,7 +466,7 @@ MEASURED_PEAK_GB = {
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
     'bootstrap-stage2-transitive': (30, 'measured'),    # the binary's whole-closure dump
-    'bootstrap-stage3-dumps':      (0.7, 'measured'),    # from stage2-dumps
+    'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
     'bootstrap-stage3-transitive': (30, 'derived'),     # from stage2-transitive (same binary shape)
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
@@ -562,7 +561,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -730,8 +729,6 @@ MEASURED_PEAK_GB = {
     'formal-ast':                             (0.1, 'measured'),
     'gimple':                                 (0.4, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
-    'runtimere':                              (0.2, 'estimated'),
-    'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
@@ -1110,7 +1107,7 @@ CLASS_ABOVE_PEAK = {
     # never be admitted AT ALL — which is what test_suite.py's own admission
     # check exists to catch. `program` (55 GB) still covers the measurement at
     # 1.19x. Settling it properly means measuring unique pages instead of the
-    # sum; settled by the unique-memory instrument (procrun.tree_usage_unique).
+    # sum; that is bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md.
     'stdlib-tests': 'the peak is UNSTABLE across runs (34.9 and 52.2 GB for '
                     'the same 321 items) and 52.2 is the worst; `program` (55) '
                     'covers it at 1.05x where class_for_peak wants `stage` '
@@ -1773,7 +1770,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/formal/FORMAL_known_limits.md` and
+# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1787,7 +1784,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model.py', 'bugs/formal/FORMAL_known_limits.md',
+            'formal/model.py', 'bugs/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1837,7 +1834,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
+# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -1987,17 +1984,6 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, me
          + CORO_RUNTIME,
      desc='compile-and-execute: every generator/coroutine shape, both backends')
 
-test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_runtime_re.py', 'build_config.py', 'exec_budget.py',
-                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc',
-                             'runtime/test_fire_re_engine.c'],
-     desc='run-time re: the engine against CPython, and a compiled program using it')
-
-test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
-                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
-     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
-
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
 # no library -- 212 s measured, against `sqliteruntime`'s ~100 s, so it costs
@@ -2072,12 +2058,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
+     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
+# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because
@@ -2191,16 +2177,17 @@ test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
      desc='closure capture through a transitive import')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
      deps=['preflight'],
-     desc='compiled-path async/await runner (C++20 escape hatch; the file '
-          'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
+     expect='36 failing: the gimple async runner, an area with no gate '
+            'coverage until now',
+     desc='36 failing: the gimple async runner, an area with no gate coverage until now')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
-     desc='Future/Event awaitable protocol, done-callbacks, and awaited '
-          'async struct-method calls (receiver + args)')
+     expect='17 failing: `await` on a Future in the coroutine runtime',
+     desc='17 failing: `await` on a Future in the coroutine runtime')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-desc='void-returning async functions and the device_context-shaped '
-          'repro, on both coroutine backends')
+     expect='3 failing: an async function with no return value',
+     desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2212,7 +2199,8 @@ test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      desc='a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
-     desc='a detached coroutine task')
+     expect='2 failing: a detached coroutine task',
+     desc='2 failing: a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
      desc='toolchain/runtime proof for step A of compiled-path async/await')
@@ -2300,36 +2288,95 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# `bootstrap-verify` and `bootstrap-validate` (below) are the jobs that compare
-# what the stages PRODUCED, which is what makes them the only ones that can see
-# a compiled-codegen divergence: `reject=` on the fanouts is a regex over a
-# child's output and a child that writes a wrong artifact prints nothing.
-# Since 2026-10-25 they pass (184 files identical across the three stage trees)
-# and carry no marker.
-# `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
-# BLOW.md §0) but are STILL red for a different, real reason: their corpora
-# legitimately trigger this compiler's self-hosting bootstrap pre-pass
-# (a genuine, do_imports=True sibling-import compile whose sources live in a
-# per-run scratch directory under the worktree — see test_ab_native.py's
-# module docstring; they used to be placed in the repo root on purpose, which
-# is what raced the fan-out enumeration and is no longer the case), and that
-# pre-pass itself is extremely expensive per call
-# (~15-30 GB, ~15-25s — see BLOW.md §0's "NOT closed" addendum for the
-# measured repro and hot-stack profile: mojo_cstr_region_eq/
-# mojo_set_add_int/_set_grow dominating, the same signature as the original
-# bug this doc fixed, just now correctly SCOPED to only the cases that
-# should trigger it at all). Update this reason (not just delete it) once
-# that per-call cost is actually brought down — see BLOW.md for the
-# specific next-step suggestions (cross-call caching across the three
-# `_selfhost_*` seed passes within one process; degenerate-hashing check on
-# the tokenizer's `MojoSet` usage).
+# HISTORY OF THE MARKER ON THIS CLASS, because it moved twice and both moves are
+# the anti-rot discipline rather than bookkeeping.
 #
-# `native-dumpfull` was marked with this same reason until its bootstrap chain
-# went green (2026-10-25); its registration below says why it is not marked
-# any more. This constant is
-# also the whole of §4's subject matter: bugs/mid/CODEGEN_ab_native_fails.md tables
-# every `expect=` job in the registry with its measured peak, its class and its
-# reservation, and a recommendation each.
+# `bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("the self-hosted binary
+# segfaults on any input, exit 139"). That was MEASURED FALSE on 2026-09-27 and
+# corrected rather than left to rot: the original SIGSEGV is fixed (BLOW.md §0),
+# `./mojoc --dump-full` on a two-line program is exit 0 / 12.1 MB / 94.6 M
+# instructions. It was replaced with `SELFHOST_STAGE2_STALL`, whose point was
+# that a marker saying "segfault" would hide the real class — a
+# `mojo_unsupported_iter` no-op the runner flags per sub-job and no exit code
+# reports.
+#
+# 2026-10-03: that marker was STALE and the runner said so (a marker whose test
+# passes is a FAILURE). Not because the class is fixed — because this fanout
+# cannot see it. `reject=` is a regex over a child's output, the 47 sub-jobs no
+# longer emit `mojo_unsupported_iter`, and `--dump` on the compiled binary now
+# writes an EMPTY `.ci` while exiting 0, which prints nothing for a regex to
+# match. So the marker moved to `bootstrap-verify` and `bootstrap-validate`,
+# which compare the stage trees and therefore DO see it, and the fanout carries
+# a comment saying so instead of a marker that would have to be a lie in one
+# direction or the other. See `SELFHOST_STAGE2_EMPTY_DUMP` below and
+# bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
+#
+# RETIRED as a marker 2026-10-03, and NOT because the class is fixed. The
+# marker said the per-item fanout "returns `mojo_unsupported_iter` no-ops or a
+# wrong dump"; measured on that gate, the `mojo_unsupported_iter` half is GONE —
+# which is why `bootstrap-stage2-dumps` passed and the runner correctly reported
+# a marker whose test passes as a FAILURE. The "wrong dump" half is exactly what
+# `bootstrap-verify` reports in the same run (87 stage1-vs-stage2 diffs, most of
+# them a 0-byte `.ci`), so the class did not go away: its DETECTOR in this job
+# went away with it. `reject=` is a regex over a child's OUTPUT and a child that
+# writes nothing prints nothing, so this fanout cannot see an empty artifact
+# however it is spelled.
+#
+# So the marker moves to the two jobs that DO compare what was produced, which
+# is where a reader of the tally will actually see this. The constant is kept,
+# renamed, because its text is still the truest short description of the class
+# in the tree and `bootstrap-verify`/`bootstrap-validate` both cite it.
+#
+# 2026-10-04: and now the fanout is RED and carries a marker again, for a
+# reason worth writing down, because it is the THIRD move of this marker and
+# the rule that produced it. What the 2026-10-03 entry above reasoned about
+# was a fanout that could not see the class: the compiled binary wrote an
+# EMPTY `.ci` and exited 0, so `reject=` had nothing to match and the per-item
+# exit code said 0. That is no longer the shape. gatefix8 fixed the tokenizer
+# and the parser, so `.tok`/`.ast` are now byte-identical to stage1's and the
+# failure has moved INTO the compiled codegen, where it is no longer silent:
+# `compile_to_gimple` raises `TypeError: unhashable type: 'list'`, or the
+# parser refuses with `SEMICOLON`, or the binary dies on SIGSEGV/SIGBUS.
+# 45 of the 46 items now exit non-zero and only `mojo_failures.mojo` passes.
+#
+# So the general rule the three moves add up to: "this job cannot SEE the
+# defect" was true on 2026-10-03 and stopped being true on 2026-10-04, and the
+# honest response to a job that has become RED is a marker on THAT job — not a
+# comment explaining why it is not red, and not a marker left off because the
+# defect "really" belongs to a sibling job. A RED job with no marker is a hole
+# in the gate: nothing reports it, and `expect=` costs 4 s here.
+SELFHOST_STAGE2_EMPTY_DUMP = (
+    'the compiled binary dumps every single-module input (46 of 46, `.tok` '
+    'byte-identical) but cannot yet compile its own closure: '
+    '`bootstrap-stage2-transitive` is disabled (it does not finish), so the '
+    'stage3 trees these compare do not exist. See '
+    'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md')
+# `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
+# BLOW.md §0). Their corpora legitimately trigger this compiler's
+# self-hosting bootstrap pre-pass (a genuine, do_imports=True sibling-import
+# compile whose sources live in a per-run scratch directory under the
+# worktree — see test_ab_native.py's module docstring; they used to be placed
+# in the repo root on purpose, which is what raced the fan-out enumeration and
+# is no longer the case), and that pre-pass is expensive per call
+# (~15-30 GB, ~15-25s — BLOW.md §2: a never-frees accumulator, localised, not
+# fixed; the measured repro and hot-stack profile are there:
+# mojo_cstr_region_eq/mojo_set_add_int/_set_grow dominating, the same
+# signature as the original bug, now correctly SCOPED to only the cases that
+# should trigger it at all). As of 2026-10-26 the two jobs sit in different
+# states, so they no longer share a reason constant:
+#   * `native-dumpfull` is GREEN — measured twice that day, both runs wrote a
+#     byte-identical fire.ci and exited 0 (38.3 GB in the gate, which included
+#     a memslot wait; 13.9 GB in a solo run). Its check asserts the ARTIFACT
+#     and the exit code, never the cost: the survival + correct-write fixes
+#     closed it, and the cost did not come down (the two peaks are the
+#     accumulator's, and their variance is the signature). BLOW.md §0's
+#     premise "the pre-pass cost has to come down for them to go green" was
+#     wrong for this check. The cost stays tracked in its `program` (55 GB)
+#     class and in BLOW.md, not in a marker.
+#   * `ab-native` is doc-disabled (bugs/CODEGEN_ab_native_fails.md) while its
+#     peak drifts against the 8 GB ceiling; §4 of that doc tables every such
+#     job with its measured peak, its class and its reservation, and a
+#     recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
 # whole-closure self-compile AND the `gcc -O2 -fgimple` over the resulting
 # 40 MB translation unit, and it used to be given the class documented on the
@@ -2354,19 +2401,6 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/mid/CODEGEN_ab_native_fails.md,
-# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
-# divergence. `2f75609d` turned the job back from disabled= to expect=
-# referencing the constant `58192261` had removed, so every import of this
-# module (i.e. every `make gate`) died with a NameError before any test ran.
-# The "1 failing" is load-bearing, not decoration: _expect_count_drift
-# re-counts the run's "Results: N passed, M failed" line against it, so a
-# second divergence cannot be absorbed silently by the marker.
-SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/mid/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
-    '(29/30 byte-identical; the blowup this constant was named for is '
-    'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
@@ -2394,7 +2428,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/mid/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2404,33 +2438,35 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/mid/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'bugs/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
+     disabled='bugs/CODEGEN_ab_native_fails.md',
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
-# NOT switched, deliberately, and the reason is per job rather than per
-# principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
-# reason and is the owner's call, because it is also the job whose run produces
-# the measurements the blowup work is steered by — a marker that cannot be
-# observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/mid/CODEGEN_ab_native_fails.md tables it with its peak, class and
-# reservation and a recommendation, so the choice is a line rather than an
-# investigation.
-# `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
-# and writes `fire.ci` into the repo root, the same shared-artifact pattern
-# that makes `ab-native` `excl`. Without `deps` it raced `mojoc` at t=0 and
-# died with "mojoc not built" — hidden until now only because `expect=` used
-# to forgive that failure.
+# The `expect=` marker that sat here until 2026-10-26 was dropped on a
+# measurement, not a whim: two completed runs that day (the gate and a solo)
+# both wrote a byte-identical fire.ci and exited 0 — 38.3 GB and 13.9 GB.
+# The check asserts the artifact and the exit code, never the cost, so it
+# went green on the survival + correct-write fixes while the pre-pass cost
+# (BLOW.md §2, still open) stays tracked in the `program` class and in
+# BLOW.md §0 rather than in a marker. `bootstrap-stage2-dumps` (the other
+# job of the §4 table in bugs/CODEGEN_ab_native_fails.md) is disabled with
+# the rest of the stage2 chain, not marked.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='module', deps=['mojoc'], excl=True,
-     memwhy='measured 10.4 GB (2026-10-25, the full gate): the self-hosting '
-            'bootstrap pre-pass this corpus legitimately triggers, still over '
-            'the 4 GB line - see ' + MEM_DEBT_DOC + '. The job PASSES now '
-            '(its `expect=` came off the day the bootstrap chain went green).',
+     mem='program',
+     memwhy='measured 31.3 GB — the largest job in the registry that still '
+            'completes, for the same pre-pass (BLOW.md section 2). '
+            '1.5x is 47 GB, so `program` is the class the ratchet assigns; the '
+            'class is already correct and the reason is recorded because it is '
+            'over the 4 GB line — see ' + MEM_DEBT_DOC + '. The 2026-10-07 gate '
+            'measured 1.4 GB, but `mojoc --dump-full` died early (TypeError, no '
+            '.ci): how far it got, not what it needs. The 2026-10-26 runs '
+            'measured 38.3 GB (gate, including a memslot wait) and 13.9 GB '
+            '(solo) on the SAME check that now passes — the variance is the '
+            'accumulator, so 38.3 stays the number the class covers.',
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 # Peak-memory budgets for the self-hosted binary, as numbers (see the module
 # docstring of test_selfhost_memory.py). `selfhost-memory` is the fixed cost of
@@ -2441,18 +2477,34 @@ test('selfhost-memory', [PY, 'test_selfhost_memory.py', 'snippet'], driver='mem'
      mem='small', deps=['mojoc'], extra=['test_selfhost_memory.py'],
      desc='peak RSS of one self-hosted --dump-full (fixed cost), under budget')
 test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='mem',
-     mem='module', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
-     memwhy='measured 12.2 GB when it last ran (doc/MEMORY.html section 11: '
-            'the type-scan scratch pool and the shared one-character strings '
-            'took the self-hosted compiler compiling fire.py from 34-47 GB to '
-            '12.2 GB), so `module` (24) is the smallest class that covers it and '
-            '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
-            'a fact — see doc/POLICY_memory_over_4gb.md. It is `excl` '
-            'because at this size it is alone on the machine by arithmetic, not '
-            'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
-            '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
-            'asserts the peak, not the exit code; 12.2 stays the last real '
-            'measurement.',
+     mem='program', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
+     memwhy='drift, measured 2026-10-26: first RESOURCE-capped at the '
+            '`module` (24 GB) ceiling twice (24.1 GB at 293 s in the gate and '
+            'at 341 s in an exclusive solo run, both still allocating at the '
+            'cap), then COMPLETED at 38.8 GB in 356 s under the raised class '
+            '— over the test self-host_memory fire case 16 GB budget, so the '
+            'test itself fails; that failure is the tripwire working, and it '
+            'is the state the BLOW.md section-2 accumulator workstream owns. '
+            'The last budget-PASSING measurement is 12.2 GB, 2026-09-30 '
+            '(doc/MEMORY.html section 11: the type-scan scratch pool and the '
+            'shared one-character strings took this exact job from 34-47 GB '
+            'to 12.2 GB). Same direction as the ab-native peak drift in '
+            'BLOW.md section 0; the signature is the section-2 never-frees '
+            'accumulator (localised, not fixed), not a new leak hunt. '
+            '`program` (55) covers the measured 38.8 GB at 1.42x, not the '
+            '1.5x the ratchet asks for (which is `stage`, 96 GB): reserving '
+            'the whole machine for a job with a known unfixed leak is a '
+            'different trade than variance headroom, and the stdlib-tests '
+            'registration above makes the same choice with its documented '
+            'reason. When the accumulator work lands, the job passes its '
+            'budget again, --apply-peaks records the true lower peak, and the '
+            'class comes back down. The failed run peak is deliberately NOT '
+            'in MEASURED_PEAK_GB: trusted_peaks only trusts PASS lines, and '
+            'locking the leak number in as the measured baseline would steal '
+            'the ratchet input the fix is supposed to produce. Over the 4 GB '
+            'line and therefore a debt — see '
+            'bugs/PERF_memory_over_4gb_is_a_bug.md. `excl` because it is the '
+            'largest reservation in the gate.',
      desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -2489,7 +2541,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # you not to let grow. If the next gate shows this step at a much higher peak,
 # the measurement changed and the class follows it (test_suite.py fails the
 # moment a recorded peak stops fitting its class).
-test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
+test('stdlib-dylib', [PY, '-c',
+                      'import build_stdlib_dylib as b; b.build_stdlib()'],
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
@@ -2633,7 +2686,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage2',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2647,16 +2700,35 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage3',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
 
+# These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`
+# names, and they became visible for a structural reason worth recording: they
+# used to SKIP, because `bootstrap-stage2-dumps` failed and a failed dep skips
+# its dependents. Its detector was then removed (the `mojo_unsupported_iter`
+# no-op it rejected for is gone), so the fanout passed, and these two ran for the
+# first time and reported the divergence the whole cluster exists to find.
+#
+# `expect=` and not `disabled=`, and the rule that decides it is cost: neither
+# job is in `MEASURED_PEAK_GB` (both are in the unmeasured list, so they keep
+# the default class) and both took 0.6 s in the 2026-10-03 gate — they are three
+# `os.listdir`s and a byte compare, and all of their cost is in
+# `bootstrap-stage3-transitive`. A known failure that is cheap runs, so that its
+# anti-rot ("marked expect= but it PASSES") is alive on every gate; `disabled=`
+# would buy nothing here and cost the machine a reservation to be told what the
+# doc already says. The markers state NO count on purpose: 87 diffs / 256
+# mismatches is a census of a class that shrinks as it is fixed, and a marker
+# that pinned a number would fire the moment one file was repaired.
 test('bootstrap-verify', [PY, 'tools/bootstrap_verify.py'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='stage1 == stage2 == stage3 for every generated file')
 test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
      deps=['bootstrap-stage3-transitive'],
+     expect=SELFHOST_STAGE2_EMPTY_DUMP,
      desc='bootstrap-validate.mojo over the three stage trees')
 
 # ── formal ───────────────────────────────────────────────────────────────────
@@ -2712,7 +2784,7 @@ test('prooflib', [PY, '-c',
             "Lean's own -M is 12 GB for a library build (6144 for a generated "
             'proof) and a 4 GB ceiling is not a tighter policy but a red suite, '
             'measured: see formal/lean.py and '
-            'measured (see MEASURED_PEAK_GB["prooflib"]). `module` (24) is '
+            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. `module` (24) is '
             'the smallest class covering 1.5x of 9.0 = 13.5 GB; `small` (8) is '
             'not, and a RESOURCE verdict here takes down every proof job that '
             'deps on it. See ' + MEM_DEBT_DOC,
@@ -2736,7 +2808,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2776,8 +2848,9 @@ test('formal', [PY, 'test_formal.py'], j=True,
             'share, so it reads HIGH; `program` covers the measurement at '
             '1.19x, and `stage` would reserve the entire machine-wide ledger '
             'for one job — which also makes it unadmittable outright on a '
-            '64 GB budget. The unique-pages measurement (procrun.tree_usage_unique)'
-            ' fixes the double-counting that made the sum read HIGH. Over '
+            '64 GB budget. The unique-pages measurement that would settle it '
+            'is the open question in '
+            'bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. Over '
             'the 4 GB line and therefore a debt, not a fact. See ' + MEM_DEBT_DOC,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'], mem='tiny',
@@ -2845,8 +2918,7 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
      deps=['preflight', 'prooflib'], timeout=1200, mem='tiny',
      extra=['test_formal_call_proof_gen.py', 'fire_compiler.py',
             'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
-            'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
-            'formal/build.py', 'formal/lean.py',
+            'formal/arm64_codegen.py', 'formal/build.py', 'formal/lean.py',
             'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
             'lib/X86.lean', 'lib/work.lean'],
      desc='proof generation on programs that CALL: a call must not raise, the '
@@ -2941,7 +3013,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'whose work it can now do itself rather than like the pure-python '
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
-            'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
+            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. See ' + MEM_DEBT_DOC,
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
@@ -2984,7 +3056,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3009,14 +3081,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
@@ -3043,21 +3115,8 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # GB), which is a machine-wide reservation for a job whose measured peak is
 # under a third of the cheapest rung.
 #
-# It is RED, and deliberately `expect=`-marked rather than left unregistered.
-# The marker this comment used to carry — `udivmod` disagrees with the
-# hardware (real 4, model 7905747460161236410) — is no longer true, and the
-# marker it described was never attached: a comment that says a job is
-# `expect=`-marked beside a registration that has no marker is a claim about
-# the tree that is not true, and the first thing a reader does with it is
-# trust it. Measured 2026-10-29, the run is `agree 91  WRONG 0  NO-RUN 3
-# (of 93)` with exit 1: `udivmod` is among the 91 that agree, and the red is
-# three runs the model stops before returning — `accum_max` (the plan builds,
-# so the model stops at a byte it accepted), `printf_int` (a `movsxd_r64_r32`
-# step is not wired) and `str_len` (the nine SSE2 scalar binary64 forms have
-# no decoder arm). That is the x86-64 instruction-coverage backlog, and it is
-# zero WRONG rows. The marker states the condition rather than a count,
-# because the harness prints no summary line the runner's drift check can
-# read, and a count here would fail as UNCHECKED on every run (`marker_failures`).
+# It is RED, and deliberately `expect=`-marked rather than left unregistered:
+# `udivmod` disagrees with the hardware (real 4, model 7905747460161236410).
 # A model bug on a file that has been running by nobody for as long as it has
 # existed is exactly what an `expect=` marker is for — it says WHAT is red
 # instead of leaving the file invisible. Fix the model and the marker flips
@@ -3065,14 +3124,6 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
-     expect='red with zero WRONG rows (measured 2026-10-29): agree 91, and 3 '
-            'runs the model stops before returning (NO-RUN) — `accum_max` '
-            '(the plan builds, so the model stops at a byte it accepted), '
-            '`printf_int` (a `movsxd_r64_r32` step is not wired) and '
-            '`str_len` (the nine SSE2 scalar binary64 forms have no decoder '
-            'arm). The former `udivmod` disagreement is gone: it is among the '
-            '91 that agree. The three NO-RUNs are the x86-64 '
-            'instruction-coverage backlog, not a wrong step.',
      desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
@@ -3599,7 +3650,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # another field's word.
 #
 # It was also the one file in the estate that no gate ran at all while
-# `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
 # `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
 # ("minutes of real compilation") — a rule made about the file rather than about
 # its expensive part, since only two of the 26 rows build. The `module table`
@@ -3670,7 +3721,7 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
-# The instrument behind `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`, and
+# The instrument behind `bugs/FORMAL_proof_coverage_census_2026-10-03.md`, and
 # only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
 # this repository's own `*.py` through `compile_formal(prove=True, …)` on both
 # architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
@@ -3710,7 +3761,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
 # `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
 # times slower, or started admitting holes, or started needing 3 GB, leaves the
-# suite green. `§0.8` of `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` is
+# suite green. `§0.8` of `bugs/FORMAL_proof_coverage_census_2026-10-03.md` is
 # the census's own summary and the finding it produced on its first run.
 #
 # Why it is a separate job from `formal` and not folded into it: `formal` runs
@@ -3914,17 +3965,6 @@ test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
             'tools/formal_host_import_wall.py',
             'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import wall tool: which readers it asks, not its numbers')
-# The measurement behind `formal-host-import-wall`: the shape that separates
-# each reader, pinned on synthetic sources rather than on the live sweep.
-# 10 s, 0.2 GB peak, `tiny`; in `check` because it is the same area and a
-# red here was the root cause of the dead-import / importlib.util row bugs.
-test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
-     mem='tiny',
-     deps=['preflight'],
-     extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
-            'tools/formal_host_import_wall.py',
-            'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
-     desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
 # the same reasoning rather than excused: seven assertions that a per-STRUCT
 # predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
@@ -4093,7 +4133,7 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
+              'gimplegenerators', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
               # hostmod claim for `ast`; each was added to this bucket on its
@@ -4109,17 +4149,6 @@ BUCKETS = {
               # loop; it arrived with `work/formal27-6` in NO bucket and NO
               # `UNREGISTERED`, which is what the estate check named.
               'formal-host-import-wall',
-              # …and `formal-host-import-shapes`, the measurement behind the
-              # wall: its registration says "in `check` because it is the same
-              # area and a red here was the root cause of the dead-import /
-              # importlib.util row bugs", but the batch added the registration
-              # and not the row, which is what the bucket check named. 10 s,
-              # 0.2 GB peak, no Lean; 15.9 s wall through the runner, measured
-              # green 2026-10-28, gate triage. Its one red on the tree (a dead
-              # `types` import in a batch regression record the tree-wide
-              # ratchet named) is fixed in this series, so the everyday loop
-              # runs it green from day one.
-              'formal-host-import-shapes',
               # …and `formal-per-struct-asks`, named by the estate check on the
               # same day for the same reason: in NO bucket and NO
               # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
@@ -4342,12 +4371,6 @@ BUCKETS = {
                # prints, and it is in `check` rather than only here for the
                # `formal-field-walk` reason: no build, no Lean, 0.36 s.
                'formal-host-import-wall',
-               # …and `formal-host-import-shapes`, the wall's measurement, in
-               # both buckets for the same reason the wall is in both: `proofs`
-               # is the whole formal picture in one bucket, and the wall's row
-               # above is its sibling. Named 2026-10-28, gate triage, with the
-               # row in `check` beside it.
-               'formal-host-import-shapes',
                # …and `formal-per-struct-asks`, in both buckets for the
                # `formal-field-walk` reason — the estate check named it in NO
                # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
@@ -4518,21 +4541,11 @@ BUCKETS = {
     # async-with-lock-guard, nested-async-generic and async-runtime-scaffold are
     # green and their `expect=` markers are gone (a marked-but-passing test is
     # reported as a FAILURE, so leaving them would have been the anti-rot firing).
-    # The remaining three keep their markers, and their counts were re-measured
+    # The remaining four keep their markers, and their counts were re-measured
     # against the run on the same day.
     #
-    # A fourth, `gimple-async-runner`, dropped its marker on 2026-10-28: the
-    # §5.5 cutover's red was the file's own, not the backend's — its C++20
-    # build helper asked `compile_to_gimple_with_cpp` for a companion .cpp
-    # that the now-default stack-switch backend never emits, so all 36
-    # buildable cases died at build ("expected a non-empty generated .cpp").
-    # It now pins `MOJO_CORO=cpp` the way its same-harness sibling
-    # test_taskgroup.py already does, its two stale bool expectations `1`
-    # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
-    # cases pass (re-measured 41 s / 0.1 GB, below).
-    #
-    # The remaining `expect=`-marked job stays in `coroutine` rather than
-    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The four `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4541,11 +4554,10 @@ BUCKETS = {
     #
     # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
-    #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
-    #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
-    #                                       import-time MOJO_CORO leak fixed)
-    #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
+    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing  (expect=)
+    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
+    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
+    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
     #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
@@ -5220,8 +5232,6 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
-    for pat in getattr(opts, 'skip', None) or []:
-        chosen = [n for n in chosen if not re.search(pat, n)]
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -5318,16 +5328,6 @@ def execute(jobs, per_test, opts, log: Log):
         state[name] = max([s for s in (prev, status) if s],
                           key=lambda s: _RANK.get(s, 0))
 
-    def pending(name):
-        """True while a dependency has no verdict yet. `state` gets an entry
-        when the FIRST job of a fanout settles, so `name in state` alone would
-        release a dependent after one of 46 items; a passing dep is only done
-        when every one of its jobs has settled (`resolved` counts them). A
-        failing one is final already: the dependent is skipped at once."""
-        if name not in state:
-            return True
-        return state[name] in DEP_SATISFIED and resolved[name] < per_test[name]
-
     with ThreadPoolExecutor(max_workers=opts.jobs,
                             thread_name_prefix='suite') as pool:
         running: dict[object, Job] = {}
@@ -5349,7 +5349,7 @@ def execute(jobs, per_test, opts, log: Log):
             ready, blocked = [], []
             for key in sorted(waiting, key=lambda k: order[k]):
                 job = waiting[key]
-                if any(pending(d) for d in job.spec.deps):
+                if any(d not in state for d in job.spec.deps):
                     continue                     # a dep is still running
                 if all(state[d] in DEP_SATISFIED for d in job.spec.deps):
                     ready.append(job)
@@ -5378,7 +5378,7 @@ def execute(jobs, per_test, opts, log: Log):
                 # plan can ever satisfy (a test whose dep was not selected).
                 # Say so instead of spinning.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
-                missing = [d for d in job.spec.deps if pending(d)]
+                missing = [d for d in job.spec.deps if d not in state]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))
                 del waiting[job.key]
@@ -5782,62 +5782,6 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-def known_bugs(name):
-    """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
-    seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
-    job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
-    import re as _re
-    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
-    hits = []
-    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
-        for f in files:
-            if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
-                continue
-            path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
-            if all(w in tokens for w in words):
-                hits.append(path)
-                continue
-            try:
-                title = open(path, encoding='utf-8', errors='replace').readline()
-            except OSError:
-                continue
-            if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
-                hits.append(path)
-    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    return sorted(os.path.relpath(h, rel) for h in hits)
-
-
-def _hms(secs):
-    """Seconds as H:MM:SS (or M:SS under an hour), for the time line a reader compares run to run."""
-    secs = int(round(secs))
-    h, rem = divmod(secs, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _record_timing(wall, work, results, opts):
-    """Append this run's timing to build/suite-timings.jsonl: one line per run, with the revision and every job's
-    own time, so a slowdown can be traced to the job and the commit that caused it."""
-    import json as _json, subprocess as _sp, time as _time
-    try:
-        head = _sp.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=HERE).stdout.strip()
-    except OSError:
-        head = ''
-    rec = {'when': _time.strftime('%Y-%m-%dT%H:%M:%S'), 'head': head,
-           'wall_s': round(wall, 1), 'work_s': round(work, 1),
-           'jobs': {k: round(r.secs, 1) for k, r in sorted(results.items())},
-           'cached': sum(1 for r in results.values() if r.cached)}
-    path = os.path.join(HERE, '..', 'build', 'suite-timings.jsonl')
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'a') as f:
-            f.write(_json.dumps(rec) + '\n')
-    except OSError as e:
-        print(f'  (could not record timing: {e})')
-
-
 def report(names, state, results, wall, peak, opts, log: Log):
     # Group the run's tests into the tally's counters, one lookup per test, so
     # a test cannot end up in a bucket nobody reads.
@@ -5999,23 +5943,6 @@ def report(names, state, results, wall, peak, opts, log: Log):
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
-                if row.count == 'failed':
-                    # Is this a regression someone has already filed? A gate reads this line to tell a repeat
-                    # from a new break: the bug doc that tracks the job, or NEW when no doc does.
-                    docs = known_bugs(name)
-                    print('      ' + (('previously seen: ' + ', '.join(docs)) if docs
-                                      else 'NEW: no bug doc tracks this job'))
-    # How long the gate took, and where the time went. The wall clock is what a person waits for; the sum of the jobs'
-    # own times is the work done (it exceeds the wall when jobs ran in parallel, and the gap is the parallelism). The
-    # slowest jobs are the first place to look when a gate gets slower. Each run is also appended to
-    # build/suite-timings.jsonl, so "how long does the gate take" has an answer over time, not just for this run.
-    work = sum(r.secs for r in results.values())
-    slow = sorted(((r.secs, k) for k, r in results.items() if not r.cached), reverse=True)[:8]
-    print(f'time: wall {_hms(wall)} | work {_hms(work)} across {len(results)} job(s) '
-          f'({sum(1 for r in results.values() if r.cached)} replayed from cache)')
-    for secs, key in slow:
-        print(f'  slowest  {_hms(secs):>9}  {key}')
-    _record_timing(wall, work, results, opts)
     print(tally + (f'   log: {log.path}' if log.path else ''))
     # Non-zero for any member of a counter that `fails`, and for a summary that
     # could not account for every test: a run that cannot count itself has not
@@ -6213,8 +6140,6 @@ def main(argv=None):
     ap.add_argument('--no-cache', action='store_true',
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
-    ap.add_argument('--skip', action='append', metavar='RE', default=[],
-                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')

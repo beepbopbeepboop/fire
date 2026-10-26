@@ -132,7 +132,7 @@ CPython oracle are `formal_fuzz`'s, imported and never re-spelled, for the
 reason `formal_proof_fuzz.py` gives.
 
 It is also not a proof of anything.  A sweep over N programs says "the backend
-was right about N × T pairs"; `bugs/formal/FORMAL_metamorphic_ledger.md` says which
+was right about N × T pairs"; `bugs/FORMAL_metamorphic_ledger.md` says which
 pairs those were, so the next session can see what stopped being covered.
 """
 
@@ -1872,7 +1872,7 @@ class _Info:
     of a statement — everything `t_reorder`'s independence test reads."""
 
     __slots__ = ("reads", "writes", "escapes", "terminal", "effectful",
-                 "mutates", "heap_write", "heap_read")
+                 "mutates")
 
     def __init__(self):
         self.reads = set()
@@ -1885,13 +1885,6 @@ class _Info:
         #: kept apart because the ALIAS rule below has to know whether the
         #: statement changes a container rather than binds a fresh local.
         self.mutates = set()
-        #: `True` when the statement STORES through a subscript (`L[i] = …`) or
-        #: an attribute (`o.x = …`); `True` when it LOADS through one (`L[i]`,
-        #: `o.x`).  Kept apart from `reads`/`writes` because those name the
-        #: local that HOLDS a container and two different locals can hold the
-        #: SAME one — see `t_reorder`'s SOUNDNESS note on aliasing.
-        self.heap_write = False
-        self.heap_read = False
 
 
 def _info(node, out=None, in_block=False):
@@ -1946,21 +1939,16 @@ def _info(node, out=None, in_block=False):
         out.writes.add(node.target.id)
     if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
         out.writes.add(node.target.id)
-    if isinstance(node, (ast.Subscript, ast.Attribute)):
-        if isinstance(node.ctx, (ast.Store, ast.Del)):
-            # `L8[0] = 31` and `o.x = 1` WRITE the base, and they say so with a
-            # `ctx` on the Subscript/Attribute rather than on a Name — so a reader
-            # that only looks at Name nodes sees a statement that writes nothing and
-            # will happily swap it with the `L8 = [0]` above it.  Measured on
-            # `mmsound:2` of the `lists` mix: the oracle caught the swap as
-            # `transform-invalid`.
-            out.writes |= _names_in(node.value)
-            out.mutates |= _names_in(node.value)
-            out.heap_write = True
-            if isinstance(node.ctx, ast.Del):
-                out.heap_read = True
-        else:
-            out.heap_read = True
+    if isinstance(node, (ast.Subscript, ast.Attribute)) and isinstance(
+            node.ctx, (ast.Store, ast.Del)):
+        # `L8[0] = 31` and `o.x = 1` WRITE the base, and they say so with a
+        # `ctx` on the Subscript/Attribute rather than on a Name — so a reader
+        # that only looks at Name nodes sees a statement that writes nothing and
+        # will happily swap it with the `L8 = [0]` above it.  Measured on
+        # `mmsound:2` of the `lists` mix: the oracle caught the swap as
+        # `transform-invalid`.
+        out.writes |= _names_in(node.value)
+        out.mutates |= _names_in(node.value)
     if isinstance(node, ast.Call):
         # OBSERVABLE.  A call is the program's output channel — `print`, a
         # `read`, anything that reaches the outside world — and two observable
@@ -2507,7 +2495,7 @@ TRANSFORM_WHY = {
 # `class` of bare annotations has no attributes, so `p.get_y()` would read a name
 # that was never assigned while the struct's field reads `0` — a disagreement
 # with CPython the translation would manufacture rather than find.  The decision
-# (§6 item 1 of `bugs/formal/FORMAL_metamorphic_ledger.md`) is to translate exactly the
+# (§6 item 1 of `bugs/FORMAL_metamorphic_ledger.md`) is to translate exactly the
 # struct whose every field is declared an INTEGER type, giving each field the
 # initialiser this path's own semantics already give it (a zero), and to leave
 # every other struct unmeasured naming the construct — so `wide_recv.mojo`,
@@ -2577,7 +2565,7 @@ def _blocking_keyword(text):
 #: class the normaliser builds.  Any OTHER field type is a value this tool will
 #: not guess at, and a file that declares one stays unmeasured naming `struct`
 #: rather than being translated with an invented initialiser.  This is the
-#: DECISION §6 item 1 of `bugs/formal/FORMAL_metamorphic_ledger.md` asked for, and this
+#: DECISION §6 item 1 of `bugs/FORMAL_metamorphic_ledger.md` asked for, and this
 #: table is where it is spelled.
 _STRUCT_ZERO_TYPE_RE = re.compile(r"U?Int(?:8|16|32|64)?\Z")
 _STRUCT_HEAD_RE = re.compile(r"struct\s+([A-Za-z_]\w*)\s*:\s*$")

@@ -70,12 +70,6 @@ from test_formal_json import Failure  # noqa: E402  (one failure type, not two)
 
 from formal import admitted as A  # noqa: E402
 from formal import imports as I  # noqa: E402
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
-
-# Non-child windows: the pool's result() is the callable's reporting window, not
-# a child budget; lock.acquire(...=0) is threading.validate_timeout(0)'s SUBJECT.
-POOL_RESULT_TIMEOUT_S = 60
-LOCK_TIMEOUT_SUBJECT_S = 0
 
 BACKENDS = ("arm64", "x86_64")
 
@@ -230,7 +224,7 @@ def _module_source(programs, name, body, tmpdir, cas_root, backend="arm64"):
           f"{name}: the image did not build.\n    "
           f"{(r.stderr or r.stdout or '').strip()[:400]}")
     check(os.path.isfile(out), f"{name}: the build reported success and wrote no image")
-    p = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    p = subprocess.run([out], capture_output=True, text=True, timeout=60)
     return [ln for ln in p.stdout.split("\n") if ln != ""]
 
 
@@ -402,7 +396,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.
@@ -876,7 +870,7 @@ def _truth_submit(c):
     bad = []
     try:
         with CF.ProcessPoolExecutor(max_workers=1) as pool:
-            where = pool.submit(os.getpid).result(timeout=POOL_RESULT_TIMEOUT_S)
+            where = pool.submit(os.getpid).result(timeout=60)
     except Exception as e:                                 # noqa: BLE001
         return [f"{c.qualified}: a ProcessPoolExecutor could not be measured "
                 f"({type(e).__name__}: {e}), so this row is not checking the "
@@ -914,7 +908,7 @@ def _truth_shutdown(c):
         return th
 
     with CF.ThreadPoolExecutor(max_workers=2) as pool:
-        pool.submit(_outer).result(timeout=POOL_RESULT_TIMEOUT_S)
+        pool.submit(_outer).result(timeout=60)
     bad = []
     if not started.is_set():
         bad.append(f"{c.qualified}: the callable's own thread never started, so "
@@ -1001,7 +995,7 @@ def _truth_lock(c, tmpdir=None):
              "fd = open(sys.argv[1], 'r+')\n"
              "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
              "print('taken')\n", path],
-            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+            capture_output=True, text=True, timeout=60)
     finally:
         lk.release()
     if "taken" not in child.stdout:
@@ -1454,7 +1448,7 @@ AXIOM_CLOSURE = {
     # says the ARRIVAL is specifications and not new trusted evaluation.
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
-    # unchanged.  See bug: stale AXIOM_CLOSURE (re-pinned 2026-10-05 / 2026-10-18).
+    # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
     # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
     # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
     # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
@@ -2861,7 +2855,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`bugs/formal/FORMAL_module_state_no_storage.md`), so there is no way to ask the
+    (`bugs/FORMAL_module_state_no_storage.md`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3223,7 +3217,7 @@ def group_subprocess_surface(tmpdir, cas_root, verbose):
                 continue
             aout = os.path.join(tmpdir, f"t_{abs(hash(name))}.aout")
             check(os.path.isfile(aout), f"{name}: no image to run")
-            p = subprocess.run([aout], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+            p = subprocess.run([aout], capture_output=True, text=True, timeout=60)
             check("ADMITTED contract" in p.stdout,
                   f"{name}: an admitted call must name its contract on stdout; "
                   f"stdout was {p.stdout[:200]!r}")
@@ -3558,7 +3552,7 @@ def group_threading(tmpdir, cas_root, verbose):
         try:
             lock = T.Lock()
             if v == 0:
-                lock.acquire(timeout=LOCK_TIMEOUT_SUBJECT_S)
+                lock.acquire(timeout=0)
                 lock.release()
             else:
                 lock.acquire(timeout=v)
@@ -3603,7 +3597,7 @@ def group_runtime(tmpdir, cas_root, verbose):
                   "-o", out, src], env={"GMOJO_HOME": home})
     check(r.returncode == 0, "the admitted-call image did not build:\n    "
           f"{(r.stderr or r.stdout or '').strip()[:300]}")
-    p = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    p = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(p.returncode == A_ADMITTED_EXIT_STATUS,
           f"subprocess.run exited {p.returncode}; it must exit "
           f"{A_ADMITTED_EXIT_STATUS}, this tree's reserved refusal status. It is "
@@ -3668,7 +3662,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `bugs/formal/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
+    `bugs/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3750,7 +3744,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "bugs/formal/FORMAL_module_state_no_storage.md",
+            "bugs/FORMAL_module_state_no_storage.md",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3830,7 +3824,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (bugs/formal/FORMAL_module_state_no_storage.md), so declaring one "
+          "function (bugs/FORMAL_module_state_no_storage.md), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)
@@ -3871,7 +3865,7 @@ def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
     """`subprocess.mojo` records WHY `run` returns the status word.
 
     The decision is option 3 of the three costed in
-    `bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
+    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
     a caller reads the status through `completed_process_returncode`, a shim
     both engines can agree on, rather than through `r.returncode`, which is a
     field read on a word.  This pins the recording, because the decision is

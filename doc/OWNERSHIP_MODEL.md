@@ -131,7 +131,7 @@ exact shape:**
      PASS. `make check-native-dumpfull` FAILS — but confirmed, via a
      from-scratch `git worktree` build of unmodified HEAD, to ALREADY
      fail identically before any of this session's changes (see
-     commit e8a7135b8's
+     `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s
      2026-09-15 entry) — a pre-existing, separately-tracked gap unrelated
      to this work, not a regression this wiring introduced.
    - [x] Two real bugs surfaced and fixed BY the gate, exactly as it's
@@ -256,7 +256,7 @@ exact shape:**
      `make bootstrap` 180/180 byte-identical across 3 stages.
      `make check-native-dumpfull` FAILS but re-confirmed as the SAME
      pre-existing, already-tracked divergence (see
-     commit e8a7135b8's new
+     `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s new
      2026-09-15 "later same day" entry) — same ~20800-21100 first-byte
      window and ~530KB gap as that doc's own same-day baseline, both
      sides up ~28KB from this session's own new code being dumped
@@ -316,7 +316,7 @@ Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
   it needs a never-boxed proof); a half-measure for closures (see the bug doc).
   Still open: containers nested inside a literal; strings whose producer is not provably fresh (`upper`/`strip`/`replace`/`join`)
   and the strings inside a `split()` list (that doc is deleted with its fix);
-  closure environments / bound methods / boxed mutable locals (the escaping half — a returned closure's env, boxes and bound method — is now freed by its single owner; stored/aliased closures remain fail-closed);
+  closure environments / bound methods / boxed mutable locals (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md);
   struct-method callee tables beyond `self`; storage homing in lifted loop bodies (struct methods, struct instances, small dicts/sets
   and integer-key strings landed 2026-09-29).
 

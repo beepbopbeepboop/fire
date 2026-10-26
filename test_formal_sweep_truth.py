@@ -37,6 +37,7 @@ import re
 import sys
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -434,7 +435,7 @@ class TestLeanOutput(unittest.TestCase):
         verdict about a search path.
 
         `repo_root="."` is not an exotic spelling: it is what
-        `bugs/formal/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
+        `bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
         reproduce command writes, so that doc's measurements were taken through
         this entry point.
 
@@ -706,7 +707,7 @@ class TestCensusReport(unittest.TestCase):
 # It is named rather than quietly dropped because this tuple is a PREMISE and the
 # test that reads it says so in its own failure message: a name that gains a
 # model stops being this test's subject, which is a reason to be told.
-# `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
+# `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
 # wave and its measurement are written down.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 
@@ -748,7 +749,7 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 #
 # That import is GONE — deleted on 2026-10-08 with the tree's other dead host
 # imports (`73e03459`, "delete the tree's dead host imports"; the ratchet handed
-# off at `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
+# off at `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
 # so `abc` is not in the derived census at all any more and the exemption became
 # a claim about a row that is no longer there, which is exactly what
 # `test_a_named_dead_import_is_still_named` catches; that anti-rot row is what
@@ -2087,15 +2088,8 @@ def _launch_sites(source: str, path: str = "<snippet>"):
                 return True
             if isinstance(sub, ast.Attribute) and "lean" in sub.attr.lower():
                 return True
-            # A string literal names Lean as a WORD — a `.lean` file, a path
-            # segment, the bare word — not as a substring of an English word:
-            # `clean`/`cleanup` contain "lean" but name nothing Lean, and
-            # tools/swarm.py's `control.py cleanup` call read as a launch of the
-            # toolchain under a substring match. Identifiers above keep the
-            # substring: a name or attribute `lean_*`/`*_lean` is a genuine
-            # signal, and no common English identifier is a `lean` substring.
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                    and re.search(r"\blean\b", sub.value.lower()):
+                    and "lean" in sub.value.lower():
                 return True
         return False
 
@@ -4445,21 +4439,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                                 "…while the guard's own two branches on the same "
                                 "path are settled")
 
-    def test_the_body_stops_before_the_float_repr_helper(self):
-        """The float-repr helper is emitted after every body and is not part of
-        the chain, so `_body` must end where it starts. Before this bound, every
-        program's body decoded straight into the helper's SIB-indexed byte
-        stores, which the decoder refuses, and the whole sweep failed on it."""
-        import formal.x86_64_endtoend_test as E
-        code, info, insns, _shapes = E._plan(
-            os.path.join(E.HERE, "examples", "ret42.mojo"))
-        base = info["base_addr"]
-        self.assertTrue(insns, "ret42's body decoded to nothing")
-        last = insns[-1]
-        self.assertLessEqual(last.offset + last.length,
-                             info["float_repr_addr"] - base,
-                             "the body runs into the float-repr helper")
-
     def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
         """Each arm selects ONE disjunct, and it is the leaf's own.
 
@@ -4895,7 +4874,7 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
             f"reader needs to know which: the stack-floor guard left the "
             f"prologue, or its two branches were DECIDED rather than walked — "
             f"the second is what "
-            f"bugs/formal/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
+            f"bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
             f"image.md asks for, and the first is a much larger change. Either "
             f"way `emit()`'s coverage number in that doc is now stale.")
         not_the_guard = [(s, b) for s, b in refused if "call_rel32" not in b]
@@ -5294,23 +5273,6 @@ class TestLabelUniqueness(unittest.TestCase):
                 # bound and still points into the image: an alias that forgot
                 # the single-definition case would show up here as a KeyError.
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
-
-
-class TestTwoUnownedFormalRedsAreNotStale(unittest.TestCase):
-    """Regression for bugs/TEST_two_unowned_formal_reds_that_are_stale_expectations.md.
-
-    The doc described a stale AXIOM_CLOSURE table (Contracts/ProofLib/Refine/X86/
-    work) after `native_decide` moved 61 sites; the table has since been re-measured
-    and the doc is deleted. This test pins that the five modules the doc named are
-    present in AXIOM_CLOSURE, so a future table drift fails rather than hiding
-    behind a skip.
-    """
-
-    def test_the_five_doc_modules_are_not_stale(self):
-        from test_formal_admitted import AXIOM_CLOSURE
-        for mod in ("Contracts", "ProofLib", "Refine", "X86", "work"):
-            self.assertIn(mod, AXIOM_CLOSURE,
-                          f"{mod} missing from AXIOM_CLOSURE - table regressed")
 
 
 if __name__ == "__main__":

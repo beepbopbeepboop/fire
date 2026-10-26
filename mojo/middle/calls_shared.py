@@ -70,7 +70,7 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
     and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
     no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`the (since-fixed) c_common/fsutil.py compile failure`)
+    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
     never saw it, because it is reachable from an ordinary `def` too.
 
     Two spellings, matching the two the corpus actually uses:
@@ -111,17 +111,6 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
     translation unit and are not visible from the separately-compiled .cpp.
     """
-    # A callable the RUNTIME implements (`os.walk`, `glob.glob`, ...) used as a
-    # value: its address, through the same `_funcptr_` static every other
-    # "function as a value" site uses.
-    if (isinstance(node, gimple_ctypes.MemberExpr)
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
-        _rtf = _RUNTIME_CALLABLE_VALUES.get(f'{node.obj.name}.{node.member}')
-        if _rtf is not None and node.obj.name not in getattr(gen, 'var_types', ()):
-            if cxx:
-                return ('void *', f'(void *){_rtf}')
-            gen._funcptr_builtins_needed.add(_rtf)
-            return ('void *', f'_funcptr_{_rtf}')
     _fname = None
     if isinstance(node, gimple_ctypes.IdentExpr):
         _fname = _as_str(node.name)
@@ -424,26 +413,11 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if (isinstance(_dflt, gimple_ctypes.MemberExpr)
             and isinstance(_dflt.obj, gimple_ctypes.IdentExpr)):
         _nm = f'{_dflt.obj.name}.{_dflt.member}'
-        # A callable the RUNTIME implements (`os.walk`, `glob.glob`,
-        # `glob.iglob`) is a real function value: its address, in the
-        # int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through.
-        _rt_fn = _RUNTIME_CALLABLE_VALUES.get(_nm)
-        if _rt_fn is not None:
-            return ('void *', gen._new_val('void *', f'(void *){_rt_fn}'))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
         gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
         return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
     return _null_default_pair(param_ctype)
-
-# `module.attr` callables the runtime implements, as function VALUES (the
-# `_w` wrappers take and return int64_t words). `glob.glob` and `glob.iglob`
-# are the same function here: both answer an eager list.
-_RUNTIME_CALLABLE_VALUES = {
-    'os.walk': 'mojo_os_walk_w',
-    'glob.glob': 'mojo_glob_w',
-    'glob.iglob': 'mojo_glob_w',
-}
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
     """Pick the candidate overload matching a call site's argument count/
@@ -564,19 +538,6 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         if _score(_c2) == best_score:
             ties.append(_c2)
     if len(ties) > 1:
-        # Type erasure cannot tell `def __iter__(var self)` from `def
-        # __iter__(ref self)` (both are `(Struct *)`), but a call on a
-        # receiver that is not consumed (`l.__iter__()`, no `^`) can only mean
-        # the non-consuming overload: real Mojo prefers it, and picking the
-        # owning one typed `LinkedList.__iter__()`'s result as the
-        # `IteratorOwnedType` stub. Explicit loop (self-host: no comprehension).
-        _kept = []
-        for _c4 in ties:
-            if not _c4.get('self_owned'):
-                _kept.append(_c4)
-        if _kept:
-            ties = _kept
-    if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")
     return ties[0]
@@ -592,8 +553,8 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
 
     String values go through mojo_dict_set_str so the dict's own value
     type is right (mojo_dict_set_int would store the char* as an integer
-    and later read it back as one), doubles through mojo_dict_set_double.
-    Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+    and later read it back as one). Everything else — ints, doubles,
+    pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
     d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
@@ -613,14 +574,6 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
-        elif kt == 'double':
-            # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
-            # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
-            # carries the double kind, which `mojo_dyn_call` also reads to
-            # route it to a float register (or refuse it for a plain pointer).
-            gen._emit_call('void', '', 'mojo_dict_set_double',
-                            [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
-                             ('double', kv)])
         else:
             gen._emit_call('void', '', 'mojo_dict_set_int',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
@@ -883,12 +836,6 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _none = gen._intern_string('None')
         return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
-
-
-# Frame attributes that are plain stored words on the frame record, and their runtime ids
-# (fire_runtime.c mojo_frame_get_attr / mojo_frame_set_attr / mojo_frame_del_attr). One table
-# for the read, store and `del` lowerings, so the three cannot disagree about an id.
-FRAME_SETTABLE_IDS = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
 
 
 def _py_box_expr(gen, node):

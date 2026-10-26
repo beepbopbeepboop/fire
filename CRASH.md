@@ -17,14 +17,14 @@ predicate. **Not fixed** — this is a handoff.
 > The remaining live subject is a *different* bug: what is left is the
 > self-hosting bootstrap pre-pass's cost and a silent-wrong-answer
 > `mojo_unsupported_iter` class, not a crash. That is
-> `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` and
-> commit e8a7135b8, and the run status of
+> `bugs/CODEGEN_bootstrap_resource_blowup.md` and
+> `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, and the run status of
 > the three steps below is in CLAUDE.md, "Known-failing tests".
 >
 > **Not deleted, and the decision is settled rather than parked.** By this
 > repo's own bug-doc rule a fixed bug's doc is deleted rather than left with a
 > status history — but this is a top-level file, and SIX places cite it *by
-> name*: `bugs/formal/FORMAL_string_value_model.md` (twice), `bugs/
+> name*: `bugs/FORMAL_string_value_model.md` (twice), `bugs/
 > RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`, and three comments
 > in `mojo/backend_gimple/` (`emit_infra.py` twice, `module_gen.py`) that name
 > it as the source of the argument they are making. Deleting it would turn
@@ -54,7 +54,7 @@ reproducible on a two-line program. Signal is SIGSEGV (11), shell status 139.
 > **Historical.** The three EXPECTED rows below were the state when this was
 > written. Only the first has changed, and it changed because of the
 > `expect=`-vs-`disabled=` decision rather than because anything was fixed:
-> `ab-native` is now `disabled=bugs/mid/CODEGEN_ab_native_fails.md` — registered,
+> `ab-native` is now `disabled=bugs/CODEGEN_ab_native_fails.md` — registered,
 > and NOT RUN at all, because it measured 20.5 GB and held 55 of a 96 GB machine
 > budget exclusively in every run to be told what its own marker already said.
 > The other two are still `expect=`. The census is CLAUDE.md, "Known-failing
@@ -204,8 +204,8 @@ previously "worked by accident". Expect fallout in the A/B corpus and in
 | the dereference that dies | `runtime/fire_runtime.c:6239` |
 | the value entering it | `mojo/middle/exprtypes.py:61` |
 | the same bug class, Python side, already fixed | `mojo/backend_gimple/emit_funcs.py:727` |
-| existing history on this crash | commit e8a7135b8, entry dated 2026-09-27 |
-| NOT the same bug | `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` — that is a SIGTRAP (133) on the large transitive dump, intermittent. This is SIGSEGV (139), two-line input, 100% reproducible. Different signal, trigger, and reproducibility. |
+| existing history on this crash | `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, entry dated 2026-09-27 |
+| NOT the same bug | `bugs/CODEGEN_bootstrap_resource_blowup.md` — that is a SIGTRAP (133) on the large transitive dump, intermittent. This is SIGSEGV (139), two-line input, 100% reproducible. Different signal, trigger, and reproducibility. |
 
 ## 7. Debugging notes
 

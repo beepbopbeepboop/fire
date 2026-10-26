@@ -25,16 +25,6 @@
 #include <string.h>
 #include <unistd.h>
 
-extern int64_t mojo_box_none(void);
-extern void mojo_exc_type_set(int64_t);
-extern void mojo_exc_msg_set(char *);
-extern void mojo_exc_obj_set(void *);
-extern void mojo_exc_pending_set(int);
-extern void mojo_raise(void);
-extern void mojo_exc_value_set(int64_t w);
-extern int __mojo_coro_has_return(MojoCoro *c);
-extern void mojo_frame_set_resuming(int64_t gen);
-
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
    by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
    and this translation unit deliberately does not include fire_runtime.h (it
@@ -60,10 +50,7 @@ typedef struct MojoGen {
     int64_t   value;      /* last yielded box */
     int64_t   retval;     /* return box once done */
     int       done;
-    int       started;
     int       pending_exc;
-    int       started_once; /* the body has been entered (its first frame bound to this generator) */
-    int64_t   frame;       /* heap frame object handed out as `gi_frame` (0 until asked for) */
 } MojoGen;
 
 /* The trampoline Layer 2 actually enters (void(MojoCoro*, void*)); it
@@ -257,9 +244,9 @@ __mojo_coro_yield_i(int64_t coro, int64_t v)
 }
 
 int64_t
-__mojo_coro_yield_p(int64_t coro, int64_t v)
+__mojo_coro_yield_p(int64_t coro, void *v)
 {
-    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, v);
+    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
 }
 
 int64_t
@@ -274,25 +261,6 @@ void
 __mojo_gen_set_return(int64_t coro, int64_t v)
 {
     __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, v);
-}
-
-/* Typed async result channel (coro.py's _ASYNC_SETRET_SHIM). A `double` or
-   `char *` return rides the same int64_t box as an int: bit-cast on the way
-   in here, and bit-cast back by the matching __mojo_bits_* reader, so
-   the awaiting side gets the value the callee returned, not its integer
-   truncation or its pointer printed as a number. */
-void
-__mojo_gen_set_return_d(int64_t coro, double v)
-{
-    int64_t bits;
-    __builtin_memcpy(&bits, &v, sizeof bits);
-    __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, bits);
-}
-
-void
-__mojo_gen_set_return_p(int64_t coro, char *v)
-{
-    __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
 }
 
 /* The value a `x = yield <double>` receives. The yield shims all return the
@@ -316,18 +284,12 @@ __mojo_gen_send_d(int64_t bits)
    bits to the yield as one int64_t. */
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);
-extern void    mojo_list_append_word(void *, int64_t);
 
-/* Each slot goes in through `mojo_list_append_word`: the stored word is the same raw bits
-   `mojo_list_append_int` stored, but the slot's KIND is recorded as well (a string pointer, a
-   None / bool / float box), so a consumer that reads the yielded tuple dynamically -- a loop over the
-   result of a call through a function value, or a generator that re-yields what it was given --
-   spells a None as None and a string as a string instead of as an integer. */
 static int64_t
 tuple_box(const int64_t *slots, int n)
 {
     void *l = mojo_list_new();
-    for (int i = 0; i < n; i++) mojo_list_append_word(l, slots[i]);
+    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
     return (int64_t)(uintptr_t)l;
 }
 
@@ -443,70 +405,12 @@ __mojo_gen_resume(int64_t gen, int64_t send)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
     if (!g || g->done) return 0;
-    extern int64_t mojo_box_none(void);
-    if (!g->started) {
-        if (send != mojo_box_none()) {
-            mojo_exc_type_set(348628165);
-            mojo_exc_msg_set((char *)"can't send non-None value to a just-started generator");
-            mojo_exc_pending_set(1);
-            mojo_raise();
-            return 0;
-        }
-        g->started = 1;
-    }
     int64_t out = 0;
-    if (!g->started_once) { g->started_once = 1; mojo_frame_set_resuming(gen); }
     int r = __mojo_coro_resume(g->coro, send, &out);
-    mojo_frame_set_resuming(0);
     if (r == 1) { g->value = out; return 1; }
     g->retval = out;
     g->done = 1;
     return 0;
-}
-
-
-/* ── gi_frame ─────────────────────────────────────────────────────────────
-   The generator's frame object (runtime/fire_runtime.c, mojo_frame_for_gen): a heap record
-   naming this generator, refreshed from the frame records the parked coroutine holds. State for
-   `frame.clear()`: 0 not started, 1 suspended, 2 running, 3 finished. */
-extern int64_t (*_mojo_gen_state_hook)(int64_t);
-extern int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
-                                  int64_t firstlineno, int64_t lineno);
-extern int     mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
-extern void   *__mojo_coro_slice_of(MojoCoro *c);
-extern int     __mojo_coro_is_running(MojoCoro *c);
-
-int64_t
-__mojo_gen_state(int64_t gen)
-{
-    MojoGen *g = (MojoGen *)(uintptr_t)gen;
-    if (!g || g->done) return 3;
-    if (!g->started) return 0;
-    return __mojo_coro_is_running(g->coro) ? 2 : 1;
-}
-
-int64_t
-__mojo_gen_frame(int64_t gen)
-{
-    MojoGen *g = (MojoGen *)(uintptr_t)gen;
-    if (!g || g->done) return 0;        /* an exhausted generator's gi_frame is None */
-    const char *name = 0, *file = 0; int64_t first = 0, line = 0;
-    if (!mojo_coro_slice_peek(__mojo_coro_slice_of(g->coro), &name, &file, &first, &line))
-        name = 0;
-    g->frame = mojo_frame_for_gen(gen, g->frame, name, file, first, line);
-    _mojo_gen_state_hook = __mojo_gen_state;
-    return g->frame;
-}
-
-
-/* A finished generator/coroutine is about to raise StopIteration: attach its `return` value (when
-   the body had a valued return) so `ex.value` reads it. Called right after mojo_exc_type_set. */
-void
-__mojo_gen_stop_value(int64_t gen)
-{
-    MojoGen *g = (MojoGen *)(uintptr_t)gen;
-    if (g && __mojo_coro_has_return(g->coro))
-        mojo_exc_value_set(g->retval);
 }
 
 int64_t __mojo_gen_value(int64_t gen)
@@ -514,22 +418,6 @@ int64_t __mojo_gen_value(int64_t gen)
 
 int64_t __mojo_gen_retval(int64_t gen)
 { MojoGen *g = (MojoGen *)(uintptr_t)gen; return g ? g->retval : 0; }
-
-/* The typed readers for the same channel (see __mojo_gen_set_return_d). They
-   take the raw int64_t slot read, so one bit-cast serves every awaiting site
-   (__mojo_gen_retval, __mojo_async_await_task, ...). */
-double __mojo_bits_d(int64_t bits)
-{
-    double d;
-    __builtin_memcpy(&d, &bits, sizeof d);
-    return d;
-}
-
-_Bool __mojo_bits_b(int64_t bits)
-{ return (_Bool)bits; }
-
-char *__mojo_bits_p(int64_t bits)
-{ return (char *)(uintptr_t)bits; }
 
 /* throw(exc) into a suspended generator. */
 int64_t
@@ -883,10 +771,9 @@ typedef struct MojoFutureCB {
     struct MojoFutureCB *next;
 } MojoFutureCB;
 
-/* Prefix mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
-   capturing closure referenced as a value: { fn, self, boxes, nboxes }. This
-   TU only reads fn and self (the leading fields, same layout), so it needs
-   neither the trailing box list nor the whole runtime header. */
+/* Mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
+   capturing closure referenced as a value: { fn, self }. Kept local so
+   this TU needn't pull in the whole runtime header. */
 typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
 
 typedef struct MojoFuture {

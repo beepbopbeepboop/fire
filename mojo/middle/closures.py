@@ -83,7 +83,7 @@ def closure_lifted_name(outer_name: str, inner_name: str) -> str:
     return f"{outer_name}_{inner_name}"
 
 
-def _gmi_all_stmts_nonfunc(stmts: list) -> list:
+def _gmi_all_stmts_nonfunc(stmts) -> list:
     """Hoisted out of `gen_module_impl._scan_for_closures` (was a
     2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
     docstring. Recursive, pure. Returns a list of statements recursively
@@ -212,40 +212,7 @@ def mutated_free_names(inner: FunctionDef, candidate_names) -> frozenset:
     return frozenset(mutated)
 
 
-def _lambda_free_names(body) -> set:
-    """Names that lambdas lexically inside `body` read from the scope `body`
-    belongs to.
-
-    `_used_idents_node` treats a LambdaExpr as a closure boundary (its names
-    are its own capture analysis, not its host's), so a nested `def` whose
-    only read of an outer local is through a lambda in its body --
-    `def inner(y): g = lambda z: z + n` with `n` owned by `outer` -- did not
-    capture `n`. The lifted lambda then read a slot with no home and came out
-    as `0`, silently (`outer(4)` printed 4 for CPython's 6). The lambda is
-    still a closure of its own, so its OWN params are subtracted; its default
-    values are evaluated in the host scope and are counted.
-
-    An over-approximation (a name the host shadows after the lambda is still
-    counted) only costs a slightly larger env, which `inner_declared`'s
-    subtraction already absorbs -- the same direction `_used_idents_node`
-    takes everywhere else.
-    """
-    out: set = set()
-    for _nd in _walk_ast(body):
-        if not isinstance(_nd, LambdaExpr):
-            continue
-        _bound: set = set()
-        for _pn, _pd in _nd.params:
-            _bound.add(_as_str(_pn))
-            for _dv in _used_idents_node(_pd):
-                out.add(_as_str(_dv))
-        for _v in _used_idents_node(_nd.body):
-            if _as_str(_v) not in _bound:
-                out.add(_as_str(_v))
-    return out
-
-
-def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
+def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
     """Discover every nested FunctionDef under `stmts`; fill `ctx._all_closures`.
 
     Returns `ctx._all_closures`: outer_name -> {inner_name -> ClosureInfo}.
@@ -348,11 +315,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
             for body_node in inner_body:
                 for _ui in _used_idents_node(body_node):
                     used.add(_as_str(_ui))
-            # A lambda in this body is a closure boundary to
-            # `_used_idents_node`, so its reads of the enclosing scope are
-            # this def's reads too -- see `_lambda_free_names`.
-            for _lf in _lambda_free_names(inner_body):
-                used.add(_lf)
             # Names this function declares `nonlocal`. They are NOT its own
             # variables: the assignment that follows the declaration rebinds
             # the ENCLOSING function's cell, so they have to come out of
@@ -514,15 +476,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     _cnm0 = _as_str(nd.func.name)
                     if _cnm0 not in _called_list:
                         _called_list.append(_cnm0)
-                elif isinstance(nd, IdentExpr):
-                    # A sibling closure named as a VALUE (handed to another function,
-                    # stored) needs its env exactly as a call to it does: the group
-                    # below shares one env across connected siblings, and a closure
-                    # that only REFERENCES another used to be left out of the group,
-                    # so the value was built with a NULL env.
-                    _cnm1 = _as_str(nd.name)
-                    if _cnm1 not in _called_list:
-                        _called_list.append(_cnm1)
             _called_names = set(_called_list)
             _transitive_mut: set = set()
             for _called in _called_names:
@@ -537,11 +490,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                         _transitive_mut.add(_tn)
             env_struct   = f"{lifted}_env" if len(captures) > 0 else ""
             ci           = ClosureInfo(lifted, env_struct, captures, inner)
-            # Call-site evidence for this closure's UNANNOTATED parameters
-            # (`_gmi_closure_call_site_param_evidence`); absent for callers
-            # that never ran that pass (formal).
-            _cs_all = getattr(ctx, '_closure_call_site_types', None) or {}
-            ci.call_site_param_types = dict(_cs_all.get(lifted) or {})
             _inner_dflts = getattr(inner, 'param_defaults', None) or {}
             if _inner_dflts:
                 ctx._func_param_defaults[lifted] = [
@@ -570,11 +518,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
             else:
                 for pname, ptype in inner_params:
                     ctx.var_types[pname] = ctx._resolve_type(ptype)
-                    if ptype is None and pname in ci.call_site_param_types:
-                        ctx.var_types[pname] = ci.call_site_param_types[pname]
-                for _cn, _ct in captures:
-                    if _cn not in ctx.var_types:
-                        ctx.var_types[_cn] = _ct
                 ctx.func_return_types[lifted] = ctx._infer_return_type(inner_body)
                 ctx.var_types.clear()
             inner_scope = dict(enriched_scope)
@@ -746,14 +689,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                         # std/atomic/atomic.mojo).
                         _sh_ct = _hook(ctx, pname, ptype, s)
                 outer_scope[pname] = _sh_ct or ctx._resolve_type(ptype)
-                if ptype is None and not _sh_ct:
-                    # An unannotated parameter's real type is what the
-                    # use/call-site inference settled on, not the bare
-                    # `int64_t` default: a closure capturing `p` stores it in
-                    # its env under THIS type.
-                    _ip = (getattr(ctx, '_inferred_param_types', None) or {}).get(s.name)
-                    if _ip and _ip.get(pname):
-                        outer_scope[pname] = _ip[pname]
             _saved_vt = dict(ctx.var_types)
             ctx.var_types.update(outer_scope)
             for stmt in s.body:

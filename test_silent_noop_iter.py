@@ -602,34 +602,6 @@ def main():
 '''
 
 
-@case('sorted_two_string_set_pinning')
-def _():
-    # Pinning test for TEST_silentnoop_sorted_two_string_set_flips: a failure
-    # must keep its artifacts in .tmp/silentnoop-failures so a recurrence is
-    # self-diagnosing (the .ci names which runtime sort call was emitted); the
-    # sorted order of a two-string set must agree with CPython.
-    return '''def pick(box, other):
-    if box is None:
-        box = {"a"}
-    elif box == "x":
-        box = {box}
-    else:
-        box = {v for v in box}
-    return sorted(box)
-
-
-def plain(items):
-    return items[0]
-
-
-def main():
-    print(pick(None, None))
-    print(pick("x", None))
-    print(pick({"q", "r"}, None))
-    print(plain(["first", "second"]))
-'''
-
-
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.
@@ -841,7 +813,7 @@ def _():
     # `fire_compiler.py::_source_lines` asks
     # `_LINE_TERMINATORS.split(src)` for a file's physical lines, so every
     # source tokenized as ZERO lines self-hosted and every `.ci` came out
-    # empty (the stage2 empty-dump bug (its doc was deleted with the fix)).
+    # empty (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
     #
     # The cases pin Python's three rules this has to match: the pieces BETWEEN
     # the matches, the CAPTURING GROUPS interleaved between them, and the
@@ -927,29 +899,25 @@ def codegen_case(name):
     return deco
 
 
-@case('findall_flags_are_honoured')
+@codegen_case('findall_flags_refused_by_name')
 def _():
-    """`re.findall(pat, s, re.MULTILINE)` must apply the flag.
+    """`re.findall(pat, s, re.MULTILINE)` must be REFUSED, not silently
+    evaluated without the flag.
 
-    A flags argument changes what `^`/`$`/`.` mean. The compile-time scan
-    engine takes no flags and refuses a third argument, but the call then
-    falls through to the runtime `re` (`mojo_re_compile(pat, flags)`), which
-    does honour them, so the compiled answer must equal CPython's multi-line
-    answer (three matches), not the single-line one (none). This used to be
-    pinned as "refused by name" (`mojo_unsupported_iter`), which stopped
-    being true when the runtime `re` path landed; the property worth pinning
-    is the one that matters, the answer.
+    A flags argument changes what `^`/`$`/`.` mean, and this backend's
+    regex engine takes no flags at all. Lowering the call and dropping the
+    flag would return the single-line answer to a question that was asked in
+    multi-line terms — a wrong answer with nothing to distinguish it from a
+    right one, which is the whole defect class. So the findall lowering
+    raises on a third positional argument, the caller rolls back, and the
+    loop's own `mojo_unsupported_iter` is what remains in the emitted C.
     """
-    return """import re
+    return ("""import re
 
 def f(src):
     for a, b in re.findall(r'^([a-z]+)=([0-9]+)$', src, re.MULTILINE):
         print("p", a, b)
-
-def main():
-    f("x=1\\ny=2\\nzz=33\\n")
-    print("done")
-"""
+""", 'mojo_unsupported_iter')
 
 
 @codegen_case('findall_two_groups_lowered')

@@ -54,7 +54,7 @@ runs in both directions — `python3 test_runtime_header_scan.py --fix` writes t
 live census into every one of those quotes from the same table the check reads,
 so the two ends of this file cannot drift apart, and a commit that adds a
 runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`bugs/formal/FORMAL_known_limits.md` quotes the census in more
+number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
@@ -360,7 +360,7 @@ def test_every_declaration_is_seen():
     #
     # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
     # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
-    # (`runtime/fire_runtime.h`, and `bugs/formal/FORMAL_runtime_library_on_the_link_line.md`
+    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
     # §0.2 for why they were left out and what decided it). Both are DEFINED by
     # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
     # declared here, so both cross the export-trie intersection and both are
@@ -439,7 +439,7 @@ def test_every_declaration_is_seen():
     #       `static int64_t id (int64_t x)` that every generated program emits
     #       used to return its argument, which for a container is the live
     #       handle, so the container registries read an `id()` token as that
-    #       container (`the stage2 empty-dump bug (its doc was deleted with the fix)`).
+    #       container (`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`).
     #   +1  `mojo_dict_slot_repr` — the ONE implementation of "what a dict
     #       slot's value looks like", from the (word, kind) pair the store
     #       recorded (`work/bugs6-1`). The codegen's emitted `_mojo_repr_dict`
@@ -491,80 +491,7 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    # 740 -> 742 (2026-11-01, merging master into the closure-env branch): the
-    # branch adds ONE name, `mojo_bound_method_add_box` (records a `{mut}` box
-    # on a bound method so `mojo_closure_free` frees it). Master had grown the
-    # header by one more name since the 740 rung without bumping it (the
-    # scanner read 741 on master), so the figure is read off the MERGED header
-    # and not added up from the two sides.
-    for header, want in (('fire_runtime.h', 757),   # --fix writes the live figure
-    # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
-    # on the MERGED header, which is the whole delta — the two sides of this
-    # merge share the other 622, and the branch's 616 -> 622 rung above already
-    # accounts for the six master had merged in before this branch cut:
-    #   +1  `mojo_cleanup_push_cattr` (3f44ffd96, "CODEGEN: class-attr instance
-    #       reads fall back to the class; unwind restores class-attr cells") —
-    #       the unwind thunk that writes a class-attribute cell's entry value
-    #       back to its global when the exception unwinds past it. It is the
-    #       ONLY declaration master added past this branch's base, which is why
-    #       the branch's note for the integrator predicted this exact step:
-    #       622 -> 623, 725 -> 726, 425 -> 426, word stays 300, and `--fix`
-    #       wrote the numbers into every quote from this scan. Box-shaped by
-    #       the live rule: its `void **slot` is pointer depth 2 — an address
-    #       the callee dereferences and writes through — and depth 2 is the
-    #       out-parameter shape this path cannot name (`_ctype_is_word`'s
-    #       depth-exact rule), so it is the whole 425 -> 426 movement and the
-    #       word row does not move.
-    # 616 -> 622 (2026-10-30, gate fixup; rthdrscan red on 616 vs 622 at the
-    # 4a845151 gate): SIX names, all read off the call at 9b1fa9066, and the
-    # whole delta — the last --fix sync (80cb5cb62) carries none of them:
-    #   +1  `mojo_list_set_kinds_uniform` (47e56285b, "CODEGEN_
-    #       materialized_container_has_no_element_type: fix opaque arm") — the
-    #       uniform-kind store the opaque-arm bb_dict branch emits once a
-    #       container's element type is known; it landed, was REVERTED
-    #       (4668f0d5e) with its first fix, and came back with the re-fix, so
-    #       the header carries the name from the re-land, not the original.
-    #   +2  `mojo_cstr_slice_n` / `mojo_cstr_region_eq_n` (d86e43269, "runtime:
-    #       add length-aware ...", root-cause fix for the quadratic tokenizer
-    #       scan) — the length-aware twins of `mojo_cstr_slice` / region-eq for
-    #       a caller that already holds the string length, so the scan does not
-    #       re-walk from byte 0; the emission side (emit_calls.py) still owes
-    #       the `_n` call sites, so this is a partial fix's census again.
-    #   +1  `mojo_raise_zero_division` (0bb162ea6, "Integer division by zero
-    #       raises ZeroDivisionError on the compiled path") — the raiser
-    #       `mojo_int_divisor()` routes its divisor through, so `x // 0`,
-    #       `x / 0` and `x % 0` raise a real, catchable ZeroDivisionError
-    #       instead of the bare C division that answered 0 on arm64.
-    #   +1  `mojo_box_from_double` (d18e106c6, "codegen: box a float passed to
-    #       an int64_t parameter beside integers") — the double -> box bridge
-    #       the argument coercion emits when a possibly-double actual meets an
-    #       int64_t parameter.
-    #   +1  `mojo_float_arith_select` (9b1fa9066, "a float-possible parameter's
-    #       + - * answers a double when it is one") — the run-time picker
-    #       between the precomputed integer and double answers of + - * whose
-    #       one operand is a float-possible parameter: a double box when either
-    #       raw operand word is a double box, the integer otherwise.
-    # Three of the six are word-shaped (the two `_n` string readers and the
-    # raiser) and three box-shaped (the two double bridges and the uniform-kind
-    # store), which is the whole 297 -> 300 word and 422 -> 425 box movement in
-    # the quoted figures — a pure renumbering `--fix` wrote from this scan, not
-    # an addition. `mojo_int_divisor` is NOT in the count: it is `static
-    # inline` in fire_runtime.h (its body is the inline that every integer
-    # `/`, `%` and `//` routes its divisor through), so it has no external
-    # symbol and is exactly like the other inline helpers this scan excludes.
-    # 610 -> 615 (2026-10-27, gate fixup on the integ batch 08e9229bf):
-    # TWO names, both read off the call at 2cf8a3358 ("Partial fix for dict
-    # slot read root cause") — `mojo_dict_slot_kind` (the MOJO_KIND byte of
-    # one `_DictSlot.kind`, the per-slot-kind read the dict repr now asks
-    # through) and `mojo_dict_repr_slot` (the same slot's rendered value).
-    # The codegen temp-tracking half of that campaign is still open in its
-    # doc, so this is a partial fix's census, not a closure. This rung also
-    # closes a PRE-BATCH drift, measured rather than inferred: the literal
-    # was 610 while the live scan read 613 at the pre-batch tip 6c8aba839 —
-    # the ledger's newest rung above is 594 (2026-10-23), and the names
-    # between 594 and 613 are the unledgered growth this file exists to
-    # surface (rthdrscan was red on 610 vs 613 before the batch; the batch's
-    # two are the 613 -> 615 step).
+    for header, want in (('fire_runtime.h', 610),   # --fix writes the live figure
     # 593 -> 594 (2026-10-23, part 6 family S): `mojo_str_first_codepoint`
     # — the 1/2/3/4-byte lead-byte decode (NUL/empty -> 0) the spelling+
     # arity-gated `Codepoint.ord(<string>)` branch reaches, so `ord` on a
@@ -619,7 +546,7 @@ def test_every_declaration_is_seen():
     # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
     # behind.md` filed for, together with the five PROSE copies of the census
     # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `bugs/formal/FORMAL_known_limits.md`. Both are closed by the same thing: this
+    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
     # entry, its ladder rung, and `--fix`, which writes the live scan into
     # every quote from the table above rather than leaving five hand-typed
     # copies of a computed number to agree with each other. The doc went with
@@ -715,29 +642,29 @@ CENSUS_QUOTES = (
     ('formal/model.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'\| entry points declared \| (\d+) \|',
      ('total',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
      ('word',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'\| a box in an argument or the return \| (\d+) \|',
      ('box',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'\*\*(\d+) of (\d+) is what a link line converts',
      ('word', 'total')),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
      ('sqlite_word', 'sqlite_total')),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
      ('word', 'word')),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'the shape answers the same question for all (\d+)\n'
      r'entry points instead of',
      ('total',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
      r'(\d+) with a box',
      ('total', 'word', 'box')),
@@ -745,13 +672,13 @@ CENSUS_QUOTES = (
     # different question from the table's (every type crossing the boundary)
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
      ('total', 'return_word', 'return_box', 'word')),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'So today the (\d+) are refused',
      ('word',)),
-    ('bugs/formal/FORMAL_known_limits.md',
+    ('bugs/FORMAL_known_limits.md',
      r'it is the only thing between the (\d+) and working code',
      ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
@@ -814,7 +741,7 @@ def live_census():
     """Every figure the prose quotes, read off the headers exactly once.
 
     `return_word`/`return_box` are the split the round-1 correction in
-    `bugs/formal/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
+    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
     argument list not counted. That is a different question from the table's
     ("every type crossing the boundary"), so it is a different pair of numbers
     from the same table -- asked with `model`'s own word rule rather than by

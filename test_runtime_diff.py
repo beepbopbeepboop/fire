@@ -296,9 +296,6 @@ BUILTIN_PROGRAMS = {
             print(b"ab"[0])
             print(b"ab" == b"ab")
             print(list(b"cd"))
-        print(set(b"ab"))
-        print([x for x in b"ab"])
-        print({x for x in b"ab"})
     """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real
@@ -772,8 +769,7 @@ BUILTIN_PROGRAMS = {
     # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
     # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
     # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
-    # or faulted. See CODEGEN_dict_comprehension_repr_is_separately_broken (dict
-    # repr: 0-is-None sentinel, int-key stringification, tuple-key address).
+    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
     #
     # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
     # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
@@ -801,23 +797,6 @@ BUILTIN_PROGRAMS = {
             d["j"] = 1
             print(d)
     """),
-    # INTEGER key spelling in a repr, for the shapes that already match CPython
-    # (measured 2026-11-01 against CPython 3.14): an integer key prints
-    # unquoted, a canonical-decimal STRING key prints quoted, and a
-    # comprehension's int keys are integers. NOT pinned here, because they are
-    # still wrong and belong to bugs/CODEGEN_dict_comprehension_repr_is_
-    # separately_broken.md: `d[5]="int"; d["5"]="str"` is ONE entry here
-    # (CPython: two), `{True: 1}` prints `{1: 1}`, and `{1.5: "x"}` prints
-    # `{'1.5': 'x'}` -- those are the int/str domain merge, a bool lowered to
-    # the integer 1, and a float key with no domain of its own.
-    "dict_int_key_spelling_repr_matches_cpython": textwrap.dedent("""\
-        def main():
-            print({10: "a"})
-            print({"10": "a"})
-            print({i: 1 for i in range(3)})
-            print({i: i for i in range(2)})
-            print({"10": 1})
-    """),
     # The SAME value kinds, read back through `.items()` instead of through
     # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
     # PAIR does not, because a pair slot is a raw int64_t and the pair is built
@@ -833,7 +812,7 @@ BUILTIN_PROGRAMS = {
     # `list(d.items())` is deliberately NOT here: that spelling reads each pair
     # pointer as an integer and segfaults, which is the element-type half of
     # `list(<a boxed container>)` and is already filed as
-    # `CODEGEN_materialized_container_has_no_element_type (fixed)`. Adding it
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
     # here would make this case a place where an unrelated red lives.
     "dict_items_reads_each_slot_kind": textwrap.dedent("""\
         def main():
@@ -853,7 +832,7 @@ BUILTIN_PROGRAMS = {
             # accessor (a container prints as a pointer decimal, a float as its
             # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
             # what a subscript loop READS with, and that half is still open —
-            # `bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
+            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
             #
             # The keyed spec of the SAME value kinds, which was already right and
             # is the control that keeps this case from being satisfied by
@@ -868,7 +847,7 @@ BUILTIN_PROGRAMS = {
     # the result is presented there; a `char *` default makes the expression a
     # `char *`. The int default and the `hasattr` probe beside it are the
     # controls: neither involves the cast. See
-    # the dynamic-attribute string-read miss fix.
+    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
     "getattr_default_on_a_miss": textwrap.dedent("""\
         class C:
             pass
@@ -912,21 +891,6 @@ BUILTIN_PROGRAMS = {
             f = e.add
             print(f(10, 20))                # 39
             print(e.add(1, 2))              # 12, a direct call on the erased receiver
-    """),
-    # Dynamic `getattr(obj, "method")` must agree with the static spelling
-    # `obj.method` and return a callable bound method, not raise AttributeError.
-    "dynamic_getattr_of_a_method": textwrap.dedent("""\
-        class C:
-            def __init__(self):
-                self.k = 9
-            def add(self, a, b):
-                return self.k + a + b
-
-        def main():
-            c = C()
-            t = getattr(c, "add")
-            print(t(1, 2))                  # 12
-            print(getattr(c, "add")(10, 20))  # 39
     """),
     # An EMPTY container literal asserts no element type, and one place
     # believed otherwise: `_lower_list_literal` /
@@ -1342,7 +1306,7 @@ BUILTIN_PROGRAMS = {
     # worst kind: the compiled path passes a receiver correctly, so a
     # compiled-path bug on this shape would have agreed with the wrong
     # answer instead of showing up as a diff. See
-    # bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
+    # bugs/COMPILE_FAIL_importlib_resources_readers.md's
     # `yield from cls.<sibling generator>(...)`, which is the real code
     # that needs it.
     #
@@ -1524,23 +1488,6 @@ BUILTIN_PROGRAMS = {
             # side fail on a warning rather than on the predicate.
             print(asyncio.run(c))
     """),
-    # Regression for bug:COMPILE_FAIL_Android_android — the guard
-    # `if asyncio.iscoroutine(result): asyncio.run(result)` where `result`
-    # comes from a dynamic callee (dict subscript) must compile: inside the
-    # then-branch the predicate proves `result` is a live handle.
-    "asyncio_iscoroutine_guard_run": textwrap.dedent("""\
-        import asyncio
-
-        async def work(n):
-            await asyncio.sleep(0)
-            return n
-
-        def main():
-            dispatch = {"a": work}
-            result = dispatch["a"](5)
-            if asyncio.iscoroutine(result):
-                print(asyncio.run(result))
-    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):
@@ -1656,8 +1603,6 @@ BUILTIN_PROGRAMS = {
 CPYTHON_COMPARABLE = {
     "minimal_main", "function_def", "method_call_result",
     "dict_get_none_guard",
-    # Int-key spelling in a repr: both engines and CPython agree on these shapes.
-    "dict_int_key_spelling_repr_matches_cpython",
     # Both engines answered these the SAME wrong way before the for-target
     # fix, so an engine-vs-engine diff was clean while both printed `1` where
     # CPython prints `(1,)`. The third opinion is the only thing that could
@@ -1693,7 +1638,6 @@ CPYTHON_COMPARABLE = {
     # dispatch hands back is a callable and not a raw int is CPython's own run
     # of the same text.
     "bound_method_value_on_an_untyped_receiver",
-    "dynamic_getattr_of_a_method",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
     # The interpreter yielded characters where the compiled path yielded ints;

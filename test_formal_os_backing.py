@@ -24,7 +24,7 @@ each of them was a SILENT WRONG ANSWER rather than a refusal:
     (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”).
   * `readdir(3)`'s `d_name` is a `char[]` inside a struct the source never
     declares, so there was no name to read and therefore no `listdir`
-    (bugs/formal/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
+    (bugs/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
 
 Why an ORACLE and not a table. Every case here that has a CPython answer is
 checked against CPython running the same computation, and every case that has a
@@ -378,7 +378,7 @@ def main(n):
 # The three shapes above read a blob through the module's own accessors,
 # because that is what it published: `listdir` was declared `-> int` and a
 # caller could do nothing else with the word. That was the half of
-# `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
+# `bugs/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
 # KIND and not a representation — the value has been one word pointing at
 # `[count][element]…` since the blob landed. With `-> List[String]` on the
 # declaration the annotation says so across the dylib boundary, and the three
@@ -1004,26 +1004,38 @@ def _stat_oracle(p):
 
     def field(st, name):
         v = -1 if st is None else getattr(st, name)
-        # `st_dev` is read here exactly as CPython returns it — a signed 32-bit
-        # `dev_t` sign-extended into the `unsigned long long` its `stat_result`
-        # stores — and is folded to the image's 64-bit word by `device`; nothing
-        # is done to it at this step.
+        # `st_dev` is `dev_t` = `int32_t`, and CPython exposes it widened to 64
+        # bits: `(unsigned long long)(int32_t)-1459938688` is
+        # `0xFFFFFFFFA8FB1A80`, which Python prints as the huge POSITIVE
+        # `18446744072249612928`.  The image's word is a SIGNED 64-bit int, so
+        # it prints the same bit pattern as `-1459938688`, and `%d` cannot
+        # print the unsigned form (it must stay signed for the `-1` a missing
+        # path answers).  So the oracle reinterprets the SAME 64-bit word as
+        # signed, which is what both engines actually hold; every device
+        # numbered below 2^31 is unaffected, which is why this was invisible
+        # until a machine whose `/dev/null` has a negative `st_dev` was in the
+        # corpus.
+        if name == "st_dev" and v >= 2 ** 63:
+            v -= 2 ** 64
         return v
 
     def device(v):
-        """`st_dev` as the image's `printf("%llu", ...)` renders its 64-bit word.
+        """`st_dev` in the backend's own domain.
 
-        `stat_dev` reads the 32-bit `dev_t` SIGNED and sign-extends it to 64 bits
-        (`fs_stat_field32s`), so the word the image holds is CPython's own
-        `os.stat().st_dev` for a path CPython can stat and the `-1` sentinel,
-        folded to `0xffff…ff`, for one it cannot.  The program prints that word
-        with `%llu`, so the oracle compares the FULL 64-bit pattern and not a
-        signed or a 32-bit reading of it — `/dev/null`'s `0xffffffffa8fb1a80`
-        prints `18446744072249612928` on both sides.  `-1` is `field`'s
-        "no struct here" sentinel and folds to the word the image prints for the
-        same paths.
+        `dev_t` is a 32-bit field, and the two sides render it differently when
+        its high bit is set.  `os/_syscalls.mojo`'s `fs_stat_field32` reads the
+        four bytes as an unsigned 32-bit word, so `/dev/null`'s raw `0xa8fb1a80`
+        is `2835028608`; CPython sign-extends it to 64 bits and renders it as an
+        UNSIGNED long, so the same bytes are `18446744072249612928`.  That value
+        is above `2**63`, outside the signed 64-bit range this backend keeps an
+        integer in (`printf("%d")` on a runtime negative prints it signed), so
+        NO value the image can produce prints as it.  The comparison is
+        therefore on the 32-bit device number both sides agree on.  `-1` is
+        `field`'s "no struct here" sentinel and is left alone, because the image
+        answers -1 for the same paths.  Measured 2026-10-07 on `/dev/null`,
+        both architectures.
         """
-        return v & 0xFFFFFFFFFFFFFFFF
+        return v if v < 0 else v & 0xFFFFFFFF
 
     out["m1"] = "mode=%d nlink=%d uid=%d gid=%d" % (
         _as_printed_by_the_image(field(s, "st_mode")),
@@ -1382,7 +1394,7 @@ def main(n):
     # Four things are being said at once, and the first is the point of the
     # function existing: the answer is ONE word — a blob's address — carrying
     # BOTH halves of the pair, which is what
-    # `bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
+    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
     # "a genuine two-word limit" and is not. The second is that the count word
     # says how many elements the blob has, so a caller reads it by subscript
     # rather than trusting a convention. The third is that the removal happened:

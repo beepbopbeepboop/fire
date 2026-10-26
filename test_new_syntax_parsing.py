@@ -576,7 +576,7 @@ def test_bracket_mixing_keyword_and_positional():
     the resulting ParseError into the `IdentExpr('_comptime_expr')` placeholder —
     so the alias read as a placeholder at every use, and the file-open flags
     built from it were a wrong answer rather than a refusal
-    (CODEGEN_comptime_function_type_alias (fixed in af167139),
+    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
     part 2).
 
     Both elements must SURVIVE, and in order: the old code parsed a bare
@@ -726,28 +726,24 @@ def test_bracket_param_default_is_captured():
           repr(getattr(fd4, 'comptime_param_defaults', None)))
 
 
-# ── 12. A MISPARSE is a refusal; a FUNCTION TYPE survives as a signature ────
+# ── 12. A MISPARSE is a refusal; a FUNCTION TYPE is still a placeholder ────
 def test_comptime_rhs_misparse_is_refused():
     """The two fates of a `comptime` right-hand side must be DISTINGUISHABLE.
 
     A function type (`comptime F = def[T](Int) -> None`) is deliberately not
-    modelled as a VALUE and becomes a `FunctionType` signature node (af167139;
-    before that it was the `IdentExpr('_comptime_expr')` placeholder, which is
-    what made "not implemented" and "misparsed" one value). A bracket call
-    that failed to parse used to become that SAME placeholder, because
-    `_skip_comptime_rhs`'s
+    modelled and becomes `IdentExpr('_comptime_expr')`. A bracket call that
+    failed to parse became the SAME placeholder, because `_skip_comptime_rhs`'s
     bare `except:` turned the ParseError into a skip-to-newline — so
     "not implemented" and "misparsed" were one value, every consumer read the
     alias as a placeholder, and the stdlib's `O_CREAT`/`O_APPEND`/`O_CLOEXEC`
     file-open flags were built from a placeholder rather than from
     `0x200 | 0x400 | 0x1000`. A wrong answer, invisibly
-    (CODEGEN_comptime_function_type_alias (fixed in af167139),
+    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
     parts 1 and 2).
 
     So a misparse is now a `SyntaxError` naming the line, and the deliberate
-    function type survives as a `FunctionType` signature node. Both halves are
-    asserted, because asserting only the refusal would pass for a parser that
-    refuses everything.
+    skip stays a placeholder. Both halves are asserted, because asserting only
+    the refusal would pass for a parser that refuses everything.
     """
     def _value(src):
         return _parse(src)[0].value
@@ -761,13 +757,8 @@ def test_comptime_rhs_misparse_is_refused():
             'comptime F = (\n    def[T](Int) -> None\n)',
             'comptime F = def[T, U](SIMD[T, U], Int) -> SIMD[T, U]')):
         v = _value(src)
-        # Before af167139 this was the `IdentExpr('_comptime_expr')`
-        # placeholder; the alias now survives as a `FunctionType` signature
-        # node (see test_comptime_function_alias_r2.py). The two fates —
-        # deliberate function type vs. misparse — are still distinguishable:
-        # this one is a FunctionType, the other (below) is a SyntaxError.
-        check("function_type_alias_survives_as_FunctionType_%d" % i,
-              isinstance(v, N.FunctionType),
+        check("function_type_alias_is_still_the_placeholder_%d" % i,
+              isinstance(v, N.IdentExpr) and v.name == '_comptime_expr',
               repr(v))
 
     # The misparse, which is now a refusal naming the offending text.

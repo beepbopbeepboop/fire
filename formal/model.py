@@ -30,17 +30,25 @@ from contextvars import ContextVar
 import keyword
 import os
 import re
-import threading
 from typing import NamedTuple
 
 import fire_compiler as F
 from formal.types import (BOOL_TYPE_NAMES, DTYPE_TYPE_NAMES,
                           FLOAT_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES)
-from formal.diagnostics import (CodegenError, MATCH_REFUSED_KINDS, spelled,  # noqa: F401
-                                    match_pattern_kind, match_pattern_refusal,
-                                    _flat_callee)
 
 
+class CodegenError(Exception):
+    """A construct this formal path refuses to lower, in the user's words.
+
+    ONE class for both backends, defined here rather than in either codegen:
+    every consumer of a refusal catches it by name (build.py around the
+    function pipeline and around each codegen pass, comptime_runner and
+    imports.py around a nested build), and a backend that defined its own
+    would be a class nobody catches — so its refusals escaped as raw
+    tracebacks out of `fire.py` instead of becoming the one-line diagnostic
+    they are written to be. It is a shared *decision* (what counts as a
+    refusal, and that both backends raise the same thing), which is what this
+    module is for."""
 
 
 # The value types a key element can have and still compare equal as a raw
@@ -122,7 +130,7 @@ def walk_stride(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     COUNT of the result was right, because three PAIRS and three WORDS are the
     same number, so a measurement that looked only at `len` agreed with CPython
     on the buggy programs.  The finding and its four sites are
-    `bugs/formal/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
+    `bugs/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
     consumers is load-bearing rather than decorative: a consumer not named here
     is a consumer that will not be audited.
     """
@@ -207,7 +215,7 @@ def key_compare_is_structural(needle) -> bool:
 # The `external_call` is called out because it was the expensive mistake here,
 # and the shape is why: its bracket is the SAME AST node as a generic's, so
 # lumping it in with them looked free and cost a 55-file family several waves
-# of re-derivation (bugs/formal/FORMAL_known_limits.md §6.2.1). A shared shape is not
+# of re-derivation (bugs/FORMAL_known_limits.md §6.2.1). A shared shape is not
 # a shared meaning. What the bracket holds is what decides it, and for
 # `external_call` it holds a C SYMBOL and a declared return type — see that
 # section below, which is not a comptime parameter list and does not need a
@@ -2403,7 +2411,7 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
     of a genuine value, it is not in a type position, and answering "type
     application" for it would drop a real frame-escape check
-    (`bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
+    (`bugs/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
     bracket list that is not one of the two compile-time ones keeps today's
     answer, refusal included — "possibly wrong" is the direction this backend
     refuses in everywhere else."""
@@ -2734,7 +2742,7 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
     a malformed one is refused by `external_call_refusal` with the reason that
     shape is malformed. Routing it through the kind table would have made a
     refused template read as a two-dimensional index, which is the
-    misdiagnosis §6.2 of bugs/formal/FORMAL_known_limits.md is about.
+    misdiagnosis §6.2 of bugs/FORMAL_known_limits.md is about.
 
     The module's OWN `external_call` declaration wins over the language's
     template, which is why `callee_defs` is consulted first: a module that
@@ -2776,7 +2784,7 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
 # files, one terminal module: `std/os/env.mojo`), and the one multi-element
 # subscript in the whole corpus that is NOT a generic's explicit-parameter list.
 # The tuple-index refusal above is true of the SHAPE and wrong about the
-# MECHANISM, which §6.2 of bugs/formal/FORMAL_known_limits.md is the audit of: the base
+# MECHANISM, which §6.2 of bugs/FORMAL_known_limits.md is the audit of: the base
 # is a function-like template, the first bracket element is the SYMBOL to call
 # and the second is the declared return type. Neither is a coordinate, and
 # `external_call` is not a dict.
@@ -2902,7 +2910,7 @@ def external_call_return_kind(text):
         rest of the runtime's void entry points).
 
     **What "at a C boundary" is doing in that list, and why it is not a claim
-    about `Optional`.** `bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`
+    about `Optional`.** `bugs/FORMAL_stdlib_optional_needs_a_representation.md`
     measures `Optional[Pointer[T]]` as one word whose payload is the address and
     whose TAG lives a second frame away, so `if not ptr:` cannot be answered from
     the word: `Some(null)` and `None` are two Mojo values of one word. That is a
@@ -3119,12 +3127,8 @@ BARE_C_RETURN_KINDS = {
 def _libsystem_handle():
     """A dlopen-able handle on the C library this image's load command names.
 
-    `None` until the first attempt settles, then either a handle or `False`
-    for "this host will not let us ask". A caller that races the first attempt
-    does not read the in-between state: it blocks on `_LIBSYSTEM_LOAD_LOCK`
-    until the attempt has settled, and then reads the settled answer — the
-    in-between used to be a `False` marker, and a second thread read it as the
-    answer instead of the state. Deliberately NOT `ctypes.CDLL(None)`: the global
+    `None` until the first call, then either a handle or `False` for "this host
+    will not let us ask". Deliberately NOT `ctypes.CDLL(None)`: the global
     namespace contains everything the *building* process has loaded, so it
     answers questions about the compiler rather than about the target.
     Measured on this machine, same symbol, two handles:
@@ -3140,39 +3144,22 @@ def _libsystem_handle():
     """
     global _LIBSYSTEM_HANDLE
     if _LIBSYSTEM_HANDLE is None:
-        with _LIBSYSTEM_LOAD_LOCK:
-            # Re-check under the lock: a caller that raced the first attempt
-            # is BLOCKED on this lock until it settles, and then reads the
-            # settled answer. Before this, the in-flight marker was `False`,
-            # and a second thread entering during the load read that marker as
-            # "not a C library symbol" and memoised the answer for the whole
-            # process — `snprintf` and `strtod` dropped out of the provided
-            # set, and every later build in it refused with "the image would
-            # bind 2 symbol(s) that nothing provides".
-            if _LIBSYSTEM_HANDLE is None:
-                try:
-                    import ctypes
-                    import platform
-                    if platform.system() == "Darwin":
-                        from formal.macho_linker import LIBSYSTEM_PATH
-                        name = LIBSYSTEM_PATH.decode().rstrip("\0")
-                    else:
-                        from formal.elf import DEFAULT_LIBC
-                        name = DEFAULT_LIBC
-                    _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
-                except Exception:
-                    _LIBSYSTEM_HANDLE = False
+        _LIBSYSTEM_HANDLE = False
+        try:
+            import ctypes
+            import platform
+            if platform.system() == "Darwin":
+                from formal.macho_linker import LIBSYSTEM_PATH
+                name = LIBSYSTEM_PATH.decode().rstrip("\0")
+            else:
+                from formal.elf import DEFAULT_LIBC
+                name = DEFAULT_LIBC
+            _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
+        except Exception:
+            _LIBSYSTEM_HANDLE = False
     return _LIBSYSTEM_HANDLE
 
 
-# The first attempt is the only thread that may be mid-load: it holds this
-# lock, and a caller racing it blocks on the lock instead of reading the
-# in-between state (double-checked locking, sound here because the GIL orders
-# the fully-constructed handle before any other thread can read the global).
-_LIBSYSTEM_LOAD_LOCK = threading.Lock()
-# `None` until the first attempt settles, then a handle or `False` for "this
-# host will not let us ask". The in-flight state is no longer a value a
-# concurrent caller can observe: it is the lock, not a word in the global.
 _LIBSYSTEM_HANDLE = None
 
 # The 19 names this function used to hardcode, kept ONLY as the fallback for a
@@ -3977,7 +3964,7 @@ def division_needs_zero_guard(denominator) -> bool:
     `test_formal.py` for exactly this and for nothing about a floor correction.
 
     So the fix available without the `lib/ProofLib.lean` change
-    `bugs/formal/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
+    `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
     asks for is to stop emitting a guard that cannot fire: for `// 7` there is
     no zero to trap, and the `bl fflush` that made the theorem unprovable goes
     with it. **What this does NOT do is fix a two-call program whose calls are
@@ -4388,7 +4375,7 @@ def shift_overflow_refusal(op: str, amount, base=None,
         which does not saturate and still overflows, so the immediate form's
         `0..63` range test is not a safety test and cannot be made into one.
         Decided only when the base folds; a variable base is the subject of
-        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
 
     `None` in any argument means "the build does not know", and every such case
     returns None rather than guessing: a refusal that fires on half a fact is a
@@ -4485,7 +4472,7 @@ def power_overflow_refusal(base, exponent, operands=None) -> str | None:
     is no question to refuse: `b ** n` overflows for some `b` and not for
     others, and a build that cannot say which has no answer to give. So the
     foldable case is refused precisely, and the variable case is what
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
+    `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
 
     `None` means "answerable": a non-negative exponent whose exact value fits,
     or the `0 ** 0` / `1 ** anything` shapes that never overflow.
@@ -5080,10 +5067,191 @@ def _facts_merge(left: dict, right) -> dict:
     return out
 
 
+# ── `match`: the pattern language this path lowers, decided ONCE ─────────────
+#
+# `fire_compiler.py` parses a `case` pattern as an ordinary EXPRESSION
+# (`_parse_match_case`: "Patterns are parsed at min_prec=1 … parsing it as a
+# plain expression pattern keeps this parser simple"), so every PEP 634
+# structural pattern arrives here as the expression that spells it: `case [a,
+# b]:` is a `ListExpr`, `case {"k": v}:` a `DictExpr`, `case Point(x=0):` a
+# `CallExpr`, `case 1 | 2:` and `case [a] as w:` both a `BinaryOp`.
+#
+# That is fine for a PARSER and fatal for a lowering that keeps the frontend's
+# own switch-style rule — "evaluate each pattern and compare it with `==`"
+# (`MatchStmt`'s docstring) — because under that rule those five shapes are not
+# patterns at all, they are VALUES:
+#
+#     case 1 | 2:        evaluates 1 | 2 and matches the subject against 3
+#     case [a, b]:       evaluates a list literal and compares it
+#     case {"k": v}:     evaluates a dict literal and compares it
+#     case Point(x=0):   CONSTRUCTS a Point and compares it
+#     case [a] as w:     evaluates `… as w`, which is not an operator
+#
+# and every one of them binds nothing, which is the opposite of what this
+# compiler's OWN free-variable analysis already says the first five do
+# (`test_new_syntax_parsing.py::test_match`: `match_seq_pattern_binds`,
+# `match_dict_pattern_binds`, `match_or_of_literals_has_no_names`,
+# `match_as_binds_both_and_guard_is_a_use` — "In `match` semantics a bare name
+# in a pattern is an irrefutable capture"). So the two front ends of this
+# compiler already disagree about these five unless something refuses them, and
+# a wrong-but-exit-0 answer is the outcome this tree treats as worse than a
+# refusal.
+#
+# THE DECISION IS HERE AND NOT IN EITHER EMITTER because it has to be the same
+# decision on both machines: `formal/build.py::_rewrite_match_statements` asks
+# it once, for the whole pipeline, and lowers what it accepts — so an arm64
+# image and an x86-64 image of one file cannot come to disagree about what a
+# pattern means, and the Lean model each of them carries is a model of the SAME
+# compares and branches (`formal/build.py` emits an `if`/`==` chain and the
+# existing conditional proof applies to it unchanged).
+#
+# The kinds `match_pattern_kind` returns that this path will NOT lower. A tuple
+# and not a set because nothing iterates it yet and a reader looking for "what
+# is refused" should find the whole list in one place; the refusal sentence for
+# each is in `match_pattern_refusal`, which is keyed by the same strings and
+# raises `KeyError` on one that is not here — so a kind added to one and not the
+# other fails at the first pattern that carries it.
+MATCH_REFUSED_KINDS = (
+    "or-pattern",
+    "sequence pattern",
+    "mapping pattern",
+    "class pattern",
+    "as-binding",
+    "enum pattern",
+)
 
 
+def match_pattern_kind(pattern, bound=frozenset()) -> str:
+    """What one `case` pattern IS, for this path's lowering.
+
+    Returns one of:
+
+    * `"wildcard"` — `case _:`. Irrefutable, binds nothing.
+    * `"capture"` — a bare name that is NOT already bound. Irrefutable, and it
+      binds the subject (this is the one PEP 634 behaviour the switch-style
+      rule keeps, because `fire_compiler.py`'s `MatchStmt` docstring keeps it
+      for exactly the guard clause that needs something to test).
+    * `"name"` — a bare name that IS bound: an ordinary read, compared with
+      `==`. `bound` is the caller's answer to "is it bound"; see
+      `formal/build.py::_match_scope_names`.
+    * `"value"` — anything else that is an ordinary expression: a literal, a
+      unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
+      with `==`, which is CPython's own reading of a literal or dotted pattern.
+    * one of `MATCH_REFUSED_KINDS` — a PEP 634 structural pattern, refused by
+      name.
+
+    `bound` defaults to empty, so an unbound-looking name reads as a CAPTURE:
+    that is the answer which refuses nothing, and the caller
+    (`formal/build.py`) supplies the real binding set because only it knows what
+    this unit folded, imported or declared.
+    """
+    if isinstance(pattern, F.IdentExpr):
+        if pattern.name == "_":
+            return "wildcard"
+        return "capture" if pattern.name not in bound else "name"
+    if isinstance(pattern, F.DottedLiteral):
+        # `case .PASS:` — Mojo's enum dispatch. It is not a PEP 634 shape; it
+        # is a type-relative NAME, and nothing on this path can resolve which
+        # type the surrounding matched value has (`myinterpreter.py` refuses it
+        # with "cannot resolve the dot-relative value '.PASS'").
+        return "enum pattern"
+    if isinstance(pattern, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return "sequence pattern"
+    if isinstance(pattern, F.DictExpr):
+        return "mapping pattern"
+    if isinstance(pattern, F.CallExpr):
+        return "class pattern"
+    if isinstance(pattern, F.BinaryOp):
+        if pattern.op == "as":
+            return "as-binding"
+        if pattern.op == "|":
+            return "or-pattern"
+        # Every other operator is an arithmetic expression, and the switch-style
+        # rule really does compare its value — `case SHIFT + 1:` is a
+        # comparison against `SHIFT + 1` in both this compiler and CPython.
+        return "value"
+    return "value"
 
 
+def match_pattern_refusal(kind: str, spelling: str, fn_name: str,
+                          line: int = 0) -> str:
+    """The refusal for one PEP 634 pattern, naming the CONSTRUCT.
+
+    A refusal that says only `MatchStmt` leaves the reader to work out which of
+    the pattern languages they wrote, and it is the same sentence on both
+    architectures with the machine's name swapped in — which is the pair of
+    defects `FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    function.md` is about. So the message names the construct, says what the
+    pattern MEANS (the part that is not obvious and is the reason it cannot be
+    an expression), and says what this path would otherwise do, which for all
+    five is the thing a reader must not be left to discover by running it.
+
+    `spelling` is the source text of the pattern, read off the node, and it is
+    what makes the message locatable: a reader with five `case` arms in a file
+    needs to know which one.
+    """
+    where = f"line {line}: " if line else ""
+    what = {
+        "or-pattern": (
+            "an or-PATTERN (`case A | B:`), which PEP 634 and this "
+            "compiler's own free-variable analysis both read as \"match A or "
+            "match B\" and which binds nothing. This path parses it as the "
+            "`|` operator, so lowering it as an expression would compare the "
+            "subject against `A | B` — for two integers that is a NUMBER "
+            "(`case 1 | 2:` matches the subject 3) — and the arm would run "
+            "for a value no `case` in the source names. Write the "
+            "or-pattern as separate cases, or as this compiler's own "
+            "comma spelling `case A, B:`, which is the one both the "
+            "interpreter and this lowering read as \"A or B\""),
+        "sequence pattern": (
+            "a SEQUENCE PATTERN (`case [a, b]:`, `case (a, b):`, `case [a, "
+            "*rest]:`), which decomposes the subject: it binds `a` and `b` and "
+            "matches only a subject of exactly that length. This path parses "
+            "it as a list/tuple literal, so lowering it as an expression would "
+            "compare the subject against `[a, b]` — a VALUE comparison that "
+            "binds nothing, matches a longer sequence of the same elements, "
+            "and reads `a` and `b` as ordinary names rather than as bindings. "
+            "Read the elements out before the `match` (`n = len(s)` then "
+            "`if n == 2: a = s[0]; b = s[1]`)"),
+        "mapping pattern": (
+            "a MAPPING PATTERN (`case {\"k\": v}:`), which looks a KEY up in "
+            "the subject and binds its value; it matches a mapping that has "
+            "that key and is not an equality comparison against a dict "
+            "literal. This path parses it as a `dict` display, so lowering it "
+            "as an expression would compare the subject against "
+            "`{\"k\": v}` — which binds nothing and requires the whole "
+            "mapping to be equal. Read the value out before the `match` (`v = "
+            "d.get(\"k\")`) and match on `v`"),
+        "class pattern": (
+            "a CLASS PATTERN (`case Point(x=0, y=1):`), which matches on a "
+            "subject's TYPE and then deconstructs it, binding the keyword "
+            "names. This path parses it as a construction, so lowering it as "
+            "an expression would CALL `Point` and compare the result — a "
+            "program that constructs a value to decide what to match, reads as "
+            "a working feature, and answers a question about the subject with "
+            "an answer about a fresh object. Dispatch on a field "
+            "(`match p.x:` then `case 0:`) is the spelling that lowers here"),
+        "as-binding": (
+            "an `as`-BINDING (`case P as w:`), which matches the whole "
+            "subject and ALSO binds it to `w`. This path parses `as` as a "
+            "binary operator, which is not one: `P as w` has no value to "
+            "compare with `==`, so the pattern cannot be lowered at all. A "
+            "bare capture is the same binding without the pattern — `case w:` "
+            "binds the subject to `w` and always matches, and that is what "
+            "lowers here"),
+        "enum pattern": (
+            "an ENUM CASE (`case .PASS:`), which names a variant of the "
+            "matched value's type. The spelling is deliberately type-relative "
+            "(`.PASS` rather than `Token.PASS`), and resolving it needs the "
+            "type of the matched value, which is a question about the type "
+            "system rather than about a pattern; nothing on this path has it "
+            "(the interpreter refuses the same spelling with \"cannot resolve "
+            "the dot-relative value\"). Spell the variant with its type, "
+            "`case Token.PASS:`, which lowers as a value comparison"),
+    }[kind]
+    return (f"{where}{fn_name}: a `case` pattern is {what}. The pattern "
+            f"spelled `{spelling}` is not a value this path can compare the "
+            f"subject against.")
 
 
 def _case_is_wildcard(case) -> bool:
@@ -5229,7 +5397,7 @@ def _range_is_nonempty(args, consts=None) -> bool:
     rather than a second reader of its own**: a `range` whose bound is a NAME
     decided by the preheader (`k = 0` then `range(0, k)`) is a fact about the
     program, exactly as `i = 0` then `while i < 3:` is. It is what
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`'s
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`'s
     option 2 asks for — "the emptiness as a predicate, carried along every
     edge" — and what is left decided only at RUN time (a bound this path cannot
     state as a literal, a parameter among them) is recorded as that doc's
@@ -5334,7 +5502,7 @@ def _for_emptiness(s, consts=None, seqs=None) -> str:
     `'maybe'`, which is the answer that keeps the zero-iteration edge and the
     header's definition: both are the safe direction for a loop whose emptiness
     is a run-time fact, and both are recorded as the residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
     """
     it = getattr(s, "iterable", None)
     direct = _iterable_literal_emptiness(it)
@@ -5391,7 +5559,7 @@ def _for_target_never_binds(stmt, consts=None, seqs=None) -> bool:
     and a `range` the PREHEADER decides as well as one it writes out (`k = 0`
     then `range(0, k)`) — an emptiness this build cannot decide keeps the target
     defined, which is a real loss
-    (`bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
+    (`bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
     and the safe direction: keeping a definition can only let through a program
     whose range happened to be non-empty, where dropping it would refuse a
     program CPython runs.
@@ -5417,10 +5585,7 @@ def _loop_target_defs(stmt, consts=None) -> set:
     return _store_names(getattr(stmt, "target", None))
 
 
-# Not `_CMP_OPS`: generated_dispatch.py declares that bare name as a SET, and the
-# self-host closure keys module globals by bare name, so a dict of the same name
-# here is refused ("cannot coerce MojoDict * to MojoSet *") in this module's toplevel.
-_FOLDABLE_CMP_OPS = {
+_CMP_OPS = {
     "<": lambda a, b: a < b,
     "<=": lambda a, b: a <= b,
     ">": lambda a, b: a > b,
@@ -5488,19 +5653,19 @@ def _literal_truth(e, consts=None) -> object:
         inner = _literal_truth(getattr(e, "operand", None) or
                                getattr(e, "expr", None), consts)
         return None if inner is None else (not inner)
-    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _FOLDABLE_CMP_OPS:
+    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
         left = _cfg_int_value(getattr(e, "left", None), consts)
         right = _cfg_int_value(getattr(e, "right", None), consts)
         if left is None or right is None:
             return None
-        return bool(_FOLDABLE_CMP_OPS[e.op](int(left), int(right)))
+        return bool(_CMP_OPS[e.op](int(left), int(right)))
     if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
         vals = [_cfg_int_value(o, consts)
                 for o in (getattr(e, "operands", None) or [])]
         if any(v is None for v in vals):
             return None
         for op, a, b in zip(e.ops, vals, vals[1:]):
-            fn = _FOLDABLE_CMP_OPS.get(op)
+            fn = _CMP_OPS.get(op)
             if fn is None or not fn(int(a), int(b)):
                 return False
         return True
@@ -5605,7 +5770,7 @@ def _preheader_facts(blocks: list, head_index: int, entry: int,
     `for q in XS`) was `'maybe'`, the header's definition of the loop target
     survived, and a read after the loop answered the caller's leftover where
     CPython raises `UnboundLocalError` — the second residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
     The facts are seeded at the ROOTS (a block with no in-region predecessor is
     reached only from the function entry), and the ordinary intersection then
     drops one wherever a path binds the name to something else, so a function
@@ -6077,7 +6242,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # holds exactly the statements this loop wrote. A name the
                 # preheader does not have keeps the header's definition, which
                 # is the safe direction — see
-                # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+                # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
                 if _for_target_never_binds(s, loop_consts, loop_seqs):
                     head.defs -= _store_names(getattr(s, "target", None))
                 else_body = getattr(s, "else_body", None)
@@ -6881,7 +7046,7 @@ def read_before_store(fn, params: set = None, placed: set = None,
     walk starts empty and such a loop is `'maybe'`, so its target stays defined
     and a read after it answers the caller's leftover. A name the function
     itself binds must NOT be passed — see the caller, and
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
 
     **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
     over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
@@ -7148,248 +7313,6 @@ def read_before_store(fn, params: set = None, placed: set = None,
     return found[0] if found else None
 
 
-def _block_stmt_exprs(s) -> list:
-    """The read-position expressions of a statement that is a BLOCK'S OWN
-    statement, as opposed to a statement in one of its arms.
-
-    A block's `stmts` are the straight-line statements it holds plus, for a
-    control-flow block, the control statement ITSELF — whose arms are separate
-    blocks, each visited on their own. So this answers "what does this block's
-    own text read" and deliberately does not descend into arm bodies: a reader
-    that did would attribute a nested arm's read to the enclosing block, and
-    the enclosing block's entry facts are not the arm's.
-
-    The per-kind list mirrors `read_before_store`'s `walk_stmts` read rules —
-    an `AssignStmt`'s TARGET is a store, not a read, and a `VarDecl` without an
-    initialiser reads nothing — because the two must count the same reads: this
-    list decides where a loop target is read in a possibly-unbound state, and
-    `read_before_store` decides whether that read is accepted at all. A graph
-    and a walk that disagree about one read is a check that appears and
-    disappears with which of them ran."""
-    kind = type(s).__name__
-    if kind == "AssignStmt":
-        return [getattr(s, "value", None)]
-    if kind == "AugAssignStmt":
-        return [getattr(s, "target", None), getattr(s, "value", None)]
-    if kind == "VarDecl":
-        return [getattr(s, "value", None)]
-    if kind == "MultiAssignStmt":
-        return [getattr(s, "value", None)]
-    if kind in ("ForStmt", "ComptimeForStmt"):
-        return [getattr(s, "iterable", None)]
-    if kind == "WhileStmt":
-        return [getattr(s, "condition", None)]
-    if kind == "IfStmt":
-        return [getattr(s, "condition", None)]
-    if kind == "MatchStmt":
-        return [getattr(s, "subject", None)]
-    if kind in ("ReturnStmt", "ExprStmt", "RaiseStmt"):
-        return [getattr(s, "value", None)]
-    if kind == "AssertStmt":
-        return [getattr(s, "value", None), getattr(s, "msg", None)]
-    if kind == "DelStmt":
-        return list(getattr(s, "targets", None) or [])
-    return []
-
-
-def _stmt_store_names(s) -> set:
-    """The names one statement STORES — `_cfg_block_defs`'s rules, one
-    statement at a time, so a block's per-statement walk and the block's `defs`
-    cannot disagree about a `VarDecl`'s missing initialiser or a `WithStmt`'s
-    alias. A `del` stores nothing: on this path a bare `del` is a no-op at run
-    time (the image keeps the name's value), which is the same reason the
-    possibly-unbound dataflow above lets a `kills` set contribute nothing."""
-    kind = type(s).__name__
-    if kind in ("AssignStmt", "AugAssignStmt"):
-        return _store_names(getattr(s, "target", None))
-    if kind == "VarDecl":
-        n = getattr(s, "name", None)
-        if isinstance(n, str) and getattr(s, "value", None) is not None:
-            return {n}
-        return set()
-    if kind == "MultiAssignStmt":
-        out: set = set()
-        for t in (getattr(s, "targets", None) or []):
-            out |= _store_names(t)
-        return out
-    if kind == "WithStmt":
-        out = set()
-        for it in (getattr(s, "items", None) or []):
-            a = getattr(it, "alias", None)
-            if isinstance(a, str):
-                out.add(a)
-        return out
-    if kind == "TryStmt":
-        out = set()
-        for h in (getattr(s, "handlers", None) or []):
-            n = getattr(h, "name", None)
-            if isinstance(n, str):
-                out.add(n)
-        return out
-    if kind == "ComptimeVarStmt":
-        return _store_names(getattr(s, "target", None))
-    return set()
-
-
-def loop_bound_flags(fn, params: set = None) -> dict:
-    """`{name: (id(ForStmt), …)}` for the loop targets this function must
-    guard with a runtime bound flag, or `{}`.
-
-    **The question.** `read_before_store` accepts a read of a `for` target
-    after a loop whose emptiness is a run-time fact (`'maybe'`), because
-    refusing would drop `last(4)`-shaped programs CPython runs. The accepted
-    read is still the defect when the range turns out empty: nothing stores
-    the target, so the read answers the caller's leftover. The build cannot
-    decide which way a given call goes, so the EMITTED image has to ask at
-    run time — one flag per flagged name, zero at entry, set by every store of
-    the name (a loop's `init:` is a store, a comprehension's per-element
-    store is a store), and branched on at a read that may be unbound. This
-    reader decides which names that is; the two backends read the same answer
-    from it, so the two architectures flag the same loops.
-
-    **A name is flagged only when all three of these hold of one of its
-    `'maybe'` loops, and the safe direction is the one that says so:**
-
-    1. the target is a single name — a tuple target is not a word this value
-       model can flag, and a `global` target is not this frame's storage at
-       all;
-    2. **every path does NOT store the name before the loop** — the
-       `_definitely_stored` dataflow, the same one `read_before_store` runs,
-       is the reader, so the two cannot answer "is this name bound here"
-       differently. A name every path stored before the loop holds a value on
-       the zero-iteration edge too, so its check would never fire and the
-       flag stays out of the image (which is where the idiomatic
-       `i = 0; for i in range(…)` stays). A name stored on SOME path is
-       flagged, not excluded: the store that path makes is the store that
-       SETS the flag, and the other path is the one the check fires for.
-       The parameters are the dataflow's seed, and that is what keeps a
-       parameter target out for the sharper reason the emitter states — the
-       prologue's argument store is the one store that does not run the flag
-       hook, so a flag there would fire on a path that holds the caller's
-       word;
-    3. the name is read in a block where it may be unbound. Without it a loop
-       whose target is never read in that state would allocate a flag nothing
-       branches on — dead code in an image whose every word is walked by the
-       proof generators.
-
-    The read test uses the "possibly unbound" dataflow, the dual of
-    `_definitely_stored`: a name is possibly unbound at a block's entry when
-    some path to it left it so. It is initialised from the TOP and narrowed,
-    because the answer being computed is "may be unbound" and a name the
-    analysis failed to track as unbound must not be assumed bound — the
-    opposite of `_definitely_stored`'s question, which is why it is a second
-    array rather than the negation of the first. The header block of a tracked
-    loop contributes its defs WITHOUT the loop target, because on the
-    zero-iteration edge the header does not bind it — that binding happens on
-    the edge into the body (the body's first block `seed`), and a header that
-    bound it would silence exactly the path this flag exists for. `del`
-    contributes nothing, because a bare `del` on this path is a no-op at run
-    time and the image keeps the name's value.
-
-    Module-level entry facts are deliberately NOT passed to the preheader
-    walk: a fact the walk cannot see makes a loop `'maybe'` rather than
-    decided, which flags MORE loops, and a flagged loop whose range turns out
-    non-empty never takes its check — the dead-check direction is the safe
-    one, while a module fact the emitter sees and `read_before_store` does not
-    (or vice versa) would be two machines answering one loop differently.
-    See `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
-    for the residual this reader closes and the cases it deliberately leaves.
-    """
-    params = set(params if params is not None
-                 else (getattr(fn, "params", None) or ()))
-    params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
-    body = getattr(fn, "body", None) or []
-    declared_global: set = set()
-    for node in iter_nodes(body):
-        if type(node).__name__ in ("GlobalStmt", "NonlocalStmt"):
-            declared_global |= {n for n in (getattr(node, "names", None) or ())}
-
-    blocks, entry, _cond_names = _build_cfg(body, None)
-    candidates: list = []
-    hdr_target: dict = {}
-    for s in (n for n in iter_nodes(body) if isinstance(n, F.ForStmt)):
-        t = getattr(s, "target", None)
-        if not (isinstance(t, str) and t.isidentifier()):
-            continue
-        if t in declared_global:
-            continue
-        header = None
-        for b in blocks:
-            if len(b.stmts) == 1 and b.stmts[0] is s:
-                header = b
-                break
-        if header is None:
-            continue
-        consts, seqs = _preheader_facts(blocks, header.index, entry, None)
-        if _for_emptiness(s, consts, seqs) != _MAYBE_RUNS:
-            continue
-        candidates.append((s, t, header))
-        hdr_target[header.index] = {t}
-    if not candidates:
-        return {}
-    tracked = {t for _s, t, _h in candidates}
-
-    # Definitively stored on EVERY path to the header: `_definitely_stored`,
-    # the same dataflow `read_before_store` runs, asked over the same CFG, so
-    # the two answers to "is this name bound here" cannot drift. A name every
-    # path stored before the loop holds a value on the zero-iteration edge too,
-    # so its check would never fire and the flag stays out of the image — which
-    # is also where the idiomatic `i = 0; for i in range(…)` stays flag-free.
-    # The seed is the parameters, and it is what keeps a parameter target
-    # unflagged for the sharper reason the emitter states: the prologue's
-    # argument store is the one store that does not run the flag hook. A name
-    # stored on SOME path is NOT excluded — the store that path makes is the
-    # store that SETS the flag, and the other path is the one the check fires
-    # for, which is the mixed shape the "possibly stored" draft used to leave
-    # as garbage.
-    stored_in, _facts_in, _guarded_in = _definitely_stored(
-        blocks, entry, params, _cond_names)
-
-    # Possibly unbound at entry, the dual: top-initialised and narrowed.
-    mu: dict = {b.index: set(tracked) for b in blocks}
-    changed = True
-    while changed:
-        changed = False
-        for b in blocks:
-            merged = None
-            for p in b.preds:
-                b_p = blocks[p]
-                stored = b_p.defs - hdr_target.get(p, set())
-                e = mu[p] - stored
-                merged = set(e) if merged is None else (merged | e)
-            merged = set(tracked) if merged is None else merged
-            merged -= b.seed
-            if merged != mu[b.index]:
-                mu[b.index] = merged
-                changed = True
-
-    # A read in a MAYBE state, per NAME. The walk is per STATEMENT within a
-    # block rather than per block, because a block's entry state and the state
-    # at its last read differ: `q = 7` and `print(q)` are one block whose entry
-    # says `q` may be unbound (the zero-iteration edge) but whose read is after
-    # the store, so the statement order is what decides. The store rules are
-    # `_cfg_block_defs`'s, one statement at a time, so the two cannot count a
-    # `VarDecl`'s missing initialiser differently.
-    maybe_reads: set = set()
-    for b in blocks:
-        cur = set(mu[b.index])
-        for s in b.stmts:
-            for e in _block_stmt_exprs(s):
-                for n in _expr_reads(e, set()):
-                    if n in tracked and n in cur:
-                        maybe_reads.add(n)
-            cur -= _stmt_store_names(s)
-
-    out: dict = {}
-    for s, t, header in candidates:
-        if t in stored_in.get(header.index, set()):
-            continue
-        if t not in maybe_reads:
-            continue
-        out.setdefault(t, []).append(id(s))
-    return {t: tuple(ids) for t, ids in out.items()}
-
-
 def read_before_store_refusal(name: str, fn_name: str, line) -> str:
     """The one-line diagnostic for a name read before anything stores it.
 
@@ -7450,7 +7373,7 @@ def specialization_call_refusal(name: str) -> str:
         instantiation: an argument that is a value rather than a type, a
         dotted `module.name[…]`, or a template in a type ANNOTATION rather
         than a callee position.
-        `bugs/formal/FORMAL_generic_monomorph_scope.md` lists each with its next step.
+        `bugs/FORMAL_generic_monomorph_scope.md` lists each with its next step.
       * the name is a function of another module whose generic parameter is
         IMPLICIT — `def name(x: Box[T])`, with the parameter written in the
         SIGNATURE and no bracket to bind. There the type is INFERRED from the
@@ -7498,7 +7421,7 @@ def specialization_call_refusal(name: str) -> str:
         f"refused and the inferred one builds and answers CPython on both "
         f"architectures). **Do not add `[<a type>]` — that is the spelling that "
         f"arrived here.** The ways this can still be reached, with the spelling "
-        f"that works for each, are in bugs/formal/FORMAL_generic_monomorph_scope.md. "
+        f"that works for each, are in bugs/FORMAL_generic_monomorph_scope.md. "
         f"If `{name}` is instead an ordinary value then the brackets are a "
         f"subscript, which is not a call this path can name at all. Refused "
         f"rather than emitted with the brackets dropped: that builds, runs, and "
@@ -7537,7 +7460,7 @@ def dotted_specialization_refusal(name: str) -> str:
     MODULE's instantiation — a wrong answer rather than a refusal, which is the
     one direction this backend must never take. So the dotted application is not
     a gap in a message, it is a gap in the mechanism, and §2 of
-    `bugs/formal/FORMAL_generic_monomorph_scope.md` is where it is written down with
+    `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
     the ABI decision it needs.
 
     **The remedy is the one spelling measured to work, and nothing else is
@@ -7571,7 +7494,7 @@ def dotted_specialization_refusal(name: str) -> str:
         f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
         f"measured on this tree and is still refused, so do not stop there. "
         f"The dotted application itself, and the ABI question a fix needs, are "
-        f"§2 of bugs/formal/FORMAL_generic_monomorph_scope.md. Refused rather than "
+        f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
         f"emitted with the brackets dropped: that builds, runs, and returns a "
         f"number the source never wrote, with nothing on the link line to catch "
         f"it"
@@ -7677,7 +7600,7 @@ def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,
     collapse the CALLEE as well: by the time a backend saw `c.f(5)` the node it
     held was `IdentExpr('c')`, and the only name it could print was `c`.  A
     refusal naming a name the reader did not write is
-    `bugs/formal/FORMAL_known_limits.md`'s failure mode — it costs a second build to
+    `bugs/FORMAL_known_limits.md`'s failure mode — it costs a second build to
     discover that `f` is the field, and a reader who does not check concludes
     that `c` is the problem.  `callee_value_refusal` above is what a backend
     reaches for on the collapsed node and it is TRUE of it (`c` is a name the
@@ -7820,7 +7743,7 @@ TYPE_KIND = "type"
 # holding one cannot be a `FLOAT_KIND` here: `Float32` is deliberately not in
 # `formal.types.FLOAT_TYPE_NAMES` and is refused by name rather than accepted
 # and misread.  `float16`/`bfloat16` and the `float8_*` family are the same
-# story.  See `bugs/formal/FORMAL_float_binary64_only.md`.
+# story.  See `bugs/FORMAL_float_binary64_only.md`.
 FLOAT_KIND = "float64"
 
 # BYTES THE KERNEL SUPPLIED, as a kind, which is new and is the whole of what a
@@ -7853,7 +7776,7 @@ FLOAT_KIND = "float64"
 # because nothing in the source states what the kernel said.  That is also why it
 # cannot be reached by a spelling the way `receiver_is_declared_bytes` reaches a
 # `Pointer[UInt8]`: a loop target over `listdir(p)` has no declaration of its own
-# (`bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`), and
+# (`bugs/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`), and
 # the annotation above it is `-> List[String]`, which is the honest word for a
 # Python-level list of `str`.  The kind is therefore SEEDED where foreign bytes
 # ENTER an image — `FOREIGN_BYTES_EXPORTS` below — and inherits through the
@@ -8329,34 +8252,20 @@ def float_unary_refusal(op: str, operand_kind, spelled: str,
 def float_int_conversion_note() -> str:
     """The one documented divergence from CPython in a double→int conversion.
 
-    A double whose truncated value does not fit in an `Int64`, and an infinity
-    (which is one: CPython raises `OverflowError` for both), is a trap —
-    refused at build time when the source spelled it (`float_to_int_refusal`),
-    checked at run time when it cannot be read (`float_to_int_trap_message`),
-    and stopped with `INT_OVERFLOW_TRAP_STATUS`, which is the one answer this
-    path gives for a program CPython raised.
-
-    The remaining divergence is a NaN. `FCVTZS` and `CVTTSD2SI` SATURATE one,
-    and each answers ITS OWN saturation — measured on both: `FCVTZS` converts
-    a NaN to 0, `CVTTSD2SI` to `INT64_MIN` (`0x8000000000000000`) — while
-    CPython raises `ValueError` for it, so the one input the range test
-    cannot separate is also the one the two machines still part company on.
-    The range test cannot take a NaN — it has no value to check, and both
-    comparisons it is built from are false (unordered) for one — so neither
-    the build's refusal nor the emitters' trap fires for it, and the trap
-    must not be spent on it: this trap is the OverflowError trap, and
-    attributing a stop to a range a NaN does not have would be a false
-    message. That is a divergence on an input rather than an approximation of
-    one, and this note is the record of it.
+    `FCVTZS` and `CVTTSD2SI` SATURATE: a NaN or an infinity converts to
+    `INT64_MIN` (`0x8000000000000000`) rather than trapping, and CPython raises
+    (`ValueError` for a NaN, `OverflowError` for an infinity).  This path has no
+    exception machinery a conversion can raise through, and refusing the
+    conversion in general would refuse the 99.99% of it that is finite — so the
+    finite answers are exact and the two special inputs get the hardware's
+    saturation.  The inputs are not visible to the build: whether a name holds a
+    NaN is a run-time fact, so no static check can separate them, and this is a
+    divergence on an input rather than an approximation of one.
     """
-    return ("a NaN is the one input the range test cannot separate, and each "
-            "hardware answers its own saturation for it — 0 on arm64 "
-            "(FCVTZS), INT64_MIN on x86-64 (CVTTSD2SI) — where CPython "
-            "raises ValueError; a double whose truncated value does not fit "
-            "in an Int64, and an infinity, are refused at build time when the "
-            "source spells them and trapped at run time with the integer "
-            "overflow's status, which is what CPython's OverflowError is on "
-            "this path; every other value is exact")
+    return ("a NaN or an infinity converts to INT64_MIN (the hardware's "
+            "saturating answer) where CPython raises ValueError / "
+            "OverflowError; this path has no exception to raise through, and "
+            "every finite value is exact")
 
 
 #: Type constructors whose VALUE is an IEEE double — `float(x)`, `Float64(x)`.
@@ -8378,8 +8287,7 @@ FLOAT_TO_INT = "from-float"
 FLOAT_FROM_INT = "to-float"
 
 
-def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
-                              value: float = None):
+def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
     """`("from-float" | "to-float" | None, refusal)` for a conversion call.
 
     Two directions, and the asymmetry between them is the whole answer:
@@ -8395,21 +8303,9 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
     `None` with no refusal means "this is not a float conversion", which is the
     answer for every ordinary `Int(x)` over an integer and lets the integer path
     run untouched.
-
-    `value` is the operand's value when the build can read it (a float literal,
-    or one with a unary minus — `float_literal_value`), and it is asked ONLY of
-    the `from-float` direction, where a double the build can read and that does
-    not fit in an `Int64` is refused instead of lowered: CPython raises
-    `OverflowError` for it, and the hardware would answer a saturation instead
-    — `INT64_MAX` on one architecture and `INT64_MIN` on the other, which is a
-    divergence the two machines used to disagree with each other on. A value
-    the build cannot read is not refused here: the emitters check the same
-    range at run time and stop with `INT_OVERFLOW_TRAP_STATUS`.
     """
     if callee_name in INT_TYPE_CTORS:
         if operand_kind == FLOAT_KIND:
-            if value is not None and float_to_int_out_of_range(value):
-                return (None, float_to_int_refusal(spelled))
             return (FLOAT_TO_INT, None)
         return (None, None)
     if callee_name not in FLOAT_TYPE_CTORS:
@@ -8423,113 +8319,6 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
             f"there is no conversion from that kind to one on this path: the "
             f"only two are an integer (SCVTF) and a double (the identity). "
             f"Convert to an integer first, or say what the value is.")
-
-
-#: The two doubles a double→int conversion must check against, and the reason
-#: the lower one is not the smaller side of the `Int64` range itself.
-#:
-#: `FCVTZS`/`CVTTSD2SI` truncate toward zero, and the truncated value must fit
-#: in an `Int64`: `INT64_MIN .. INT64_MAX`. The UPPER boundary is the range
-#: edge — `2**63` is representable, truncates to itself, and does not fit, so
-#: `x >= 2**63` is the whole upper test. The LOWER edge is not: `-2**63`
-#: truncates to `INT64_MIN` and FITS, so the range's own minimum is not the
-#: constant. But a double cannot name the trap: the spacing of binary64 above
-#: `2**63` is 2048, so there is no double between `-2**63 - 2048` and
-#: `-2**63`, and "the value does not fit below the range" over doubles is
-#: exactly `x <= -2**63 - 2048`. Both boundaries are doubles, both are the
-#: extreme members of the trap, and a Python `float` read of either is exact,
-#: so the build-time and run-time halves compare the same two values.
-FLOAT_TO_INT_HI = 2.0 ** 63
-FLOAT_TO_INT_LO = -(2.0 ** 63) - 2048
-
-
-def float_to_int_out_of_range(value: float) -> bool:
-    """Whether a double's truncated value does not fit in an `Int64`.
-
-    The ONE test both halves of the double→int decision mean: the build's
-    refusal asks it of a literal the source spelled, and the emitters' range
-    test is the same inequality over the run-time word. CPython is the
-    oracle: `int()` truncates toward zero and raises `OverflowError` when
-    the truncated value is past `Int64`'s range, and over the set of doubles
-    that is exactly `x >= FLOAT_TO_INT_HI` or `x <= FLOAT_TO_INT_LO` (the
-    boundary arithmetic is the comment on the constants above).
-
-    An infinity answers `True`, which is right: CPython raises `OverflowError`
-    for it, and the hardware would saturate. A NaN answers `False`, because
-    neither comparison holds for one, and a NaN is the one input the trap
-    must NOT take: it has no value to check, `FCVTZS`/`CVTTSD2SI` give it the
-    hardware's saturation, and `float_int_conversion_note` records that
-    divergence rather than a comparison settling it.
-    """
-    return value >= FLOAT_TO_INT_HI or value <= FLOAT_TO_INT_LO
-
-
-def float_literal_value(e):
-    """The value of a float literal, or of one with a unary `+`/`-`, else None.
-
-    The one reader of "can the build read a double", for both backends, for
-    the reason `integer_literal_value` exists: a rule that read the literal
-    with one backend's private spelling is a rule that misses the other
-    spelling. `Int(1e300)` and `Int(-1e300)` are the two shapes the parser
-    keeps — the minus is a node (`UnaryOp('-', FloatLiteral)`) rather than a
-    sign on the literal — and a `0 - 1e300` is a `BinaryOp`, which no build
-    can fold here, so it is None and the run-time range test answers it.
-    """
-    if isinstance(e, F.FloatLiteral):
-        return e.value
-    if isinstance(e, F.UnaryOp) and e.op in ("-", "+"):
-        v = float_literal_value(e.operand)
-        if v is not None:
-            return -v if e.op == "-" else v
-    return None
-
-
-def float_to_int_refusal(spelled: str) -> str:
-    """The build-time half of the double→int range decision.
-
-    Asked from `float_conversion_lowering` when the build can read the operand
-    and `float_to_int_out_of_range` says it does not fit: the source spelled a
-    value, so the answer CPython gives — an `OverflowError`, the program's own
-    next line never reached — is knowable at build time, and the honest move
-    is to say so rather than lower a conversion the hardware would answer with
-    a saturation. The saturation is not one wrong answer: `FCVTZS` clamps at
-    `INT64_MAX` and `CVTTSD2SI` at `INT64_MIN`, so the two architectures used
-    to answer the same source with two different programs, which is the
-    divergence this refusal closes at the place it is decidable. A value the
-    build cannot read is not refused and is checked at run time instead —
-    `float_to_int_trap_message` is that half, and `INT_OVERFLOW_TRAP_STATUS`
-    is the one status both leave behind.
-    """
-    return (f"{spelled} converts a double whose value the build can read, and "
-            f"it does not fit in an Int64: CPython raises OverflowError for "
-            f"an `int()` past the 64-bit range, and the hardware's "
-            f"FCVTZS/CVTTSD2SI would answer a saturation instead — "
-            f"{INT64_MAX} on one architecture and {INT64_MIN} on the other — "
-            f"so this build refuses rather than emit the answer the hardware "
-            f"would give. A value the build cannot read (a name, a parameter, "
-            f"a field) is not refused here: it is checked at run time, and an "
-            f"out-of-range one stops the program with the integer overflow's "
-            f"status.")
-
-
-def float_to_int_trap_message() -> str:
-    """The ONE text a double→int conversion past the range writes to fd 2.
-
-    For BOTH backends, in the shape of `int_overflow_trap_message`: the three
-    things a reader needs and no more — what the target cannot do, what
-    CPython would have said, and that this is a stop rather than an answer.
-    The status it is written for is `INT_OVERFLOW_TRAP_STATUS`, because "this
-    program could not be answered on this target" is one answer on this path,
-    and a reader who has seen an overflow stop should not have to learn that a
-    conversion stops differently.
-    """
-    return ("OverflowError: this program converted a double to an integer, "
-            f"and the double's truncated value does not fit in the signed "
-            f"64-bit range this target has for an integer ({INT64_MIN} .. "
-            f"{INT64_MAX}). CPython raises OverflowError for that program; "
-            "this formal image has no way to raise, so it stops here rather "
-            "than answer the hardware's saturation (which is a different "
-            "number on each architecture).\n")
 
 
 def float_literal_bits(value) -> int:
@@ -9066,7 +8855,7 @@ LENGTH_DEPENDENT_METHODS = {
 # `char *` builds and runs on both backends. Note that the length is RIGHT
 # THERE, in slot 1 — so "a string needs a length" is not the problem these 16
 # files have; they have a length and cannot keep it. See
-# bugs/formal/FORMAL_string_value_model.md, which records the decision, the cost, and
+# bugs/FORMAL_string_value_model.md, which records the decision, the cost, and
 # the two representations' collision.
 
 # The two libc symbols this representation makes available, named once so a
@@ -9090,7 +8879,7 @@ LENGTH_DEPENDENT_METHODS = {
 # compared `b`'s NUL, so it cannot succeed unless `a` ends there too. One extra
 # `strlen` and one extra `add`, no new symbol, and both halves are the same
 # libc calls the same two backends already make. See
-# bugs/formal/FORMAL_string_value_model.md for the x86-64 observation and what it does
+# bugs/FORMAL_string_value_model.md for the x86-64 observation and what it does
 # and does not establish.
 STRING_LENGTH_SYMBOL = "strlen"
 STRING_COMPARE_SYMBOL = "strncmp"
@@ -9378,7 +9167,7 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
 # tidying: a byte answer presented where CPython gives a code-point answer is a
 # MISCOMPILE — a program that indexes by the answer then reads out of range,
 # and a program that only prints it is wrong in a way no reader of the output
-# would catch. The representation decision above (`bugs/formal/FORMAL_string_value_model.md`
+# would catch. The representation decision above (`bugs/FORMAL_string_value_model.md`
 # §"The decision": a formal value is one word and a string is a bare `char *`)
 # does not change, and neither does anything above this value model; what
 # changes is that the ONE question "is this byte count a code point count" is
@@ -12843,7 +12632,7 @@ def interpolated_literal_quote_start(spelled: str) -> int:
     `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
     open their quote at index **2** while `f"…"` opens it at 1. The reader below
     used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
-    missing quote that was not missing — `bugs/formal/FORMAL_the_interpolated_literal_
+    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
     reader_assumes_a_one_character_prefix.md`. The lexer above it
     (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
     known the prefix width since 2026-10-05; this is the one answer the reader
@@ -12878,7 +12667,7 @@ def interpolated_literal_segments(spelled: str) -> list:
     apart: `expr` is a value, `:spec` is a FORMAT (`>3`, `04d`) and `!conv` is a
     CONVERSION (`!r`, `!s`) — and neither of the latter two is a value on this
     path in any case, which is what
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
+    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
     to say rather than answering them as if they were an f-string's field.
 
     Brace-depth tracked, so `f"{d['k']}"` and `f"{ {'a': 1}['a'] }"` split
@@ -13017,7 +12806,7 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         spec or a conversion, since those are three questions and the old
         sentence merged them into one;
       * the `print` advice, which was wrong and is gone.
-        `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
+        `bugs/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
         the fix** … the message's own advice is wrong", and it is: CPython's
         `print` puts a `sep` between its operands, so following "Print the parts
         as separate operands" on `f"n={n}"` with `n = 7` gives
@@ -13203,7 +12992,7 @@ def integer_text_width(bits: int) -> int:
     against `decimal` should find a formula.
 
     This is the number §7.1 of
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
+    `bugs/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
     never been asked for: a buffer with a COMPILE-TIME-KNOWN bound needs each
     field's WIDTH to be known at compile time, and an integer's width is a
     property of its declared type rather than of its value — which is the only
@@ -13220,12 +13009,6 @@ def integer_text_width(bits: int) -> int:
 # `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
-
-#: Export-rule answers `_export_rule_for` in `build.py` returns when the
-#: defining module declares a name but no exclusion applies (DECLARED), or
-#: never names it at all (ABSENT). Both are `reflect.EXCL_*`-shaped strings.
-EXPORT_RULE_DECLARED = "declared"
-EXPORT_RULE_ABSENT = "absent"
 
 # What an f-string's FIELD has to be for a buffer's bound to be known before
 # the program runs. Read out of the corpus by
@@ -13281,7 +13064,7 @@ def interpolated_literal_bound(spelled: str, field_width=None):
     over its bytes (`formal/model.py`'s text-encoding block and
     `LENGTH_DEPENDENT_METHODS`), so a composition that is not terminated is a
     `len()` that walks past the end of it. That is the obligation
-    `bugs/formal/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
+    `bugs/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
     the first method which can build a string at run time inherits the
     obligation" — and inheriting it is cheaper than a second word in every
     string value on this path.
@@ -14752,7 +14535,7 @@ def is_set_expr(e) -> bool:
 
     **Set-ness is a question nothing else asked, and the reason it has to be
     asked is that the value model does not keep it.** A set lowers as a list
-    (`bugs/formal/FORMAL_set_value_model.md` says so and `container_literal_elem_kind`
+    (`bugs/FORMAL_set_value_model.md` says so and `container_literal_elem_kind`
     is why: a `SetExpr`, a `ListExpr` and a `DictExpr` all classify as
     `list:<elem>`), so `_blob_vars` holds all three and `ValueKinds` cannot
     tell them apart. The one operator that CAN tell them apart is `|`, because
@@ -14937,7 +14720,7 @@ def container_escape_sites(fn, returns_container=None, copied=None) -> list:
     CPython answers `11 22 33` in both. **A list LITERAL at the return site is
     the same shape and the same wrong answer** (`return [11, 22, 33]`, measured
     identically), which corrects
-    `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3: a returned container
+    `bugs/FORMAL_listdir_no_run_time_sequence.md` item 3: a returned container
     literal is NOT `malloc`'d here, and "it reads correctly immediately after the
     call" is the only reason it looked like it was.
 
@@ -15538,7 +15321,7 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
         f"blob the callee appends to rather than a concatenation or a splat, "
         f"and when every element is provably a word — so the reader is being "
         f"told which of those four this program is. "
-        f"`bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
+        f"`bugs/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
         f"the capability that closes the rest (a container with a run-time "
         f"length, `malloc`'d rather than frame-resident). What lowers today: "
         f"read the value before calling anything else, keep the container in "
@@ -16289,7 +16072,7 @@ def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:
     the same `strlen` the refusal told the reader to write by hand, and the
     empty string is the case that tells a correct lowering from a null test.
     One table, three or four spellings of one question; see
-    bugs/formal/FORMAL_string_value_model.md ("found and not fixed").
+    bugs/FORMAL_string_value_model.md ("found and not fixed").
     """
     if op not in STRING_ARITHMETIC_UNARY_OPS:
         return None
@@ -16475,7 +16258,7 @@ def truthy_lowering(kind, expr=None) -> str:
 # `len` read the count and a subscript read one byte), and by both emitters.
 # One set for all three, because a constructor that reserved word slots while
 # the kind said `byte` would build a blob whose COUNT and whose ELEMENTS
-# disagree — the exact defect `bugs/formal/FORMAL_bytearray_and_bytes_have_no_
+# disagree — the exact defect `bugs/FORMAL_bytearray_and_bytes_have_no_
 # representation.md` was filed for.
 BYTE_BLOB_CTORS = frozenset({"bytearray"})
 
@@ -17163,7 +16946,7 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     derives the field set by walking every method body of the struct twice, and
     so does `struct_sole_field_name`, so the guard doubled the price of the
     question it was guarding.  This is the same provably-dead filter
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §4.1 removed from
+    `bugs/FORMAL_build_cost_2026-10-03.md` §4.1 removed from
     `struct_derived_names`, and the reason it is worth writing down rather than
     leaving as an unexplained simplification: a reader who deletes the `None`
     test on the strength of "the count already said so" would be deleting the
@@ -17191,7 +16974,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
 
     A crash, not a wrong answer, and that is worth saying plainly: a segfault is
     at least loud, and this is the mildest member of the family in
-    bugs/formal/FORMAL_string_value_model.md. It is refused rather than lowered because
+    bugs/FORMAL_string_value_model.md. It is refused rather than lowered because
     the result would have to be a NEW container, and the one shape a slice of a
     string can have — an interior pointer `s + k` for a suffix, or the NUL-
     terminated bytes up to an end offset for a bounded one — is a string whose
@@ -17223,7 +17006,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
         f"capability — but a BOUNDED slice has no representation here at all, "
         f"so neither does. Index with an integer offset (`{spelled_obj}[i]`, "
         f"which yields the byte) or use a method; see "
-        f"bugs/formal/FORMAL_string_value_model.md")
+        f"bugs/FORMAL_string_value_model.md")
 
 
 # ── `in` / `not in` on a string haystack ──────────────────────────────────
@@ -17256,7 +17039,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
 # the `lstrip` loop: it IS the algorithm, it cannot be half-right, and there is
 # then nothing to keep in step between two architectures. `strchr` was checked
 # to BIND on both backends before being relied on here (the x86-64 `strcmp`
-# observation in bugs/formal/FORMAL_string_value_model.md is why that is worth a
+# observation in bugs/FORMAL_string_value_model.md is why that is worth a
 # measurement rather than an assumption): with `STRING_COMPARE_SYMBOL` pointed
 # at it, a program that calls it ran to completion and returned a non-NULL
 # pointer on arm64 and on x86-64.
@@ -17559,7 +17342,7 @@ def string_element_refusal(base, index, fn=None, decls=None,
     "A character test with no byte load, which is the only way to ask this
     question on this target". So the byte subscript is not this path's way of
     reading a character, in this module or in this corpus; what a `str` element
-    read costs is still recorded in `bugs/formal/FORMAL_string_value_model.md` and is
+    read costs is still recorded in `bugs/FORMAL_string_value_model.md` and is
     still refused everywhere else.
 
     **This is a REFUSAL and not a fold, and the difference from `len` is the
@@ -17643,7 +17426,7 @@ def string_index_refusal(base_kind, index_kind,
     NOT the same refusal as `string_operand_is_string(base_kind)` being false:
     this is about the INDEX. A string base with an integer index is `s + i`,
     which is real C pointer arithmetic and is lowered, giving the byte at that
-    offset — see the `s[0]` case in bugs/formal/FORMAL_string_value_model.md for why
+    offset — see the `s[0]` case in bugs/FORMAL_string_value_model.md for why
     that byte rather than a one-character String is a recorded divergence
     rather than a refusal.
     """
@@ -17661,6 +17444,130 @@ def string_index_refusal(base_kind, index_kind,
         f"does have")
 
 
+def spelled(expr) -> str:
+    """`expr` as the source spells it, for a diagnostic that quotes it.
+
+    Lives here rather than in either backend because a refusal has to be able
+    to say WHICH operand it is about — `len(m)` and `len(k)` are different
+    problems and a message that names neither sends the reader to look at the
+    whole function — and the two backends would otherwise spell it two ways
+    and a diagnostic would match on one architecture and not the other.
+
+    Deliberately an approximation: a chain is spelled out, and anything this
+    does not have a shape for is named by its node type, which is the same
+    fallback `_dotted` uses for a callee it cannot flatten.
+    """
+    if isinstance(expr, F.StringLiteral):
+        return repr(expr.value)
+    if isinstance(expr, F.IdentExpr):
+        return expr.name
+    if isinstance(expr, F.MemberExpr):
+        parts = []
+        node = expr
+        while isinstance(node, F.MemberExpr):
+            parts.append(node.member)
+            node = node.obj
+        parts.append(spelled(node))
+        return ".".join(reversed(parts))
+    if isinstance(expr, F.CallExpr):
+        callee = _flat_callee(expr)
+        # **A call whose callee is a DOT — `cat().startswith("q")` — is spelled
+        # through `spelled(node)` rather than named by its node type.** The
+        # recursion above hands this arm a `CallExpr` for `cat()` when the chain
+        # rooted here, and the fallback printed `CallExpr(...)`, so a refusal
+        # about `cat().startswith("q")` quoted `CallExpr(...)` — which names no
+        # construct the author wrote, and is the same complaint
+        # `_emit_expr`'s own `Ellipsis` refusal makes ("a node the author never
+        # wrote"). A reader sent to look for `CallExpr` finds nothing.
+        #
+        # The dotted callee goes through the SAME `spelled` recursion, so
+        # `a.b().c` prints `a.b().c` rather than being flattened by
+        # `_flat_callee`'s own rule (which would give `b` for a package path).
+        func = getattr(expr, "func", None)
+        if isinstance(func, F.MemberExpr):
+            return f"{spelled(func)}(...)"
+        # …and a call whose arguments are ALL KEYWORD is spelled with them.
+        # `P(x=0, y=1)` is the shape a `case` class pattern arrives in
+        # (`fire_compiler.py` parses `case Point(x=0, y=1):` as a plain call),
+        # and the keywords are the whole of what the reader wrote — `(...)`
+        # hides the only part that says which pattern it is. A call with
+        # positional arguments keeps `(...)`, which is the shape the argument
+        # arm above was written for and where the values are usually not what
+        # the message is about.
+        if callee and not (getattr(expr, "args", None) or []) \
+                and (getattr(expr, "kwargs", None) or []):
+            return "%s(%s)" % (callee, ", ".join(
+                "%s=%s" % (k, spelled(v)) for k, v in expr.kwargs))
+        return f"{callee}(...)" if callee else f"{type(expr).__name__}(...)"
+    if isinstance(expr, F.IntLiteral):
+        # The literal's VALUE, which is its spelling. Same reason as the
+        # subscript arm below: a message that quotes `IntLiteral` instead of
+        # `46` names the node's type rather than the thing the reader is
+        # looking at.
+        return str(expr.value)
+    if isinstance(expr, F.SliceExpr):
+        # `a[1:3]`, not `SliceExpr`. A `del a[1:3]` target PARSES as a bare
+        # `SliceExpr` (the subscript is the target's own shape, not a
+        # `SubscriptExpr` with a slice index), so a refusal that quotes this
+        # node without spelling it named the parser's type and not the line —
+        # and a stepped-slice `del` is exactly the case that needs the bounds
+        # in the message.
+        bounds = [getattr(expr, part, None) for part in ("start", "stop")]
+        step = getattr(expr, "step", None)
+        if step is not None:
+            bounds.append(step)
+        return (f"{spelled(expr.obj)}[{':'.join(spelled(b) for b in bounds)}]")
+    if isinstance(expr, F.SubscriptExpr):
+        # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
+        # whose spelling is both short and exact, and it is the shape a byte
+        # read arrives as — so the diagnostic that explains `p[0] != "."` was
+        # quoting `SubscriptExpr != '.'`, which names neither the expression
+        # nor the byte.
+        if isinstance(expr.index, F.SliceExpr):
+            return f"{spelled(expr.obj)}[...]"
+        return f"{spelled(expr.obj)}[{spelled(expr.index)}]"
+    if isinstance(expr, (F.TupleExpr, F.ListExpr)):
+        # `(a, b)` / `[a, b]`, element by element.  Same reason as the two arms
+        # above and the same defect it fixes: a message about a tuple target
+        # that quotes `TupleExpr` names the parser's node type and not the line
+        # the reader is looking at, and a target list is the one thing a refusal
+        # about a tuple store most needs to show.
+        open_c, close_c = ("(", ")") if isinstance(expr, F.TupleExpr) else ("[", "]")
+        return (f"{open_c}{', '.join(spelled(e) for e in (getattr(expr, 'elements', None) or []))}"
+                f"{close_c}")
+    if isinstance(expr, F.DictExpr):
+        # `{"k": v}`, pair by pair.  A `case` mapping pattern arrives as a dict
+        # display (`fire_compiler.py` parses `case {"k": v}:` as a plain
+        # expression), so the refusal that names it has to be able to quote it;
+        # `DictExpr` would name the parser's node type and not the line.
+        pairs = getattr(expr, "pairs", None) or []
+        return "{%s}" % ", ".join(
+            "%s: %s" % (spelled(pair[0]), spelled(pair[1]))
+            for pair in pairs
+            if isinstance(pair, (tuple, list)) and len(pair) == 2)
+    if isinstance(expr, F.SetExpr):
+        return "{%s}" % ", ".join(
+            spelled(e) for e in (getattr(expr, "elements", None) or []))
+    if isinstance(expr, F.DottedLiteral):
+        # `.PASS`, not `DottedLiteral`.  Same reason as the arms above and the
+        # same reader: a refusal about a `case .PASS:` that quotes the node's
+        # type names nothing the author wrote — the leading dot IS the spelling
+        # that makes it type-relative, so dropping it makes the message read as
+        # a plain name.
+        return "." + str(getattr(expr, "path", "") or "")
+    if isinstance(expr, F.UnaryOp):
+        # `*rest`, not `UnaryOp`.  A starred element of an assignment target is
+        # a shape `__init__`'s inline refuses by name, so the refusal quotes it,
+        # and `UnaryOp` tells the reader nothing they can act on.
+        return f"{expr.op}{spelled(getattr(expr, 'operand', None))}"
+    if isinstance(expr, F.BinaryOp):
+        # `a + b`, not `BinaryOp`.  The same defect as the arm above and for the
+        # same reason: an arithmetic expression is the shape a `%s` conversion is
+        # most often handed by accident (`printf("[%s]", 2 + 4)`), so the
+        # diagnostic that refuses it has to show the expression.
+        return (f"{spelled(getattr(expr, 'left', None))} {expr.op} "
+                f"{spelled(getattr(expr, 'right', None))}")
+    return type(expr).__name__
 
 
 def del_refusal(target, base_is_string: bool = False,
@@ -18606,7 +18513,7 @@ def affix_tuple_fold(dotted: str, method: str, recv, arg):
 # table is, and whose real content is that the conversion is already a no-op.
 #
 # `as_c_string_slice` is the stdlib's PREVIOUS name for the same conversion
-# (`bugs/formal/FORMAL_env_family_next_terminal.md` records the old spelling's
+# (`bugs/FORMAL_env_family_next_terminal.md` records the old spelling's
 # `unsafe_ptr()` blocker, and `test_formal_external_call.py` still transcribes
 # it), so both are here: a rename is not a reason to refuse a construct whose
 # lowering did not change.
@@ -18840,7 +18747,7 @@ VALUE_METHOD_RECEIVERS = {
 # ── the POINTER VALUE MODEL ─────────────────────────────────────────────────
 #
 # THE DECISION (wave 6, F2; the reasoning is in
-# `bugs/formal/FORMAL_pointer_value_model.md`, which is the long form of this comment).
+# `bugs/FORMAL_pointer_value_model.md`, which is the long form of this comment).
 #
 # A formal value is one 64-bit word.  A pointer is one word.  So what does a
 # pointer need beyond that?
@@ -18972,14 +18879,14 @@ VALUE_METHOD_RECEIVERS = {
 # boundary a nullable pointer is one word, while as a value a MOJO function
 # built it is an `Optional` whose tag lives a second frame away, so `if not
 # ptr:` is not answerable from the word and `Some(null)` is not `None`
-# (`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`).
+# (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`).
 #
 # **So the other half of a nullable pointer is its own table, named for the
 # question it answers**, and this is the note that says so at the point where a
 # future reader adds one: `NULLABLE_POINTER_UNWRAP_ALIASES` below is what makes
 # `value()` the UNWRAP rather than a LOAD, and adding a name to THIS table does
 # not make its `value()` an unwrap. One name per question, and the name says
-# which question it answers — which is what `bugs/formal/FORMAL_nullable_pointer_
+# which question it answers — which is what `bugs/FORMAL_nullable_pointer_
 # aliases_is_defined_twice.md` is about, and what
 # `test_formal_external_call.py`'s `no_module_level_name_is_bound_twice` keeps
 # true from then on.
@@ -19767,7 +19674,7 @@ def _declared_annotations(fn) -> dict:
     body.  A name bound by an assignment with no annotation is absent, and that
     absence is the answer every consumer here wants — a width or an integer-ness
     that no declaration states is not established, and this path refuses rather
-    than guesses (`bugs/formal/FORMAL_known_limits.md`'s rule).
+    than guesses (`bugs/FORMAL_known_limits.md`'s rule).
 
     **Agree-or-refuse, not last-write-wins**, for the reason `_name_bindings`
     gives: two declarations that name two different pointees are a
@@ -19851,7 +19758,7 @@ def _pointer_offset_scale(fn, e):
     That is not decoration.  The refusal used to name the address's BASE for
     every failure, so a program whose `p` is a perfectly good `Pointer[Int64]`
     and whose `k` has no annotation — the case
-    `bugs/formal/FORMAL_pointer_value_model.md` §9 calls "the remaining half of this
+    `bugs/FORMAL_pointer_value_model.md` §9 calls "the remaining half of this
     item" — was refused with the sentence
 
         `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
@@ -20057,7 +19964,7 @@ def _offset_scale(fn, expr, width, seen=()):
                 f"this path only scales an integer offset it can read a "
                 f"POINTER and an ELEMENT WIDTH off a declaration for: {what}. "
                 f"{advice} — see "
-                f"bugs/formal/FORMAL_pointer_value_model.md §9")
+                f"bugs/FORMAL_pointer_value_model.md §9")
     if isinstance(expr, F.CallExpr) and isinstance(expr.func, F.SubscriptExpr) \
             and isinstance(expr.func.obj, F.MemberExpr) \
             and expr.func.obj.member in ("bitcast", "rebind"):
@@ -20124,7 +20031,7 @@ def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
 
     **The identity is the correct VALUE, and it is correct for a reason that is
     about the representation rather than about the source**: `Optional[T]`'s
-    payload here is one word (`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`
+    payload here is one word (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`
     measures `Optional` at one field), so the pointer and its wrapper are the
     same storage, and unwrapping is the identity on it — exactly the identity
     `Pointer()` already is on this path (wave 4's D4) and the same one
@@ -20624,7 +20531,7 @@ def _rhs_declared_text(fn, expr, decls, functions):
 #     `Scalar[Self.dtype]`), or a struct field.  So a table whose `value` entry
 #     says "it is a load from the address the receiver holds" is FALSE about
 #     ~527 of 528 files it is reported against, which
-#     `bugs/formal/FORMAL_known_limits.md` opens by calling "worse than no message".
+#     `bugs/FORMAL_known_limits.md` opens by calling "worse than no message".
 #   * `unsafe_value` is BOTH: ~33 of its 47 sites are `Optional.unsafe_value`,
 #     which is an UNWRAP (see UNWRAP_METHODS), and ~14 are a pointer load.
 #
@@ -21787,9 +21694,10 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     # a store through a `Pointer[Float64]` writes the value's own BITS, so the
     # integer 1 is 0x1 — a denormal, not 1.0 — and the answer the reader is
     # given is `Int(x)`, which is `FCVTZS`.
-    bits = (" So a store through a `Float64` pointee writes the value's own "
+    bits = ("" if pointee_is_float else
+            " So a store through a `Float64` pointee writes the value's own "
             "BITS: `p.value() = 1` would write 0x1, a denormal rather than "
-            "1.0." if pointee_is_float else "")
+            "1.0.")
     return (
         f"the pointee is `{pointee}` and this store writes {where}.{bits} "
         f"{spelled(value)} is a different kind of word from the one the "
@@ -22358,7 +22266,7 @@ NOT_LOWERED_BUILTINS = {
            "`all`",
     "bin": "a base-2 rendering into a buffer: a digit table and a loop, and "
            "the ANSWER is a run-time string, which is "
-           "`bugs/formal/FORMAL_string_value_model.md`",
+           "`bugs/FORMAL_string_value_model.md`",
     "bool": "a compare against zero and a normalize — but the name is also in "
             "`FRAME_VALUE_ONLY_CALLS`, so the frame-address half of the answer "
             "is settled and the value half is not",
@@ -22712,7 +22620,7 @@ def not_lowered_builtin_refusal(functions, module_names=()) -> str | None:
 #     a variadic of values and belongs to `FORMAL_string_value_model.md`. The
 #     arguments are still EVALUATED (they are ordinary Python argument
 #     expressions, and evaluating them is what keeps a side effect from being
-#     dropped), but nothing is formatted from them. `bugs/formal/FORMAL_ast_module_
+#     dropped), but nothing is formatted from them. `bugs/FORMAL_ast_module_
 #     subset.md` and `FORMAL_known_limits.md` §1.1 are that neighbourhood.
 #
 # The two spellings are ONE construct with one predicate, because two private
@@ -23363,7 +23271,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
     This is `frame_receiver_escape_refusal`'s fifth case, split — it was one
     sentence over five different facts, and four of the five were false of the
     program in front of the reader.  Measured on the 12 files the sweep files
-    under it (the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md` row 8), and on the 41
+    under it (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` row 8), and on the 41
     over all roots — the population and the per-arm classification are both in
     `test_refusal_taxonomy.py::_no_def_callee_arm_checks`, one callee per arm:
 
@@ -23527,7 +23435,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"A frame address would be meaningful to a callee compiled against "
             f"the same field list, but there is no such callee here to be "
             f"compiled. "
-            f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
             f"what is still open about it")
 
 
@@ -24232,7 +24140,7 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
             f"created it, and that frame is reclaimed when the function "
             f"returns, so the address the caller would dereference names "
             f"reclaimed stack." + tail + ". "
-            f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
             f"what is still open about it")
 
 
@@ -24320,7 +24228,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 863 entry
+# a list that rots, and the shape answers the same question for all 713 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24490,7 +24398,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 863 entry points for that reason looks
+    scalar — and a rule that refuses all 713 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -24741,7 +24649,7 @@ def gimple_runtime_void_result_refusal(name: str, signature: str = "") -> str:
     the difference in direction is what makes this a refusal rather than a
     deletion: taking `void` out of `_WORD_SCALARS` outright would break the
     `void *` spellings that section 0.3 of
-    `bugs/formal/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
+    `bugs/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
     stays and this rule reads `returns_void` instead.
 
     **It is asked about the POSITION, not the callee**, so the negative is
@@ -25144,7 +25052,7 @@ def variadic_named_args(symbol: str):
 # `d_name` at 21 for the second (the `__DARWIN_STRUCT_DIRENTRY` spelling in the
 # same header). `os.listdir` read `d_name` at 21 and got `.` for the 12th byte
 # of the other layout, so it returned `cc.txt` where CPython returns `ccc.txt`
-# and a count one too high — `bugs/formal/FORMAL_x86_64_byte_read_of_a_libc_returned_
+# and a count one too high — `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_
 # pointer_reads_the_wrong_bytes.md`, whose first three candidate causes (the
 # byte read, the element read, the copy) were all measured and all wrong.
 #
@@ -25596,7 +25504,7 @@ def print_kwargs(e, backend: str):
     nine of the sixty items `tools/formal_proof_breadth.py` measures reach this
     refusal on arm64, and every one of the nine is the same `print(…, flush=True)`
     in a test's `check` helper
-    (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2, the largest
+    (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2, the largest
     `codegen-refused` family there).
 
     `flush` is answered as a LITERAL bool only, and `False` is the default so it
@@ -25788,50 +25696,6 @@ def bool_print_operand(e):
                          col=getattr(e, "col", 0))
 
 
-# The label of the one helper function each backend appends to its image:
-# CPython's shortest-round-trip `repr()` of the `double` whose bit pattern it is
-# handed, written into the caller's buffer. It is a label and not a C symbol on
-# purpose: the image links only the C library, and the whole point of the helper
-# is that the conversion CPython prints is NOT any of that library's, so it has
-# to live in the image's own `__text`. `print` of a float is the only caller,
-# and the name is published here rather than spelled in each backend because the
-# two must emit the same label the same way, and a second spelling is how the
-# call lands on a label nothing defines.
-FLOAT_REPR_SYMBOL = "__fire_float_repr"
-
-
-class FloatPrintOperand:
-    """A `print` operand that is a `double`, rendered by the float helper.
-
-    Not an expression the emitter dispatches on its own: it is a marker the
-    operand slot of `print_call_spelling`'s answer carries, and the emitter's
-    one arm for it evaluates `expr` (the double's bit pattern into the value
-    register) and branches to `FLOAT_REPR_SYMBOL` with a buffer, so the slot
-    the printf's `%s` reads holds the address of CPython's spelling of the
-    value rather than the value's own word. The wrapper exists so that both
-    halves of the decision — which operand is a fragment and which is a value,
-    and that this value is a double whose text is computed, not interned — are
-    made in `print_call_spelling` once, and each backend supplies only the
-    branch and the buffer it can spell on its own machine.
-
-    `index` is the ordinal of this float AMONG THE FLOATS of one print, and
-    `position` its index in the print's OPERAND list (the literals are
-    fragments and not operands, so the two counts differ). They are the
-    machine half of the address of the helper's buffer, which each backend
-    computes from them: the block of buffers is one reservation per print
-    call, `index` picks the 64-byte slot in it, and `position` says how far
-    the call machinery's own argument spills have carried the stack when
-    this operand is evaluated. Both are made here, in the one place that
-    sees the whole operand list, so the two backends cannot number the
-    buffers differently.
-    """
-
-    def __init__(self, expr, index, position):
-        self.expr = expr
-        self.index = index
-        self.position = position
-
-
 # ── `bytes`: the one kind whose CPython rendering is a QUOTED, ESCAPED word ──
 #
 # `print(b)` writes `repr(b)` for a `bytes`, never its text: `b'ab'`, not `ab`,
@@ -25906,28 +25770,64 @@ def bytes_repr_body(value: str) -> str:
     return quote + "".join(out) + quote
 
 
-# ── what a `print` of a FLOAT and of a CONTAINER now gets ──────────────────
+# ── the two refusals a `print` of a FLOAT and of a CONTAINER now gets ───────
 #
-# The FLOAT is RENDERED. Its old refusal ("print() of a float is refused …")
-# was a sentence whose reason was still right — CPython's `str()` of a float is
-# `repr()` of it, the SHORTEST decimal that parses back to the same 64 bits, and
-# no libc conversion is that function: `%g` drops the `.0` CPython writes
-# (`100000` where CPython writes `100000.0`), `%f` is six digits after the
-# point (`1.500000`), `%e` is a fixed scientific spelling CPython uses only
-# outside `[1e-4, 1e16)`, `%.17g` round-trips without being what CPython
-# PRINTS (`0.10000000000000001` where CPython writes `0.1`), and `-0.0` survives
-# only through the round-trip rule's own spelling. The rendering that replaced
-# the refusal is each backend's `FLOAT_REPR_SYMBOL` helper, which computes that
-# shortest decimal over the value's own bits — `%.*g` at the smallest precision
-# that parses back, laid out in CPython's notation, with `inf`/`-inf`/`nan` and
-# `-0.0` from the same reader — and `print_call_spelling`'s `FLOAT_KIND` arm
-# hands the value to it through `FloatPrintOperand`.
+# Both replace a message that was FALSE about the source, which is the defect
+# `FORMAL sweep work map 2026-10-05 b14` §4.2 names for the `rf`/`fr`
+# f-strings ("every one is refused with a sentence that is FALSE about the
+# source").  `print(1.5)` was refused with "print() cannot tell whether
+# FloatLiteral is a string or a number … guessing would print an address as if
+# it were text" — and this path knows perfectly well that `1.5` is neither: the
+# model's own `FLOAT_KIND` says it is a `double`, and `is_number_kind` says
+# no.  The refusal was right and its REASON was a lie about a value the model
+# had already classified, which sends the reader to annotate a literal.
 #
-# The CONTAINER is still refused, for the shape `container_print_refusal`
-# names: a count this build does not know, a loop rather than a conversion.
-# Its message replaced the generic one that was FALSE about the source in the
-# same way the float's was, and the two sentences are the difference between
+# A refusal whose reason names the real absence is the whole difference between
 # "this path cannot do it" and "you wrote something wrong".
+
+
+def float_print_refusal(backend: str) -> str:
+    """Why `print` of a `double` is refused rather than rendered.
+
+    NOT "there is no float here" — there is one 64-bit word holding the
+    IEEE-754 binary64 pattern, and `model.FLOAT_KIND` is the row that says so.
+    The absence is the RENDERING, and it is a specific one: CPython's `str()` of
+    a float is `repr()` of it, which is the SHORTEST decimal string that parses
+    back to the same bits (David Gay / Grisu), and libc's conversions are not
+    that function:
+
+      * `%g` is six significant digits by default and drops the `.0` CPython
+        writes: `repr(100000.0)` is `100000.0` where `%g` writes `100000`;
+      * `%f` is six digits after the point: `1.5` becomes `1.500000`;
+      * `%e` is never CPython's spelling — CPython uses scientific notation only
+        outside `[1e-4, 1e16)`;
+      * `%.17g` round-trips but is not what CPython PRINTS: `repr(0.1)` is `0.1`
+        and `%.17g` writes `0.10000000000000001`;
+      * `-0.0` needs the round-trip rule's own spelling: CPython writes `-0.0`,
+        `%f` writes `-0.000000` and `%g` writes `-0`.
+
+    (`inf`, `-inf` and `nan` are NOT part of this: measured on this target's
+    libc, all four conversions write them the way CPython spells them. An earlier
+    draft of this text claimed otherwise and the measurement corrected it — see
+    `bugs/FORMAL_a_float_has_no_print_spelling.md` §3 for the whole table.)
+
+    So every conversion libc offers is either a wrong number or a wrong
+    SPELLING, and this path's whole rule about output is that what lands on
+    stdout is what the source says.
+    """
+    return (
+        f"print() of a float is refused on the formal {backend} path, and the "
+        f"missing thing is its SPELLING rather than its storage: the value is "
+        f"one 64-bit word holding an IEEE-754 binary64, but CPython's `str()` "
+        f"of a float is the shortest decimal that parses back to the same bits "
+        f"(`repr(0.1)` is `0.1`, `repr(100000.0)` is `100000.0`), which is not "
+        f"any libc conversion — `%f` writes six digits after the point, `%g` drops the "
+        f"`.0`, `%e` is a fixed scientific spelling CPython only uses outside "
+        f"`[1e-4, 1e16)`, and `%.17g` round-trips without being what CPython "
+        f"prints. Refused rather than emitted, because a float printed in a "
+        f"spelling the source never wrote is a wrong answer that looks right. "
+        f"Print an integer if you meant one"
+    )
 
 
 def container_print_refusal(backend: str, kind, node_name: str) -> str:
@@ -26008,16 +25908,10 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
     printf for fewer arguments than it was handed and everything after the first
     literal would be read one slot late.
 
-    Raises `CodegenError` for the shapes this path cannot render, each with
+    Raises `CodegenError` for the five shapes this path cannot render, each with
     a message that says what CPython prints and what is missing here.
     """
     frags, operands = [], []
-    # The ordinal of a float AMONG THE FLOATS of this print — `index` on the
-    # `FloatPrintOperand` — and the operand list's own length, which is its
-    # `position`. Both are needed by the backends' buffer arithmetic (see the
-    # class's docstring), and the operand list is the one this loop builds, so
-    # this loop is the one place both are known together.
-    float_index = 0
     for a in args:
         if isinstance(a, F.StringLiteral):
             # `print_literal` renders a `str` literal's text and a `bytes`
@@ -26070,18 +25964,12 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
         if string_operand_is_string(kind):
             frags.append("%s")
         elif kind == FLOAT_KIND:
-            # Its own arm, and it comes BEFORE the generic refusal below for
-            # the reason that refusal was FALSE about a float: the model
-            # classifies one as `FLOAT_KIND` and `is_number_kind` says no. The
-            # answer is CPython's `repr()` of the value, computed at run time
-            # by the backend's `FLOAT_REPR_SYMBOL` helper — the shortest
-            # decimal that parses back to the same 64 bits, in CPython's
-            # own notation — and the slot the `%s` reads is that helper's
-            # buffer, not the double's own word.
-            frags.append("%s")
-            operands.append(FloatPrintOperand(a, float_index, len(operands)))
-            float_index += 1
-            continue
+            # Its own arm, and it comes BEFORE the generic refusal below
+            # because the generic one is FALSE about a float: the model
+            # classifies one as `FLOAT_KIND` and `is_number_kind` says no, so
+            # "cannot tell whether this is a string or a number" describes a
+            # value the model has already classified.
+            raise CodegenError(float_print_refusal(backend))
         elif is_number_kind(kind):
             # `is_number_kind` and not `== INT_KIND`: a type TAG is a word, so
             # `print(t)` for `t = bool` prints the tag, which is what it
@@ -26605,7 +26493,7 @@ def _kind_of_nested_elements(elems, resolve=None) -> str | None:
     with its fix, which is this arm.
 
     Measured, both architectures, before this existed — and it is the
-    comprehension row of `bugs/formal/FORMAL_string_value_model.md`, found with the
+    comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
     `for` row beside it: a `for` target over `["p", "", "q"]` classified as
     `list:str` and the empty string was TRUTHY, because the count-field load
     reads the eight bytes of `__TEXT` that follow the terminating NUL. The kind
@@ -27087,7 +26975,7 @@ def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
     operands and refuses each of them in `_print_call`; a `printf` the SOURCE
     wrote was only checked for a usable FORMAT, so `printf("%d", g(…))` for a `g`
     with no `return` built and printed the leftover word — the same divergence
-    `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
+    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
     None.md` refuses for `print(g(…))`, at the same position (the value's word
     becoming text) and one call spelling away.
 
@@ -29123,6 +29011,24 @@ _COMPARISON_OPS = ("<", ">", "<=", ">=", "==", "!=", "is", "is not", "in",
                    "not in")
 
 
+def _flat_callee(call) -> str | None:
+    """The dotted name a call's callee spells, or None if it is not a name.
+
+    A module call (`os.path.join`) and a value's method (`items.append`) both
+    arrive as a dotted name; the backends tell them apart by asking whether the
+    receiver is a local, not by looking at the spelling."""
+    func = call.func if isinstance(call, F.CallExpr) else call
+    if isinstance(func, F.IdentExpr):
+        return func.name
+    parts = []
+    node = func
+    while isinstance(node, F.MemberExpr):
+        parts.append(node.member)
+        node = node.obj
+    if parts and isinstance(node, F.IdentExpr):
+        parts.append(node.name)
+        return ".".join(reversed(parts))
+    return None
 
 
 def subscript_callee_name(call) -> str | None:
@@ -29139,7 +29045,7 @@ def subscript_callee_name(call) -> str | None:
     of a subscript callee they can flatten (`arm64_codegen._callee_symbol` has
     carried a `SubscriptExpr` arm for a long time and `x86_64_codegen`'s copy
     has not, which is a pre-existing x86-64 gap listed in
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1).  Collapsing that gap is
+    `bugs/FORMAL_wide_receiver_by_reference.md` §5.1).  Collapsing that gap is
     not this change's job, so the shared question is asked at the level both
     backends can answer: the BASE NAME, which is the whole of what the
     empty-container decision needs.
@@ -29237,7 +29143,7 @@ def _parameter_argument_shape(arg, rets=None):
 
     **The container row is the one `len()` of a LIST PARAMETER needs, and it is
     here rather than in the `len` reader for the reason
-    `bugs/formal/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+    `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
     subscripts.md` gives: the parameter is a blob, `xs[i]` on it already lowers
     through the blob path (`subscript_base_lowering`'s own answer for a base no
     declaration makes a pointer), and only `len` — the one reader that insists
@@ -29398,7 +29304,7 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
     `_parameter_argument_shape` reads the argument's own SHAPE, and a name has
     none — so before this, `f(some_local)` claimed nothing and every name
     reached through one was a word. Measured on both architectures, the shape
-    the sweep filed it on (`bugs/formal/FORMAL_sweep_singles_second_half.md` §4's last
+    the sweep filed it on (`bugs/FORMAL_sweep_singles_second_half.md` §4's last
     paragraph, and the limitation this module's own header listed first):
 
         def helper(t):  return len(t)
@@ -29622,8 +29528,7 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
             # initializer is not a type: `ValueKinds._bind_value` takes the
             # annotation for exactly this reason.
             if len(anns) == 1:
-                for only in anns:    # exactly one: `len(anns) == 1` above
-                    seen.add(_declared_value_shape(only))
+                seen.add(_declared_value_shape(next(iter(anns))))
             else:
                 seen.add(None)    # two declarations of one name: nothing
         else:
@@ -29747,7 +29652,7 @@ class ParameterKindReader:
 # modules that both define `helper` cannot cross-bind, and a bare `f()` cannot
 # reach either of them through the dotted table. (The flat bare-name map is a
 # different, older, coarser answer and stays where it is;
-# `bugs/formal/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
+# `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
 # advertised there at all.)
 
 
@@ -30186,7 +30091,7 @@ def foreign_bytes_export_kind(entry) -> str | None:
       kernel-derived `os.path` exports (`realpath`, `abspath`, `expanduser`) are
       mixed for the same reason and are therefore also absent — a stated gap
       rather than a silent one, and it is what
-      `bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`'s
+      `bugs/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`'s
       Status records as the remainder of this work.
     * **Every `String` in user code**, which is the point of the whole exercise:
       an exemption here would be right for the few kernel strings and wrong for
@@ -30228,7 +30133,7 @@ def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
     this path cannot tell an integer from a frame address and the unclassified
     answer is the one that refuses rather than guessing; widening this to the
     scalars is a decision with its own blast radius, and the measured gap this
-    closes is the container one (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`'s
+    closes is the container one (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s
     item 1: `len()` of a value the callee's declaration says is a list).
 
     `declaration` may be None — a library shipped without its sources, or one
@@ -30468,41 +30373,6 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
     return by_name.get(callee)
 
 
-def _respell_aliased_module_qualifier(name: str, aliases: dict) -> str:
-    """A dotted call rooted at an import alias, re-spelled at the module.
-
-    `import lib2 as L` spells the call `L.answer`, but every export table is
-    filed under the module the alias stands for — `lib2` — so the qualifier
-    `L` has to be translated to `lib2` before the table is asked. This is the
-    ONE re-spelling both readers of a dotted callee use, `dylib_extern_symbol`
-    (which SYMBOL the call binds) and `dylib_callee_export` (whose DECLARATION
-    its arguments bind against), so the two cannot answer about different
-    modules for the same call.
-
-    Only a MODULE binding is re-spelled, and the discriminator is the
-    `imported_bindings` value's own shape: a module import's DEFINING name is
-    the module itself (`L -> (lib2, lib2)`), while a `from m import f as g`
-    alias's defining name is the FUNCTION (`g -> (m, f)`) and a `g.…` chain is
-    a read through a value, not a library qualifier — `defining == module` is
-    what tells the two apart. A non-aliased import spells the qualifier as the
-    module already (`os -> (os, os)`), so `module != qualifier` excludes it and
-    every existing dotted call passes through unchanged. A bare name is
-    returned as it came in: the alias for one of those is a BARE local and the
-    flat map answers it through `dylib_aliased_export`, not this.
-    """
-    if not aliases or "." not in name:
-        return name
-    qualifier, dot, leaf = name.rpartition(".")
-    pair = aliases.get(qualifier)
-    if pair is None:
-        return name
-    module_spelling, defining = pair[0], pair[1]
-    if (module_spelling and defining == module_spelling
-            and module_spelling != qualifier):
-        return module_spelling + dot + leaf
-    return name
-
-
 def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
                         aliases: dict, callee: str):
     """The manifest export entry the call to `callee` binds, or None.
@@ -30541,12 +30411,6 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     `None` means nothing on this link line publishes the name, which is the
     caller's cue to keep whatever answer it has for a callee it cannot resolve
     (`dylib_extern_symbol` is the one that turns it into a refusal)."""
-    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
-    # with the local name, and BOTH lookups below are filed under the module
-    # the alias stands for. Re-spelled once, here, so the declaration reader
-    # and the symbol reader (`dylib_extern_symbol`) cannot answer about two
-    # different modules for the same call.
-    callee = _respell_aliased_module_qualifier(callee, aliases)
     entry = dylib_aliased_export(by_name, by_module, callee, aliases)
     if entry is not None:
         return entry
@@ -30795,12 +30659,6 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             raise CodegenError(dylib_aliased_export_refusal(
                 name, aliases, by_module))
         return (syms or {}).get(name, name)
-    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
-    # with the local name, and the export table is filed under the module the
-    # alias stands for. Re-spelled through the SAME helper the declaration
-    # reader uses, so the symbol and the declaration the arguments bind against
-    # reach the same library.
-    name = _respell_aliased_module_qualifier(name, aliases)
     entry = dylib_export_lookup(by_name, by_module, name, forwarded)
     if entry is not None:
         return entry.get("symbol") or name
@@ -30820,10 +30678,10 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             f"leading `_`, a generic template, an overload, or a C library "
             f"symbol such as `exit` or `write`) is not advertised, so a module "
             f"that defines one cannot be called by that name. The exclusion is "
-            f"measured and settled in bugs/formal/FORMAL_known_limits.md 1.1; a module "
+            f"measured and settled in bugs/FORMAL_known_limits.md 1.1; a module "
             f"that needs to publish mutable state rather than functions is a "
             f"different gap, written down in "
-            f"bugs/formal/FORMAL_module_state_no_storage.md")
+            f"bugs/FORMAL_module_state_no_storage.md")
     refusal = dylib_value_member_refusal(name, module, leaf, by_module,
                                          forwarded)
     if refusal:
@@ -30898,7 +30756,7 @@ def dylib_value_member_refusal(name: str, module: str, leaf: str,
             f"it to bind. A dylib publishes functions, not the objects they "
             f"are called on, so an operation on a value a module hands back "
             f"cannot be spelled as a member of it; {repair}. "
-            f"bugs/formal/FORMAL_module_state_no_storage.md §(2) records why a value "
+            f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
             f"cannot cross a dylib boundary at all")
 
 
@@ -30983,7 +30841,7 @@ def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
             f"dylib publishes functions, not the objects they are called on, so "
             f"an operation on a value a module hands back cannot be spelled as a "
             f"member of it; {repair}. "
-            f"bugs/formal/FORMAL_module_state_no_storage.md §(2) records why a value "
+            f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
             f"cannot cross a dylib boundary at all")
 
 
@@ -31102,7 +30960,7 @@ def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
 #
 # A dylib cannot export a VARIABLE: there is nowhere for one to live, because
 # every value a formal program can name lives in a function's own stack scratch
-# (`bugs/formal/FORMAL_module_state_no_storage.md`). But a module-level name the build
+# (`bugs/FORMAL_module_state_no_storage.md`). But a module-level name the build
 # FOLDED to a literal needs no storage, for the reason the in-unit substitution
 # already relies on: the module-level sequence is its only writer, and a
 # function that writes the name writes a LOCAL of the same name, which shadows
@@ -31789,7 +31647,7 @@ def narrow_float_ctor_refusal(callee_name: str) -> str:
     one float kind `FLOAT_TYPE_CTORS` carries, `FLOAT_TYPE_NAMES` is its two
     spellings, and `FLOAT_KIND` is it.  Everything here is narrower than it or
     wider than one word, which is the whole of the boundary this document owns —
-    `bugs/formal/FORMAL_float_binary64_only.md`.
+    `bugs/FORMAL_float_binary64_only.md`.
     """
     if callee_name == "UInt128":
         what = ("128 bits, and a formal value is one 64-bit word — so it is "
@@ -31904,7 +31762,7 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
     `str(<call>)` whose result kind is unknown — is still the identity, and
     still faults at its first use. Closing that is not this rule's job: it needs
     the value model to classify call results, which is
-    `bugs/formal/FORMAL_string_value_model.md`'s subject and not a name in a table.
+    `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
@@ -32005,7 +31863,7 @@ def type_constructor_kind(callee_name: str):
 #   * `Optional` — a value OR the empty one, and the empty one is the integer
 #     0, so an empty `Optional` is indistinguishable from `Some(0)`. This is
 #     the one-word value model showing through, and it is
-#     `bugs/formal/FORMAL_pointer_value_model.md`'s niche question, not a table entry.
+#     `bugs/FORMAL_pointer_value_model.md`'s niche question, not a table entry.
 #   * `StringRef` / `InlineArray` / `Array` / `StaticTuple` — each is a blob in
 #     the *source* language with an element width or a pointer this path does
 #     not carry, so "empty" for them is a statement about a layout nothing here
@@ -32239,7 +32097,7 @@ def subscript_callee_names(call) -> list:
 # hold — which is why every name in the tables above used to be refused with
 # "'Int32' has no home", a sentence that is false about the program: `Int32` is
 # not a name that was left without a register, it is a TYPE, and the source
-# says so in the position it stands in. `bugs/formal/FORMAL_type_name_as_a_value.md`
+# says so in the position it stands in. `bugs/FORMAL_type_name_as_a_value.md`
 # is the long form.
 #
 # The answer here is that a type IS a word on this path, and the word is a TAG:
@@ -32547,7 +32405,7 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     The emitters route a call in one order and it is worth writing the order down
     once, here, because the build pass has to answer the SAME question the
     emitter answers and the two disagreeing about it is the collision in
-    `bugs/formal/FORMAL_string_constructor_collision`:
+    `bugs/FORMAL_string_constructor_collision`:
 
     ```
     if name not in functions and not type_constructor_prefers_local_struct(…)
@@ -33731,7 +33589,7 @@ CPYTHON_EXCEPTION_BASES = frozenset({
     # anywhere in the subclass. Modelling that as a field is what gives the
     # message a SLOT: a class whose body is a docstring and nothing else has
     # nowhere to put one otherwise, and the construction was refused for
-    # exactly that (`bugs/formal/FORMAL_an_exception_constructed_with_its_message_has_
+    # exactly that (`bugs/FORMAL_an_exception_constructed_with_its_message_has_
     # no_field_to_hold_it.md`, whose fix this is).
     "ArithmeticError", "AssertionError", "AttributeError",
     "BaseException", "BaseExceptionGroup", "BlockingIOError",
@@ -33787,7 +33645,7 @@ def builtin_base_fields(base: str) -> tuple:
 #
 # Shared infrastructure for the unwinder, landed on its own and fixing nothing
 # by itself — which is the honest description and the reason it is worth having
-# separately. `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
+# separately. `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
 # designs the convention: one callee-visible word per function meaning "an
 # exception is in flight", holding the KIND of the current exception, and §5
 # step 2 is this. The dispatch, the raise sites, the CFG and the Lean model are
@@ -33903,7 +33761,7 @@ def exception_kind_for(name: str, kinds: dict = None):
 
 # ── §4's SUPERCLASS question, ANSWERED: the table grows a base relation ──────
 #
-# `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 asks for the one
+# `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 asks for the one
 # design decision in that document with no answer in the code, and §5 step 1
 # says to decide it BEFORE the emitters are written: "either the kind table
 # grows a `SUPERCLASS_OF` bit, or the word is a pointer and the base walk moves
@@ -35537,73 +35395,6 @@ def comprehension_result_is_flat(expr) -> bool:
     return True
 
 
-def _descendant_builds_a_non_literal_container(e) -> bool:
-    """True when the subtree under `e` builds a container the element's own
-    emission does not reserve at a LITERAL site.
-
-    The question `comprehension_element_is_relocatable` asks of a container
-    literal's children, and it is `_expr_builds_a_container` narrowed to the
-    answer the relocation needs: a container literal is not the answer, it is
-    a branch into its children (the relocation gives each such literal its own
-    per-iteration slot), while a comprehension, a slice, a call and a star
-    splat each build their blob where its own emission does not move it per
-    iteration — a comprehension reserves its result in `_emit_comprehension`
-    before its walk and reuses it, a slice reserves its result in its own
-    emission, a call's returned block is parked above the blob region by
-    `container_returned_blob_sites`, and a star literal appends into its blob
-    at its own site — so any such blob's address in the element's words would
-    point at one frame location every iteration shares, the aliasing the flat
-    copy is refused for. A star is the same answer for its own reason: its
-    literal lowers by APPENDING (`_emit_list_star`), which cannot target a
-    slot the append does not read its count from.
-    """
-    if e is None or isinstance(e, str):
-        return False
-    if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
-        if isinstance(e, F.DictExpr):
-            pairs = e.pairs or []
-            if any(isinstance(k, F.UnaryOp) and k.op in ("**", "*")
-                   for k, _v in pairs):
-                return True
-            children = [x for pair in pairs for x in pair]
-        else:
-            if any(isinstance(el, F.UnaryOp) and el.op == "*"
-                   for el in e.elements or []):
-                return True
-            children = list(e.elements or [])
-        return any(_descendant_builds_a_non_literal_container(c)
-                   for c in children)
-    return _expr_builds_a_container(e)
-
-
-def comprehension_element_is_relocatable(element) -> bool:
-    """True when a comprehension ELEMENT's containers are given a per-iteration
-    BASE rather than a per-iteration COPY.
-
-    THE predicate for the element a byte copy cannot make per-iteration and a
-    base can: the element's region carries the ADDRESS of a container the same
-    emission built, so a copy would share it, and the sound materialisation is
-    to build each such container in the slot ITS iteration owns — a slot of a
-    `cap`-sized array indexed by the result count, recomputed at run time —
-    which the emitters' `_emit_list`/`_emit_dict` do when the element is this
-    shape. It is here rather than in either backend so the two architectures
-    cannot relocate — or refuse — the same element differently.
-
-    The shape is a container LITERAL whose container-building descendants are
-    all container literals — a list of lists, a tuple holding a list, a dict
-    pair holding one — because those are the blobs the element's own emission
-    reserves at the element site and the relocation can move. What is not this
-    shape keeps `comprehension_element_blob_refusal`: a nested comprehension
-    (its result is reserved in `_emit_comprehension` and reused), a slice (its
-    result is a separate blob of its own), a call (its returned block is
-    parked elsewhere), and a star splat (its literal appends at its own site).
-    """
-    if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
-                                F.DictExpr)):
-        return False
-    return not _descendant_builds_a_non_literal_container(element)
-
-
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container and
@@ -35616,13 +35407,9 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     because a byte copy of its result is sound. What reaches this refusal is
     the element that a byte copy of would STILL alias or that this path cannot
     size, the same shapes the predicate's docstring names: a nested
-    comprehension, a slice whose base carries a scratch
+    comprehension, a list of lists, a slice whose base carries a scratch
     address, a constructor call, and every non-literal expression — a call, a
     subscript or a member read whose result this path cannot type among them.
-    A container literal that holds containers of its own (a list of lists
-    among them) is the OTHER materialisation, the one
-    `comprehension_element_is_relocatable` answers with a per-iteration base
-    rather than a per-iteration copy, so it does not reach this refusal.
     `comprehension_element_is_flat_container` is the shared predicate and
     `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
     pins both sides.
@@ -35642,13 +35429,11 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                               CPython: 63   this path: 93
 
     **Both of those are now materialised per iteration** by
-    `comprehension_element_is_flat_container`, so this message fires only on
-    the shapes whose per-iteration copy is unsound and whose containers the
-    relocation does not build at the element site: a nested comprehension
-    whose produced values are containers, a slice whose base carries a scratch
-    address and a constructor call. A container literal that holds containers
-    of its own (a list of lists among them) is materialised per iteration by
-    the relocation, and its rows answer rather than refuse. The paragraph above is the
+    `comprehension_element_is_flat_container`, so this message fires only on the
+    shapes whose per-iteration copy is unsound: a container literal with a nested
+    container in it, a nested comprehension whose produced values are containers,
+    a list of lists, a slice whose base carries a scratch address and a
+    constructor call. The paragraph above is the
     measurement that made the refusal the right answer for THEM; the two
     reproducers are kept because they are what a copy must answer, and are the
     rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
@@ -35883,7 +35668,7 @@ def struct_width_cost(struct_def) -> str:
     tool has already solved sends the reader looking for a bug that is not
     there. What is still not closed is named instead: the *proof* side of a
     wide receiver is reached only for the cases
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` records."""
+    `bugs/FORMAL_wide_receiver_by_reference.md` records."""
     n = struct_field_count(struct_def)
     if wide_receiver_by_reference():
         return (f"{n} fields is a frame of {n} 8-byte slots with a pointer "
@@ -35917,7 +35702,7 @@ def struct_width_cost(struct_def) -> str:
 #
 # The full design, its cost, and the proof-side algebra (`ProofLib.Frame`,
 # `ProofLib.MF`, `Refine.FrameOk_except`) are in
-# `bugs/formal/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
+# `bugs/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
 # two backends have to agree on, which is why it is in the shared model rather
 # than in either of them: a width that the build pass and the codegen pass
 # measured differently is a struct whose receiver is the wrong number of bytes
@@ -36183,7 +35968,7 @@ def one_field_mutating_methods(functions, method_owners: dict,
     asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
     one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
     the same answer at the cost of the walk; see
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
+    `bugs/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
     why reading the table is sound.
     """
     out = {}
@@ -36901,7 +36686,7 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
             "both structs a `__eq__` will not either: two owners is the case "
             "that refuses. Compare the fields, or make the two sides the same "
             "struct so the comparison names one `__eq__` — "
-            "bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md")
+            "bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md")
     return lead + (
         "Each name holds a different frame on each path that binds it, and "
         "this analysis has no path sensitivity to say which one is live at "
@@ -37841,7 +37626,7 @@ CONTAINER_TYPE_NAMES = ("List", "list", "StaticList", "Tuple", "tuple",
 # have been handed — the callee cannot see its call sites, and the call sites
 # cannot see the callee's body across a dylib boundary — so the check that is
 # cheap and local is done and the rest is named rather than implied:
-# `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
+# `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
 
 # Types this path SUBSCRIPTS.  A value of one of these answers `x[i]` with an
 # element, which is the reading a bracketed callee has to be told apart from;
@@ -38053,7 +37838,7 @@ def function_value_argument_refusal(name: str, callee: str, param: str,
     Only the bare `dbl(x)` spelling reaches this, because that is the only one
     where the argument is DEFINITIONALLY a code address; a computed argument is
     a word of unknown provenance and is named in
-    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather than
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather than
     refused here, where the answer would be a sentence about a program this
     check cannot see.
     """
@@ -38125,7 +37910,7 @@ def value_callee_can_hold_a_function(ann) -> bool:
 
     What it cannot do is the other direction — proving the value IS an address,
     which needs a whole-module dataflow and is named in
-    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather
     than implied here.
     """
     base = _outer_annotation_base(ann)
@@ -38448,7 +38233,7 @@ def _binding_sites_index(fn) -> dict:
     locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
     `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
     walk and 2.24 s with this one (best of three each), and the standard this is
-    measured against is `bugs/formal/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    measured against is `bugs/FORMAL_build_cost_2026-10-03.md`'s — where the two
     residues left open were 0.094 s and 0.003 s on the largest file in the
     repository, and both were declined rather than taken.  There is one dispatch
     below and `_binding_values` reads it, so the two cannot disagree about which
@@ -38823,7 +38608,7 @@ def caller_local_holds(fn, name: str, _asked=frozenset()) -> str | None:
 
     The PASSING end's half for an argument the caller BOUND rather than spelled,
     which is the residual
-    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` names as
+    `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` names as
     `apply_arg(3, xs[0])` — measured on that tree as still building and still
     trapping, with `xs` a local list.
 
@@ -38922,7 +38707,7 @@ def caller_local_element_holds(fn, name: str, index=None,
     A DICT literal is one of the literals because its VALUES are what a subscript
     hands back and they are as visible as a list's elements: `d["k"]` on
     `{"k": 17}` is 17, and `d[k]` on `{"k": 17}` is 17 or a `KeyError`, never a
-    function. That is the answer `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+    function. That is the answer `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
     called missing ("a subscript of a DICT name … which no spelling
     distinguishes from a list") — no spelling of the SUBSCRIPT distinguishes
     them, but the spelling of the BINDING does, and that is what this reader
@@ -41737,7 +41522,7 @@ def _init_store_is_redundant(value, placed_struct: str) -> bool:
         a different struct is a different value, and dropping it would leave the
         field holding the declared type's frame while the source put another
         one there — the two can share a field count and a field list, which is
-        exactly `bugs/formal/FORMAL_declared_parameter_against_its_call_sites.md`'s
+        exactly `bugs/FORMAL_declared_parameter_against_its_call_sites.md`'s
         subject, so "the layout happens to match" is not available as a test.
         `assigned_type_a_declaration_still_wins` is the program that measures
         it: `Outer` declares `var in1: Inner` and `__init__` assigns
@@ -42704,7 +42489,7 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
     in that caller's own terms — `constructing P`, `call f()` — because the two
     sites that raise it are different constructs and a message that named the
     wrong one would send the reader to the wrong line, which is the failure mode
-    `bugs/formal/FORMAL_known_limits.md` records.
+    `bugs/FORMAL_known_limits.md` records.
 
     ARCH-FREE and asked from the shared plan (`struct_construction_plan`), which
     is where the false sentence it replaces was produced.
@@ -43421,7 +43206,7 @@ def _callee_container_evidence(arg, rets=None, struct_def=None):
     # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
     # tree's one reader of "which function does this call name", and a comptime
     # SPECIALIZATION `f[a]` names the same function as its bare twin —
-    # which is the whole content of `bugs/formal/FORMAL_a_specialization_defeats_the_
+    # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
     # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
     #
     # Measured here, and it was the permissive direction, which is the expensive
@@ -44066,7 +43851,7 @@ def frame_field_premise_refusal(struct_def) -> str:
         f"in a method would then append into reclaimed stack, which is a "
         f"number the source never wrote rather than a failure. "
         + (f"({note}) " if note else "")
-        + f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the premise and "
+        + f"bugs/FORMAL_wide_receiver_by_reference.md records the premise and "
         f"which decisions it currently rests on; the value-method work is what "
         f"has to keep it true")
 
@@ -44119,7 +43904,7 @@ def one_field_struct_names(structs) -> dict:
 
     **Sound by the measurement the framed table's threading was sound by**, not
     by an invalidation argument: `formal/model.py`'s `read_before_store`
-    derivation and `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    derivation and `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 walked
     146 779 asks of the four predicates over 7 788 (question, struct) pairs
     across 14 files and NOT ONE pair changed its answer between two asks inside
     one `_prepare_functions` call — `struct_is_one_field` was one of the four.
@@ -45803,7 +45588,7 @@ def is_none_expr(node) -> bool:
 #     slot read through a word that is not a receiver.  Measured: every frame
 #     read this path has lowers from a RECEIVER (`self.f`) or from a name whose
 #     candidate struct is known, and a name declared `Optional[…]` has no
-#     candidate struct here.  See `bugs/formal/FORMAL_a_subscript_on_a_frame_slot_is_a_
+#     candidate struct here.  See `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_
 #     pointer_dereference_and_the_two_backends_disagree.md` for the shape.
 #   3. `x = None` is then a store of a FRAME into a slot, which is
 #     `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
@@ -45838,7 +45623,7 @@ def is_none_expr(node) -> bool:
 # `x is None` compare against a niche the pair does not have: for a `Bool`
 # payload it would compare against 2, for a `String` against 0, and in both cases
 # the answer is about a word that is only half the value.  `Some(0)` and `None`
-# being the same word is the ambiguity `bugs/formal/FORMAL_optional_needs_a_niche.md`
+# being the same word is the ambiguity `bugs/FORMAL_optional_needs_a_niche.md`
 # opened this representation to remove, and admitting the two-word sibling under
 # the one-word name puts it back for a reader who annotated `OptionalReg`.
 #
@@ -46010,7 +45795,7 @@ SCALAR_TYPE_WIDTHS = {
 # `Optional[Float32]` and for `Optional[DType]` claimed this build had not read
 # a layout, which is a claim about a C struct and neither name is one.  The
 # verdict was right in both cases and the EXPLANATION was wrong, which is the
-# expensive kind: `doc/ABI.md`'s niche table and `bugs/formal/FORMAL_optional_needs_a_niche.md`
+# expensive kind: `doc/ABI.md`'s niche table and `bugs/FORMAL_optional_needs_a_niche.md`
 # both list these two as refused, so nothing went red.
 #
 # So there are THREE reasons a payload leaves no word for `None`, and each is
@@ -47483,7 +47268,7 @@ def fold_module_int_expr(node, names=None):
     "print() cannot tell whether IdentExpr is a string or a number" — a message
     about print's materialization for a name the build had read and simply could
     not fold. Measured on `test_formal_math.py:isqrt_source`
-    (`MAX64 = 2 ** 63 - 1`, `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
+    (`MAX64 = 2 ** 63 - 1`, `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
     §0.6), where it also made the two backends report DIFFERENT subjects for one
     function: arm64 stopped at the constant, x86-64 got as far as the string
     operand two lines later.
@@ -47765,7 +47550,7 @@ def builtin_module_constants(source_path: str) -> dict:
     **What this is not:** it is not `sys.argv`.  `argv` is the process's command
     line, which arrives in registers the entry stub overwrites before the first
     statement runs, so there is nothing for the build to hold —
-    `bugs/formal/FORMAL_module_state_no_storage.md` §(4) is right about that one and
+    `bugs/FORMAL_module_state_no_storage.md` §(4) is right about that one and
     this doc's author grouped `__file__` with it by shape rather than by cause.
     A source the BUILD was handed is not a source that is gone.
     """
@@ -49266,10 +49051,8 @@ def import_bindings(stmt) -> list:
                 continue
             out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
-            # owns; the alias `as` form binds the alias. The parser records the
-            # `as` name in `alias` (there is no `asname`), and it is None when
-            # the import has no `as`, so the guard keeps the base binding alone.
-            alias = getattr(stmt, "alias", None)
+            # owns; the alias `as` form binds the alias.
+            alias = getattr(stmt, "asname", None)
             if alias:
                 out.append((alias, part, part))
         return out
@@ -49990,7 +49773,7 @@ def _generic_inference_tail(name: str) -> str:
         f"pipeline reads type arguments off an explicit bracket, so a bare call "
         f"arrives here with no instantiation to bind; the inference, the 123 "
         f"measured files it is worth, and the shape of the missing piece are "
-        f"in bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+        f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
         f"inferrable.md. So write the operation in this module, or call a "
         f"public function that does it — which is the same program with a "
         f"definition this image can bind. Spelling it `{name}[<a type>](…)` "
@@ -50053,7 +49836,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `var t = Float64` above it) has no concrete spelling to mangle, and a
     DOTTED application `mod.G[T]()` is refused by
     `comptime.specialization_name` by design.  All three are listed with the
-    exact next step in `bugs/formal/FORMAL_generic_monomorph_scope.md`, which is the
+    exact next step in `bugs/FORMAL_generic_monomorph_scope.md`, which is the
     single home for what the mechanism does not cover.
 
     **And the last sentence says the BARE case is CORRECT SOURCE, because it
@@ -50065,7 +49848,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `refuse_without:` defect in its purest form: a repair that is wrong about
     correct code. So the sentence now names what is missing (the inference),
     points at the measured 123 files and the inference's shape
-    (`bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
+    (`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
     and says the bracket is a WORKAROUND rather than the fix.
     """
     who = f"{fn_name}: " if fn_name else ""
@@ -50101,7 +49884,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                     f"a bare call arrives here with no instantiation to bind; "
                     f"the inference, the 123 measured files it is worth, and the "
                     f"shape of the missing piece are in "
-                    f"bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_"
+                    f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"
                     f"arguments_are_inferrable.md. So write the operation in this "
                     f"module, or call a public function that does it — which is "
                     f"the same program with a definition this image can bind. "
@@ -50112,7 +49895,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                 f"the call has to bind a symbol `{mod}` exports. That module "
                 f"does not export it, and the reason is `doc/ABI.md`'s export "
                 f"rule applied to the DECLARATION: {why}. The exclusion is "
-                f"measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and "
+                f"measured and settled in bugs/FORMAL_known_limits.md §1.1, and "
                 f"the generic case in §1.2.")
     # …and the case that is NOT an exclusion at all: the module's own source
     # declares no such name. `runtime/stdlib_wrapper.mojo`'s `from time import
@@ -50139,14 +49922,14 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
             f"both at once), an overload has no single symbol, and a C library "
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
-            f"bugs/formal/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
             + _generic_inference_tail(name))
     if clause is not None:
         return head + (
             f"That module does not export it, and the reason is `doc/ABI.md`'s "
             f"export rule rather than anything about this call: {clause}. The "
             f"exclusion is measured and settled in "
-            f"bugs/formal/FORMAL_known_limits.md §1.1.")
+            f"bugs/FORMAL_known_limits.md §1.1.")
     return head + (
         f"That module does not export it, and the reason is `doc/ABI.md`'s "
         f"export rule rather than anything about this call: a name with a "
@@ -50154,7 +49937,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
         f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
         f"both at once), an overload has no single symbol, and a C library "
         f"name like `exit` or `write` is provided by libSystem. The exclusion "
-        f"is measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and the "
+        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
         f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
@@ -50184,7 +49967,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     CALL: a dylib exports functions (as symbols) and module-level names the
     build FOLDED TO A LITERAL (as values, because a literal needs no storage to
     cross). `sys.argv` is neither — it is a list, and §(4) of
-    `bugs/formal/FORMAL_module_state_no_storage.md` records that the command line is
+    `bugs/FORMAL_module_state_no_storage.md` records that the command line is
     gone before the first statement runs, so there is nothing in it either.
 
     **`variables` is the half that keeps the sentence true.** "A list, an
@@ -50257,7 +50040,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"STARTED at. What `{module}` publishes: {shown} — give the "
                 f"module an accessor (`def get_{leaf}(): global {leaf}; return "
                 f"{leaf}`) and call that, which reads the same slot and lowers "
-                f"today. `bugs/formal/FORMAL_module_state_no_storage.md` §(2) records "
+                f"today. `bugs/FORMAL_module_state_no_storage.md` §(2) records "
                 f"what it would take to publish the slot itself rather than a "
                 f"function that reads it")
     if leaf in set(containers or ()):
@@ -50277,7 +50060,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"of it: `def {leaf}_at(i: Int) -> Int: return "
                 f"{leaf}[i]` in `{module}`, called as `{module}.{leaf}_at(0)`. "
                 f"What `{module}` publishes: {shown}. "
-                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) records what "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what "
                 f"publishing the blob itself would take")
     if leaf not in set(published or ()):
         return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -50300,7 +50083,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"`formal/hostmods/sys.mojo`'s own module docstring says which "
                 f"of those names it deliberately does not declare and why "
                 f"(`argv`, `stderr`, `stdout`, `modules`, `path`), and "
-                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) and §(4) "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) and §(4) "
                 f"record what would have to be true to close the boundary for "
                 f"the ones CPython has and this path does not")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -50317,7 +50100,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
             f"side of the boundary, because every value a formal program can "
             f"name lives in a function's own stack scratch, which is reclaimed "
             f"when the function returns. What `{module}` publishes: {shown}. "
-            f"`bugs/formal/FORMAL_module_state_no_storage.md` records the design and "
+            f"`bugs/FORMAL_module_state_no_storage.md` records the design and "
             f"what would have to be true to close it, and §(2) is this shape")
 
 
@@ -50418,7 +50201,7 @@ def module_global_refusal(name: str, sym, fn_name: str, variables=None,
                 f"a property of the value model rather than of this call: "
                 f"`{mod}.fn(...)` where `{mod}` publishes that function as a "
                 f"function is the same program with a representation. "
-                f"bugs/formal/FORMAL_module_state_no_storage.md records the design "
+                f"bugs/FORMAL_module_state_no_storage.md records the design "
                 f"and what would have to be true to close it")
     if site == "declared":
         return (f"{who}{name!r} is declared at module level with no value "
@@ -51150,7 +50933,7 @@ def call_graph_depth(edges: dict) -> int:
     """An UPPER BOUND on the number of distinct functions a call chain can have
     live at once, in `edges`.
 
-    The question `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+    The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
     sixty levels deep spends the same stack as a recursion sixty deep.
@@ -51357,7 +51140,7 @@ def stack_floor_guarded_names(functions, structs: dict = None,
       * **or the body already contains a conditional branch**
         (`body_has_conditional_branch`). This was NOT in the rule that landed
         with the guard, and it is the measured answer to the question
-        `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
+        `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
         life asking. Every formal prologue subtracts a fixed 128 KiB frame on
         arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
         constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
@@ -51543,7 +51326,7 @@ def module_body_store_names(functions) -> set:
     This is why the module body cannot be scoped like an ordinary function.
     Read as one, `G` is a local of `__module_body__`, so `module_slot_for` sends
     its reads and writes to a register — and a register dies with the body,
-    which is the whole of `bugs/formal/FORMAL_module_state_no_storage.md`'s subject: the
+    which is the whole of `bugs/FORMAL_module_state_no_storage.md`'s subject: the
     module's own value computed somewhere nobody can read it. The name needs the
     module's `__DATA` slot for the same reason a name written through
     `global G` inside a function needs one, and it needs it for the same
@@ -51984,7 +51767,7 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         literal to put at the read — but it IS static data: the blob is a flat
         run of words whose first word is the count, so the linker can place it in
         `__DATA` and the slot can hold its address. `NUMS = [10,20,30]` read from
-        a function is the case `bugs/formal/FORMAL_module_state_no_storage.md` §1
+        a function is the case `bugs/FORMAL_module_state_no_storage.md` §1
         measured as the first one, and it builds and runs correctly now.
         `[0] * 624` is the same value as the written-out literal, and
         `_is_static_container` asks the same question of it — see
@@ -52831,7 +52614,7 @@ def static_initializer_refusal_reason(slot) -> str:
     The zero an unwritten slot gives is therefore not what any read can see, in
     exactly the way it is not what any read can see for a slot that does have an
     initializer. Refusing here would be refusing a value the image computes
-    before its first read, which is the case `bugs/formal/FORMAL_module_state_no_storage.md`
+    before its first read, which is the case `bugs/FORMAL_module_state_no_storage.md`
     §"the exact next step" item 1 is about.
     """
     if slot is None or slot.init[0] != "unknown":
@@ -52935,7 +52718,7 @@ def module_slot_unreadable_refusal(slot, fn) -> str:
                f"the slot holds it. A module-level assignment cannot read, or "
                f"call something that reads, the name it assigns. ")
     return head + why + ("Make the value a literal and the build folds it at "
-                          "every read instead. bugs/formal/FORMAL_module_state_no_storage.md"
+                          "every read instead. bugs/FORMAL_module_state_no_storage.md"
                           " records the design")
 
 
@@ -53047,7 +52830,7 @@ def global_value_refusal(name: str, fn_name: str, why: str,
             "that module's dylib. A slot in THIS image cannot hold it; what a "
             "cross-module global needs is the other module's slot exported as a "
             "symbol, which this path does not do yet — "
-            "bugs/formal/FORMAL_module_state_no_storage.md"),
+            "bugs/FORMAL_module_state_no_storage.md"),
         "unknown": (
             "the build cannot compute it from the module-level statement, and "
             "a value it cannot compute has no initializer to write into the "
@@ -53368,7 +53151,7 @@ def module_entry_literal_facts() -> dict:
     table excludes a container constant because a blob has no literal to put at
     a READ, and this asks the weaker question "what is the value", which a blob
     answers. See
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
     slots = module_slots()
     out: dict = {}
     for name, sym in module_symbols().items():
@@ -53682,7 +53465,7 @@ def function_value_refusal(name: str, fn_name: str) -> str:
             f"a container, or returning one is refused rather than answered "
             f"with a number that means nothing. `formal/hostmods/` has no "
             f"module that hands back a callable for the same reason "
-            f"(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"(`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
             f"it directly, or move the work into a `def` and pass its results")
 
 
@@ -54168,7 +53951,7 @@ def undeclared_linked_struct_refusal(struct_name: str, owners: list,
     slot key and nothing else, so its message can only say "this path has no
     way to say what the base holds" — which is true and sends the reader after a
     type inference this backend does not have, when the actual fact is one hop
-    away and checkable (`bugs/formal/FORMAL_field_access_refusal_names_the_wrong_
+    away and checkable (`bugs/FORMAL_field_access_refusal_names_the_wrong_
     module.md`). This one is raised where the construction `S()` itself is, and
     it reports what is actually missing: a DECLARATION, whose field list and
     frame layout are read from the module's source.
@@ -54299,7 +54082,7 @@ def aug_assign_target_refusal(got: str) -> str:
     Both backends reach it, and they used to spell it differently — arm64 "must
     be a plain name", x86-64 "must be a plain name on the formal x86-64 path" —
     which is the same class of defect
-    `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
     function.md` is about: one construct, two sentences, and a reader has to
     guess which machine wrote it. The architecture is not named, for the reason
     `member_access_refusal` does not name one either: the two backends are ONE
@@ -54526,8 +54309,7 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list,
-                        mappings=None) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -54590,7 +54372,7 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list,
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()", mappings)
+        list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
         return None, [], spread_refusal
     slots: list = list(args or [])
@@ -54774,12 +54556,10 @@ def struct_is_context_manager(struct_def) -> bool:
         own `TemporaryDirectory` and `nullcontext` both keep more than one
         attribute, so the honest mirror of either is representable.
       * `__enter__` takes no argument other than the receiver and RETURNS a
-        value.  `__exit__` takes the receiver alone, CPython's own
-        `(self, exc_type, exc_val, tb)`, or the variadic spelling
-        `(self, *exc)` — and each wider spelling is accepted ONLY when the
-        method never reads the words it would receive
-        (`context_exit_ignores_its_exception_words` /
-        `context_exit_variadic_ignores`).  Those three words are a
+        value.  `__exit__` takes either the receiver alone or CPython's own
+        `(self, exc_type, exc_val, tb)` — and the four-parameter spelling is
+        accepted ONLY when the method never reads its last three words
+        (`context_exit_ignores_its_exception_words`).  Those three words are a
         question about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
         `__exit__` that acted on them could not act on a value this path
@@ -54809,17 +54589,10 @@ def struct_is_context_manager(struct_def) -> bool:
     # unwinder), so passing a made-up value to a method that looks at it would be
     # a lie; a method that ignores them is the cleanup-only shape and lowers
     # with the receiver alone plus three words it never looks at.  See
-    # `context_exit_ignores_its_exception_words`.  The variadic spelling of the
-    # same shape, `__exit__(self, *exc)` with `exc` unread, is the second half of
-    # that predicate (`context_exit_variadic_ignores`) and is called with the
-    # receiver alone, which binds it to the empty tuple.
-    if params == -1:
-        if not context_exit_variadic_ignores(exit_):
-            return False
-    elif params == 4:
-        if not context_exit_ignores_its_exception_words(exit_):
-            return False
-    elif params != 1:
+    # `context_exit_ignores_its_exception_words`.
+    if params not in (1, 4):
+        return False
+    if params == 4 and not context_exit_ignores_its_exception_words(exit_):
         return False
     return not context_exit_returns_truthy(exit_)
 
@@ -55142,28 +54915,17 @@ def _exit_return_folds_truthy(value_node) -> bool:
 
 
 def _dunder_receiver_params(method) -> int:
-    """How many parameters a method declares, receiver included; -1 if variadic.
+    """How many parameters a method declares, receiver included; -1 if unknown.
 
     `*args`/`**kwargs` cannot be counted from the tree and are -1, which fails
     every comparison here — a variadic context-manager method is refused rather
     than assumed, for the same reason a variadic call is
-    (`refuse_variadic_parameter_read`) — **except** for the one variadic shape a
-    context manager really writes, which `context_exit_variadic_ignores` decides
-    and `__exit__`'s gate lets through.
-
-    **The star is read from the parameter LIST, not from an attribute.**  This
-    used to ask `getattr(method, "vararg", None)`, and no `FunctionDef` on this
-    front end has that attribute — the parser keeps the star IN the name it
-    appends to `params` (`("*args", …)` / `("**kwargs", …)`,
-    `fire_compiler.py::_parse_funcdef`).  So `def __exit__(self, *args)` came
-    out as arity 2, was refused with a message about "1 parameters after the
-    receiver", and the variadic branch below was dead.  `function_param_shape`
-    is the one reader of that list for the whole file, so the two cannot drift.
+    (`refuse_variadic_parameter_read`).
     """
-    shape = function_param_shape(method)
-    if shape.variadic:
+    params = list(getattr(method, "params", None) or ())
+    if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
         return -1
-    return len(shape.fixed)
+    return len(params)
 
 
 def _param_names(params) -> list:
@@ -55205,63 +54967,17 @@ def context_exit_ignores_its_exception_words(method) -> bool:
     conservative direction: it is not a read, and refusing it costs a shape no
     real context manager writes.
     """
-    shape = function_param_shape(method)
-    if shape.variadic or len(shape.fixed) != 4:
+    params = list(getattr(method, "params", None) or ())
+    if len(params) != 4 or getattr(method, "vararg", None) or \
+            getattr(method, "kwarg", None):
         return False
-    names = set(_param_names(list(getattr(method, "params", None) or [])[1:]))
+    names = set(_param_names(params[1:]))
     if len(names) != 3 or None in names:
         return False
-    return not _body_reads_any_name(method, names)
-
-
-def _body_reads_any_name(method, names) -> bool:
-    """Whether any of `names` occurs as an identifier in `method`'s body.
-
-    The shared half of the two ignoring predicates below — the four-fixed-word
-    shape and the variadic one — so a name read inside a nested `def`, a
-    closure, or as an assignment TARGET is one occurrence either way (the
-    conservative direction `context_exit_ignores_its_exception_words` states).
-    """
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if isinstance(node, F.IdentExpr) and getattr(node, "name", None) in names:
-            return True
-    return False
-
-
-def context_exit_variadic_ignores(method) -> bool:
-    """True when `__exit__(self, *exc)` never reads its catch-all.
-
-    **The variadic spelling of the same ignoring shape
-    `context_exit_ignores_its_exception_words` accepts**, and it is the one
-    `with` signature this path used to refuse for a reason that stopped being
-    true.  CPython calls `__exit__(type, value, tb)` POSITIONALLY, so a method
-    that catches them catches them in `*exc`:
-
-        class TempDir:
-            def __enter__(self): ...
-            def __exit__(self, *exc): self.close()      # ignores the triple
-
-    On a normal exit CPython binds `exc = (None, None, None)`; this path calls
-    the method with the receiver alone, so `exc` binds the empty tuple.  A body
-    that never looks at `exc` cannot tell the two apart, which is exactly the
-    evidence the four-word predicate uses — so the two are one question and this
-    is its second spelling rather than a second rule.
-
-    **Two clauses are structural rather than about reading, and both are the
-    call shape.**  A *positional* catch-all is required: `def __exit__(self,
-    **kw)` is not a context manager in CPython either (three positional
-    arguments against a keyword-only signature is a `TypeError`), so a `kwarg`
-    with no `vararg` is refused.  And the receiver must be the ONLY fixed
-    parameter: `def __exit__(self, exc_type, *rest)` would leave `exc_type`
-    unbound on the receiver-only call this path makes, so it stays refused even
-    though `rest` is ignored — a value the method could read would be the
-    caller's leftover, which is the failure this whole family refuses.
-    """
-    shape = function_param_shape(method)
-    if shape.vararg is None or len(shape.fixed) != 1:
-        return False
-    names = {n for n in (shape.vararg, shape.kwarg) if n}
-    return not _body_reads_any_name(method, names)
+            return False
+    return True
 
 
 def context_exit_arity(struct_def) -> int:
@@ -55270,12 +54986,10 @@ def context_exit_arity(struct_def) -> int:
     The ONE reader of "what does the exit call pass", for the lowering that
     builds the call (`formal/build.py::_one_with_item`).  It answers from the
     same `_dunder_receiver_params` the gate does, so the call and the gate cannot
-    disagree; a receiver-only `__exit__` is 1, CPython's own three-word spelling
-    is 4, and the variadic shape (`(self, *exc)`, `_dunder_receiver_params` -1)
-    is 1 — it catches the words in an empty tuple the body never reads.  A struct
-    that is not a context manager this path lowers gets the receiver-only
-    answer, which is the shape the resource arm (`open`) uses and the only one
-    its `close` builtin takes.
+    disagree; a receiver-only `__exit__` is 1 and CPython's own three-word
+    spelling is 4.  A struct that is not a context manager this path lowers gets
+    the receiver-only answer, which is the shape the resource arm
+    (`open`) uses and the only one its `close` builtin takes.
     """
     for m in struct_methods(struct_def):
         if getattr(m, "name", None) == CONTEXT_EXIT:
@@ -55476,27 +55190,6 @@ def with_context_manager_defect(struct_def) -> str:
         if params == 1:
             continue
         if params < 0:
-            if name == CONTEXT_EXIT and context_exit_variadic_ignores(
-                    methods[name]):
-                # The gate accepts this shape, so reaching here is impossible —
-                # kept so the sentence and the decision cannot come apart if
-                # `struct_is_context_manager` is ever reordered.
-                continue
-            if name == CONTEXT_EXIT:
-                shape = function_param_shape(methods[name])
-                if shape.vararg and len(shape.fixed) == 1:
-                    return (
-                        f"it declares both dunders, but its `{CONTEXT_EXIT}` "
-                        f"takes CPython's three exception words through a "
-                        f"variadic `*{shape.vararg}` and READS it. Those three "
-                        f"words are a question about an UNWINDER this backend "
-                        f"does not have: there is no exception value, no "
-                        f"traceback and no type word to pass, so any value this "
-                        f"path supplied would be a lie the method then acted on. "
-                        f"Drop the reads (or the catch-all): a `{CONTEXT_EXIT}` "
-                        f"that IGNORES it is the cleanup-only shape, it is what "
-                        f"`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` "
-                        f"declares, and it lowers")
             return (f"it declares both dunders, but its `{name}` is variadic "
                     f"(`*args`/`**kwargs`), which cannot be counted from the "
                     f"tree — so this path refuses it rather than assume it "

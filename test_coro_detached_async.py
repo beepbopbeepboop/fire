@@ -14,7 +14,7 @@ bare function-pointer VALUES). Under MOJO_CORO=stackswitch this exercises:
      coroutine representation), not just the cpp path's `MojoAsync *`.
   2. `GimpleGen.BUILTIN_VALUE_MAP` substituting `_coro_resume_fn`/
      `_coro_destroy_fn` for `__mojo_gen_resume_once`/`__mojo_gen_destroy`
-     (runtime/fire_coro_gen.c) instead of the cpp path's
+     (runtime/mojo_coro_gen.c) instead of the cpp path's
      `mojo_coro_resume_generic`/`destroy_generic`.
   3. A BARE call to a local nested async helper (`var coro = wrapper()`,
      no `create_task`/`asyncio.run` wrapper at all) being rewritten to its
@@ -29,7 +29,7 @@ bare function-pointer VALUES). Under MOJO_CORO=stackswitch this exercises:
 
 This compiles the REAL generated C with `gcc -fgimple`, links against this
 project's own runtime (fire_runtime.c, fire_async_runtime.cpp,
-fire_coro.c/fire_coro_gen.c/fire_async_sched.c/fire_coro_ctx_*), runs the
+mojo_coro.c/mojo_coro_gen.c/mojo_async_sched.c/mojo_coro_ctx_*), runs the
 executable, and asserts on real stdout.
 """
 import os
@@ -41,16 +41,15 @@ os.environ['MOJO_CORO'] = 'stackswitch'
 
 import gimple_codegen
 from build_config import find_gcc, find_gxx
-from exec_budget import COMPILE_TIMEOUT_S, LINK_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
                  if platform.machine() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
 
 _PASS = 0
 _FAIL = 0
@@ -69,9 +68,9 @@ def check(name, cond, detail=""):
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
-    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
-    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 
@@ -97,8 +96,7 @@ def _build_and_run(mojo_src: str) -> str:
     objs = []
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
                         os.path.join(wd, 'prog.o'), c_path],
-                        capture_output=True, text=True,
-                        timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
     objs.append(os.path.join(wd, 'prog.o'))
@@ -109,21 +107,18 @@ def _build_and_run(mojo_src: str) -> str:
         extra = ['-std=c++20'] if is_cpp else []
         o = os.path.join(wd, f'rt{i}.o')
         r = subprocess.run([cc, *extra, f'-I{RUNTIME_DIR}', '-c', '-o', o, src],
-                            capture_output=True, text=True,
-                            timeout=COMPILE_TIMEOUT_S)
+                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError(f"compile of {src} failed: {r.stderr}")
         objs.append(o)
 
     exe = os.path.join(wd, 'prog.exe')
-    r = subprocess.run([GXX, '-o', exe, *objs], capture_output=True, text=True,
-                       timeout=LINK_TIMEOUT_S)
+    r = subprocess.run([GXX, '-o', exe, *objs], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"link failed: {r.stderr}")
 
     os.chmod(exe, 0o755)
-    r = subprocess.run([exe], capture_output=True, text=True,
-                       timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout

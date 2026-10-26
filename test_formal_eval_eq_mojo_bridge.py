@@ -703,10 +703,10 @@ TERNARY_PROGRAM = "def main(n):\n    return 1 if n > 3 else 0\n"
 
 class TestAConditionalExpressionIsAValue(unittest.TestCase):
     """`a if c else b`: the model's two renderings, the AST's refusal, and the
-    machine half's select — modelled, stepped, and generating.
+    machine half's own word for what it cannot step.
 
     A conditional expression is the construct this file's sibling
-    `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+    `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
     is about, and it is here rather than in that file because the subject is the
     same one this file is about: two renderings of a source construct that have
     to agree, and what happens when one of them cannot exist.
@@ -723,12 +723,9 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
       * the TYPED model carries the SELECTED word at the arms' common type, which
         is the one thing the typed path adds and the reason it cannot be the
         untyped term;
-      * the arm64 machine half is modelled now: the select is `_STEP_CONDS`'s
-        row 69, `arm64_step`'s last arm and `work_step_csel`, and the program
-        GENERATES its proof with the step closed by the library lemma. What
-        stays refused, by name, is the certificate wall for a CSEL-carrying
-        MULTI-BRANCH function (`FORMAL_a_three_branch_certificate_exceeds_the_
-        lean_bound.md`) — the certificate's size, not the select.
+      * the arm64 refusal names the instruction it cannot step. The model is
+        right and the machine half is not, and a reader who is sent to "this
+        function shape" has nothing to look at.
     """
 
     def test_the_untyped_model_selects_between_the_two_words(self):
@@ -832,87 +829,62 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_the_arm64_select_is_modelled_and_the_ternary_generates(self):
-        """The machine half's word is modelled, and the program generates.
+    def test_the_arm64_refusal_names_the_select_it_cannot_step(self):
+        """The machine half's own word for its gap, not "this function shape".
 
-        `a if c else b` with pure operands is one `CSEL` on arm64; the class
-        `(0xffe00c00, 0x9a800000)` is `_STEP_CONDS`'s row 69, `arm64_step`'s
-        last arm, and the statement of `work_step_csel` in `lib/ProofLib.lean`
-        — the select is a step the model takes, so a block's runs certificate
-        is built from the word and the program GENERATES its proof, with the
-        CSEL's step result closed by `exact`-ing the library lemma at the
-        word. The row that was refused now refuses nothing.
-
-        What this does not pin: a CSEL-carrying program whose run certificate
-        exceeds `formal/lean.py`'s `PROOF_WALL_S` is still refused — the wall
-        is the certificate's size, not the select, and
-        `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
-        is the tracked leaf for it.
+        `a if c else b` with pure operands is one `CSEL` on arm64, `arm64_step`
+        has no branch for it, `_STEP_CONDS` deliberately has no row for it, and
+        a block's runs certificate cannot be built — so the program gets no
+        proof. That is unchanged; what changed is that the message names the
+        instruction and the bug doc, which is the difference between a reader
+        knowing where the wall is and re-deriving it.
         """
         import struct
         import formal.arm64_proof_gen as G
         from formal.arm64 import encode_csel_xd_xm_cond
-        from formal.arm64 import encode_cset_xd_cond
 
         word = struct.unpack("<I", encode_csel_xd_xm_cond(0, 1, 2, "ne"))[0]
         self.assertEqual((word >> 21) & 0x7ff, 0x4d4,
                          f"`encode_csel_xd_xm_cond(0, 1, 2, \"ne\")` is "
                          f"{word:#010x}, whose bits 31..21 are "
                          f"{bin((word >> 21) & 0x7ff)} and not the CSEL field "
-                         f"the step table decodes — so the row claims a word "
-                         f"the image does not contain")
-        self.assertEqual(
-            G._step_branch_index(word), 69,
-            "the CSEL word no longer decodes to the model's select branch "
-            "(`_STEP_CONDS`'s row 69, `work_step_csel`): a step the model "
-            "takes is a step the certificate cannot build, and the program "
-            "refuses again")
-        # and a CSET word must not land on that row: its encoder sets bit 10,
-        # which the class keeps clear — the two selects are disjoint by a bit
-        cset = struct.unpack("<I", encode_cset_xd_cond(0, "ne"))[0]
-        self.assertNotEqual(
-            (cset & 0xffe00c00), 0x9a800000,
-            "a CSET word satisfies the CSEL row's test, so the two selects "
-            "share a word and one of them mis-steps")
+                         f"the refusal's diagnosis reads — so the refusal names "
+                         f"an instruction the image does not contain")
+        self.assertIsNone(G._step_branch_index(word),
+                          "`arm64_step` grew a CSEL branch: the refusal message "
+                          "is no longer the reason this program has no proof, "
+                          "and `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_"
+                          "step_table_cannot_claim_it.md` should be re-read "
+                          "before this row is deleted")
 
         tmp = tempfile.mkdtemp(prefix="ternary-arm64-")
         try:
             path, err = _generate(tmp, TERNARY_PROGRAM, "tern_arm64",
                                   arch="arm64")
-            self.assertIsNone(err,
-                              "arm64 refuses the ternary, and the select is "
-                              "modelled — so the refusal is something else; "
-                              "re-measure which:\n" + (err or ""))
-            self.assertIsNotNone(
-                path,
-                "arm64 generated no proof for the ternary (the select is "
-                "modelled, so this is a different gap than the one the "
-                "refusal used to name)")
-            text = _read(path)
-            self.assertIn("work_step_csel", text,
-                          "the CSEL's step result is not closed by the "
-                          "library lemma, so the step the model takes is not "
-                          "the step the certificate steps")
+            self.assertIsNone(path, "arm64 now generates a proof for this "
+                                    "program, so the rows above are no longer "
+                                    "the whole story — re-measure them")
+            self.assertIn("CSEL", err,
+                          f"the refusal does not name the instruction:\n{err}")
+            self.assertIn("FORMAL_arm64_csel_is_not_modelled", err,
+                          f"the refusal does not point at the measurement:\n"
+                          f"{err}")
+            self.assertIn("_ternary_go", err,
+                          f"the refusal does not say the model states it:\n{err}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_spill_is_not_attributed_to_the_conditional_expression(self):
-        """A spill is not attributed to the conditional expression, and the
-        spilling function proves.
+        """The other unmodelled word is a spill, and it says so.
 
         `STUR`/`LDUR` is the 9-bit-displacement form a frame access at a
-        NEGATIVE offset needs, and a function with enough spilled locals to
-        reach below the entry `sp` is the other unmodelled-word case the
-        refusal mechanism names off the encoding. It has nothing to do with a
-        conditional expression, and this row is why the mechanism does not
-        assume the one construct this file is about: a message that blamed the
-        ternary for a spill would send a reader to fix the wrong thing. The
-        step table got arms for the pair on 2026-10-05 (`_STEP_CONDS` rows
-        64/65, `work_step_ldur`/`work_step_stur`), so the spilling function
-        GENERATES an arm64 proof now instead of being refused — the refusal
-        half of this row retired with that; what stays pinned, re-measured
-        2026-10-27, is the name read off the encoding and the absence of a
-        `_ternary_go` blame in the word the mechanism would still name for it.
+        NEGATIVE offset needs, and the step table has arms for the scaled
+        `STR`/`LDR` and not for these — so a function with enough spilled
+        locals to reach below the entry `sp` gets no arm64 proof either, and has
+        nothing to do with a conditional expression. This row is why the refusal
+        names the instruction off its encoding instead of assuming the one
+        construct this file is about: a message that blamed the ternary for a
+        spill would send a reader to fix the wrong thing.
 
         Measured: twelve spilled locals is enough, and the words are
         `stur x0, [x29, #-0x58]` (`0xf81a83a0`) and `ldur` of the same shape.
@@ -926,24 +898,25 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         for enc, want in ((encode_stur_xt_xn_imm, "STUR"),
                           (encode_ldur_xt_xn_imm, "LDUR")):
             word = struct.unpack("<I", enc(0, 29, -0x58))[0]
-            name, why = G._unmodelled_instruction(word)
-            self.assertEqual(name, want,
+            self.assertEqual(G._unmodelled_instruction(word)[0], want,
                              f"{want} is not what the refusal names for "
                              f"{word:#010x}")
-            self.assertNotIn("_ternary_go", why,
-                             f"a {want} would be blamed on the conditional "
-                             f"expression:\n{why}")
 
         tmp = tempfile.mkdtemp(prefix="spill-arm64-")
         try:
             path, err = _generate(tmp, spill, "spill_arm64", arch="arm64")
-            self.assertIsNotNone(path,
-                                 "the spilling function is refused again, so "
-                                 "`_STEP_CONDS` rows 64/65 "
-                                 "(`work_step_ldur`/`work_step_stur`) stopped "
-                                 "stepping:\n" + (err or ""))
-            self.assertIsNone(err,
-                              "the spilling function refused:\n" + (err or ""))
+            self.assertIsNone(path, "a spilling function now generates an arm64 "
+                                    "proof, so `bugs/FORMAL_arm64_instruction_"
+                                    "coverage.md`'s LDUR/STUR row is stale and "
+                                    "this row should be re-measured")
+            self.assertNotIn("_ternary_go", err,
+                             f"a spill is being blamed on the conditional "
+                             f"expression:\n{err}")
+            self.assertIn("STUR", err,
+                          f"the refusal does not name the spill:\n{err}")
+            self.assertIn("NEGATIVE offset", err,
+                          f"the refusal does not say why the emitter reached "
+                          f"for the unscaled form:\n{err}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -956,15 +929,14 @@ class TestTheConditionalExpressionModelTypechecks(unittest.TestCase):
     records ("images dyld refused to load … every one of those produced a
     *correct proof* about code that could not run"). So this asks Lean.
 
-    x86-64, and the reason is economy rather than a wall: arm64 models the
-    select now (row 69, `work_step_csel` — the row above pins the generation,
-    and the whole-file check of that file is the 12 GB line in
-    `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_
-    claim_it.md`'s Status). What this pins on x86-64 is the half this file's
-    subject is about — that the model a conditional expression produces is a
-    term the generated file accepts, that the bridge really is absent rather
-    than present and unproved, and that the two designed trust boundaries are
-    the only holes.
+    x86-64 only, and the reason is the arm64 wall rather than a preference:
+    `a if c else b` is one `CSEL` there and `arm64_step` has no branch for it,
+    so arm64 refuses the program (`bugs/FORMAL_arm64_csel_is_not_modelled_so_
+    the_step_table_cannot_claim_it.md`). What this pins on x86-64 is the half
+    that IS landable now — that the model a conditional expression produces is
+    a term the generated file accepts, that the bridge really is absent rather
+    than present and unproved, and that the two designed trust boundaries are the
+    only holes.
 
     Skipped, loudly, without Lean or `lib/ProofLib.olean`.
     """
@@ -1074,7 +1046,7 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 #
 # `MojoExpr.call` carries ONE `MojoExpr`, so a call with two arguments has no
 # faithful AST and `eval_eq_mojo` is false for it
-# (`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
+# (`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
 # three ways to widen it and says the first is a "0.3-second experiment", which
 # is this class: three Lean files, each answering one question, all of them
 # things the NEXT worker would otherwise re-derive by hand.

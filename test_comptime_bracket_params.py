@@ -19,7 +19,6 @@ import subprocess
 import tempfile
 
 import driver
-from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -44,7 +43,7 @@ def _build_and_run(mojo_src: str, filename: str = 'prog.mojo') -> str:
     rc = driver.compile_program(src_path, mojo_src, output=exe, run=False)
     if rc is None:
         raise RuntimeError("driver.compile_program failed to build (returned None)")
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout
@@ -201,21 +200,6 @@ def main():
     out = _build_and_run(src)
     check("both keyword-bound fn params thread through (prints 1, 70)",
           out == "1\n70\n", detail=repr(out))
-
-
-def test_paramless_function_bracket_refused_in_single_tu():
-    """Regression for bug CODEGEN_bracket_call_to_a_runtime_paramless_
-    function_is_a_zero: a bracket call to a callee with zero runtime
-    params must not silently compile to 0 on the single-TU path."""
-    import gimple_codegen
-    src = "def a[T: Int]():\n    return T\n\ndef main():\n    print(a[7]())\n"
-    try:
-        gimple_codegen.compile_to_gimple_cached(src)
-        check("paramless bracket refused (not 0)", False,
-              detail="compile succeeded silently — expected refusal")
-    except RuntimeError as e:
-        check("paramless bracket refused (not 0)",
-              "link-mode specialisation" in str(e), detail=str(e))
 
 
 def run_all():

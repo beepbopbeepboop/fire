@@ -8,11 +8,11 @@ name would TAKE rather than by how many files mention it.
     python3 tools/formal_host_import_wall.py --unmodelled glob --unmodelled fnmatch
 
 **Why this is a tool and not a fourth document.** Three documents described this
-same measurement in prose — `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
+same measurement in prose — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
 §5, the thirteen-row `terminal`-vs-`closure` walk whose doc is deleted with this
 promotion (its numbers were 2026-10-03, and every one of its four reachable
 names has since landed: `glob`, `shlex`, `signal`, `fnmatch`), and the `b11`
-round, whose census is `bugs/formal/FORMAL_sweep_work_map.md` §1.13 — and the first of
+round, whose census is `bugs/FORMAL_sweep_work_map.md` §1.13 — and the first of
 those says the scratch "should have become a second tool rather than a fourth
 description of one". This is that tool.
 
@@ -77,7 +77,7 @@ a gap in this repository, which `tools/formal_sweep.py` classes as
 with an owner), `unreachable` (a permanent fact about the target), `admitted`
 (answers under a declared contract), `unclassified` — CPython ships it and no
 tier says which of the two it is, which is the queue
-`bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` carries and what the
+`bugs/FORMAL_stdlib_module_names_are_not_classified.md` carries and what the
 `tier` column prints as `unclassified` — and `not-code`, which is CPython
 shipping a name whose content is not code at all (`this`, `antigravity`,
 `turtledemo`). **`not-code` is a wall because the BUILD refuses the import**, with
@@ -89,7 +89,6 @@ IMPORTS, which is decidable from source, and a build would answer a different
 question at twenty minutes a sweep.
 """
 import argparse
-import functools
 import json
 import os
 import re
@@ -113,7 +112,7 @@ import tools.formal_sweep as SW      # noqa: E402
 # name a host module: a name a tier classifies reads "is a host module (CPython
 # standard library)", while a name CPython ships that no tier classifies reads
 # "is a CPython standard-library module, which has no Mojo source in this tree
-# and no tier …". The second arm is `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`'s
+# and no tier …". The second arm is `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s
 # whole fix, and a pattern that only knows the first arm drops exactly the files
 # that are in no tier — so the `sweep` column would be silent about the rows that
 # classification is for. Measured on `sweep-arm-11.txt`: 4 of the 203 host-import
@@ -287,7 +286,7 @@ def sweep_coverage(sweep_path: str) -> tuple:
     column over the ones it kept: measured on `sweep-arm-11.txt`, a pattern
     matching only the "is a host module" wording attributes 199 of 203 and the
     four it drops are all the no-tier wording — the files whose classification
-    is `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`'s subject.
+    is `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s subject.
     """
     attributed = len(sweep_rows(sweep_path))
     total = sum(1 for _ in _sweep_host_lines(sweep_path))
@@ -311,20 +310,6 @@ def rank(files, unmodelled=frozenset()):
         name: {"reach": sorted(set(v)), "alone": sorted(alone.get(name, []))}
         for name, v in reach.items()
     }
-
-
-@functools.lru_cache(maxsize=None)
-def default_rank() -> dict:
-    """`rank` over the DEFAULT corpus — the walk `main` reports on with no flags.
-
-    The corpus is the whole walk, not the files one sweep blocked on: `reach` is
-    "what in this tree's closure names the module", and a caller that ranks a
-    subset (the sweep's files for one module) gets a different number under the
-    same name. Cached per process, because one walk is the cost and every caller
-    of the default corpus wants the same answer; callers must not mutate it.
-    """
-    roots, _notes = SW.default_roots()
-    return rank(SW.find_source_files(roots))
 
 
 def main(argv=None) -> int:

@@ -40,7 +40,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-from exec_budget import COMPILE_TIMEOUT_S  # per-child budgets
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -583,7 +582,7 @@ def test_a_hostmod_getsize_call_answers_under_rosetta(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(build.returncode == 0,
           f"the getsize program did not build for x86-64: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -684,7 +683,7 @@ def test_program_importing_an_extern_module_matches_cpython(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(build.returncode == 0,
           f"an x86-64 program importing a module with an extern call did not "
           f"build: {(build.stderr or build.stdout).strip()[-400:]}")
@@ -737,7 +736,7 @@ def test_module_dylib_with_an_extern_call_loads_into_a_program(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, "--link-dylib", lib, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(build.returncode == 0,
           f"linking an x86-64 module dylib with an extern failed: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -789,7 +788,7 @@ def test_an_imported_hostmod_dylib_answers_on_x86_64(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(build.returncode == 0,
           f"an x86-64 program importing os.path.getsize did not build: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")
@@ -831,7 +830,7 @@ def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
 # nothing calls — the file builds, links, and does nothing at load time, which
 # is the silent no-op one level down from the executable path's own and cost 16
 # files of this repository (the dylib-module-body row, §6 of
-# the `b7` round of `bugs/formal/FORMAL_sweep_work_map.md`). Each object writer therefore
+# the `b7` round of `bugs/FORMAL_sweep_work_map.md`). Each object writer therefore
 # emits the loader's own mechanism for "call this when the image loads", and each
 # one is a DIFFERENT mechanism, so each is checked in its own container:
 #
@@ -990,7 +989,7 @@ def test_a_module_body_is_a_load_time_initializer(tmpdir, shared):
     built = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(built.returncode == 0,
           f"an x86-64 program importing a module with a body failed to build: "
           f"{(built.stderr or built.stdout).strip()[-400:]}")
@@ -1118,7 +1117,7 @@ def test_a_program_importing_os_path_getsize_matches_cpython(tmpdir, shared):
     build = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
          "--backend=x86_64", "-o", out, prog],
-        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+        capture_output=True, text=True, timeout=600)
     check(build.returncode == 0,
           f"an x86-64 program importing os.path.getsize did not build: "
           f"{(build.stderr or build.stdout).strip()[-400:]}")

@@ -31,12 +31,7 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.abspath(__file__))
-# A cast is always followed by its operand. `(MojoSet *);` is the parameter list
-# of a one-parameter PROTOTYPE (`static char * _mojo_repr_set (MojoSet *);`), not
-# a cast, so a `;` right after the paren is excluded -- which removes the
-# asymmetry the ledger below records (one-parameter prototypes counted, the
-# `(MojoList *, MojoDict *)` ones not).
-CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)(?!\s*;)')
+CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)')
 
 
 def strip_prose(src: str) -> str:
@@ -376,29 +371,7 @@ def strip_prose(src: str) -> str:
 # defeats CAST_RE, so two of three near-identical lines count and one does
 # not. That asymmetry is the metric's text-scan limit, not a reason to
 # respell the counted pair to hide it.
-#
-# 26 -> 27 (2026-10-27, gate fixup): the bytes arm of the generated
-# `_mojo_generic_elem_repr` -- `mojo_bytes_repr((MojoBytes *)(intptr_t)val)`,
-# guarded by its own `mojo_is_registered_bytes(val)` predicate exactly like
-# the list/dict arms beside it (a0790e16f, the runtime-type-erased-bytes
-# fix; it entered this line of master through the 768dea0e1 merge, which is
-# why the 24 -> 26 entry above never saw it). Same class as the baseline's
-# existing module_gen repr-template sites: C the GENERATED program executes,
-# in a template string, with no `gen` in scope and the kind proven by the
-# measured registry dispatch -- the "kind proven by a measured dispatch"
-# class this ledger records, not a static guess, and the chokepoint cannot
-# serve a template string.
-#
-# 27 -> 24 (2026-10-31): the 14 casts added since 37e8c2a2 were all C++ TEXT in
-# the coroutine backend (the `_W`/`_MjWord` word-conversion operators, three
-# `(MojoList *)(intptr_t)` slice/yield/contains casts) plus two `(MojoDict *)0`
-# NULLs. They are now composed in ONE place, `emit_resolve.cpp_container_cast_prefix`
-# / `container_null` / `cpp_word_container_operator` (reached through GimpleGen
-# delegates), which this test exempts, and the two duplicate operator lists in
-# cpp_core.py and module_gen.py share it. Generated C++ is byte-identical.
-# The one-parameter prototype `_mojo_repr_set (MojoSet *);` stopped counting (see
-# CAST_RE), which is the rest of the drop.
-BASELINE_COUNT = 24
+BASELINE_COUNT = 26
 
 
 def count_casts() -> int:

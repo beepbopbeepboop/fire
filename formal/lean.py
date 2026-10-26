@@ -93,7 +93,7 @@ returns it in `LeanRun.exceeded` and every caller turns it into a message that
 names the bound it broke; it is NOT published to the verdict cache, because a
 breach is a fact about this machine at this moment (how loaded it was, how many
 proofs ran at once) rather than a property of the proof's bytes — caching it is
-how a red becomes permanent (`bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md`).
+how a red becomes permanent (`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`).
 And it is never silently `0` holes: a killed elaboration measured nothing, so
 the hole census reports UNMEASURED for it.
 
@@ -104,7 +104,7 @@ MEASURED is now fixed rather than documented: `bv_decide` on a 14-fold composed
 `Arm64State` normalised its own goal with a `simp` -- the runner's `if pc = pc
 then .. else ..`, one per step, around the whole state -- which `maxHeartbeats`,
 `maxSteps` and `maxRecDepth` all failed to meter, three separate measurements.
-`FORMAL.md` §12 and `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 carry
+`FORMAL.md` §12 and `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 carry
 the numbers and the fix; the lesson for this module is the one that outlives it:
 a budget was the wrong instrument three times over, so the bound here is the
 instrument and the emitter owes the tree goals small enough to need it.
@@ -135,7 +135,7 @@ import time
 # semantics and 1/200th of the edit surface does not belong inside it.  Nothing
 # imports it yet: the FP step functions that would are `arm64_step`'s and
 # `x86_64_step`'s, and giving either state a second register file is the step
-# that has to land first (`bugs/formal/FORMAL_float_step_functions.md`).  Until then it
+# that has to land first (`bugs/FORMAL_float_step_functions.md`).  Until then it
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.
@@ -266,7 +266,7 @@ LIBRARY_WALL_S = 1800.0
 LIBRARY_CPU_S = 1800.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
 # project's 4 GB line: that line is a DEBT standard for what a job should cost
-# (`doc/POLICY_memory_over_4gb.md`), and enforcing it by capping Lean is
+# (`bugs/PERF_memory_over_4gb_is_a_bug.md`), and enforcing it by capping Lean is
 # not paying the debt, it is breaking the build — measured, not assumed: with
 # `-M 4096` the `lib/ProofLib.lean` build fails at line 3808 with "(kernel)
 # excessive memory consumption detected" and peaks at 7.8 GB, so a 4 GB ceiling
@@ -1347,7 +1347,7 @@ AXIOM_FOUNDATION = frozenset({"propext", "Quot.sound", "Classical.choice"})
 #: the bound is ours. Two readers of one sentence is how a reworded ceiling ends
 #: up classified as a proof failure by one tool and as an absence by another —
 #: and that disagreement is exactly what
-#: `bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+#: `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
 #: records for `both` and `either`, the two examples whose proof Lean's `-M`
 #: refuses rather than rejects.
 LEAN_MEMORY_REFUSAL_RE = re.compile(
@@ -1876,7 +1876,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     # bound is a function of the MACHINE (how loaded, how many proofs at once),
     # so caching it turns one slow afternoon into a permanent red that no
     # re-run can clear — which is exactly what
-    # `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` records about a cached
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` records about a cached
     # timeout. So a breach is reported, never published, and its hole census is
     # UNMEASURED rather than the partial prefix the killed run managed to print.
     return census(False, detail, False, None, lib)
