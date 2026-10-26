@@ -88,7 +88,7 @@ That is the trade this codebase's own rules make explicitly — "a silent
 wrong-answer is worse than a crash", and here it is not even a crash, it is an
 exit-0 program that printed the wrong number. The rest of that family is filed
 separately rather than fixed here:
-the rest of that family — method calls on bare-imported uncompiled module markers silently returning the marker — was filed separately and is now closed.
+`bugs/CODEGEN_a_method_call_on_an_uncompiled_module_marker_is_a_silent_zero.md`.
 
 Verified no new reds: `test_gimple_runner.py` 295 passed / 9 failed (the same
 9 that fail on a pristine `bc17a62b`), `test_gimple.py` 368 passed / 0 failed,

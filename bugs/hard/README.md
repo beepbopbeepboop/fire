@@ -359,7 +359,8 @@ were silent:
   produced `CODEGEN_return_type_of_module_constructor_result_erased.md`, which
   is a *distinct* bug (it breaks the attribute read too) and is the reason that
   doc was deleted rather than kept.
-- The parent `bugs/` directory tracks the wider (non-hard) set.
+- `BUGFIX_ROADMAP.md` in the parent directory tracks the wider
+  (non-hard) set.
 
 ## Known rot in these docs: 9 dangling cross-references
 
