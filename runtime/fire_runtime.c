@@ -728,10 +728,6 @@ static int _mojo_is_struct_word(int64_t v) {
 typedef struct {
     uint64_t addr;    /* the MojoList address; 0 = empty slot */
     char    *kinds;   /* one byte per slot, or NULL */
-    char     owned;   /* 1 iff `kinds` is a private malloc'd buffer this row
-                       * owns (and may realloc/grow); 0 if it is a shared
-                       * string-pool constant handed over by
-                       * mojo_list_set_kinds. */
     void   **boxes;   /* lazily allocated, one entry per list element */
     /* How to REPR one element of this list, or NULL. Same "the information
      * travels with the value" bargain as `kinds`, and for the same reason: the
@@ -816,7 +812,6 @@ static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
     /* A new row describes nothing yet, whatever a deleted row left here. */
     _reg_kinds.rows[i].addr = addr;
     _reg_kinds.rows[i].kinds = NULL;
-    _reg_kinds.rows[i].owned = 0;
     _reg_kinds.rows[i].boxes = NULL;
     _reg_kinds.rows[i].repr_fn = NULL;
     _reg_kinds.used++;
@@ -866,7 +861,6 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
     r->kinds = (char *)kinds;
-    r->owned = 0;   /* mojo_list_set_kinds stores a (possibly shared) pointer */
     if (fresh && !kinds) _kinds_forget(addr);
 }
 
@@ -1413,8 +1407,7 @@ int mojo_boxed_is_str(int64_t v) {
      * shipped in the first place. */
     if (!(_mojo_ptr_shaped(v))) return 0;
     if (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
-        || mojo_is_registered_set(v) || mojo_is_boxed(v)
-        || mojo_is_registered_bytes(v)) return 0;
+        || mojo_is_registered_set(v) || mojo_is_boxed(v)) return 0;
     /* Pointer-shaped and not a container: the sound half the range test could
      * never give. A LIVE heap allocation is a real pointer and no bare integer
      * is one, and a registered non-heap string is the codegen's `__rodata`
@@ -9315,19 +9308,6 @@ MojoList *mojo_str_chars(char *s)
     size_t n = strlen(s);
     for (size_t i = 0; i < n; i++)
         mojo_list_append_str(l, mojo_cstr_slice(s, (int64_t)i, (int64_t)(i + 1)));
-    /* Every slot is a one-character string, so the list describes itself as
-     * "pppp..."; without this a STRING spread into a mixed literal leaves its
-     * tail undescribed and the integer slots beside it print as None. */
-    if (n > 0) {
-        char *kinds = (char *)malloc(n + 1);
-        if (kinds) {
-            for (size_t i = 0; i < n; i++) kinds[i] = 'p';
-            kinds[n] = '\0';
-            mojo_list_set_kinds(l, kinds);
-            _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
-            if (r) r->owned = 1;
-        }
-    }
     return l;
 }
 
@@ -9371,19 +9351,6 @@ MojoList *mojo_str_chars(char *s)
  * generated branch must have a value of the right C type. */
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
-    /* A type-erased bytes value iterates its bytes as ints 0-255
-     * (CPython), the same element source the statically-typed
-     * `MojoBytes *` arm of `_materialize_as_list` uses. Before this arm,
-     * `mojo_boxed_is_str` (which now excludes registered bytes) was the
-     * only discriminator and a registered bytes fell through to the
-     * not-iterable raise; test the bytes registry first. */
-    if (mojo_is_registered_bytes(v)) {
-        MojoBytes *b = (MojoBytes *)(intptr_t)v;
-        MojoList *l = mojo_list_new();
-        for (int64_t i = 0; i < mojo_bytes_len(b); i++)
-            mojo_list_append_int(l, mojo_bytes_get(b, i));
-        return l;
-    }
     if (mojo_boxed_is_str(v))
         return mojo_str_chars((char *)(intptr_t)v);
     mojo_raise_type_error((char *)"object is not iterable");
@@ -10296,30 +10263,6 @@ int64_t mojo_list_delitem(MojoList *l, int64_t idx) {
     return mojo_list_pop_at(l, idx);
 }
 
-/* Append `n` kind bytes to `r`'s kinds string, growing it. A no-op when the
- * row has no kinds at all: a list that never recorded any must not start
- * recording on an append (the runtime's fallback for an undescribed slot is
- * 'i', and inventing bytes here would describe slots the codegen never
- * committed to). Copy-on-write: a shared (unowned) buffer is copied first, so
- * the realloc only ever touches a private buffer. */
-static void _kinds_append(_KindRow *r, const char *bytes, int64_t n) {
-    if (!r || !r->kinds || !bytes || n <= 0) return;
-    if (!r->owned) {
-        size_t cur = strlen(r->kinds);
-        char *priv = (char *)malloc(cur + 1);
-        if (!priv) return;
-        memcpy(priv, r->kinds, cur + 1);
-        r->kinds = priv;
-        r->owned = 1;
-    }
-    size_t cur = strlen(r->kinds);
-    char *nb = (char *)realloc(r->kinds, cur + (size_t)n + 1);
-    if (!nb) return;
-    memcpy(nb + cur, bytes, (size_t)n);
-    nb[cur + (size_t)n] = '\0';
-    r->kinds = nb;
-}
-
 void mojo_list_extend(MojoList *dst, MojoList *src) {
     if (!dst || !src) return;
     /* Checked here rather than left to mojo_list_append_int below: an EMPTY
@@ -10337,22 +10280,6 @@ void mojo_list_extend(MojoList *dst, MojoList *src) {
     if (!mojo_list_repr_elem(dst, 0)) {
         _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
         if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
-    }
-    /* Inherit the source's per-slot kinds onto the destination, so a mixed
-     * literal `[0, *s]` ends up described as "i" + "pp..." instead of only
-     * "i" (which made the integer slot 0 print as None), and a pure spread
-     * `[*s]` inherits "pp..." instead of nothing. An undescribed destination
-     * with an undescribed source stays undescribed (no slot invention). */
-    {
-        _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
-        if (sr && sr->kinds) {
-            _KindRow *dr = _kinds_row((uint64_t)(uintptr_t)dst);
-            if (dr && dr->kinds) {
-                _kinds_append(dr, sr->kinds, (int64_t)strlen(sr->kinds));
-            } else {
-                mojo_list_set_kinds(dst, sr->kinds);
-            }
-        }
     }
 }
 
@@ -11327,17 +11254,6 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
    exist, and a bool argument arrives as 0/1 anyway. */
 char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
 
-/* Element-repr shims for homogeneous scalar lists built at runtime
- * (comprehensions / list(range)): the generic container walker consults
- * `mojo_list_repr_elem` per slot, which has the right signature
- * `char *(*)(int64_t)`. These adapt the scalar repr functions to it. */
-char *mojo_repr_list_elem_double(int64_t v) {
-    return mojo_repr_float(mojo_double_from_bits(v));
-}
-char *mojo_repr_list_elem_bool(int64_t v) {
-    return mojo_repr_bool((int)v);
-}
-
 /* The TRANSIENT decimal strings of `mojo_cstr_or_int_str` (an Int dict key or
  * compare operand) are blocks from this small free list: one per access,
  * released the moment the call that consumed it returns
@@ -11469,8 +11385,6 @@ static char *_container_key_str(int64_t v) {
    ask it here rather than guessing a direction. */
 char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
-    if (mojo_is_registered_bytes(v))
-        return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_registered_list(v)) return _container_key_str(v);
     return _int_str_transient(v);
 }
@@ -11524,7 +11438,7 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
      registered list is the only value that produces this kind of string, so
      the two cannot disagree about which allocation `s` is. */
-    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
+    if (mojo_is_registered_list(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
