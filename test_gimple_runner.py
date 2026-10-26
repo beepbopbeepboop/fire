@@ -5745,6 +5745,23 @@ for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
     print(a, b)
 """, "a padded `double` slot has no value that means `absent`")
 
+    # Regression for CODEGEN_a_padded_zip_longest_struct_slot_is_a_null_dereference:
+    # a member read through a padded struct-pointer slot must take the None-aware
+    # dynamic path (not a raw -> dereference) when the slot can hold NULL.
+    test_gimple_runtime_error(
+        "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware", """\
+struct StackItem:
+    var peek: Bool = False
+import itertools
+def main():
+    var inputs = [StackItem(), StackItem(), StackItem()]
+    var outputs = [StackItem()]
+    for input, output in itertools.zip_longest(inputs, outputs):
+        input.peek = output.peek = True
+    print("done")
+main()
+""", "AttributeError")
+
     # A fillvalue outside the slot's own domain is the same wrong answer in a
     # second spelling: CPython hands every slot the value as given, so this
     # prints `b 5` where the old `(int64_t)(0.0)` fill printed `b 0`. The
