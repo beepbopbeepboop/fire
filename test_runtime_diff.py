@@ -850,7 +850,7 @@ BUILTIN_PROGRAMS = {
     # the result is presented there; a `char *` default makes the expression a
     # `char *`. The int default and the `hasattr` probe beside it are the
     # controls: neither involves the cast. See
-    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
+    # the dynamic-attribute string-read miss fix.
     "getattr_default_on_a_miss": textwrap.dedent("""\
         class C:
             pass

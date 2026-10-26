@@ -3325,7 +3325,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # STRING'S OWN ADDRESS — the miss flag and the default were both
             # already correct in the emitted C, and `_t9 = missed ? dflt :
             # raw` was computed and then formatted with `%ld`. That is the
-            # whole of bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md's
+            # whole of the dynamic-attribute string-read miss (missing cast to
+            # the default's domain) — see fix commit
             # residual 2: not a missing ternary, a missing CAST, in the
             # opposite direction from the one that branch was looking for.
             _res = dt if dt in ('char *', 'double') else 'int64_t'
