@@ -1374,3 +1374,4 @@ def load_module_from_path(path: str) -> dict:
 def get_symbol_type(module_name: str, symbol_name: str) -> str:
     """Get the inferred type of an imported symbol."""
     return _module_loader.get_symbol_type(module_name, symbol_name)
+
