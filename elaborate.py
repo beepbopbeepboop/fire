@@ -16,8 +16,7 @@ import subprocess
 
 import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
-                          TraitDef, split_top_level_commas, VarDecl,
-                          AssignStmt, IdentExpr)
+                          TraitDef, split_top_level_commas)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -914,32 +913,8 @@ def _struct_layout_anns(concrete_src: str, name: str):
         if not (isinstance(s, StructDef) and s.name == name):
             continue
         for f in getattr(s, 'fields', []):
-            # `fields` is VarDecl + AssignStmt (fire_compiler._parse_struct's
-            # own contract), and ONLY VarDecl has a `.name`:
-            #
-            # * a dataclass field with a default, `name: Type = default`
-            #   spelled WITHOUT `var`, is an AssignStmt CARRYING the
-            #   annotation — a real field, its name on `.target`;
-            # * a struct-level assignment the parser could not place any
-            #   better is an AssignStmt whose target is not a name (no
-            #   annotation, no provable layout) — not a field at all.
-            #
-            # Reading `.name`/`.type_ann` off both, as before, died with
-            # AttributeError on the second kind — the measured instance is
-            # the stdlib containers' `comptime IteratorOwnedType: Iterator
-            # where conforms_to(...) = ...` aliases, whose `where`-clause
-            # continuation the parser used to drop and re-parse as an
-            # ordinary assignment (now a ComptimeVarStmt — see
-            # fire_compiler._parse_comptime's own where-skip), so the junk
-            # no longer reaches here; the narrowing is what keeps this
-            # reader honest for either spelling.
-            if isinstance(f, VarDecl):
-                fields.append((f.name, _mojo_type(f.type_ann)))
-                anns.append((f.name, 'field', 0, f.type_ann))
-            elif (isinstance(f, AssignStmt) and isinstance(f.target, IdentExpr)
-                    and f.type_ann is not None):
-                fields.append((f.target.value, _mojo_type(f.type_ann)))
-                anns.append((f.target.value, 'field', 0, f.type_ann))
+            fields.append((f.name, _mojo_type(f.type_ann)))
+            anns.append((f.name, 'field', 0, f.type_ann))
         for m in getattr(s, 'methods', []):
             ret = _mojo_type(m.return_type) if m.return_type else 'void'
             ps = [_mojo_type(t) for n, t in m.params if n != 'self']
