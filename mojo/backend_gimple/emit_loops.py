@@ -3101,7 +3101,11 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # `TypeError: cannot unpack non-iterable <type> object`. Refuse
             # at runtime via the slot's keykind rather than stringify/slice.
             _kk = gen._new_val('int64_t', f"mojo_dict_iter_key_kind ({iter_t})")
-            _notstr = gen._new_val('_Bool', f"{_kk} != 0")
+            # `0LL`, not `0`: `mojo_dict_iter_key_kind` returns int64_t, and a
+            # bare int `0` makes this `int64_t != int` — a "mismatching
+            # comparison operand types" refusal under the self-host's
+            # `gcc -fgimple` (the int64_t key-kind temp vs the int literal).
+            _notstr = gen._new_val('_Bool', f"{_kk} != 0LL")
             _kb = gen._new_bb(); _ko = gen._new_bb()
             gen._emit(f'  if ({_notstr}) goto {_kb}; else goto {_ko};')
             gen._emit_label(_kb)
