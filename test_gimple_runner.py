@@ -12208,6 +12208,18 @@ def main():
 main()
 """)
 
+    test_gimple_stdout("gimple_star_spread_of_string_beside_own_slot", """\
+def tup_str(a: str) -> tuple:
+    return (0, *a)
+
+def list_str(a: str) -> list:
+    return [0, *a]
+
+print(tup_str('ab'))
+print(list_str('ab'))
+print([*'ab'])
+""", "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
+
     _parser_struct_and_symbols()
 
 
