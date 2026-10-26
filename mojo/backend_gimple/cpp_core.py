@@ -490,17 +490,35 @@ def _cpp_try_unpack_call(gen, e):
     refusal (a spread left to the generic UnaryOp case would emit
     `(**x)` — a double pointer-dereference, a silent miscompile).
     """
-    if not isinstance(e.func, gimple_ctypes.IdentExpr):
-        return None
-    fname = e.func.name
-    decl = gen._cpp_declared
-    if decl is None:
-        return None
-    ctype = decl.get(fname)
-    if ctype not in (gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+    if isinstance(e.func, gimple_ctypes.IdentExpr):
+        fname = e.func.name
+        decl = gen._cpp_declared
+        if decl is None:
+            decl = {}
+        ctype = decl.get(fname)
+        if ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
                      gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
                      gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
-        return None  # not a declared variadic-family callable local
+            pass  # declared variadic-family local — handled below
+        else:
+            # Parameter-callee extension (the parameter-callee axis,
+            # claim parameter-callee-axis): a parameter whose type is
+            # callable-value carries any callable ctype. The same
+            # container-copy lowering applies — the callee's own
+            # callable-value emission (_callable_value_symbol, fixed
+            # for the parameter-callee case on 2026-08-26) provides the
+            # call site; the spread only needs to provide the container.
+            param_ctype = (getattr(gen, 'func_param_types', {}).get(fname)
+                           or getattr(gen, '_cpp_param_ctype', {}).get(fname))
+            if not (param_ctype is not None and param_ctype != 'int64_t'):
+                return None  # callee is neither a variadic local nor a
+                             # callable-value parameter — let the caller's
+                             # honest refusal stand.
+            ctype = param_ctype  # parameter-callee: use the param's callable type
+    else:
+        return None  # not an IdentExpr callee: not callable through a
+                     # spread-lowerable mechanism here.
+
     star = None
     kwarg = None
     for i, a in enumerate(e.args):
