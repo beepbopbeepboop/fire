@@ -1896,6 +1896,8 @@ double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 /* Python bool repr: "True"/"False", not 1/0. */
 char *mojo_repr_bool(int b);
+char *mojo_repr_list_elem_double(int64_t v);
+char *mojo_repr_list_elem_bool(int64_t v);
 
 /* A callable-valued parameter default naming an IMPORTED module's function
  * (`def probe(x, *, g=os.walk)`) — see the block comment on
