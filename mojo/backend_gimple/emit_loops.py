@@ -2839,8 +2839,10 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # With a star, every slot is a CHARACTER of the key, so `char *` —
             # including the ones after the star, which the starless lowering
             # declares `int64_t` and stores a literal 0 into.
-            _want = ('int64_t' if int_keys else 'char *') if (i == 0 or star_idx >= 0) \
-                else 'int64_t'
+            if int_keys:
+                _want = 'int64_t'
+            else:
+                _want = 'char *'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
                 or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
@@ -2882,15 +2884,15 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if int_keys:
         ikey_tmp = gen._new_val('int64_t', f"mojo_dict_iter_key_int ({iter_t})")
         if is_tuple:
-            gen._emit(f"  {gen._cname(var_names[0])} = {ikey_tmp};")
-            for _vi in range(1, len(var_names)):
-                _vt = _slot_ctypes[_vi]
-                if _vt in ('int64_t', 'int', 'int32_t'):
-                    gen._emit(f"  {gen._cname(var_names[_vi])} = (int64_t)0;")
-                elif _vt.endswith(' *'):
-                    gen._emit(f"  {gen._cname(var_names[_vi])} = ({_vt})0;")
-                else:
-                    gen._emit(f"  {gen._cname(var_names[_vi])} = (char *)0;")
+            # A dict with int keys is not unpackable: an int has no
+            # characters, so CPython raises
+            # `TypeError: cannot unpack non-iterable int object`. Raise
+            # the same rather than binding the int to slot 0 and 0 to the
+            # rest (the old, wrong shape).
+            gen._emit_call('void', '', 'mojo_raise_type_error',
+                           [('char *', gen._intern_string(
+                               'cannot unpack non-iterable int object'))])
+            gen._emit(f"  goto {bb_after};")
         else:
             gen._emit(f"  {gen._cname(var)} = {ikey_tmp};")
         key_tmp = None
@@ -2998,13 +3000,9 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # this was found on. Same emission idiom as that branch:
             # `_emit_call('void', '', 'mojo_raise_value_error', ...)`.
             #
-            # What this deliberately does NOT change: a key of exactly the
-            # right length still binds the whole key plus the 0 stand-in
-            # below, which is this lowering's shape (the value slots are
-            # declared int64_t for the sibling list arm — see the note
-            # above). This adds a refusal and takes no binding away, so a
-            # loop that worked before still works.
-            #
+            # A key of exactly the right length now splits into one character
+            # per slot (see the binding below), matching CPython and the
+            # interpreter. The refusal above still guards the wrong lengths.            #
             # The dict arm of the runtime-dispatch sibling (the boxed
             # `for name, func in self.funcs:` where funcs is really a LIST)
             # never executes this — `mojo_is_registered_list` routes it to
@@ -3044,29 +3042,30 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                                'string)'))])
             gen._emit(f'  goto {_so};')
             gen._emit_label(_so)
-            # Assign key to first name, NULL (zero) to remaining names
-            vn0 = var_names[0]
-            cvn0 = gen._cname(vn0)
-            # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
-            # store must use the type the slot was actually DECLARED with (see
-            # where _slot_ctypes is built).
-            vt0 = _slot_ctypes[0]
-            if vt0 in ('int64_t', 'int', 'int32_t'):
-                vp = gen._new_val('void *', f'(void *){key_tmp}')
-                box = gen._new_val('int64_t', f'(int64_t){vp}')
-                gen._emit(f"  {cvn0} = {box};")
-            else:
-                gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-            for _vi in range(1, len(var_names)):
-                vn = var_names[_vi]
-                cvn = gen._cname(vn)
-                vt = _slot_ctypes[_vi]
-                if vt in ('int64_t', 'int', 'int32_t'):
-                    gen._emit(f"  {cvn} = (int64_t)0;")
-                elif vt.endswith(' *'):
-                    gen._emit(f"  {cvn} = ({vt})0;")
-                else:
-                    gen._emit(f"  {cvn} = (char *)0;")
+            # A non-str key is not unpackable: CPython raises
+            # `TypeError: cannot unpack non-iterable <type> object`. Refuse
+            # at runtime via the slot's keykind rather than stringify/slice.
+            _kk = gen._new_val('int64_t', f"mojo_dict_iter_key_kind ({iter_t})")
+            _notstr = gen._new_val('_Bool', f"{_kk} != 0")
+            _kb = gen._new_bb(); _ko = gen._new_bb()
+            gen._emit(f'  if ({_notstr}) goto {_kb}; else goto {_ko};')
+            gen._emit_label(_kb)
+            gen._emit_call('void', '', 'mojo_raise_type_error',
+                           [('char *', gen._intern_string(
+                               'cannot unpack non-iterable int object'))])
+            gen._emit(f'  goto {_ko};')
+            gen._emit_label(_ko)
+            # Split the key into one character per slot, the way CPython
+            # unpacks a str — `for a, b in {"ab": 1}` binds a='a', b='b'.
+            # The arity check above already guarantees len(key) == nslots.
+            for _si, _svn in enumerate(var_names):
+                _cvn = gen._cname(_svn)
+                _from = gen._new_val('int64_t', f"{_si}LL")
+                _to = gen._new_val('int64_t', f"{_si + 1}LL")
+                _chr = gen._new_val('char *',
+                                    f"mojo_cstr_slice ((char *) {key_tmp}, "
+                                    f"{_from}, {_to})")
+                gen._emit(f"  {_cvn} = {_chr};")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')

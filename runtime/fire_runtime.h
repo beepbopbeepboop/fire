@@ -1572,6 +1572,7 @@ typedef struct {
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
+int64_t mojo_dict_iter_key_kind(MojoDictIter *it);
 char *mojo_dict_slot_key(MojoDict *d, int64_t i);
 /* The double twin of that one: the emitted dict repr walks slots by index and
  * a double slot's bits are a pointer-shaped word, so reading one back as an
