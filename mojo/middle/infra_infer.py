@@ -2152,9 +2152,15 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     return out
 
 
-def _dict_value_locals(gen, body: list) -> dict:
-    """`{dict name: ctype}` for every dict in `body` that is STORE-INTO with
-    a value of a known type, so a later `return <that dict>[k]` can be typed.
+def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
+    """`({dict name: value_ctype}, {dict name: elem_ctype})` for every dict
+    in `body` that is STORE-INTO with a value of a known type.
+
+    The second dict records the element type of that value (so `d["k"][i]`
+    can be typed when `d["k"]` holds a list or a string). First-store-wins
+    for both, and they are overlaid together so they cannot disagree about
+    which `d` they describe.
+    """
 
     The companion to `_prebound_local_ctypes`, for the subscript case: a
     container literal bound to a NAME is found by the former, but a
@@ -2177,7 +2183,8 @@ def _dict_value_locals(gen, body: list) -> dict:
     an unknown store must not pin the dict to the box and suppress a later,
     better-evidenced one.
     """
-    out: dict = {}
+    out_vt: dict = {}
+    out_et: dict = {}
 
     def note(n):
         if not isinstance(n, gimple_ctypes.AssignStmt):
@@ -2187,7 +2194,7 @@ def _dict_value_locals(gen, body: list) -> dict:
                 and isinstance(t.obj, gimple_ctypes.IdentExpr)):
             return
         name = _as_str(t.obj.name)
-        if name in out:
+        if name in out_vt:
             return                       # first store wins
         vt = gen._quick_type(n.value)
         if vt == 'int64_t':
@@ -2197,11 +2204,19 @@ def _dict_value_locals(gen, body: list) -> dict:
         if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
                           'MojoSet *', 'MojoBytes *')
                    or vt.endswith(' *')):
-            out[name] = vt
+            out_vt[name] = vt
+            # Element type of the value: for a list literal, the element type
+            # of the container; for a char* (string), subscript yields char*;
+            # otherwise the value type itself (scalar, never subscripted).
+            if isinstance(n.value, gimple_ctypes.ListExpr):
+                et = gen._infer_list_elem_type(n.value.elements)
+            else:
+                et = vt
+            out_et[name] = et
 
     for n in _each_binding(body):
         note(n)
-    return out
+    return out_vt, out_et
 
 
 def _lambda_call_ret_locals(gen, body: list) -> dict:
@@ -2335,7 +2350,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     Every other ctype recorded here is a real pointer, so the rule cannot
     fire for anything else."""
     _locals = _prebound_local_ctypes(gen, body)
-    _dict_vals = _dict_value_locals(gen, body)
+    _dict_vals, _dict_elems = _dict_value_locals(gen, body)
     # No early-out on "all three empty" here, because `_lambda_call_ret_locals`
     # is the one overlay that has to be computed INSIDE the window below: it
     # asks `_quick_type` about the lambda's own body, so it has to see this
@@ -2361,6 +2376,14 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         if _n not in _merged_dv:
             _merged_dv[_n] = _t
     gen._dict_val_types = _merged_dv
+    # Second table, paired with the value-type overlay above: the element type
+    # of a dict's values, so `d["k"][i]` can be typed without guessing.
+    _saved_de = getattr(gen, '_dict_val_elem_types', None)
+    _merged_de: dict = gen._scratch_dict_copy(_saved_de if _saved_de else {})
+    for _n, _t in _dict_elems.items():
+        if _n not in _merged_de:
+            _merged_de[_n] = _t
+    gen._dict_val_elem_types = _merged_de
     # Third table, same window: what CALLING a lambda-bound local produces
     # (`_lambda_call_ret_locals`). Additive for the same reason — a name
     # already carrying a real return type keeps it.
@@ -2377,6 +2400,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         gen.var_types = _saved
         gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
+        gen._dict_val_elem_types = _saved_de
         gen._lambda_call_ret_types = _saved_lr
 
 

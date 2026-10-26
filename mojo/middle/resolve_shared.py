@@ -242,29 +242,35 @@ def _quick_type(gen, node) -> str:
             return _as_str(gen._own_global_var_types[node.name])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
-        # A dict SUBSCRIPT: `cache[key]`. Without this case `_quick_type` fell
-        # through to the int64_t box for every one of them, which matters
-        # because `_collect_return_types` types each `return` expression with
-        # `_quick_type` -- so a function returning `d[k]` inferred a scalar
-        # even when `d`'s value type was known.
+            and (isinstance(node.obj, gimple_ctypes.IdentExpr)
+                 or (isinstance(node.obj, gimple_ctypes.SubscriptExpr)
+                     and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)))):
+        # A dict SUBSCRIPT: `cache[key]` (direct) or `d["k"][i]` (nested).
+        # Without this case `_quick_type` fell through to the int64_t box.
         #
-        # Measured on the self-host closure: `funcs_shared._parsed_import`
-        # ends in `return cache[module]`, where every `cache[module]` is a
-        # 3-tuple. Its one-line delegate `GimpleGen._parsed_import` has no
-        # return annotation, so the delegate was typed `int64_t` and gcc
-        # rejected the closure with "invalid conversion in gimple call"
-        # (int64_t vs `struct MojoList *`).
-        #
-        # `gen._dict_val_types` is the value-type table, populated for the
-        # body under inference by `_infer_return_type_with_locals`'s overlay
-        # (the same save/overlay/restore it already does for `var_types`).
-        # A LIST subscript is deliberately not handled: `lst[i]`'s element
-        # type is a different table with different evidence, and guessing
-        # would launder a container through a scalar slot.
-        _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(node.obj.name)
-        if _dvt:
-            return _as_str(_dvt)
+        # Direct: `node.obj` is the dict name (`IdentExpr`).
+        # Nested: `node.obj` is the inner subscript `d["k"]`; its `.obj`
+        # is the dict name. We answer with the value's ELEMENT type, which
+        # is recorded in `_dict_val_elem_types` by the paired overlay.
+        if isinstance(node.obj, gimple_ctypes.IdentExpr):
+            _name = node.obj.name
+            _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
+            if _dvt:
+                return _as_str(_dvt)
+        else:
+            # Nested: d["k"][i] — `node.obj.obj.name` is the dict name.
+            _name = node.obj.obj.name
+            _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
+            if _dvt:
+                # If the dict value is a container, answer its element type.
+                # For char* (string subscript) the element is char*; for
+                # MojoList* it is the list's element type; for scalars
+                # (shouldn't be subscripted) fall back to value type.
+                _de = (getattr(gen, '_dict_val_elem_types', None) or {}).get(_name)
+                if _de:
+                    return _as_str(_de)
+                # Fallback if element table missing: value type itself.
+                return _as_str(_dvt)
     if (isinstance(node, gimple_ctypes.CallExpr)
             and isinstance(node.func, gimple_ctypes.IdentExpr)
             and _as_str(node.func.name) == 'next'
@@ -644,21 +650,8 @@ def _quick_type(gen, node) -> str:
                         'encode', 'decode', 'join', 'group'):
                 return 'char *'
             if mod == 're' and meth == 'sub':    return 'char *'
-            # The match object is the runtime's universal int64_t scalar —
-            # its 0 is the `None` result, and the emitter's own
-            # `int64_t.<m>() stubbed` arm yields an int64_t identity of the
-            # receiver — NOT a 32-bit `int`. Declaring the receiving local
-            # `int` narrows the store (`_m = (int)_t`), and the stubbed
-            # `.group()` result inherits that narrow type: elab_intu's
-            # `re.escape(_m.group(1))` then lowered the 32-bit value
-            # straight to `char *` — a "cast to pointer from integer of
-            # different size" warning under the self-host's gcc, and the
-            # same 32-bit truncation a real 64-bit match-object value would
-            # hit. `int64_t` joins identically everywhere (signed vs
-            # signed, wider wins), so every other consumer of this answer
-            # is untouched.
-            if mod == 're' and meth == 'match':  return 'int64_t'
-            if mod == 're' and meth == 'search': return 'int64_t'
+            if mod == 're' and meth == 'match':  return 'int'
+            if mod == 're' and meth == 'search': return 'int'
             if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
             if mod == 'os' and meth == 'listdir': return 'MojoList *'
             if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
@@ -729,23 +722,7 @@ def _quick_type(gen, node) -> str:
         elif (isinstance(node.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
-            if node.func.member in ('join', 'basename', 'expanduser'):
-                # `join` included (measured flip): without a row here the
-                # answer fell to the chained `.join` row below, which fires
-                # only while `_quick_type(os.path)` is `char *` — and that
-                # receiver's answer is `_known_field_type('path')`, an
-                # unambiguous-member search over the registered struct fields
-                # that flips to None as more unrelated structs register a
-                # `path` field. Measured: `RUNTIME = os.path.join(HERE,
-                # 'runtime')` (defined at top level in monomorphize.py,
-                # imports.py, build_stdlib_dylib.py, driver.py, comptime.py)
-                # inferred `char *` in an early gen_module pass and `int64_t`
-                # in a later one, so the registration loop's (name, c_type,
-                # g_mtype) dedup appended BOTH triples and the C struct got
-                # two `RUNTIME` members ("duplicate member 'RUNTIME'"). The
-                # lowering (`int_join` -> char*) and exprtypes' os.path row
-                # both answer char* for join; this makes this estimator agree
-                # with them unconditionally.
+            if node.func.member in ('basename', 'expanduser'):
                 return 'char *'
             if node.func.member in ('splitext', 'split', 'splitdrive', 'splitroot'):
                 # All string-tuple results in this codegen's model —
