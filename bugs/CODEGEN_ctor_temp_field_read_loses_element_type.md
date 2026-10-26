@@ -156,10 +156,9 @@ outer type; a companion element-type classifier would need to handle a
 this file for exactly this purpose) and feed it in at the same pipeline
 point the container-type pass now runs at.
 
-Not attempted this session — scoped as its own item since it is additive
-(a new element-type tracer, not a change to the type tracer just fixed) and
-the two together in one change would make either one harder to verify in
-isolation.
+Not attempted this session — regression test added (`test_regression_ctor_temp_field_read_loses_element_type.py`) to demonstrate failure, root-cause fix (new constructor-argument ELEMENT-type tracer in `module_gen.py`) still requires the full inference pass and bootstrap verification and is out of light-worker scope.
+
+Session 2026-10-26 (work/bug-codegen-ctor-temp-field-read-loses-e-8778): added regression marker; bug remains OPEN; doc kept; no source edit to `module_gen.py` attempted.
 
 ## Status (2026-09-30) — the doc's scope is wrong in both directions; the trigger is a COMPREHENSION, and the local spelling is broken too
 
