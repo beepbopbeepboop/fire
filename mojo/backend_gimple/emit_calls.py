@@ -2097,7 +2097,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and (node.func.obj.name in gen._container_callable_ret
-                     or node.func.obj.name in gen._global_container_callable_ret)):
+                     or node.func.obj.name in gen._global_container_callable_ret
+                     # A module-level container that may have had a callable
+                     # appended to it inside some other function (e.g. a nested
+                     # `def` stored in a global list) is not in either table --
+                     # the store happened in a different scope. Its subscript
+                     # read is still a potential first-class callable, and the
+                     # runtime helper dispatches on the value's actual tag, so
+                     # attempt the call instead of stubbing it to 0.
+                     or node.func.obj.name in getattr(gen, '_global_var_types', {}))):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -3664,6 +3672,12 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # emitted first: freeing before it is a use-after-free, which is what
         # the first version of this did). `_owned_free_runtime_fn` answers ''
         # for a `char *`, which is why the branch it now takes is spelled out.
+        _lit = node.args[0]
+        if (isinstance(_lit, gimple_ctypes.StringLiteral)
+                and not getattr(_lit, 'is_interpolated', False)
+                and not getattr(_lit, 'is_bytes', False)):
+            _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
+            return 'int64_t', gen._new_val('int64_t', str(_cp))
         _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)
@@ -5135,6 +5149,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     # bits and parses as gimple.
     boxed = gen._new_val('int64_t', raw)
     gen._void_call('mojo_list_append_int', [('MojoList *', pair), ('int64_t', boxed)])
+    gen._void_call('mojo_mark_as_tuple', [('MojoList *', pair)])
     # The pair's SECOND slot holds the element, so record its type or a
     # consumer reads a string back as a raw integer.
     if elem and elem != 'int64_t':
@@ -5182,7 +5197,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
 # dispatch chain — check them against each other if either changes.
 _COMPREHENSION_ITER_TYPES = (
     'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
-    'MojoGenerator *',
+    'MojoGenerator *', 'MojoBytes *',
 )
 
 
@@ -5386,6 +5401,23 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
                        [('MojoList *', res), ('MojoList *', _copy_src)])
         if _copy_src in gen._maybe_kinds_vals:
             gen._maybe_kinds_vals.add(res)
+        # Carry the compile-time element / nested-element typing across the
+        # copy too: `mojo_list_inherit_kinds` only copies the RUNTIME kinds
+        # string, and `_list_repr_fn` consults these compile-time tables to
+        # route to the pair-aware helpers. Without this, a runtime-built pair
+        # list copied through `list(...)` loses its 2-slot spec and prints
+        # indices as `None` / pair pointers as decimals.
+        if _copy_src in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_copy_src]
+        if _copy_src in gen._nested_elem_types:
+            gen._nested_elem_types[res] = gen._nested_elem_types[_copy_src]
+        else:
+            # An opaque/boxed source (e.g. a zip handle) carries no compile-time
+            # nested spec; the copy's elements are whatever the source yields at
+            # runtime (often marked tuple-pairs), so do not let a stray int64
+            # record route the copy's repr through the int helper.
+            gen._elem_types.pop(res, None)
+            gen._nested_elem_types.pop(res, None)
     # `tuple(x)` builds a TUPLE, and the marker is the only thing that makes
     # a value one (see mojo_mark_as_tuple's doc comment). Applied AFTER the
     # comprehension is complete, which is required: every mutating MojoList
@@ -6873,7 +6905,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                               ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
-        return 'void *', gen._new_val('void *', f'(void *){_vf}')
+        _vft = gen._new_val('void *', f'(void *){_vf}')
+        gen._func_value_names[_vft] = '<lambda>'
+        return 'void *', _vft
 
     if not _env_struct:
         gen._funcptr_builtins_needed.add(lifted_name)
@@ -6891,6 +6925,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # exactly this reason), so record it against the value and let
         # `_lower_fnptr_call_value` narrow the result through.
         gen._callable_ret_types[t] = ret_type
+        gen._func_value_names[t] = '<lambda>'
         return 'void *', t
 
     # A closing lambda's value: a heap env holding the captured values,
@@ -6943,6 +6978,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # is `_tN = (void *) _tM`, a different temp from the `_call_expr`'s), since
     # that is what a declaration's `_decl_rhs_val` records.
     gen._closure_vals.add(_val)
+    gen._func_value_names[_val] = '<lambda>'
     return 'void *', _val
 
 

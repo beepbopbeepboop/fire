@@ -674,6 +674,10 @@ def _reset_func(gen, body: list = None, params: list = None,
         _gvk_s = _as_str(_gvk)
         if _gvk_s not in _reset_locally_bound:
             gen._callable_ret_types[_gvk_s] = _as_str(gen._global_callable_ret_types[_gvk])
+    for _gvk in getattr(gen, '_global_func_value_names', ()):
+        _gvk_s = _as_str(_gvk)
+        if _gvk_s not in _reset_locally_bound:
+            gen._func_value_names[_gvk_s] = _as_str(gen._global_func_value_names[_gvk])
     # A DICT's lowered value -> the SINGLE callable return type stored into
     # it, or '' for "more than one distinct type, so no answer". The rule is
     # the same unanimity-or-nothing rule every other inference in this file
@@ -1736,7 +1740,7 @@ def carry_callable_ret_types(gen, src: str, dst: str) -> None:
     exactly the case that was broken. A copy that is forgotten is silent: the
     program keeps running and prints a plausible wrong value with exit 0."""
     for _tbl in (gen._callable_ret_types, gen._container_callable_ret,
-                 gen._bound_method_ret_types):
+                 gen._bound_method_ret_types, gen._func_value_names):
         if src in _tbl:
             _tbl[dst] = _tbl[src]
 
@@ -1781,6 +1785,10 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
     if _rt:
         gen._callable_ret_types[dst] = _rt
+
+    _rn = getattr(gen, '_return_func_value_names', {}).get(_as_str(_f.name))
+    if _rn:
+        gen._func_value_names[dst] = _rn
 
 
 def note_fresh_result(gen, t: str) -> None:
@@ -2177,7 +2185,7 @@ def _dict_union_val_type(gen, lv, rv) -> str:
     representation has one int64_t slot plus a `kind` tag and no static type
     for "either", so those stay unrecorded — the pre-existing behaviour —
     rather than becoming a new silent miscompile. See
-    bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
+    the remaining heterogeneous dict-union gap.
     """
     lvt = _dict_val_of_expr(gen, lv)
     rvt = _dict_val_of_expr(gen, rv)
@@ -4527,8 +4535,11 @@ def _materialize_in_tu_wrapper(gen, csn: str, w: str) -> str:
         # same pair tracking the `_Enumerate` branch sets, with the pair's
         # own per-slot element types from the tuple struct's field map.
         gen._elem_types[out] = 'MojoList *'
-        gen._nested_elem_types[out] = list(
-            (gen.struct_field_types.get(_ret) or {}).values())
+        _fld_types = list((gen.struct_field_types.get(_ret) or {}).values())
+        if len(_fld_types) == 2:
+            gen._nested_elem_types[out] = _fld_types
+        else:
+            gen._nested_elem_types[out] = ['int64_t', 'int64_t']
     else:
         gen._elem_types[out] = 'int64_t'
     return out
@@ -6276,6 +6287,9 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     _drt = gen._container_callable_ret.get(value_text)
     if _drt is not None:
         gen._global_container_callable_ret[gname] = _drt
+    _frn = gen._func_value_names.get(value_text)
+    if _frn is not None:
+        gen._global_func_value_names[gname] = _frn
 
 
 # The repr/format helpers whose return the CALLER OWNS ON EVERY PATH, so a

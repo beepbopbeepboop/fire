@@ -8408,6 +8408,42 @@ step(7)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_print_of_a_closure_value_is_not_a_decimal_address():
+        global _PASS, _FAIL
+        name = "print_of_a_closure_value_is_not_a_decimal_address"
+        src = (
+            "def outer(a):\n"
+            "    def inner(x):\n"
+            "        return x + a\n"
+            "    return inner\n"
+            "\n"
+            "f = outer(3)\n"
+            "print(f)\n"
+            "\n"
+            "g = (lambda y: y * 2)\n"
+            "print(g)\n"
+        )
+        got = _compiled_stdout(src, 'single-TU')
+        if isinstance(got, tuple):
+            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
+            _FAIL += 1
+            return
+        lines = (got or '').splitlines()
+        if len(lines) != 2:
+            print(f"FAIL  {name}: expected 2 lines, got {got!r}")
+            _FAIL += 1
+            return
+        if not re.fullmatch(r'<function .* at 0x[0-9a-f]+>', lines[0]):
+            print(f"FAIL  {name}: first line {lines[0]!r} not a function repr")
+            _FAIL += 1
+            return
+        if not re.fullmatch(r'<function <lambda> at 0x[0-9a-f]+>', lines[1]):
+            print(f"FAIL  {name}: second line {lines[1]!r} not a lambda repr")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not():
         """`next(<user-defined iterator struct>)` is a real call, and the
         `for` loop over the same object is a NAMED refusal.
@@ -12537,6 +12573,7 @@ print(run('x/y.txt'))
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
+    test_print_of_a_closure_value_is_not_a_decimal_address()
     test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
     # `len()` of a value the codegen could not type, where that value is a

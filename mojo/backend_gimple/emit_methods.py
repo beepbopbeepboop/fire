@@ -320,6 +320,12 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
             "return) value can't represent -- falling back to "
             "interpreting this module from source instead")
     candidates = gen._struct_method_signatures.get(_gmm_sms_key(struct_name, method))
+    if candidates and len(candidates) >= 2:
+        raise RuntimeError(
+            f"cannot compile module: method {struct_name}.{method!r} has "
+            f"{len(candidates)} overloads and is referenced as a plain value; "
+            "an overloaded method has no single address to bind -- falling "
+            "back to interpreting this module from source instead")
     overload_id = ''
     if candidates and len(candidates) == 1:
         overload_id = candidates[0].get('overload_id', '') or ''

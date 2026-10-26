@@ -909,7 +909,7 @@ main()
     # `print(f)` is NOT part of this case: a `MojoBoundMethod *` read as a
     # value has no `__repr__` lowering yet and prints its address decimal,
     # which is a different defect with its own doc
-    # (bugs/CODEGEN_closure_value_repr_prints_its_address.md).
+    # (now fixed; doc deleted).
     test_gimple_matches_cpython("gimple_module_scope_closure_value_is_declared", """\
 class Tok:
     def __init__(self, k):
@@ -1963,7 +1963,17 @@ def main():
 main()
 """)
 
-    # A class written INSIDE a function body. Every consumer of the module's
+    test_gimple_stdout("gimple_call_nested_def_fetched_from_container", """def keep(kept, base):
+    def inner(x):
+        return x + base
+    kept.append(inner)
+    return inner(1)
+
+kept = []
+print(keep(kept, 10))
+print(len(kept))
+print(kept[0](5))
+""", "11\n1\n15\n")
     # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
     # nested in a `FunctionDef.body` was in none of them, so the class had no
     # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm
@@ -10143,6 +10153,20 @@ for x in [1, 2]:
 for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
+
+    test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
+for x in "cd":
+    print(x)
+for x in b"ab":
+    print(x)
+""", "c\nd\n97\n98\n")
+
+    test_gimple_stdout("gimple_for_loop_target_rebind_int_then_dict_key", """\
+for k in [5]:
+    print(k)
+for k in {"a": 1}:
+    print(k)
+""", "5\na\n")
 
     # A `for` loop whose target is a bare 1-tuple — `for patterns, in ...:`,
     # real at c_parser/preprocessor/__init__.py:169

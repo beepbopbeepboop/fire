@@ -952,13 +952,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         lifted = _ci.lifted_name
         gen._funcptr_builtins_needed.add(lifted)
         fp = gen._new_val('void *', f'_funcptr_{lifted}')
+        _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
         if _ci.env_struct:
             env_void = gen._new_val(
                 'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
             t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                                 [('void *', fp), ('void *', env_void)])
             gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
+            gen._func_value_names[t] = _repr_name
             return 'MojoBoundMethod *', t
+        gen._func_value_names[fp] = _repr_name
         return 'void *', fp
     # A local `comptime NAME = <value>` (e.g. `comptime maxI = 100`,
     # test_locks.mojo's own idiom for its stress-test loop bounds) is
@@ -6836,6 +6839,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._compr_dict_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'MojoSet *':
         gen._compr_set_loop(node, gen0, res, res_type, it_val)
+    elif it_type == 'MojoBytes *':
+        _bytes_list = gen._materialize_as_list(it_type, it_val)
+        gen.var_types[_bytes_list] = 'MojoList *'
+        gen._compr_list_loop(node, gen0, res, res_type, _bytes_list)
     elif it_type == 'MojoGenerator *':
         gen._compr_generator_loop(node, gen0, res, res_type, it_val)
     elif it_type == 'int64_t' or it_type == 'int' or it_type == 'void *':
