@@ -2177,7 +2177,7 @@ def _dict_union_val_type(gen, lv, rv) -> str:
     representation has one int64_t slot plus a `kind` tag and no static type
     for "either", so those stay unrecorded — the pre-existing behaviour —
     rather than becoming a new silent miscompile. See
-    bugs/BUGFIX_ROADMAP.md item 2 for that remaining gap.
+    the remaining heterogeneous dict-union gap.
     """
     lvt = _dict_val_of_expr(gen, lv)
     rvt = _dict_val_of_expr(gen, rv)
