@@ -10835,7 +10835,11 @@ PRINTF_NUMBER_CONVERSIONS = (frozenset(PRINTF_32_BIT_INTEGER_CONVERSIONS)
 #: conversion. Both are the interpreter's own wording and quoting anything else
 #: would be the "a list is required, not int" mistake this table exists to
 #: avoid.
-PRINTF_CPYTHON_NUMBER_REFUSALS = {
+# CPython reworded these messages in 3.15, so the table is keyed by minor
+# version: the check (`test_formal_run.check_printf_number_conversion_agreement`)
+# selects the entry for the interpreter running the build, and refuses to
+# guess a wording for a minor version nobody has measured.
+PRINTF_CPYTHON_NUMBER_REFUSALS_3_14 = {
     "d": "%d format: a real number is required, not {t}",
     "i": "%i format: a real number is required, not {t}",
     "u": "%u format: a real number is required, not {t}",
@@ -10851,6 +10855,35 @@ PRINTF_CPYTHON_NUMBER_REFUSALS = {
     "G": "must be real number, not {t}",
     "*": "* wants int",
 }
+
+PRINTF_CPYTHON_NUMBER_REFUSALS_3_15 = {
+    "d": "format argument: %d requires a real number, not {t}",
+    "i": "format argument: %i requires a real number, not {t}",
+    "u": "format argument: %u requires a real number, not {t}",
+    "o": "format argument: %o requires an integer, not {t}",
+    "x": "format argument: %x requires an integer, not {t}",
+    "X": "format argument: %X requires an integer, not {t}",
+    "c": "format argument: %c requires an integer or a unicode character, not {t}",
+    "e": "format argument: %e requires a real number, not {t}",
+    "f": "format argument: %f requires a real number, not {t}",
+    "g": "format argument: %g requires a real number, not {t}",
+    "E": "format argument: %E requires a real number, not {t}",
+    "F": "format argument: %F requires a real number, not {t}",
+    "G": "format argument: %G requires a real number, not {t}",
+    "*": "format argument 1: * requires int, not {t}",
+}
+
+PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS = {
+    (3, 14): PRINTF_CPYTHON_NUMBER_REFUSALS_3_14,
+    (3, 15): PRINTF_CPYTHON_NUMBER_REFUSALS_3_15,
+}
+
+import sys as _sys
+_PRINTF_CPYTHON_VERSION = (_sys.version_info.major, _sys.version_info.minor)
+PRINTF_CPYTHON_NUMBER_REFUSALS_SUPPORTED_VERSIONS = frozenset(
+    PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS)
+PRINTF_CPYTHON_NUMBER_REFUSALS = PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS.get(
+    _PRINTF_CPYTHON_VERSION, {})
 
 
 def _printf_length_modifier(spec: str) -> str:
