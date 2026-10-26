@@ -10895,9 +10895,9 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "0 < UInt64.ofNat m",
-             "NE": "UInt64.ofNat m \u2260 0",
-             "GE": "1 \u2264 UInt64.ofNat m"}[cond_op]
+    _PRED = {"GT": "m < 9223372036854775808 → 0 < UInt64.ofNat m",
+             "NE": "m < 9223372036854775808 → UInt64.ofNat m \u2260 0",
+             "GE": "m < 9223372036854775808 → 1 \u2264 UInt64.ofNat m"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
         "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"

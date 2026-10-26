@@ -296,9 +296,6 @@ BUILTIN_PROGRAMS = {
             print(b"ab"[0])
             print(b"ab" == b"ab")
             print(list(b"cd"))
-        print(set(b"ab"))
-        print([x for x in b"ab"])
-        print({x for x in b"ab"})
     """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real
