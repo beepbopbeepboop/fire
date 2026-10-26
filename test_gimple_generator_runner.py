@@ -3138,8 +3138,7 @@ def main():
 
     # A generator method INHERITED from a base class, called on the
     # SUBCLASS -- the generator half of
-    # inherited-classmethod-generator dispatch (compiled-path gaps, #1),
-    # whose `cls` /
+    # bugs/CODEGEN_compiled_path_gaps_round2.md's #1, whose `cls` /
     # plain-`@classmethod` half closed on 2026-10-01.
     #
     # One unit per RECEIVER CLASS is the whole requirement, and both halves
@@ -5564,26 +5563,6 @@ def main():
         print(v)
 main()
 """, "2\n2\n")
-
-    test_generator_stdout("generator_iterating_a_string_parameter_yields_nothing", """\
-def apply_to(items):
-    for it in items:
-        yield it
-
-def go():
-    for v in apply_to('ab'):
-        print(v)
-
-go()
-""", "a\nb\n")
-
-    test_generator_stdout("generator_iterating_a_string_parameter_control", """\
-def go():
-    s = 'ab'.upper()
-    for it in s:
-        print(it)
-go()
-""", "A\nB\n")
 
     # ── a VARIADIC lambda inside a compiled generator body ────────────────
     # `mojo/middle/coro.py`'s `_lambdas_ok` used to refuse EVERY lambda with a

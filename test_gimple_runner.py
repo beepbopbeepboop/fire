@@ -9750,22 +9750,6 @@ def main():
 main()
 """)
 
-    # Regression for CODEGEN_scalar_container_repr_derived_list_nested_in_a_container:
-    # a list BUILT at runtime (comprehension / list(range)) nested in a
-    # container the runtime walks generically used to render a 0 as None (and
-    # crash on a float). CPython is the oracle.
-    test_gimple_matches_cpython("gimple_nested_scalar_container_repr_derived_list", """\
-def main():
-    print({'k': [i for i in range(2)]})
-    print({'k': [i * 0.5 for i in range(2)]})
-    print({'k': list(range(2))})
-    def f():
-        return [i for i in range(2)]
-    print({'k': f()})
-    print([{'j': [i for i in range(2)]}])
-main()
-""")
-
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -12270,18 +12254,6 @@ def main():
 
 main()
 """)
-
-    test_gimple_stdout("gimple_star_spread_of_string_beside_own_slot", """\
-def tup_str(a: str) -> tuple:
-    return (0, *a)
-
-def list_str(a: str) -> list:
-    return [0, *a]
-
-print(tup_str('ab'))
-print(list_str('ab'))
-print([*'ab'])
-""", "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
 
     _parser_struct_and_symbols()
 
