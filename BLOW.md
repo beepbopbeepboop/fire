@@ -12,19 +12,25 @@ nothing" rule). This document supersedes its framing, not its history.
 
 ## 0. NOT closed
 
-**Status: localised, not fixed.** Three gate steps are red *because* of
-this, and all three `expect=` markers cite this section:
+**Status: localised, not fixed.** Updated 2026-10-26: the gate steps this
+drove red have since changed state, and one of them went **green without the
+cost coming down** — which was this section's own premise, and it was wrong
+for that check:
 
-| step | what is actually wrong now |
+| step | state measured 2026-10-26 |
 |---|---|
-| `ab-native` | RESOURCE-capped. Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict — killed for memory before finishing. |
-| `native-dumpfull` | Runs 126 s, then fails. Its cost is the self-hosting bootstrap pre-pass this corpus triggers: **~15-30 GB, ~15-25 s per call**. |
-| `bootstrap-stage2-dumps` | No longer segfaults, but does not reproduce the reference dumps. Sub-jobs return `mojo_unsupported_iter` no-ops or a wrong dump — a **silent-wrong-answer** class that no exit code reports. |
+| `ab-native` | doc-disabled (`bugs/CODEGEN_ab_native_fails.md`). Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict. |
+| `native-dumpfull` | **GREEN, twice measured.** Both runs wrote a byte-identical `fire.ci` and exited 0: **38.3 GB** in the gate run (which included a memslot wait) and **13.9 GB** in a solo run. Its check asserts the ARTIFACT and the exit code, never the cost — the survival + correct-write fixes (the `e7fc3ec` line and the bootstrap series) closed it; the pre-pass cost did not come down. The two peaks are the accumulator's, and the variance between them is its signature. Cost stays tracked in the job's `program` (55 GB) class and in §2 — not in a marker (the one that cited this section was dropped with this update). |
+| `bootstrap-stage2-dumps` | disabled/skipped in the current gate (`bootstrap-stage2-transitive` does not finish). Last measured shape: sub-jobs returning `mojo_unsupported_iter` no-ops or a wrong dump — a **silent-wrong-answer** class that no exit code reports. |
+| `selfhost-memory-fire` | **New measurement.** `mojoc fire.py --dump-full` hit its `module` (24 GB) class ceiling **twice** on 2026-10-26 (24.1 GB at 293 s in the gate; 24.1 GB at 341 s in an exclusive solo run), still allocating at the cap, then **completed at 38.8 GB in 356 s** under the raised `program` (55 GB) class — over the test's own 16 GB budget, so the test now fails on the number, which is the tripwire working. Last budget-passing measurement: **12.2 GB** on 2026-09-30. Same direction as `ab-native`'s drift. The 38.8 GB peak is deliberately not in the ratchet table (failed runs are not trusted peaks); the class and its `memwhy` carry it until the accumulator fix makes the job pass its budget again. |
 
-None of the three is the original SIGSEGV; that is fixed. All three sit
-downstream of the same unbounded accumulation documented in §2, so none
-can be closed by correcting a marker — the pre-pass cost has to come
-down for them to go green.
+None of these is the original SIGSEGV; that is fixed. They all sit
+downstream of the same unbounded accumulation documented in §2. (The older
+line here — "none can be closed by correcting a marker, the pre-pass cost
+has to come down for them to go green" — held for the crash-shaped failures
+and was disproven by `native-dumpfull` on 2026-10-26: its failure mode was
+the crash/early-death shape, and the crash fix closed it at a cost that is
+still here.)
 
 **Measured repro for the per-call pre-pass cost**: §2. **Root-cause
 status**: localised to a never-frees accumulator, not yet fixed; the
