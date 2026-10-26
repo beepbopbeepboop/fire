@@ -358,7 +358,8 @@ def _sorry_note(result) -> str:
     if not n:
         return ""
     n_str = str(n)
-    sorry_str = "  [{n_str} declaration(s) ADMITTED a sorry - the file typechecks,"                 + " it is not a proof]"
+    sorry_str = ("  [" + n_str + " declaration(s) ADMITTED a sorry - the file typechecks,"
+                 + " it is not a proof]")
     return sorry_str
 
 
