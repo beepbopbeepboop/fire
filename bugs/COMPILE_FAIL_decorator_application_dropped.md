@@ -75,7 +75,7 @@ What did NOT come with it is `print(f)`'s text: a capturing closure read as a
 value still has no repr and prints its address decimal where CPython prints
 `<function outer.<locals>.inner at 0x...>`, so this doc's first paragraph is
 still true for the closure spelling. That is filed, with its own next step, as
-the now-fixed closure-value repr bug (deleted with its fix). The wider gap the
+`bugs/CODEGEN_closure_value_repr_prints_its_address.md`. The wider gap the
 same measurement turned up — a module-scope global bound to a
 container-returning CALL is declared `int64_t` and does not compile — is
 `bugs/CODEGEN_a_module_scope_global_bound_to_a_container_returning_call_is_a_box.md`,

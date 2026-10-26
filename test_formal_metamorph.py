@@ -795,19 +795,20 @@ class ReorderAliasing(unittest.TestCase):
         with self.assertRaises(M.NotApplicable):
             self._twin(source)
 
-    def test_a_non_heap_pair_is_still_swapped(self):
-        """The control: a pair that touches no container CONTENTS still swaps.
+    def test_an_unaliased_store_and_read_pair_is_still_swapped(self):
+        """The control: two DIFFERENT lists are the swap this rule must keep.
 
-        The heap rule is an over-approximation over subscript/attribute
-        accesses, so a pair of plain-name assignments must remain swappable or
-        the transform is dead.
+        `c` is built from `b[0]`, so the only adjacent pair with no dependency
+        is `b[0] = …` beside `w = c[0]`, and because `c` is a fresh literal the
+        pair is genuinely independent.  The rule refuses the aliased spelling
+        and nothing else.
         """
         source = ("def main() -> Int32:\n"
-                  "    a = 0\n"
-                  "    b = 0\n"
-                  "    a = a + 1\n"
-                  "    b = b + 2\n"
-                  "    print(a, b)\n"
+                  "    b = [1, 2]\n"
+                  "    c = [b[0], 4]\n"
+                  "    b[0] = b[0] + 62\n"
+                  "    w = c[0]\n"
+                  "    print(w)\n"
                   "    return 0\n")
         tree = self._twin(source)
         self.assertIsNotNone(tree)
