@@ -377,8 +377,10 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
-| `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
-| the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
+| `gimple-async-runner` | `expect=`, count checked (36) | compiled-path async/await runner | 1.4-15.4 s each, `tiny`; `coroutine` |
+| `coro-detached-async` | `expect=`, count checked (2) | a detached coroutine task | `tiny`; `coroutine` |
+| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
+| `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
 more: both markers were dropped on this tree, so `--list` reports neither and a
@@ -397,13 +399,6 @@ measured one at a time before being named, and `test_suite.py`'s `the buckets:`
 checks are what keeps it that way — a registration that is in no bucket fails
 the self-test unless it declares `dep=True`, which is `prooflib` and nothing
 else.
-
-The `native-dumpfull` `expect=` is the old "the binary segfaults on any input"
-claim, which was **measured false on 2026-09-27 and corrected rather than left
-to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
-/ 94.6 M instructions. What is left there is the self-hosting bootstrap
-pre-pass's cost (~15-30 GB / ~15-25 s per call, localised in
-`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0).
 
 **The bootstrap chain is green (2026-10-25) and carries no marker.**
 `bootstrap-verify` / `bootstrap-validate` compare the three stage trees byte
