@@ -1295,12 +1295,13 @@ class MojoInstance:
         self._mojo_class = mojo_class
 
     def __getattr__(self, name):
-        # Python's built-in `getattr(obj, name)` (which the interpreter
-        # exposes as the `getattr` builtin) only consults real instance
+        # Python's built-in `getattr(obj, name)` only consults real instance
         # attributes and class attributes, never the Mojo method table, so a
         # method fetched dynamically (`getattr(c, "tag")`) raised
-        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`'s
-        # method resolution here so the two spellings agree.
+        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`
+        # so the two spellings agree.
+        if name in self.__dict__:
+            return self.__dict__[name]
         cls = self._mojo_class
         method = cls.methods.get(name)
         if method is not None:
@@ -1312,6 +1313,7 @@ class MojoInstance:
         if name in cls.comptime_aliases:
             return cls.comptime_aliases[name]
         raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
+
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
         method, if the struct defines one, and return the accumulated text —
@@ -1399,6 +1401,13 @@ class BoundMethod:
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
+            if isinstance(f, MojoOverloadSet):
+                # An overloaded method taken as a value (and then bound to
+                # an instance) has no single `_invoke` to delegate to; route
+                # through the overload set's own dispatch instead, with `self`
+                # prepended as the receiver. See
+                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
+                return self.interpreter.invoke(f, self.instance, *args, **kwargs)
             interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
             return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
