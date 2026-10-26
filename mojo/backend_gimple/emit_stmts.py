@@ -2833,6 +2833,9 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._callable_ret_types:
             gen._return_callable_ret_types[gen.current_func_name] = \
                 gen._callable_ret_types[v]
+        if gen.current_func_name and v in gen._func_value_names:
+            gen._return_func_value_names[gen.current_func_name] = \
+                gen._func_value_names[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)

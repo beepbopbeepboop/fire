@@ -1577,6 +1577,7 @@ class GimpleGen:
         # the name (see _gen_stmt_AssignStmt). See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._global_callable_ret_types: dict[str, str] = {}
+        self._global_func_value_names: dict[str, str] = {}
         self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
@@ -1638,6 +1639,7 @@ class GimpleGen:
         # table cannot match it. See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
+        self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
         # scope, NOT re-created per function the way the value-keyed
