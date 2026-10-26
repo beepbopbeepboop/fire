@@ -1732,10 +1732,182 @@ def main():
 """, "Unsupported shape(s): probe:")
 
 
+def run_unpack_call_forward_tests():
+    # Pure `*`/`**`-UNPACK call arguments through a declared variadic-
+    # family callable-value local, lowered as a container copy
+    # (mojo_list_copy/mojo_dict_copy — the runtime's own slot-for-slot /
+    # update-based deep copies): `f(*x)` -> `f(mojo_list_copy(x))`, and so
+    # on. bugs/CODEGEN_star_kwargs_unpack_call_argument_refused_in_
+    # compiled_coroutine.md is the doc; fsutil's `iter_files` lambda body
+    # (`_walk(*a, walk=_files, **k)`) is the one-line repro this group
+    # starts from, with the declared local substituted for the
+    # polymorphic `_walk` parameter. Same `*, start=[]` path-forcing
+    # idiom as the group above.
+    # The one-line repro itself: a list local unpacked into a held
+    # `*args` local.
+    test_generator_stdout("cpp_coroutine_unpack_starargs_list", """\
+def probe(*, start=[]):
+    nums = [4, 5]
+    f = lambda *a: a[0] + a[1]
+    yield f(*nums)
+
+def main():
+    for v in probe():
+        print(v)
+""", "9\n")
+    # The fsutil-shaped OWN-PARAMETER forward: the outer lambda's `*args`
+    # (declared `MojoList *` for its own body lowering) is the spread
+    # SOURCE of the inner call — the copy is what keeps the inner body's
+    # view of `*args` a distinct container from the caller's.
+    test_generator_stdout("cpp_coroutine_unpack_own_starargs_param", """\
+def probe(*, start=[]):
+    g = lambda *a: a[0] + a[1]
+    f = lambda *a: g(*a)
+    yield f(4, 5)
+
+def main():
+    for v in probe():
+        print(v)
+""", "9\n")
+    # The dict half: a dict local unpacked into a held `**kwargs` local.
+    test_generator_stdout("cpp_coroutine_unpack_kwargs_dict", """\
+def probe(*, start=[]):
+    kv = {'x': 7}
+    f = lambda **k: k['x'] * 2
+    yield f(**kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "14\n")
+    # Both halves at once, in CPython's only legal order (`*` before `**`).
+    test_generator_stdout("cpp_coroutine_unpack_star_kwargs_both", """\
+def probe(*, start=[]):
+    nums = [4, 5]
+    kv = {'v': 1}
+    f = lambda *a, **k: a[0] + k['v']
+    yield f(*nums, **kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "5\n")
+    # One half absent: the callee's missing container is filled with a
+    # fresh empty one (CPython's `k = {}` for a star-kw lambda called
+    # without keyword arguments).
+    test_generator_stdout("cpp_coroutine_unpack_star_only_star_kw_local", """\
+def probe(*, start=[]):
+    nums = [4, 5]
+    f = lambda *a, **k: a[0]
+    yield f(*nums)
+
+def main():
+    for v in probe():
+        print(v)
+""", "4\n")
+    test_generator_stdout("cpp_coroutine_unpack_kwargs_only_star_kw_local", """\
+def probe(*, start=[]):
+    kv = {'v': 6}
+    f = lambda *a, **k: k['v']
+    yield f(**kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "6\n")
+    # Honest refusals — every shape the helper cannot PROVE falls through
+    # to the one-line refusal (a spread left unrefused would reach the
+    # generic UnaryOp case's `(**x)` double-dereference miscompile).
+    # A FIXED positional argument beside a `*`-spread: legal in CPython
+    # (append-then-copy) but a separate emission, not this pure-spread
+    # lowering.
+    test_generator_refused(
+        "cpp_coroutine_unpack_fixed_arg_beside_spread_refused", """\
+def probe(*, start=[]):
+    kv = {'v': 1}
+    f = lambda *a, **k: a[0]
+    yield f(1, **kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "unpack call argument is not supported")
+    # A NAMED keyword beside a spread: CPython raises TypeError at runtime
+    # when the dict already holds the key; the body model cannot raise
+    # from generated C++, so the mix is refused rather than merged into a
+    # working wrong answer (the _cpp_try_kwargs_forward_call class).
+    test_generator_refused(
+        "cpp_coroutine_unpack_named_kw_beside_spread_refused", """\
+def probe(*, start=[]):
+    nums = [4, 5]
+    kv = {}
+    f = lambda *a, **k: a[0]
+    yield f(*nums, w=3, **kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "unpack call argument is not supported")
+    # A spread whose SOURCE is a boxed int64_t local (an untyped
+    # parameter): the runtime kind is unproven, and *unpack of a
+    # non-iterable is a TypeError to refuse, not a miscompile to guess at.
+    test_generator_refused(
+        "cpp_coroutine_unpack_boxed_source_refused", """\
+def probe(src, *, start=[]):
+    f = lambda *a: a[0]
+    yield f(*src)
+
+def main():
+    for v in probe([4, 5]):
+        print(v)
+""", "unpack call argument is not supported")
+    # A `*`-spread of a list whose TRACKED element kind is str: the lambda
+    # body reads `*args` through the int64-box getters, so a copied str
+    # slot would come back as a pointer — the same reason the non-spread
+    # packing refuses str arguments into a `*args` local.
+    test_generator_refused(
+        "cpp_coroutine_unpack_str_elem_list_refused", """\
+def probe(*, start=[]):
+    words = ['ab', 'cd']
+    f = lambda *a: a[0]
+    yield f(*words)
+
+def main():
+    for v in probe():
+        print(v)
+""", "unpack call argument is not supported")
+    # And the two shape mismatches CPython itself rejects (positional args
+    # through a kwargs-only lambda / keyword args through a starargs-only
+    # one): refused statically, where CPython answers a runtime TypeError.
+    test_generator_refused(
+        "cpp_coroutine_unpack_star_through_kwargs_local_refused", """\
+def probe(*, start=[]):
+    nums = [4, 5]
+    f = lambda **k: 1
+    yield f(*nums)
+
+def main():
+    for v in probe():
+        print(v)
+""", "unpack call argument is not supported")
+    test_generator_refused(
+        "cpp_coroutine_unpack_kw_through_starargs_local_refused", """\
+def probe(*, start=[]):
+    kv = {'x': 1}
+    f = lambda *a: a[0]
+    yield f(**kv)
+
+def main():
+    for v in probe():
+        print(v)
+""", "unpack call argument is not supported")
+
+
 def run_tests():
     run_callable_param_tests()
     run_lambda_capture_tests()
     run_variadic_lambda_value_tests()
+    run_unpack_call_forward_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()

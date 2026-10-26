@@ -467,6 +467,107 @@ def _cpp_try_kwargs_forward_call(gen, e):
     return f"[&]() -> {ret_ctype} {{ {body} }}()"
 
 
+def _cpp_try_unpack_call(gen, e):
+    """Pure `*`/`**`-UNPACK call arguments through a DECLARED variadic-
+    family callable-value local, lowered as a container COPY:
+    `f(*x)` -> `f(mojo_list_copy(x))`, `f(**y)` ->
+    `f(mojo_dict_copy(y))`, `f(*x, **y)` ->
+    `f(mojo_list_copy(x), mojo_dict_copy(y))` — with the callee's
+    missing container filled by a fresh empty one (CPython's `**k = {}`
+    / `*a = ()` for the absent half of a star-kw lambda). The copy is
+    what `*`/`**` MEAN (the callee receives a new container holding the
+    source's elements/entries — a list.copy()/dict.copy() at the model
+    level), and it is what keeps a body that mutates its own `*args`
+    from writing through the caller's list. `mojo_list_copy` is the
+    runtime's own slot-for-slot copy (kinds inherited), `mojo_dict_copy`
+    its `update`-based entry copy — both faithful per key/element kind,
+    so the forwarding is exact for whatever the source holds.
+
+    See bugs/CODEGEN_star_kwargs_unpack_call_argument_refused_in_
+    compiled_coroutine.md for the scope and every refusal below. Returns
+    the lowered C++ expression string, or None — never a guess — for
+    anything else, so the caller falls through to the existing honest
+    refusal (a spread left to the generic UnaryOp case would emit
+    `(**x)` — a double pointer-dereference, a silent miscompile).
+    """
+    if not isinstance(e.func, gimple_ctypes.IdentExpr):
+        return None
+    fname = e.func.name
+    decl = gen._cpp_declared
+    if decl is None:
+        return None
+    ctype = decl.get(fname)
+    if ctype not in (gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                     gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                     gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
+        return None  # not a declared variadic-family callable local
+    star = None
+    kwarg = None
+    for i, a in enumerate(e.args):
+        if not isinstance(a, gimple_ctypes.UnaryOp) or a.op not in ('*', '**'):
+            return None  # a fixed positional argument beside a spread: a
+                         # separate emission (append-then-copy), not this
+                         # pure-spread lowering
+        if a.op == '*':
+            if star is not None:
+                return None  # two * spreads
+            star = a.operand
+        else:
+            if kwarg is not None or i != len(e.args) - 1:
+                return None  # a ** is CPython-last (`f(**y, *x)` is a
+                             # SyntaxError) and only one is legal
+            kwarg = a.operand
+    if e.kwargs:
+        # Named keywords beside a `**`-spread (or beside a `*`-spread on
+        # a shape without **k): CPython raises TypeError at runtime when
+        # the dict already holds the key; the body model cannot raise
+        # from generated C++, so merging would be a working wrong answer
+        # in exactly the class _cpp_try_kwargs_forward_call's docstring
+        # describes. Refuse the whole mix, not half of it.
+        return None
+    if star is None and kwarg is None:
+        return None  # no spread at all: the non-spread packing branch
+    if ctype == gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS and star is not None:
+        return None  # CPython: positional args through a kwargs-only lambda
+    if ctype == gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS and kwarg is not None:
+        return None  # CPython: keyword args through a starargs-only lambda
+    if star is not None:
+        if not (isinstance(star, gimple_ctypes.IdentExpr)
+                and decl.get(star.name) == 'MojoList *'):
+            return None  # a boxed int64_t (or other non-container) source:
+                         # the runtime kind is unproven, and *unpack of a
+                         # non-iterable is a TypeError to refuse, not a
+                         # miscompile to guess at
+        _elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(star.name)
+        if _elem in ('char *', 'double'):
+            # The lambda body reads `*args` through the int64-box getters
+            # (mojo_list_get_int): a copied str/double slot would come
+            # back as a pointer/bit pattern. The SAME reason the
+            # non-spread packing branch refuses str/double positional
+            # arguments into a `*args` local — a forwarded element has to
+            # survive the body's read-back, not just the copy.
+            return None
+    if kwarg is not None and not (
+            isinstance(kwarg, gimple_ctypes.IdentExpr)
+            and decl.get(kwarg.name) == 'MojoDict *'):
+        return None  # ditto for the dict half
+    cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+    args = []
+    if ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                 gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
+        if star is not None:
+            args.append(f"mojo_list_copy({gen._cpp_expr(star)})")
+        else:
+            args.append("mojo_list_new ()")
+    if ctype in (gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                 gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW):
+        if kwarg is not None:
+            args.append(f"mojo_dict_copy({gen._cpp_expr(kwarg)})")
+        else:
+            args.append("mojo_dict_new ()")
+    return f"{cpp_fname}({', '.join(args)})"
+
+
 def _cpp_body_str_evidence(name: str, body) -> bool:
     """True when a for-loop target `name` is used inside its own loop
     `body` in a way only valid for a STRING (char *) local: subscripted
@@ -2345,6 +2446,21 @@ def _cpp_expr(gen, e) -> str:
             if _kwfwd is not None:
                 return _kwfwd
         if any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**') for a in e.args):
+            # A PURE `*`/`**`-unpack call through a DECLARED variadic-
+            # family callable-value local lowers as a container copy —
+            # the one unpack shape this model can prove (bugs/CODEGEN_
+            # star_kwargs_unpack_call_argument_refused_in_compiled_
+            # coroutine.md). Checked AHEAD of the refusal below, not in
+            # the declared-local packing branch further down, because
+            # this refusal is what stands between a spread and the
+            # generic UnaryOp case's `(**x)` double-dereference
+            # miscompile: the branch below never sees a call that gets
+            # refused here. _cpp_try_unpack_call returns None (never a
+            # guess) for every shape it cannot prove, which falls
+            # straight through to the honest refusal.
+            _unfwd = gen._cpp_try_unpack_call(e)
+            if _unfwd is not None:
+                return _unfwd
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a `*`/`**`-unpack call argument is not supported in a "
                 "compiled generator/coroutine body")
