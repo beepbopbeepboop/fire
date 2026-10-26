@@ -909,7 +909,7 @@ main()
     # `print(f)` is NOT part of this case: a `MojoBoundMethod *` read as a
     # value has no `__repr__` lowering yet and prints its address decimal,
     # which is a different defect with its own doc
-    # (bugs/CODEGEN_closure_value_repr_prints_its_address.md).
+    # (now fixed; doc deleted).
     test_gimple_matches_cpython("gimple_module_scope_closure_value_is_declared", """\
 class Tok:
     def __init__(self, k):

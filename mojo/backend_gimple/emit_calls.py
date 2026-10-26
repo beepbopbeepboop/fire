@@ -6873,7 +6873,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                               ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
-        return 'void *', gen._new_val('void *', f'(void *){_vf}')
+        _vft = gen._new_val('void *', f'(void *){_vf}')
+        gen._func_value_names[_vft] = '<lambda>'
+        return 'void *', _vft
 
     if not _env_struct:
         gen._funcptr_builtins_needed.add(lifted_name)
@@ -6891,6 +6893,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # exactly this reason), so record it against the value and let
         # `_lower_fnptr_call_value` narrow the result through.
         gen._callable_ret_types[t] = ret_type
+        gen._func_value_names[t] = '<lambda>'
         return 'void *', t
 
     # A closing lambda's value: a heap env holding the captured values,
@@ -6943,6 +6946,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # is `_tN = (void *) _tM`, a different temp from the `_call_expr`'s), since
     # that is what a declaration's `_decl_rhs_val` records.
     gen._closure_vals.add(_val)
+    gen._func_value_names[_val] = '<lambda>'
     return 'void *', _val
 
 
