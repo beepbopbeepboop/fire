@@ -474,10 +474,9 @@ def cmd_refill(a):
                   open(breaker_path(), "w"))
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
-    model = pick_model(MODEL)
-    if model is None:
-        print("%s refill: every model is out of quota (%s), starting nothing" % (
-            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F", time.localtime(u))) for m, u in dead_models().items())), flush=True)
+    if not any(pick_model(i["model"] or MODEL) for i in (json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json"))):
+        print("%s refill: every queued task's model is out of quota (%s), starting nothing" % (
+            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u))) for m, u in dead_models().items())), flush=True)
         return
     if time.time() < breaker_until():
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
@@ -488,6 +487,7 @@ def cmd_refill(a):
     items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
                    key=lambda i: i["added"])
     started = 0
+    items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     for it in items:
         if live + started >= a.target:
             break
@@ -495,6 +495,8 @@ def cmd_refill(a):
             continue
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL))
+        if not ns.model:
+            continue                      # this task's model (and every fallback) is out of quota; others may not be
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -959,7 +961,8 @@ def main():
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
     s.add_argument("--needs", nargs="*"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_enqueue)
-    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8); s.set_defaults(f=cmd_refill)
+    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8)
+    s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
