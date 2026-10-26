@@ -1,10 +1,18 @@
 # CODEGEN: a method with overloads is unresolvable as a value — the link fails on the bare symbol
 
-**State: OPEN, unfixed.** Found 2026-10-19 while fixing the "bound method of an
-untyped receiver" defect (fixed, doc removed with its fix). That fix made an
-untyped receiver's method arm answer a bound method; this is the shape it
-deliberately did *not* cover, because covering it needs the ≥2-overload
-symbol-resolution question answered, not just a second call site.
+**State: PARTIAL.** 2026-10-26: compiled path no longer emits a bare,
+unmangled symbol (`_C_m`) that cannot link — `_lower_bound_method_value`
+now raises the established `cannot compile module:` RuntimeError when the
+method has >= 2 overloads, so the module falls back to interpreting from
+source instead. The interpreter side no longer crashes with
+`AttributeError: 'MojoOverloadSet' object has no attribute '_invoke'`:
+`BoundMethod` now delegates to the overload set's own dispatch with `self`
+prepended. What remains (out of scope per "Not fixing here"): the
+interpreter still cannot resolve the overload by argument type, so a
+same-arity overloaded method taken as a value and then called raises
+`_NoOverloadMatch` (AMBIGUOUS) rather than dispatching to the matching
+overload. CPython resolves at call time from argument types; that is a
+separate, larger feature.
 
 ## What I ran and what I saw
 
