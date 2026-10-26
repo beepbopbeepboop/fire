@@ -1872,7 +1872,7 @@ class _Info:
     of a statement — everything `t_reorder`'s independence test reads."""
 
     __slots__ = ("reads", "writes", "escapes", "terminal", "effectful",
-                 "mutates")
+                 "mutates", "heap_write", "heap_read")
 
     def __init__(self):
         self.reads = set()
@@ -1885,6 +1885,13 @@ class _Info:
         #: kept apart because the ALIAS rule below has to know whether the
         #: statement changes a container rather than binds a fresh local.
         self.mutates = set()
+        #: `True` when the statement STORES through a subscript (`L[i] = …`) or
+        #: an attribute (`o.x = …`); `True` when it LOADS through one (`L[i]`,
+        #: `o.x`).  Kept apart from `reads`/`writes` because those name the
+        #: local that HOLDS a container and two different locals can hold the
+        #: SAME one — see `t_reorder`'s SOUNDNESS note on aliasing.
+        self.heap_write = False
+        self.heap_read = False
 
 
 def _info(node, out=None, in_block=False):
@@ -1939,16 +1946,21 @@ def _info(node, out=None, in_block=False):
         out.writes.add(node.target.id)
     if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
         out.writes.add(node.target.id)
-    if isinstance(node, (ast.Subscript, ast.Attribute)) and isinstance(
-            node.ctx, (ast.Store, ast.Del)):
-        # `L8[0] = 31` and `o.x = 1` WRITE the base, and they say so with a
-        # `ctx` on the Subscript/Attribute rather than on a Name — so a reader
-        # that only looks at Name nodes sees a statement that writes nothing and
-        # will happily swap it with the `L8 = [0]` above it.  Measured on
-        # `mmsound:2` of the `lists` mix: the oracle caught the swap as
-        # `transform-invalid`.
-        out.writes |= _names_in(node.value)
-        out.mutates |= _names_in(node.value)
+    if isinstance(node, (ast.Subscript, ast.Attribute)):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            # `L8[0] = 31` and `o.x = 1` WRITE the base, and they say so with a
+            # `ctx` on the Subscript/Attribute rather than on a Name — so a reader
+            # that only looks at Name nodes sees a statement that writes nothing and
+            # will happily swap it with the `L8 = [0]` above it.  Measured on
+            # `mmsound:2` of the `lists` mix: the oracle caught the swap as
+            # `transform-invalid`.
+            out.writes |= _names_in(node.value)
+            out.mutates |= _names_in(node.value)
+            out.heap_write = True
+            if isinstance(node.ctx, ast.Del):
+                out.heap_read = True
+        else:
+            out.heap_read = True
     if isinstance(node, ast.Call):
         # OBSERVABLE.  A call is the program's output channel — `print`, a
         # `read`, anything that reaches the outside world — and two observable
