@@ -716,7 +716,23 @@ def _quick_type(gen, node) -> str:
         elif (isinstance(node.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
-            if node.func.member in ('basename', 'expanduser'):
+            if node.func.member in ('join', 'basename', 'expanduser'):
+                # `join` included (measured flip): without a row here the
+                # answer fell to the chained `.join` row below, which fires
+                # only while `_quick_type(os.path)` is `char *` — and that
+                # receiver's answer is `_known_field_type('path')`, an
+                # unambiguous-member search over the registered struct fields
+                # that flips to None as more unrelated structs register a
+                # `path` field. Measured: `RUNTIME = os.path.join(HERE,
+                # 'runtime')` (defined at top level in monomorphize.py,
+                # imports.py, build_stdlib_dylib.py, driver.py, comptime.py)
+                # inferred `char *` in an early gen_module pass and `int64_t`
+                # in a later one, so the registration loop's (name, c_type,
+                # g_mtype) dedup appended BOTH triples and the C struct got
+                # two `RUNTIME` members ("duplicate member 'RUNTIME'"). The
+                # lowering (`int_join` -> char*) and exprtypes' os.path row
+                # both answer char* for join; this makes this estimator agree
+                # with them unconditionally.
                 return 'char *'
             if node.func.member in ('splitext', 'split', 'splitdrive', 'splitroot'):
                 # All string-tuple results in this codegen's model —
