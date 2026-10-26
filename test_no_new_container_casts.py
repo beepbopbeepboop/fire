@@ -355,7 +355,23 @@ def strip_prose(src: str) -> str:
 #     (`mojo_is_tuple` / `_registered_dict` / `_registered_set` / list), each
 #     cast guarded by the registry predicate that selects the arm.
 # Both are the "kind proven by a measured dispatch" class, not a static guess.
-BASELINE_COUNT = 24
+#
+# 24 -> 26 (2026-10-26, the variadic lambda-value ctypes): the two new
+# matches are TYPE NAMES, not casts. `mojo/middle/types.py`'s
+# `_CPP_CALLABLE_CTYPE_STARARGS` / `_CPP_CALLABLE_CTYPE_KWARGS` spell
+# `std::function<int64_t(MojoList *)>` and `std::function<int64_t(MojoDict
+# *)>` -- the `(MojoList *)` in there is the PARAMETER of the declared
+# function type (return `int64_t`, parameter `MojoList *`), the value's one
+# nameable declared ctype. Nothing is coerced to it: it is declared, and
+# there is no `gen` in scope to route through anyway. `strip_prose` cannot
+# tell a parameter of a type name from a cast -- it drops prose, not C type
+# grammar -- so the count records the spellings and the baseline follows.
+# The third new constant, `_CPP_CALLABLE_CTYPE_STAR_KW`, spells
+# `int64_t(MojoList *, MojoDict *)` -- the comma before the closing paren
+# defeats CAST_RE, so two of three near-identical lines count and one does
+# not. That asymmetry is the metric's text-scan limit, not a reason to
+# respell the counted pair to hide it.
+BASELINE_COUNT = 26
 
 
 def count_casts() -> int:
