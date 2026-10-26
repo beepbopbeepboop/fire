@@ -2966,7 +2966,8 @@ def main():
 
     # A generator method INHERITED from a base class, called on the
     # SUBCLASS -- the generator half of
-    # bugs/CODEGEN_compiled_path_gaps_round2.md's #1, whose `cls` /
+    # inherited-classmethod-generator dispatch (compiled-path gaps, #1),
+    # whose `cls` /
     # plain-`@classmethod` half closed on 2026-10-01.
     #
     # One unit per RECEIVER CLASS is the whole requirement, and both halves
