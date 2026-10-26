@@ -489,8 +489,8 @@ def cmd_refill(a):
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     for it in items:
-        if live + started >= a.target:
-            break
+        if live + started >= a.target and not it["name"].startswith("fix-landed"):
+            continue                      # a red master is repaired at once, whatever the slot count
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
