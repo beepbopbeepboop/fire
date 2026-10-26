@@ -1,5 +1,79 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-25 — `iter_files`'s lambda guard is FIXED; its refusal moved one layer down, and the tree's CPython-closure gap is the real gate on the other two
+
+Re-measured on the current master after this session's fix (full package build:
+`cp` the whole `c_common/` into `.tmp/ca/c_common/`, then
+`python3 fire.py build -o .tmp/out-fsutil fsutil.py`; arm64, ~30 s):
+
+```
+Error building: cannot compile module: function(s) _walk_tree, glob_tree,
+iter_files (generator function(s), contain a `yield`/`yield from`)
+  _walk_tree:  a `for` over a call through the callable-valued local/parameter
+               '_walk(...)' is not supported ... (what that call RETURNS is not
+               knowable here ...)
+  glob_tree:   the same, through '_glob(...)'
+  iter_files:  a `*`/`**`-unpack call argument is not supported in a compiled
+               generator/coroutine body
+```
+
+Three — the same three as the 2026-10-04 entry above (its `process_filenames`
+clearing is confirmed, below), with one REFUSAL REASON that changed and one
+new measurement that reframes the rest:
+
+1. **`iter_files`: the narrow lambda guard — this doc's blocker-3 axis and the
+   2026-10-02 entry's "second, older guard" — is now closed.**
+   `cpp_core.py`'s `LambdaExpr` value emission admits the `*args`/`**kwargs`
+   family (one nameable declared type each, per `gimple_ctypes._cpp_lambda_
+   ctype`, mirroring the plain path's container convention: `*args` packed
+   into a `MojoList *`, `**kwargs` into a `MojoDict *`), the call site packs
+   the arguments into that container in an IIFE, and the first-assignment
+   typing / filter / sorted-key sites agree with the one shared helper.
+   The 14 regression tests are `cpp_coroutine_starargs_lambda_*` /
+   `cpp_coroutine_kwargs_lambda_*` in `test_gimple_generator_runner.py`
+   (whole runner: 241/241; `test_gimple.py`: 396/396).
+   **The file still refuses, but one layer deeper and for a different,
+   separately-tracked gap:** the lambda BODY
+   `_walk(*a, walk=_files, **k)` is a `*`/`**`-UNPACK CALL ARGUMENT through a
+   polymorphic local, and star/kwarg call forwarding is still refused in a
+   compiled generator body. Note the refusal now names the CALL, not the
+   lambda: the value is a value; forwarding its parameters on is the missing
+   emission.
+2. **`_walk_tree` / `glob_tree` are gated on a prerequisite this session
+   measured directly: CPython's stdlib is NOT in the GIMPLE closure at all.**
+   `module_loader.STDLIB_PATH` points at the new-modular Mojo stdlib,
+   `can_resolve_module_path('os')` → False, and the compiled probe from
+   `bugs/CODEGEN_imported_callable_default_answers_zero.md` still raises
+   `NotImplementedError: os.walk is a callable that is not available in
+   compiled mode`. So "resolve the imported case for real" — the
+   `os.walk` arm the two docs' next-step sections call for — cannot land
+   until `os`/`glob` are compileable members of the closure; and they are
+   blocked on their OWN shapes (`bugs/CODEGEN_generator_function_Lib_os.md`:
+   `walk` mixes tuple/non-tuple yields, `_fwalk` is cluster A). That is a
+   feature project, not a gate fix — recorded here so the next session does
+   not re-derive it from the two docs' next-step sections alone.
+3. **Full-package measurement artifact, flagged so it is not re-discovered as
+   a regression:** building `fsutil.py` ALONE (no sibling `.py` next to it)
+   refuses a fourth, `process_filenames` ("unsupported for-loop iterable
+   type: CallExpr") — the relative `from .iterutil import iter_many` cannot
+   find its sibling, so `iter_many(...)` is an unresolvable callee. With the
+   package present (as in the source tree, and as this entry builds),
+   `process_filenames` compiles, matching the 2026-10-04 entry. Loading
+   `iterutil` also pulls ITS generators into the closure: `iter_many` is
+   refused ("a call to unresolved callee 'onempty(...)'", the family the
+   2026-10-04 entry counted when building tables.py) and `chain` is refused
+   (mixed tuple/non-tuple yield kinds); `iterutil` itself falls back to
+   source interpretation, which is why the module-level error names only
+   fsutil's three.
+
+So the honest remainder is: (1) star/kwarg call forwarding through a
+callable-valued local in a compiled generator body — a new, separate
+capability with a clean one-line reproduction once the lambda above is
+substituted for `_walk`; (2) the CPython-closure prerequisite for the
+`_walk`/`_glob` default axis. Nothing in this entry is a re-verification of
+the 2026-10-04 entry: the measurement moved, and it moved because of the fix
+landed in this session.
+
 ## Status 2026-10-04 — THREE blockers, not four: `process_filenames` has cleared, and `onempty(...)` is the same shape reached from another module
 
 Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/fsutil.py`,

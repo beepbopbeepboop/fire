@@ -1,6 +1,37 @@
 # A keyword-only parameter defaulting to an IMPORTED function compiles to a
 # NULL call, and now answers `0` instead of crashing
 
+## Status (2026-10-25 — step 1 re-confirmed on the current tree; step 2 re-scoped: the imported case cannot be "resolved" while CPython's stdlib is not in the GIMPLE closure)
+
+Step 1 is unchanged on the current master: the compiled probe
+(`import os` + `def probe(x, *, g=os.walk): return g(x)` + `print(probe('/r'))`)
+still raises `NotImplementedError: os.walk is a callable that is not available
+in compiled mode` and exits non-zero — the whole 2026-10-04 table still holds.
+
+**Step 2 ("resolve the imported case for real") was re-measured and is
+re-scoped.** The 2026-10-04 entry and this doc's own "The exact next step"
+section assume `os` can become a compiled member of the closure and that an
+`os.walk` arm in `module_gen`'s eligibility loop is the missing piece. Measured
+against the current tree, that assumption does not hold: `module_loader.
+STDLIB_PATH` points at the new-modular Mojo stdlib,
+`can_resolve_module_path('os')` → False, and `import os` compiles to an
+`extern` globals-struct stub, never to the module's own code. So the `os.walk`
+arm cannot fire: there is no compiled `os` for it to resolve against. Making
+`os`/`glob` closure members is gated on their OWN generator shapes
+(`bugs/CODEGEN_generator_function_Lib_os.md`: `walk` mixes a tuple yield with a
+bare `yield <var>`, `_fwalk` is cluster A) — a feature project, not the small
+arm this section describes. The next session picking up step 2 should treat
+"get `Lib/os.py` into the compiled closure" as the real step-2 entry point and
+this doc's arm as a sub-step of it.
+
+Also recorded, because the two docs' blocker lists overlap: the SAME session
+closed the C++ coroutine path's narrow lambda guard that
+`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s blocker 3 rested
+on (`iter_files`' `lambda *a, **k: ...` value is now admitted; its refusal
+moved to the `*`/`**`-unpack call in the lambda body — see that doc's 2026-10-
+25 entry for the current three-generator refusal list and the artifact note
+about building the file without its package siblings).
+
 ## Status (2026-10-04 — step 1 LANDED: the ordinary path refuses. Step 2 is still open.)
 
 `mojo_unavailable_callable` now **raises a catchable `NotImplementedError`**
