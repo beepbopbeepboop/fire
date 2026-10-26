@@ -14843,6 +14843,22 @@ def gen_module_impl(self, stmts):
     struct_defs = [s for s in stmts if isinstance(s, StructDef)]
     if not self.do_imports:
         struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
+    # The method prototypes below can carry a `MojoGenerator *` return
+    # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
+    # generator block that DEFINES the type emits later in this section.
+    # In the entry section that order left every generator-typed forward
+    # decl ahead of its own typedef: `unknown type name 'MojoGenerator'`
+    # plus a cascading `conflicting types for 'Mailbox___iter__'` (measured
+    # 2026-10-25/26, row-25 entry C, the 93d13780-era 14->2 residual pair).
+    # Emit the typedef first; the generator block below then skips its own
+    # copy (membership guard) so the section still carries exactly one.
+    # Full-closure TUs are unaffected: earlier inlined module sections
+    # already emit the identical typedef, and C11 permits identical
+    # redeclarations — the entry's one typedef merely moves earlier within
+    # its own section (measured: no other C output moves).
+    if (self._supported_generators or self._generator_method_api
+            or self._generator_api):
+        parts.append('typedef struct MojoGenerator MojoGenerator;')
     _emit_struct_method_prototypes(self, parts, struct_defs)
 
     if self.emit_struct_defs:
@@ -15204,7 +15220,11 @@ def gen_module_impl(self, stmts):
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
     if self._supported_generators or self._generator_method_api or self._generator_api:
-        parts.append('typedef struct MojoGenerator MojoGenerator;')
+        # The typedef may already have been emitted ahead of the
+        # method-prototype pass (declaration-before-typedef cascade fix,
+        # see that site) — keep exactly one in the section.
+        if 'typedef struct MojoGenerator MojoGenerator;' not in parts:
+            parts.append('typedef struct MojoGenerator MojoGenerator;')
         # `self._generator_api: dict[str, dict] = {}` (and `_generator_
         # method_api`'s matching declaration) has a bare `dict` nested-value
         # annotation, not `dict[str, dict[str, str]]` — the same "no nested-
