@@ -2097,15 +2097,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and (node.func.obj.name in gen._container_callable_ret
-                     or node.func.obj.name in gen._global_container_callable_ret
-                     # A module-level container that may have had a callable
-                     # appended to it inside some other function (e.g. a nested
-                     # `def` stored in a global list) is not in either table --
-                     # the store happened in a different scope. Its subscript
-                     # read is still a potential first-class callable, and the
-                     # runtime helper dispatches on the value's actual tag, so
-                     # attempt the call instead of stubbing it to 0.
-                     or node.func.obj.name in getattr(gen, '_global_var_types', {}))):
+                     or node.func.obj.name in gen._global_container_callable_ret)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -2142,6 +2134,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if not _vt:
                     _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
+        if isinstance(node.func, gimple_ctypes.SubscriptExpr):
+            # A bracket-parametrized call to a function that needs
+            # link-mode specialisation (comptime parameters bound at
+            # call site) — the single-TU path has no mechanism for
+            # this, so refusing loudly is the correct answer (see
+            # bugs/CODEGEN_bracket_call_to_a_runtime_paramless_function_
+            # is_a_zero.md). Returning 0 was a silent wrong answer.
+            _base_name = node.func.obj.name if isinstance(node.func.obj, gimple_ctypes.IdentExpr) else repr(node.func.obj)
+            raise RuntimeError(
+                f"cannot compile module: a bracketed call {_base_name}[...]() "
+                f"needs link-mode specialisation, which this build does not do")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -5197,7 +5200,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
 # dispatch chain — check them against each other if either changes.
 _COMPREHENSION_ITER_TYPES = (
     'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
-    'MojoGenerator *', 'MojoBytes *',
+    'MojoGenerator *',
 )
 
 
@@ -6905,9 +6908,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
                               ('int64_t', _hsv)])
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
-        _vft = gen._new_val('void *', f'(void *){_vf}')
-        gen._func_value_names[_vft] = '<lambda>'
-        return 'void *', _vft
+        return 'void *', gen._new_val('void *', f'(void *){_vf}')
 
     if not _env_struct:
         gen._funcptr_builtins_needed.add(lifted_name)
@@ -6925,7 +6926,6 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # exactly this reason), so record it against the value and let
         # `_lower_fnptr_call_value` narrow the result through.
         gen._callable_ret_types[t] = ret_type
-        gen._func_value_names[t] = '<lambda>'
         return 'void *', t
 
     # A closing lambda's value: a heap env holding the captured values,
@@ -6978,7 +6978,6 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # is `_tN = (void *) _tM`, a different temp from the `_call_expr`'s), since
     # that is what a declaration's `_decl_rhs_val` records.
     gen._closure_vals.add(_val)
-    gen._func_value_names[_val] = '<lambda>'
     return 'void *', _val
 
 

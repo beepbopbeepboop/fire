@@ -1381,29 +1381,6 @@ class BoundMethod:
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
-            if isinstance(f, MojoOverloadSet):
-                # An overloaded method taken as a value (and then bound to
-                # an instance) has no single `_invoke` to delegate to; route
-                # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver. See
-                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
-                #
-                # The receiver is folded into the `*`-unpack (`invoke(f,
-                # *_merged, **kwargs)`) rather than written as an explicit
-                # positional before it (`invoke(f, self.instance, *args,
-                # **kwargs)`): the codegen cannot lower an explicit positional
-                # that PRECEDES a `*`-unpack in the same call — it emits the
-                # positional as a separate C argument (casting it to the
-                # `*args` MojoList*) instead of folding it into the unpacked
-                # list, so the call comes out with one argument too many and
-                # the self-host's `gcc -fgimple` refuses it ("too many
-                # arguments to 'myinterpreter_Interpreter_invoke'"). The
-                # `func, *args, **kwargs` shape below (no leading positional
-                # before the unpack) is the one it lowers. Semantics are
-                # unchanged: both pass func=f, the receiver prepended to the
-                # `*args`, and `**kwargs`.
-                _merged = [self.instance] + list(args)
-                return self.interpreter.invoke(f, *_merged, **kwargs)
             interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
             return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
