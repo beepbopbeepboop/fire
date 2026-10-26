@@ -74,6 +74,13 @@ def slot_ctype(elem):
         return 'double'
     if elem == 'char *':
         return 'char *'
+    # Container elements (pair-lists from enumerate/zip, nested lists/dicts)
+    # store their pointer as an int64_t word; the cursor must present them
+    # typed as the container, not as a bare integer.
+    if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
+                 'MojoSet *' in elem or 'MojoBytes *' in elem or
+                 'MojoStr *' in elem or elem.endswith(' *')):
+        return elem
     return 'int64_t'
 
 
@@ -120,8 +127,19 @@ def read_at(gen, rec, idx):
         return vct, gen._new_val(vct, f"(*{_as_str(addr)})")
     _src2 = _as_str(rec['src'])
     _idx2 = _as_str(idx)
-    suf = (gimple_ctypes.TypeLattice.list_suffix(rec['elem'])
-           if rec.get('elem') else 'int')
+    elem = rec.get('elem')
+    suf = (gimple_ctypes.TypeLattice.list_suffix(elem)
+           if elem else 'int')
+    # Container elements (MojoList *, MojoDict *, etc.) store their pointer as
+    # an int64_t word. `mojo_list_get_int` reads the word, and a cast applied
+    # directly to a call result in an assignment RHS is rejected by
+    # gcc -fgimple, so read through a temp: first grab the int word, then cast
+    # the temp (not a call rhs).
+    if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
+                 'MojoSet *' in elem or 'MojoBytes *' in elem or
+                 'MojoStr *' in elem or elem.endswith(' *')):
+        raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
+        return elem, gen._new_val(elem, f"({elem}){raw}")
     return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
 
 
