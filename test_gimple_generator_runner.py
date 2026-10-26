@@ -5564,6 +5564,26 @@ def main():
 main()
 """, "2\n2\n")
 
+    test_generator_stdout("generator_iterating_a_string_parameter_yields_nothing", """\
+def apply_to(items):
+    for it in items:
+        yield it
+
+def go():
+    for v in apply_to('ab'):
+        print(v)
+
+go()
+""", "a\nb\n")
+
+    test_generator_stdout("generator_iterating_a_string_parameter_control", """\
+def go():
+    s = 'ab'.upper()
+    for it in s:
+        print(it)
+go()
+""", "A\nB\n")
+
     # ── a VARIADIC lambda inside a compiled generator body ────────────────
     # `mojo/middle/coro.py`'s `_lambdas_ok` used to refuse EVERY lambda with a
     # `*args`/`**kwargs` parameter (or a defaulted one) in a generator body,
