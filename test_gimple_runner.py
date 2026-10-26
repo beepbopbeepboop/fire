@@ -10144,6 +10144,20 @@ for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
 
+    test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
+for x in "cd":
+    print(x)
+for x in b"ab":
+    print(x)
+""", "c\nd\n97\n98\n")
+
+    test_gimple_stdout("gimple_for_loop_target_rebind_int_then_dict_key", """\
+for k in [5]:
+    print(k)
+for k in {"a": 1}:
+    print(k)
+""", "5\na\n")
+
     # A `for` loop whose target is a bare 1-tuple — `for patterns, in ...:`,
     # real at c_parser/preprocessor/__init__.py:169
     # (`for patterns, in _resolve_file_values(filename, file_same.items()):`).
