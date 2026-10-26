@@ -6264,7 +6264,50 @@ def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
 
 _compile_cache: dict = {}  # key -> str  (in-process L1 for compile_to_gimple_cached)
 
-_IMPORT_LINE_RE = re.compile(r'^\s*(?:from|import)\s+([.\w]+)', re.MULTILINE)
+def _import_line_modules(src: str) -> list:
+    """The module names of every `from X`/`import X` line in `src` -- what
+    `re.findall(r'^\\s*(?:from|import)\\s+([.\\w]+)', src, re.MULTILINE)` answers.
+
+    A plain scan, not that regex: the compiled compiler's regex engine has no
+    `^` anchor and no MULTILINE flag (a flagged `re.compile` is a pattern
+    string with its flags silently dropped), so the pattern lowered to a loop
+    that matched nothing and the compiled `_dep_sources_texts` found no
+    dependencies at all. `\\s` is ASCII whitespace and `\\w` an
+    alphanumeric or `_`, as in the regex."""
+    out = []
+    n = len(src)
+    ws = ' \t\n\r\f\v'
+    i = 0
+    while i <= n:
+        # a match can only start at the beginning of a line
+        if i == 0 or src[i - 1] == '\n':
+            j = i
+            while j < n and src[j] in ws:
+                j += 1
+            kw = 0
+            if src.startswith('from', j):
+                kw = 4
+            elif src.startswith('import', j):
+                kw = 6
+            if kw:
+                k = j + kw
+                m = k
+                while m < n and src[m] in ws:
+                    m += 1
+                if m > k:
+                    e = m
+                    while e < n and (src[e].isalnum() or src[e] == '_'
+                                     or src[e] == '.'):
+                        e += 1
+                    if e > m:
+                        out.append(src[m:e])
+                        i = e
+                        continue
+        nl = src.find('\n', i)
+        if nl < 0:
+            break
+        i = nl + 1
+    return out
 
 
 def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
@@ -6306,7 +6349,7 @@ def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
         return None
 
     def _scan(src: str, fdir: str):
-        for mod in _IMPORT_LINE_RE.findall(src):
+        for mod in _import_line_modules(src):
             path = _resolve(mod, fdir)
             if not path:
                 continue

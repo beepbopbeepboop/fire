@@ -2504,7 +2504,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # SIGSEGV'd on 0x4d4a424f58310001 in `infer_return_elem_type`'s
             # `_scratch_et.update(_as_dict(_saved[1]))`, which is the first
             # thing every self-hosted compile runs
-            # (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md). The box has to
+            # (the stage2 empty-dump bug (its doc was deleted with the fix)). The box has to
             # come apart before the cast; `mojo_box_int` returns a non-double
             # box's raw word (the pointer) and anything that is not a box
             # unchanged.

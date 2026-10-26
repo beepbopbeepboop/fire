@@ -548,15 +548,30 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         raise ValueError('findall() call expected')
     if len(it.kwargs or []) > 0:
         raise ValueError('findall() keyword arguments (incl. flags=) are not lowered')
-    if len(it.args) != 2:
-        raise ValueError(
-            f'findall() with {len(it.args)} positional arguments is not lowered '
-            f'(a third argument is a flags argument)')
-    pattern = gen._try_const_fold_str(it.args[0])
-    if pattern is None:
-        raise ValueError('findall() pattern is not a compile-time-known string')
+    # The METHOD spelling on a module-level compiled pattern --
+    # `_TOK = re.compile(r'...')` ... `for w in _TOK.findall(s):` -- is the
+    # same scan as `re.findall(PATTERN, s)`, with the pattern string recorded
+    # at the `re.compile` assignment (`gen._regex_patterns`, the table
+    # `.finditer()` is lowered from). It used to emit `mojo_unsupported_iter`
+    # and run zero times: the compiled compiler's own
+    # `infra_infer._bound_names_in` loops this way, so its int-keyed-dict scan
+    # saw no bound names at all once that scan started running there.
+    _recv = it.func.obj if isinstance(it.func, gimple_ctypes.MemberExpr) else None
+    if (len(it.args) == 1 and isinstance(_recv, gimple_ctypes.IdentExpr)
+            and _recv.name in gen._regex_patterns):
+        pattern = gen._regex_patterns[_recv.name]
+        text_node = it.args[0]
+    else:
+        if len(it.args) != 2:
+            raise ValueError(
+                f'findall() with {len(it.args)} positional arguments is not lowered '
+                f'(a third argument is a flags argument)')
+        pattern = gen._try_const_fold_str(it.args[0])
+        if pattern is None:
+            raise ValueError('findall() pattern is not a compile-time-known string')
+        text_node = it.args[1]
 
-    text_type, text_val = gen.lower_expr(it.args[1])
+    text_type, text_val = gen.lower_expr(text_node)
     if text_type != 'char *':
         text_val = gen._new_val(
             'char *', f'(char *){gen._ensure_local(text_type, text_val)}')

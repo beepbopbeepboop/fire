@@ -383,7 +383,7 @@ went rather than dropping them:
 
 ## Related
 
-- `bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md` — the other half of the
+- `the stage2 empty-dump bug (its doc was deleted with the fix)` — the other half of the
   self-host story, and a different subject: this is about the produced BINARY,
   that one about the `--dump` artifact the stage2 compiler writes.
 - `bugs/UNTESTED.md` §3.3 — "a non-zero exit is the only verdict

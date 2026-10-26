@@ -439,7 +439,7 @@ def test_every_declaration_is_seen():
     #       `static int64_t id (int64_t x)` that every generated program emits
     #       used to return its argument, which for a container is the live
     #       handle, so the container registries read an `id()` token as that
-    #       container (`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`).
+    #       container (`the stage2 empty-dump bug (its doc was deleted with the fix)`).
     #   +1  `mojo_dict_slot_repr` — the ONE implementation of "what a dict
     #       slot's value looks like", from the (word, kind) pair the store
     #       recorded (`work/bugs6-1`). The codegen's emitted `_mojo_repr_dict`

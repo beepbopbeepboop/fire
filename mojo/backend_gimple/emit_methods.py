@@ -1924,7 +1924,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # i.e. the pattern OBJECT read as a C string and used as the separator. The
     # split therefore returned nothing, `raw_lines` was empty, and the
     # tokenizer emitted a single EOF token for every input: no tokens, no AST,
-    # no `.ci`, which is bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md, and
+    # no `.ci`, which is the stage2 empty-dump bug (its doc was deleted with the fix), and
     # the `.pyi` was still right because it comes from a different pass.
     #
     # `re.split(pattern, text)` (the module-level spelling) lowers the same
@@ -5786,7 +5786,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     # matched at every position instead — so every literal "ended" one
     # character in and the file collapsed to a 2-token stream (just EOF) where
     # the reference has tens of tokens. The exit-1 class and the
-    # silent-empty-dump class of bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md
+    # silent-empty-dump class of the stage2 empty-dump bug (its doc was deleted with the fix)
     # are therefore the SAME defect. `_src_loc`'s `src.count('\n', 0, pos)` /
     # `src.rfind('\n', 0, pos)` are how those diagnostics came to report a
     # NEGATIVE column.

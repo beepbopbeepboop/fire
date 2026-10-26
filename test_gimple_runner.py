@@ -4854,6 +4854,29 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
+    # `for w in PATTERN.findall(text)` on a module-level `re.compile(<literal>)`
+    # pattern: the method spelling of `re.findall(PATTERN, text)`. It emitted
+    # `mojo_unsupported_iter` and ran zero times (the compiled compiler's own
+    # `infra_infer._bound_names_in`, so its int-keyed-dict scan saw nothing).
+    test_gimple_stdout("gimple_compiled_pattern_findall_method_loop", """\
+import re
+_TOK = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_PAIR = re.compile(r'(\\w+)=(\\d+)')
+
+def names(x, out):
+    if isinstance(x, str):
+        for m in _TOK.findall(x):
+            out.add(m)
+
+def main():
+    out = set()
+    names("a, (b_1, c)", out)
+    print(sorted(out))
+    for k, v in _PAIR.findall("x=1 yy=22"):
+        print(k, v)
+main()
+""", "['a', 'b_1', 'c']\nx 1\nyy 22\n")
+
     # `d.get(k, default)` on a str-valued dict tests PRESENCE, not truth: an
     # empty-string value is a real value (the self-hosted compiler's root
     # module qualifier is ''), and the presence test must read the first
@@ -6670,7 +6693,7 @@ fn main():
     # the self-hosted parser's `self._expect("LPAREN")` believed a value had
     # been passed and refused every file with "Expected '0' got ')'" — the
     # parser half of the class in
-    # bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md, and the reason the
+    # the stage2 empty-dump bug (its doc was deleted with the fix), and the reason the
     # tokenizer fix alone still left every `.ast` unwritten.
     #
     # CPython is the oracle. The cases cover a `str` default, a `list`
@@ -6718,7 +6741,7 @@ main()
     # bootstrap inputs as "unterminated string literal" (exit 1) and gave the
     # 21 that begin with a `"""` docstring a 2-token stream — so this one
     # defect was both bootstrap-stage2-dumps' failure and the
-    # dumps-nothing class behind bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
+    # dumps-nothing class behind the stage2 empty-dump bug (its doc was deleted with the fix).
     #
     # CPython is the oracle, so this states no expected output: the grid below
     # is the whole clamping surface (negative, zero, past-the-end and inverted
@@ -12119,7 +12142,7 @@ print(str(d))
     # `mojo_dict_key_for`, which rightly refuses a list as a dict key, and the
     # self-hosted compiler raised `TypeError: unhashable type: 'list'` inside
     # gen_module_impl on every input — the failure that stopped it compiling
-    # anything (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    # anything (the stage2 empty-dump bug (its doc was deleted with the fix)).
     #
     # CPython is the oracle and the program states no expected output, because
     # the addresses differ. What has to match is the SEMANTICS: the token is
