@@ -422,7 +422,7 @@ def needs_memwhy(spec) -> bool:
 # next full `make gate` replaces this table wholesale, and the floor check in
 # test_suite.py (a class must cover its recorded peak) is what notices if
 # somebody adds a measurement and forgets to move the class.
-MEASURED_RUN = ('a full `gate`, 2026-10-24, master d20e7984, per-job peaks from the '
+MEASURED_RUN = ('a full `gate`, 2026-10-20, master 8e449ed3, per-job peaks from the '
                 'run log (--apply-peaks)')
 
 # `measured`: read off that run for this job.
@@ -454,8 +454,8 @@ MEASURED_PEAK_GB = {
     'selfhost':                    (4.4, 'measured'),
     'mojoc':                       (4.9, 'measured'),
     'stdlib-syntax':               (1.5,  'measured'),
-    'sqliteruntime':               (2.4, 'measured'),
-    'bootstrap-stage1-transitive': (1.4, 'measured'),
+    'sqliteruntime':               (2.3, 'measured'),
+    'bootstrap-stage1-transitive': (1.6, 'measured'),
     'bootstrap-stage2-cc':         (1.9, 'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
@@ -465,9 +465,9 @@ MEASURED_PEAK_GB = {
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
     'bootstrap-stage1-dumps':      (0.1, 'measured'),    # per item, 3 ok items of 2-4 s
-    'bootstrap-stage2-transitive': (30, 'measured'),    # from stage1-transitive
+    'bootstrap-stage2-transitive': (30, 'measured'),    # the binary's whole-closure dump
     'bootstrap-stage3-dumps':      (0.5, 'derived'),    # from stage2-dumps
-    'bootstrap-stage3-transitive': (30, 'derived'),    # from stage2-transitive (30 GB class)
+    'bootstrap-stage3-transitive': (30, 'derived'),     # from stage2-transitive (same binary shape)
     # The eight formal host-module suites, measured one at a time under
     # `tools/memslot.py --gb 8` on 2026-09-30, arm64, python 3.14.7. The peak
     # is memcap's own poll of the whole process tree (`procrun.tree_rss`, the
@@ -2594,10 +2594,29 @@ fanout('bootstrap-stage1-dumps',
 # numbers were measuring (a macOS *footprint* probe, on a tree state weeks
 # older) is not what memcap enforces: a ceiling is applied to summed RSS of
 # the process tree, and that is 1.1-1.2 GB.
+#
+# `reject=CLOSURE_INCOMPLETE`: `_compile_imported_module` deliberately
+# survives a sibling module that raises — it prints `# ERROR: compiling
+# imported module ...`, rolls the module back and keeps going, which is the
+# right fallback for a user program and exactly wrong here. A closure missing
+# a module still links (every call into it becomes a weak "unavailable in
+# compiled mode" stub), so this step used to PASS while `stage2/mojo` lacked
+# all of `emit_stmts.py` — the binary then lowered no statement at all and
+# every later bootstrap failure was downstream of a dropped module, not of the
+# code being debugged. The stage2/stage3 closure dumps reject the stub's own
+# diagnostic too: the binary calling a stub while compiling itself is the
+# same hole seen from the other side.
+CLOSURE_INCOMPLETE = r'# ERROR: compiling imported module|unavailable in compiled mode'
+# The per-file dumps of the COMPILED binary reject the same stub diagnostic:
+# the binary calling a weak stub while compiling a file means a call into a
+# sibling module of its own closure was never resolved (a module-qualified
+# call across an import cycle is the usual cause), and the file it was
+# compiling came out wrong with exit 0.
+SELFHOST_DUMP_REJECT = r'mojo_unsupported_iter|unavailable in compiled mode'
 test('bootstrap-stage1-transitive',
      [PY, '../fire.py', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='tiny', cwd='stage1', env={'PYTHONPATH': '..'},
-     deps=['bootstrap-stage1-dumps'],
+     deps=['bootstrap-stage1-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
 
 # The gcc -O0 -fgimple compile of the 40 MB closure into a real binary. Its
@@ -2641,7 +2660,7 @@ fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
-       deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
+       deps=['bootstrap-stage2-cc'], reject=SELFHOST_DUMP_REJECT,
        items_are_files=True,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
@@ -2651,21 +2670,21 @@ test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
-     deps=['bootstrap-stage2-dumps'],
+     deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
 
 fanout('bootstrap-stage3-dumps',
        ['../stage2/mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage3',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
-       deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
+       deps=['bootstrap-stage2-transitive'], reject=SELFHOST_DUMP_REJECT,
        items_are_files=True,
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
      driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
-     deps=['bootstrap-stage3-dumps'],
+     deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
 
 # These two are the ONLY jobs that can see the class `SELFHOST_STAGE2_EMPTY_DUMP`

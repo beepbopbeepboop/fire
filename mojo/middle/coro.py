@@ -1165,7 +1165,15 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     # from build_stdlib_dylib.py's `_output_lock`. Every other decorator still
     # refuses, because those really do change what the function IS (a
     # @property result is not a generator you can drive; @deco wraps it).
-    if _decos and _decos not in (['contextlib.contextmanager'], ['contextmanager']):
+    # The ONE decorator's name, compared as a string. `_decos not in
+    # (['contextlib.contextmanager'], ['contextmanager'])` asked whether a
+    # list is in a tuple of list literals, which the compiled compiler answers
+    # by HANDLE: always "not in", so it refused every @contextmanager
+    # generator and the stage2 binary could not compile build_stdlib_dylib.py
+    # (`_scratch_dir`, `_output_lock`).
+    _only_deco = _cm_as_str(_decos[0]) if len(_decos) == 1 else ''
+    if _decos and not (_only_deco == 'contextlib.contextmanager'
+                       or _only_deco == 'contextmanager'):
         # v0: a @classmethod generator METHOD is accepted (its `cls` receiver
         # is an opaque, never-read int64_t placeholder slot -- the same ABI
         # the cpp path used and the call-site machinery in
@@ -1176,12 +1184,13 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         # reads the same `N.method_receiver_kind` verdict to leave the leading
         # parameter alone. Any other decorator, or either of these on a plain
         # (non-method) generator, still falls through.
-        if struct_name is not None and _decos in (['classmethod'], ['staticmethod']):
+        if struct_name is not None and (_only_deco == 'classmethod'
+                                        or _only_deco == 'staticmethod'):
             if any(isinstance(n, (N.IdentExpr, N.MemberExpr))
                    and getattr(n, 'name', None) == 'cls'
                    for n in _walk(fn)):
                 return False, ('classmethod generator body references `cls` (v0)'
-                               if _decos == ['classmethod'] else
+                               if _only_deco == 'classmethod' else
                                'a @staticmethod generator has no `cls` to reference')
         else:
             return False, 'decorated'
@@ -3268,20 +3277,26 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
     return out
 
 
-_STMT_TYPES = tuple(
-    getattr(N, nm) for nm in (
-        'AssignStmt', 'AugAssignStmt', 'MultiAssignStmt', 'VarDecl', 'ExprStmt',
-        'ReturnStmt', 'RaiseStmt', 'BreakStmt', 'ContinueStmt', 'PassStmt',
-        'AssertStmt', 'IfStmt', 'WhileStmt', 'ForStmt', 'WithStmt', 'TryStmt',
-        'MatchStmt', 'FunctionDef', 'ImportStmt', 'FromImportStmt', 'GlobalStmt',
-        'NonlocalStmt',
-        'DelStmt', 'StructDef',
-    ) if hasattr(N, nm)
-)
+def _is_stmt_node(x) -> bool:
+    """One statement node? A LITERAL tuple of classes, inline: the old
+    module-level `_STMT_TYPES = tuple(getattr(N, nm) for nm in ...)` was
+    built at import time out of names, which the compiled compiler cannot
+    evaluate -- `isinstance(x, _STMT_TYPES)` lowered to
+    `mojo_isinstance_p(x, 0)`, False for everything, so no coroutine rewrite
+    in the stage2 binary ever recognised a statement list."""
+    return isinstance(x, (
+        N.AssignStmt, N.AugAssignStmt, N.MultiAssignStmt, N.VarDecl, N.ExprStmt,
+        N.ReturnStmt, N.RaiseStmt, N.BreakStmt, N.ContinueStmt, N.PassStmt,
+        N.AssertStmt, N.IfStmt, N.WhileStmt, N.ForStmt, N.WithStmt, N.TryStmt,
+        N.MatchStmt, N.FunctionDef, N.ImportStmt, N.FromImportStmt,
+        N.GlobalStmt, N.NonlocalStmt, N.DelStmt, N.StructDef))
 
 
 def _looks_like_stmt_list(v: list) -> bool:
-    return all(isinstance(x, _STMT_TYPES) for x in v)
+    for x in v:
+        if not _is_stmt_node(x):
+            return False
+    return True
 
 
 def _declares_its_own_scope(s) -> bool:
@@ -3291,7 +3306,7 @@ def _declares_its_own_scope(s) -> bool:
     Every `_rewrite_*_stmts` in this file recurses into a statement's
     attributes looking for nested statement lists, and the test it uses —
     "is this a list of statements?" — is answered by `_looks_like_stmt_list`,
-    whose `_STMT_TYPES` includes BOTH `FunctionDef` and `StructDef`. So a
+    whose `_is_stmt_node` includes BOTH `FunctionDef` and `StructDef`. So a
     nested `def`'s body and a nested `class`'s `methods` list were rewritten
     with the ENCLOSING coroutine's context variable: their `return e` became
     `__mojo_gen_set_return(__c, e); return`, and their `yield e` /
@@ -5014,10 +5029,43 @@ def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
 
 
 def _deep_copy_stmt(node):
-    """Shallow structural clone so rewrites don't mutate the original AST
-    (the same FunctionDef object can be walked again elsewhere)."""
+    """A structural clone of an AST subtree, so the coroutine rewrites do not
+    mutate the original (the same FunctionDef object can be walked again
+    elsewhere).
+
+    Every dataclass node is copied (`copy.copy`) and every list reachable
+    through its fields is rebuilt with its elements cloned; anything else --
+    a string, a number, None -- is
+    immutable and shared (a tuple is rebuilt only so the nodes inside an
+    `elifs` pair are cloned too). That is what `copy.deepcopy` gave for an AST, and
+    it is spelled out rather than delegated because the compiled compiler
+    has no generic deep copy: `copy.deepcopy(node)` lowered to the module
+    marker, so the stage2 binary built every stack-switch generator body
+    out of None statements (`/* TODO: <type> */`) and every genexp it
+    compiled came out empty."""
+    if isinstance(node, tuple):
+        # Tested BEFORE `list`: the compiled value model spells a tuple as a
+        # marked list, and an `elifs` / `kwargs` entry has to come back a
+        # tuple (with its nodes cloned) for every `isinstance(e, tuple)`
+        # reader downstream.
+        items: list = []
+        for item in node:
+            items.append(_deep_copy_stmt(item))
+        return tuple(items)
+    if isinstance(node, list):
+        out: list = []
+        for item in node:
+            out.append(_deep_copy_stmt(item))
+        return out
+    if not dataclasses.is_dataclass(node):
+        return node
     import copy
-    return copy.deepcopy(node)
+    new = copy.copy(node)
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if isinstance(v, (list, tuple)) or dataclasses.is_dataclass(v):
+            setattr(new, f.name, _deep_copy_stmt(v))
+    return new
 
 
 # ── registration + C emission ─────────────────────────────────────────

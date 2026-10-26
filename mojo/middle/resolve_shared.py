@@ -329,6 +329,12 @@ def _quick_type(gen, node) -> str:
         if node.op in ('and', 'or'):
             lt = gen._quick_type(node.left)
             rt = gen._quick_type(node.right)
+            # A string and a word of unknown kind: the value may be either,
+            # so it is the word -- the lowering (`_lower_BinaryOp`'s and/or
+            # arm) types the result the same way, and the two must agree.
+            if ((lt == 'char *' and rt == 'int64_t')
+                    or (lt == 'int64_t' and rt == 'char *')):
+                return 'int64_t'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':
             # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a
@@ -907,6 +913,26 @@ def _quick_type(gen, node) -> str:
         _st = _struct_unpack_elem_ctype(gen, obj, node.index)
         if _st is not None:
             return _st
+        # A subscript of a dict DISPLAY written inline (`{'stdin': '0',
+        # ...}[name]`): the value type is the join of the literal's own
+        # values, exactly what the lowering's `mojo_dict_get_<suffix>` reads.
+        # Without it the estimator answered the int64_t box, so a function
+        # returning one was declared `int64_t` and its `char *` came back as
+        # a decimal address.
+        if (isinstance(obj, gimple_ctypes.DictExpr) and obj.pairs
+                and not isinstance(node.index, gimple_ctypes.SliceExpr)):
+            # A `**spread` pair (key `UnaryOp('**')`) contributes values the
+            # literal does not spell, so it leaves the answer unknown.
+            _dv_types = []
+            _dv_spread = False
+            for _dp in obj.pairs:
+                _dk = _dp[0]
+                if isinstance(_dk, gimple_ctypes.UnaryOp) and _dk.op == '**':
+                    _dv_spread = True
+                    break
+                _dv_types.append(gen._quick_type(_dp[1]))
+            if not _dv_spread:
+                return gimple_ctypes.TypeLattice.join_all(_dv_types)
         if isinstance(obj, gimple_ctypes.IdentExpr):
             # `s[i]` where s is a plain char* string: the element is a
             # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for
@@ -1710,9 +1736,20 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
             i += 1
             depth = 1
             expr_chars = []
+            # A quoted string inside the field (`{"!= 0" if c else "== 0"}`)
+            # is opaque to both scans below: its braces do not nest and its
+            # `!` / `:` are not a conversion or a spec. Read as syntax, the
+            # `!` of `"!= 0"` split the field into the expression `"` and a
+            # conversion, and the literal came out as the text `{"}`.
+            _q = ''
             while i < len(inner) and depth > 0:
                 ch = inner[i]
-                if ch == '{': depth += 1
+                if _q != '':
+                    if ch == _q:
+                        _q = ''
+                elif ch == '"' or ch == "'":
+                    _q = ch
+                elif ch == '{': depth += 1
                 elif ch == '}': depth -= 1
                 if depth > 0:
                     expr_chars.append(ch)
@@ -1723,8 +1760,14 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
             _spec = ''
             _conv = ''
             _depth = 0
+            _q = ''
             for _k, _ch in enumerate(expr_src):
-                if _ch in '([{':
+                if _q != '':
+                    if _ch == _q:
+                        _q = ''
+                elif _ch == '"' or _ch == "'":
+                    _q = _ch
+                elif _ch in '([{':
                     _depth += 1
                 elif _ch in ')]}':
                     _depth -= 1
@@ -1732,7 +1775,9 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
                     _spec = expr_src[_k + 1:]
                     expr_src = expr_src[:_k]
                     break
-                elif _ch == '!' and _depth == 0:
+                elif (_ch == '!' and _depth == 0
+                      and not expr_src[_k + 1:_k + 2] == '='):
+                    # `!=` is the operator, not a `!r` conversion.
                     _conv = expr_src[_k + 1:]
                     expr_src = expr_src[:_k]
                     break
@@ -1969,7 +2014,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
         if isinstance(s, gimple_ctypes.FunctionDef) and s.name == g and s.return_type:
             ret_ann = s.return_type
             for tp, concrete in zip(params, mangled_type_args):
-                ret_ann = gimple_ctypes.re.sub(rf'\b{gimple_ctypes.re.escape(tp)}\b', concrete, ret_ann)
+                ret_ann = gimple_ctypes.replace_word(ret_ann, _as_str(tp), _as_str(concrete))
             if materialize is not None:
                 ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)

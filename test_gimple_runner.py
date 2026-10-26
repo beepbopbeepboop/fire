@@ -4844,6 +4844,23 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
+    # `d.get(k, default)` on a str-valued dict tests PRESENCE, not truth: an
+    # empty-string value is a real value (the self-hosted compiler's root
+    # module qualifier is ''), and the presence test must read the first
+    # lookup's word rather than probe the dict again (a content-keyed key is
+    # consumed by the first lookup).
+    test_gimple_stdout("gimple_dict_get_str_hit_empty_string_is_not_a_miss", """\
+def main():
+    d = {"root": ""}
+    print("[" + d.get("root", "dflt") + "]")
+    print("[" + d.get("x", "dflt") + "]")
+    t = {}
+    t[("a", 1)] = ""
+    print("[" + t.get(("a", 1), "dflt") + "]")
+    print("[" + t.get(("a", 2), "dflt") + "]")
+main()
+""", "[]\n[dflt]\n[]\n[dflt]\n")
+
     # The VALUE side of a container-keyed store, and specifically the value
     # KINDS whose setter had no `_kw` twin. `_KW_DICT_FNS` tests the setter's
     # NAME, so `mojo_dict_set_bool` / `_none` / `_struct` /

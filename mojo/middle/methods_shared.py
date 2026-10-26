@@ -125,7 +125,36 @@ def _is_selfhost_source_file(path: str) -> bool:
             _pkg = _base + '/' + _sub
             if _rp == _pkg or _rp.startswith(_pkg + '/'):
                 return True
+    # The same question asked of the FILE'S OWN TREE, which is the answer
+    # that does not depend on where the running compiler lives. The compiled
+    # binary has no source location of its own (`__file__` is `<bootstrap>`,
+    # so its `_SELFHOST_DIR` is the process CWD): the stage2 binary's
+    # `--dump ../fire_main.py`, run from `stage2/`, answered False here where the
+    # python reference answered True, and every compiler-source dump it made
+    # lacked the self-host struct layouts (`Scope`, `Token`, `Parser`,
+    # `CallExpr`, ...) -- the stage1-vs-stage2 `.ci` divergence. A compiler
+    # source tree is recognised by the module that defines it: the root holds
+    # `fire_compiler.py` and `gimple_codegen.py`. Same marker
+    # `_is_selfhost_sibling_alias` below already uses, applied at the file
+    # level only (the file's own directory, or the root above its `mojo/` /
+    # `jit/` package), never by walking up, so a file merely somewhere under
+    # the checkout (`tools/`, `build/`) is still not compiler source.
+    if _is_compiler_root(_dir):
+        return True
+    _parts = _rp.split('/')
+    for _i in range(1, len(_parts) - 1):
+        _pi = _parts[_i]
+        if _pi == 'mojo' or _pi == 'jit':
+            if _is_compiler_root('/'.join(_parts[:_i])):
+                return True
     return False
+
+
+def _is_compiler_root(d: str) -> bool:
+    """`d` is the root of a copy of this compiler's source (see
+    `_is_selfhost_source_file`)."""
+    return (os.path.isfile(d + '/fire_compiler.py')
+            and os.path.isfile(d + '/gimple_codegen.py'))
 
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     """True when compiling this compiler's OWN backend source and

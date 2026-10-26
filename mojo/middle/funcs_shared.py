@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node, conv_is_read_only, conv_is_exclusive, conv_is_transfer
+from fire_compiler import split_top_level_commas
 import ast_rewriter
 import regex_compile
 import mlir
@@ -238,10 +239,21 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # without a cast", self-hosted myinterpreter.py's
             # Interpreter__call_dunder). Mirrors the precedence the
             # gen_module forward-declaration loop applies.
+            # `_as_str` on both halves of the key, for the reason the `self`
+            # arm above gives: `self_struct` defaults to None, so the
+            # compiled compiler formatted the struct name's pointer as a
+            # DECIMAL here, every lookup missed, and the `*args` method's
+            # unannotated params stayed int64_t in `func_param_types` while
+            # the definition declared the inferred type -- the stage2 binary
+            # then boxed `'__enter__'` to int64_t at every
+            # `self._call_dunder(ctx, '__enter__')` the reference passed bare.
             _msig_ct = None
             if pt is None and self_struct and hasattr(gen, '_inferred_param_types'):
-                _msig_ct = gen._inferred_param_types.get(
-                    f"{self_struct}_{node.name}", {}).get(pn)
+                _msig_key = f"{_as_str(self_struct)}_{_as_str(node.name)}"
+                if _msig_key in gen._inferred_param_types:
+                    _msig_tbl = _as_dict(gen._inferred_param_types[_msig_key])
+                    if pn in _msig_tbl:
+                        _msig_ct = _as_str(_msig_tbl[pn])
             if _msig_ct is not None:
                 out.append(_msig_ct)
             else:
@@ -722,6 +734,38 @@ def _resolved_export_entry(gen, module: str, name: str, info):
     # measurement -- see its own comment and the bug doc named there.
     _out['c_return_type_is_default'] = not _fn.return_type
     return _out
+
+def record_annotated_tuple_slots(gen, key: str, ann) -> None:
+    """Record the per-slot C types a `-> tuple[A, B, ...]` annotation states,
+    under the callee key a call site can name (`f`, `Struct_method`).
+
+    `_return_slot_types` is filled from a body's own `return a, b` literal,
+    which is both too late (a caller emitted before the callee sees nothing)
+    and absent for a body that returns another call's tuple (`return
+    ginf.lower_expr(self, node)` -- which is exactly how `GimpleGen.lower_expr`
+    returns). The ANNOTATION is the declaration of the same fact and is
+    known at signature time. Only the ARITY and per-slot types are taken;
+    a bare `tuple`, a variadic `tuple[X, ...]` or an unparseable annotation
+    records nothing. Kept in its own table rather than merged into
+    `_return_slot_types` so the body-derived record, which every tuple
+    unpack already reads, keeps meaning exactly what it meant."""
+    a = _as_str(ann).strip() if ann is not None else ''
+    lb = a.find('[')
+    if lb <= 0 or not a.endswith(']'):
+        return
+    head = a[:lb].strip()
+    if head not in ('tuple', 'Tuple'):
+        return
+    parts = split_top_level_commas(a[lb + 1:-1])
+    slots: list = []
+    for p in parts:
+        ps = _as_str(p).strip()
+        if ps == '' or ps == '...':
+            return
+        slots.append(gen._resolve_type(ps))
+    if len(slots) > 0:
+        gen._return_ann_slot_types[key] = slots
+
 
 def register_imported_symbol(gen, name: str, info: dict,
                              original_name: str = None,
@@ -1250,10 +1294,12 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
     path, src, mod = gen._parsed_import(module)
     if not src:
         return None
-    head = r'\bstruct\s+' if kind == 'struct' else r'\b(?:fn|def)\s+'
-    if gimple_ctypes.re.search(head + rf'{gimple_ctypes.re.escape(name)}\s*\[', src):
+    # `source_declares` / `name_in_import_list`, not regexes built around the
+    # name: the compiled compiler has no run-time regex engine (see
+    # `source_decl_ends`), so both searches answered 0 there.
+    _heads = ['struct'] if kind == 'struct' else ['fn', 'def']
+    if gimple_ctypes.source_declares(src, _heads, name, '['):
         return path
-    nm = gimple_ctypes.re.escape(name)
     # Flat [mod0, names0, mod1, names1, ...] scan instead of two
     # `re.finditer(...)` loops with `mm.group(1)/.group(2)` — the
     # self-hosted backend has no lowering for `re.finditer` (emits
@@ -1266,7 +1312,7 @@ def _find_generic_source(gen, module: str, name: str, kind: str = 'fn', depth: i
         _fmod = _fi[_j]
         _fnames = _fi[_j + 1]
         _j += 2
-        if gimple_ctypes.re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', _fnames):
+        if gimple_ctypes.name_in_import_list(_as_str(_fnames), name):
             r = gen._find_generic_source(gen._abs_module(_fmod, module), name, kind, depth + 1)
             if r:
                 return r
@@ -1724,10 +1770,46 @@ def _sgfs_resolve_ann(gen, _ann: str) -> str:
     compiled program with at least one local variable, once the unrelated
     `_ensure_bool_cond` fix (see its own docstring) stopped an earlier
     crash from masking this one."""
-    _cls = getattr(gimple_ctypes, _ann, None)
-    if isinstance(_cls, type):
+    if _ann in _parser_node_class_names():
         return f"{_ann} *"
     return gen._resolve_type(_ann)
+
+
+# `{class name}` of every class `mojo.middle.types` (`gimple_ctypes`) binds --
+# the ones it imports from `fire_compiler` and the ones it defines -- read from
+# the PARSED sources rather than from the live module (`getattr(gimple_ctypes,
+# name)` + `isinstance(.., type)`): a module attribute looked up by a run-time
+# string is something the self-hosted compiler cannot do, so there every
+# `node: CallExpr` parameter of a GimpleGen delegate came out `int64_t` while
+# the reference typed it `CallExpr *`. The parsed answer is the same in both,
+# and it is cached for the process like every other source scan here.
+_PARSER_NODE_CLASSES: dict = {}
+
+
+def _parser_node_class_names() -> dict:
+    """`{name: True}` for the classes `gimple_ctypes` binds."""
+    _hit = _PARSER_NODE_CLASSES.get('names')
+    if _hit is not None:
+        return _hit
+    import gimple_codegen
+    _sd = gimple_codegen._SELFHOST_DIR
+    _fc_classes: dict = {}
+    for _st in _selfhost_parsed_source(gimple_ctypes.os.path.join(_sd, 'fire_compiler.py')):
+        if isinstance(_st, StructDef):
+            _fc_classes[_as_str(_st.name)] = True
+    _names: dict = {}
+    _types_src = gimple_ctypes.os.path.join(_sd, 'mojo', 'middle', 'types.py')
+    for _st in _selfhost_parsed_source(_types_src):
+        if isinstance(_st, StructDef):
+            _names[_as_str(_st.name)] = True
+        elif (isinstance(_st, FromImportStmt)
+                and _as_str(getattr(_st, 'module', '')) == 'fire_compiler'):
+            for _entry in (getattr(_st, 'name_alias_strs', None) or []):
+                _nm = _as_str(gimple_ctypes._fi_name(_entry))
+                if _nm in _fc_classes:
+                    _names[_nm] = True
+    _PARSER_NODE_CLASSES['names'] = _names
+    return _names
 
 # --- dependency _ris_base (from gimple_gen_funcs.py) ---
 def _ris_base(ann) -> str:

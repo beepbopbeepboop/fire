@@ -26,6 +26,7 @@ site, and there is no call site to inline into.
 from __future__ import annotations
 
 import mojo.middle.types as gimple_ctypes
+from fire_compiler import _as_str
 
 
 def _param_names(node) -> list:
@@ -105,6 +106,20 @@ def _bind_site(stmt):
             and isinstance(stmt.target, gimple_ctypes.IdentExpr)):
         return stmt.target.name, stmt.target, stmt.value
     return None
+
+
+def _bind_site_name(stmt) -> str:
+    """The local name `_bind_site(stmt)` reports, for a statement it accepts."""
+    if isinstance(stmt, gimple_ctypes.VarDecl):
+        return _as_str(stmt.name)
+    return _as_str(stmt.target.name)
+
+
+def _bind_site_value(stmt):
+    """The bound VALUE `_bind_site(stmt)` reports, for a statement it accepts."""
+    if isinstance(stmt, gimple_ctypes.VarDecl):
+        return stmt.value
+    return stmt.value
 
 
 def candidate_lambdas(body: list, enclosing: dict) -> dict:
@@ -374,10 +389,13 @@ def bound_local_name(gen, node) -> str:
     body = getattr(gen, '_cur_func_body', None)
     if not body:
         return '?'
+    # `_bind_site_value`/`_bind_site_name`, not `b[2] is node` / `b[0]` off
+    # the 3-tuple: the tuple's slots mix a str and two nodes, and the two
+    # compilers disagreed about the kind of slot 2 (one compared the slot's
+    # box, the other read it as a string), so the identity test differed.
     for stmt in _stmts(body):
-        b = _bind_site(stmt)
-        if b is not None and b[2] is node:
-            return b[0]
+        if _bind_site(stmt) is not None and _bind_site_value(stmt) is node:
+            return _bind_site_name(stmt)
     return getattr(node, '_bound_local', None) or '?'
 
 
@@ -407,8 +425,19 @@ def captures_only_locals(gen, node, enclosing: dict) -> bool:
     written for captures a `var`-bound local (`lambda: n`, `lambda:
     len(xs)`, `lambda x: n + x`).
     """
-    params = getattr(gen, '_cur_func_params', None) or ()
-    return not (set(free_names(node, enclosing)) & set(params))
+    # Explicit membership over `_as_str` views rather than `set(a) & set(b)`:
+    # the compiled compiler's intersection of two untyped sets came back
+    # empty, so `_sig_pn = lambda pn: gen._cpp_kw_param_renames.get(pn, pn)`
+    # -- the very repro above -- was inlined there and lifted here.
+    # A set either way (`set-or-()` joined to a list in the compiled compiler).
+    params: set = getattr(gen, '_cur_func_params', None) or set()
+    _pset: set = set()
+    for _p in params:
+        _pset.add(_as_str(_p))
+    for _fn in free_names(node, enclosing):
+        if _as_str(_fn) in _pset:
+            return False
+    return True
 
 
 def reducible_lambdas(gen) -> dict:

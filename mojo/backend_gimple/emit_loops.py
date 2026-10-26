@@ -1089,6 +1089,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
                 bb_not_dict = gen._new_bb(); bb_not_list = gen._new_bb()
+                bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
                 bb_after = gen._new_bb()
                 it64 = gen._to_int64(it_type, it_val)
                 isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
@@ -1097,6 +1098,13 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
                 gen._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_not_list};")
                 gen._emit_label(bb_not_list)
+                # A SET is the third container a word can be. Without this arm
+                # `for m in getattr(ci, 'mut_names', None) or []:` over a
+                # frozenset ran zero times in the compiled compiler, so a
+                # closure call group never shared its `nonlocal` cells.
+                iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
+                gen._emit(f"  if ({iss}) goto {bb_set}; else goto {bb_not_set};")
+                gen._emit_label(bb_not_set)
                 # A non-zero scalar word below the pointer range is a
                 # number, never a container: real Mojo raises `TypeError:
                 # ... is not iterable` here (measured 2026-10-21 part 4,
@@ -1157,6 +1165,18 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
                     and not for_target_is_tuple(var))
+                # Both arms share ONE C variable, declared by the dict arm
+                # (lowered first) as the `char *` its keys need -- so in the
+                # list arm an ELEMENT is read through a `char *`, and every
+                # `isinstance(st, <Struct>)` there folded to a static False
+                # (the self-hosted compiler's re-export resolver,
+                # `_find_symbol_home_module`, never saw an import). The name is
+                # recorded as an unknown-kind word, which `_isinstance_one_type`
+                # answers at run time whatever its C type. (Declaring the
+                # shared variable `int64_t` instead was tried and corrupted
+                # loops whose bodies rely on the `char *` key.)
+                if not for_target_is_tuple(var) and not _it_is_items:
+                    gen._dyn_word_locals.add(_as_str(var))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
@@ -1177,6 +1197,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # the same [key, value] pairs.
                     gen._dict_items_val_elems[lp] = 'int64_t'
                 gen._gen_for_list(var, lp, node.body, share_var_with_sibling_arm=True)
+                gen._emit(f"  goto {bb_after};")
+                gen._emit_label(bb_set)
+                _for_set_ptr = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
+                _set_lp = gen._call_expr('MojoList *', 'mojo_set_to_list',
+                                         [('MojoSet *', _for_set_ptr)])
+                gen._gen_for_list(var, _set_lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_after)
             else:
@@ -1996,6 +2022,12 @@ def _gen_for_enumerate(gen, node):
                 gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
     elif not val_is_tuple:
         gen._declare_var(val_var, elem if elem else 'int64_t')
+        # An element of a sequence whose element kind nothing recorded is a
+        # word of unknown kind (see `_dyn_word_locals`): `f'{ct}'` over
+        # `enumerate(params)` of an untyped `params` has to ask the runtime
+        # whether `ct` is a string, or it renders the pointer's decimal.
+        if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
+            gen._dyn_word_locals.add(_as_str(val_var))
     # Writes go through _cname (a target named after a C keyword is
     # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
     # a fresh temp in the tuple case, so _cname is a no-op there.
@@ -2119,6 +2151,18 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
         acc.append(vn)
 
 
+def _list_slot_read_expr(ptr, i, slot_elem) -> tuple[str, str]:
+    """`(ctype, C expression)` reading slot `i` of the list at `ptr` with the
+    accessor `slot_elem` calls for. Module-level, not a closure nested in
+    `_gen_for_list` beside its one caller: it captures nothing, and as a
+    sibling of the closure that calls it the compiled compiler grouped the
+    two into a shared env where the reference compiler did not."""
+    suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
+    if suf_i == 'str':
+        return 'char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})"
+    return 'int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})"
+
+
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                    share_var_with_sibling_arm: bool = False):
     # Handle tuple unpacking: for (a, b) in list_of_tuples — and the 1-tuple
@@ -2159,6 +2203,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # assigns them from opaque boxed pairs, matching the pre-typed-
         # slots behavior for that shape).
         slot_elems = _tuple_unpack_slot_elems(gen, it_val, len(var_names))
+        # No per-slot record of any kind for this iterable (not dict items,
+        # no tuple slot types, no nested element type): an `int64_t` slot is
+        # then a word whose kind only the runtime knows, and `str()`/f-strings
+        # must ask it (`_dyn_word_locals`). `for n, r, p in
+        # gimple_codegen._selfhost_syms(): f"{r} {n} ({p})"` emitted three
+        # pointer decimals per forward declaration in the self-hosted compiler.
+        _fl_no_slot_record = (it_val not in gen._dict_items_val_elems
+                              and gen._tuple_slot_types.get(it_val) is None
+                              and it_val not in gen._nested_elem_types)
         for _fli in range(len(var_names)):
             _fl_vn = _as_str(var_names[_fli])
             _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
@@ -2173,6 +2226,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     gen._elem_types[starred_slot_name(_fl_vn)] = _fl_se
                 continue
             _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
+            if _fl_no_slot_record and _fl_se == 'int64_t':
+                gen._dyn_word_locals.add(_fl_vn)
     else:
         var_names = None
         _fl_ctype = _as_str(elem) if elem is not None else elem
@@ -2219,6 +2274,15 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                      or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
                 and gen.var_types.get(var) != 'int64_t'):
             gen._declare_var(var, 'int64_t', force=True)
+        # A list whose element kind nothing recorded yields words of unknown
+        # kind (see `_dyn_word_locals`): `for pname in d[k]:` over a dict
+        # value built from unpacked names has to stringify `pname` by asking
+        # the runtime, or `key + '::' + pname` renders its address.
+        if ((not elem or elem == 'int64_t')
+                and gen.var_types.get(var) == 'int64_t'):
+            gen._dyn_word_locals.add(_as_str(var))
+            if shadow_name:
+                gen._dyn_word_locals.add(_as_str(shadow_name))
         # AFTER every declaration above (each of which can re-type `var`) and
         # BEFORE the body is generated below, so a loop over `var` INSIDE the
         # body sees the inner element type. The doc's placement note.
@@ -2263,12 +2327,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # shared with the declarations there).
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
 
-        def _emit_slot_read(ptr, i, slot_elem):
-            suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
-            if suf_i == 'str':
-                return 'char *', f"mojo_list_get_str ({_as_str(ptr)}, {i})"
-            return 'int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})"
-
         def _emit_target_assign(ptr, vn, i, slot_elem):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
             which may itself be a parenthesized nested tuple target
@@ -2277,7 +2335,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             the realistic real-world shape; deeper nesting recurses
             identically)."""
             if vn.startswith('(') and vn.endswith(')'):
-                rt, rv = _emit_slot_read(ptr, i, 'int64_t')
+                rt, rv = _list_slot_read_expr(ptr, i, 'int64_t')
                 nested_raw = gen._new_val(rt, rv)
                 nested_ptr = gen._coerce_to_type(rt, 'MojoList *', nested_raw)
                 nested_names = gen._split_top_level_comma(vn[1:-1].strip())
@@ -3104,6 +3162,62 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     # types it `ClosureInfo *` exactly as it already does for
     # `_lower_outer_closure_call` / `_emit_closure_recursive`.
     """Generate a top-level C function for a nested (closure) function."""
+    # The per-FUNCTION ownership state (emit_infra's Phase-3 candidates and
+    # the block-scope tables) belongs to whatever function was being lowered
+    # when this closure is lifted: the PARENT for a lambda (lifted in the
+    # middle of it, `_lower_LambdaExpr`), or the previously lowered, unrelated
+    # function for a nested `def` (lifted ahead of its owner). Neither is
+    # this body's. Saved here, replaced with a clean slate for the closure,
+    # and restored on the way out, so:
+    #   * a `return` in the closure frees nothing of another function's
+    #     (`_emit_owned_local_frees` would otherwise emit `free (_env_x)` for
+    #     a parent's nested-def env, a name the closure does not even have);
+    #   * the closure's OWN registrations -- the env of a `def` nested inside
+    #     it (`register_nested_env_free`) -- are freed at its fallthrough exit
+    #     too, not only at an explicit `return`. Before, a void closure that
+    #     fell off its end pushed a cleanup thunk per call and never cancelled
+    #     it: the self-hosted compiler's own `scan_nodes` (infra_infer) filled
+    #     the 8192-entry cleanup stack while compiling itself and then leaked
+    #     every env after it (bootstrap-stage2-transitive);
+    #   * the parent's state survives the lift intact.
+    _sv_cands = gen._owned_free_candidates
+    _sv_pushed = gen._owned_free_pushed
+    _sv_stack = gen._owned_stack_allocated
+    _sv_intkeyed = gen._int_keyed_dicts
+    _sv_lit = gen._literal_storage
+    _sv_lit_ct = gen._literal_storage_ctype
+    _sv_scoped = gen._scoped_free_candidates
+    _sv_armed = gen._scope_armed
+    _sv_live = gen._scope_live
+    _sv_live_depth = gen._scope_live_depth
+    _sv_live_fn = gen._scope_live_fn
+    _sv_strelem_names = gen._owned_str_elem_names
+    _sv_strelem_vals = gen._owned_str_elem_vals
+    _sv_closure_names = gen._owned_closure_names
+    _sv_env_names = gen._owned_env_names
+    gen._reset_no_candidates()
+    _code = _gen_lifted_closure_body(gen, ci, outer_name)
+    gen._owned_free_candidates = _sv_cands
+    gen._owned_free_pushed = _sv_pushed
+    gen._owned_stack_allocated = _sv_stack
+    gen._int_keyed_dicts = _sv_intkeyed
+    gen._literal_storage = _sv_lit
+    gen._literal_storage_ctype = _sv_lit_ct
+    gen._scoped_free_candidates = _sv_scoped
+    gen._scope_armed = _sv_armed
+    gen._scope_live = _sv_live
+    gen._scope_live_depth = _sv_live_depth
+    gen._scope_live_fn = _sv_live_fn
+    gen._owned_str_elem_names = _sv_strelem_names
+    gen._owned_str_elem_vals = _sv_strelem_vals
+    gen._owned_closure_names = _sv_closure_names
+    gen._owned_env_names = _sv_env_names
+    return _code
+
+
+def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
+    """`_gen_lifted_closure` without the ownership-state save/restore around
+    it (see there). `ci` unannotated for the same reason as there."""
     gen._reset_func(ci.inner_def.body, ci.inner_def.params)
     # Set module context for global field access -- same fix, same reason
     # as _gen_struct_method's identical line just above: a lifted closure
@@ -3357,6 +3471,9 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
             gen._gimple_mut_ptr[_mn] = _ptr_var
     for stmt in node.body:
         gen.gen_stmt(stmt)
+    # The fallthrough half of the ownership wiring every other function body
+    # gets (gen_func / _gen_struct_method): see `_gen_lifted_closure`.
+    gen._emit_fallthrough_frees(node)
 
     # See _reset_func's own comment on `_func_used_setjmp` /
     # _gen_struct_method's identical handling just above -- a lifted

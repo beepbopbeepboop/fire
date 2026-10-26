@@ -724,11 +724,14 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     # PART 6 (2026-10-23, family D piece 2): a ref-scalar parameter (the
     # caller passes the ADDRESS of its own variable — see
     # _ref_scalar_param_ctype) takes the lvalue box instead of a value.
+    # Every other argument goes through the shared `*t`-expanding builder.
     out = []
     for _ai, _an in enumerate(args):
         _rct = _ref_scalar_param_ctype(chosen, _ai)
-        out.append(_ref_scalar_lvalue_pair(gen, _an, _rct) if _rct is not None
-                   else gen.lower_expr(_an))
+        if _rct is not None:
+            out.append(_ref_scalar_lvalue_pair(gen, _an, _rct))
+        else:
+            out.extend(gen._lower_call_args([_an]))
     # A `**kwargs` parameter is a concrete `MojoDict *` (see
     # _gen_struct_method's param loop), so literal keyword arguments at
     # the call site must be PACKED into a real dict. Otherwise the
@@ -810,7 +813,14 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
     this compile registered, a method it actually emitted, a return type it
     actually registered as `char *` — and anything unproven falls through.
     """
-    _have = gen._struct_method_names.get(struct_name) or ()
+    # Not `... .get(struct_name) or ()`: the two arms are a SET and a tuple,
+    # and the compiled compiler typed the local from the join of the two --
+    # a list, so `'__repr__' in _have` searched the set as a list and no user
+    # `__repr__` was ever called. One container kind, whatever the lookup
+    # answered.
+    _have = gen._struct_method_names.get(struct_name)
+    if not _have:
+        _have = set()
     _local = gen._ensure_local(ctype, cval)
     for _dunder in prefer:
         if _dunder not in _have:

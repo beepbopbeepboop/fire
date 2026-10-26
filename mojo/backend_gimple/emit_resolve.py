@@ -923,6 +923,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     temp_gen._selfhost_gimplegen_sigs = gen._selfhost_gimplegen_sigs
                 if hasattr(gen, '_selfhost_gimplegen_dict_vts'):
                     temp_gen._selfhost_gimplegen_dict_vts = gen._selfhost_gimplegen_dict_vts
+                if hasattr(gen, '_selfhost_gimplegen_elem_anns'):
+                    temp_gen._selfhost_gimplegen_elem_anns = gen._selfhost_gimplegen_elem_anns
                 # share: `self._compiled_modules`-based dedup (line above,
                 # `_compiled_modules`) means a module can be Pass1b-scanned
                 # exactly ONCE, in whichever temp_gen happens to compile it
@@ -1323,8 +1325,29 @@ def _source_defines_struct(name: str, text: str) -> bool:
     `import M` + `M.X` spelling). They must agree, exactly as the two
     duplicated copies of the classifier this function replaced had to be
     collapsed for the same reason — see that function's own docstring."""
-    _nre = gimple_ctypes.re.escape(name)
-    return bool(gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text))
+    return gimple_ctypes.source_declares(text, ['struct', 'class'], name, '(:')
+
+
+def _type_param_member_mentioned(text: str, param: str, members: list) -> bool:
+    """`re.search(rf'\\b{param}\\s*\\.\\s*(?:M1|M2|...)\\b', text)` without a
+    run-time regex (see `gimple_ctypes.source_decl_ends`)."""
+    n = len(text)
+    for _st in gimple_ctypes.word_starts(text, param):
+        j = int(_st) + len(param)
+        while j < n and gimple_ctypes._decl_scan_space(text[j]):
+            j += 1
+        if not (j < n and text[j] == '.'):
+            continue
+        j += 1
+        while j < n and gimple_ctypes._decl_scan_space(text[j]):
+            j += 1
+        for _m in members:
+            ms = _as_str(_m)
+            e = j + len(ms)
+            if text.startswith(ms, j) and (
+                    e >= n or not gimple_ctypes._decl_scan_word_char(text[e])):
+                return True
+    return False
 
 
 def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
@@ -1362,14 +1385,16 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     anyway. The regexes are a routing decision, not a type decision; every
     type the imported name gets still comes from the inlined module's own
     compile."""
-    _nre = gimple_ctypes.re.escape(name)
-    if gimple_ctypes.re.search(rf'\bstruct\s+{_nre}\s*\[', text):
+    # `source_declares`/`source_decl_ends`, not a regex built around the
+    # name: see `source_decl_ends` for why the compiled compiler cannot run
+    # one.
+    if gimple_ctypes.source_declares(text, ['struct'], name, '['):
         gen._imported_generic_structs.setdefault(sym, src_path)
         return True
-    if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\[', text):
+    if gimple_ctypes.source_declares(text, ['fn', 'def'], name, '['):
         gen._imported_generics.setdefault(sym, src_path)
         return True
-    if len(gimple_ctypes.re.findall(rf'\b(?:fn|def)\s+{_nre}\s*\(', text)) > 1:
+    if len(gimple_ctypes.source_decl_ends(text, ['fn', 'def'], name, '(')) > 1:
         gen._imported_overloads.setdefault(sym, src_path)
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
@@ -1379,7 +1404,7 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     if _source_defines_struct(name, text):
         gen._link_inline_modules.add(inline_module)
         return True
-    if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\(', text):
+    if gimple_ctypes.source_declares(text, ['fn', 'def'], name, '('):
         gen._link_inline_modules.add(inline_module)
         return True
     return False
@@ -1672,8 +1697,8 @@ def _register_link_imports(gen, stmts) -> list:
                             _ov_src = open(source).read()
                         except Exception:
                             _ov_src = ''
-                        if len(gimple_ctypes.re.findall(
-                                rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(name)}\s*\(', _ov_src)) > 1:
+                        if len(gimple_ctypes.source_decl_ends(
+                                _ov_src, ['fn', 'def'], name, '(')) > 1:
                             gen._imported_overloads.setdefault(sym, source)
                     # Record the module source for any imported name, so a
                     # comptime call to it can be evaluated at compile time.
@@ -2780,15 +2805,15 @@ def _static_generic_return_ctype(gen, func_name: str) -> str | None:
         text = open(src_path).read()
     except OSError:
         return None
-    m = gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(func_name)}\s*\[', text)
-    if not m:
+    _decl_ends = gimple_ctypes.source_decl_ends(text, ['fn', 'def'], func_name, '[')
+    if not _decl_ends:
         return None
     # Scan forward tracking bracket/paren depth from the opening `[` of
     # the comptime param list, through the `(...)` value param list, to
     # find the return annotation right after the value params' closing
     # `)` — bracket-aware because a real signature nests brackets inside
     # brackets (`origin: Origin[mut=mut]`).
-    i = m.end() - 1
+    i = int(_decl_ends[0]) - 1
     depth = 0
     n = len(text)
     while i < n:
@@ -2966,8 +2991,13 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                     _sn = getattr(gen, '_current_struct_name', None)
                     _ann = (getattr(gen, '_field_annotations', None) or {}).get(
                         f"{_sn}.{_a.member}") if _sn else None
-                    if not (_ann and any(re.search(rf'\b{re.escape(p)}\b', _ann)
-                                         for p in _tp)):
+                    _mentions_tp = False
+                    if _ann:
+                        for p in _tp:
+                            if gimple_ctypes.word_starts(_ann, p):
+                                _mentions_tp = True
+                                break
+                    if not _mentions_tp:
                         continue
                     try:
                         _tmpl = elaborate.extract_fn_source(
@@ -2978,10 +3008,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                         continue
                     _container = False
                     for _p in elaborate.type_param_names(_tmpl):
-                        if re.search(
-                                rf'\b{re.escape(_p)}\s*\.\s*'
-                                r'(?:Element|IteratorType|IteratorOwnedType)\b',
-                                _tmpl):
+                        if _type_param_member_mentioned(
+                                _tmpl, _p,
+                                ['Element', 'IteratorType', 'IteratorOwnedType']):
                             _container = True
                             break
                     if not _container:
@@ -3053,7 +3082,7 @@ def _register_generic_structs_named(gen, source_path: str | None, names) -> None
     except OSError:
         return
     for n in todo:
-        if gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(n)}\s*[\[:]', text):
+        if gimple_ctypes.source_declares(text, ['struct'], n, '[:'):
             gen._imported_generic_structs.setdefault(n, source_path)
 
 
@@ -3483,7 +3512,8 @@ def _literal_elements_include_none(gen, elements: list) -> bool:
     return False
 
 
-def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
+def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
+                          start_val: str | None):
     """`[... for i, x in enumerate(seq[, start]):]` (and dict/set
     equivalents) — walks `it_val` (the already-lowered underlying
     list) by index, assigning the (optionally `start`-offset) 0-based
@@ -3556,6 +3586,10 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     else:
         gen._emit(f"  {idx_c} = {idx64};")
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    # An element whose kind nothing recorded is a word of unknown kind (see
+    # `_dyn_word_locals`), exactly as in the `for` statement's enumerate.
+    if (not elem or elem == 'int64_t') and gen.var_types.get(val_var) == 'int64_t':
+        gen._dyn_word_locals.add(_as_str(val_var))
     if suf == 'double':
         gen._emit(f"  {val_c} = mojo_list_get_double ({it_val}, {idx64});")
     elif suf == 'str':
@@ -3614,7 +3648,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
         ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
-def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
     saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
     len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
@@ -3638,7 +3672,7 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
-def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
+def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     """`[... for c in s]`/`(... for c in s)` where `s` is a plain
     `char *` (this codegen's usual representation for an ordinary
     Python str local — MojoStr* is a separate, less common wrapped-
@@ -3927,6 +3961,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         et = _as_str(_sr[0]); ev = _sr[1]
         if et == 'char *':
             gen._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
+        elif et == 'int64_t' and ev not in gen._int_word_vals:
+            # A word of unknown kind: see mojo_set_add_word.
+            gen._emit_call('void', '', 'mojo_set_add_word', [('MojoSet *', res), ('int64_t', ev)])
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])

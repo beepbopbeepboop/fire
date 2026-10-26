@@ -36,7 +36,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 # `from mojo.middle.stmts_shared import _with_item_alias_name` keeps working).
 from mojo.middle.boundnames import _with_item_alias_name
 
-def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
+def _annotation_container_elem_type(gen, ann, ctype: str) -> str | None:
     """`list[T]` / `List[T]` / `set[T]` / `Set[T]` / `tuple[T, ...]`
     annotation → the container's ELEMENT C type (`T`), else None.
 
@@ -75,9 +75,15 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     """
     if ctype not in ('MojoList *', 'MojoSet *'):
         return None
-    if not isinstance(ann, str) or '[' not in ann or ann.startswith('['):
+    # A typed `str` view before any string operation: `ann` arrives
+    # unannotated (a str, None or an AST node), and on a bare word the
+    # compiled compiler's `'[' not in ann` / `.split` are not string ops.
+    if not isinstance(ann, str):
         return None
-    _inner = ann.split('[', 1)[1].rstrip(']').strip()
+    _ann: str = _as_str(ann)
+    if '[' not in _ann or _ann.startswith('['):
+        return None
+    _inner = _bracket_inner(_ann)
     if not _inner:
         return None
     _parts = gimple_ctypes._split_top_level_commas(_inner)
@@ -88,6 +94,20 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     except Exception:
         return None
     return _et if _et and _et != 'int64_t' else None
+
+def _bracket_inner(s: str) -> str:
+    """The text between `s`'s FIRST `[` and its final `]`. Not
+    `s.split('[', 1)[1].rstrip(']')`, which strips EVERY trailing bracket:
+    `dict[str,dict[str,tuple[str,int]]]` came apart as
+    `str,dict[str,tuple[str,int`, an unbalanced fragment the reference and
+    the self-hosted compiler resolved differently."""
+    _lb = s.find('[')
+    if _lb < 0:
+        return s
+    if s.endswith(']'):
+        return s[_lb + 1:len(s) - 1].strip()
+    return s[_lb + 1:].strip()
+
 
 def _annotation_dict_val_type(gen, ann) -> str | None:
     """`dict[K, V]` / `Dict[K, V]` annotation → the dict's VALUE C type,
@@ -100,7 +120,7 @@ def _annotation_dict_val_type(gen, ann) -> str | None:
     if isinstance(ann, str):
         s = ann.strip()
         if s.startswith('dict[') or s.startswith('Dict['):
-            inner = s.split('[', 1)[1].rstrip(']').strip()
+            inner = _bracket_inner(s)
             parts = gimple_ctypes._split_top_level_commas(inner)
             if len(parts) >= 2:
                 return gen._resolve_type(parts[1].strip())
@@ -115,19 +135,19 @@ def _annotation_dict_nested_val_type(gen, ann) -> str | None:
     if isinstance(ann, str):
         s = ann.strip()
         if s.startswith('dict[') or s.startswith('Dict['):
-            inner = s.split('[', 1)[1].rstrip(']').strip()
+            inner = _bracket_inner(s)
             parts = gimple_ctypes._split_top_level_commas(inner)
             if len(parts) >= 2:
                 v = parts[1].strip()
                 vbase = v.split('[', 1)[0].strip()
                 if vbase in ('dict', 'Dict') and '[' in v:
                     vparts = gimple_ctypes._split_top_level_commas(
-                        v.split('[', 1)[1].rstrip(']').strip())
+                        _bracket_inner(v))
                     if len(vparts) >= 2:
                         return gen._resolve_type(vparts[1].strip())
                 if vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in v:
                     eparts = gimple_ctypes._split_top_level_commas(
-                        v.split('[', 1)[1].rstrip(']').strip())
+                        _bracket_inner(v))
                     if len(eparts) == 1 and eparts[0].strip():
                         _e = gen._resolve_type(eparts[0].strip())
                         return _e if _e and _e != 'int64_t' else None
@@ -260,6 +280,15 @@ def _assign_target(gen, tgt, et, ev):
     plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
     nested tuples by indexing the inner iterable."""
     if isinstance(tgt, gimple_ctypes.IdentExpr):
+        if (gen._in_toplevel_gen and tgt.name not in gen.var_types
+                and tgt.name in gen._global_var_types):
+            # A module-level unpacking (`A, B = ...` at the top level) binds
+            # module GLOBALS: `_write_dest` routes the store to the globals
+            # struct, and a `_toplevel` local of the same name would only
+            # shadow nothing. The value is coerced to the field's own C type.
+            _gdt = gen._global_c_decl_types.get(tgt.name) or gen._global_var_types[tgt.name]
+            gen._safe_coerce_emit(et, _gdt, ev, gen._write_dest(tgt.name))
+            return
         if tgt.name not in gen.var_types:
             hint = gen._inferred_var_types.get(gen.current_func_name, {}).get(tgt.name) \
                 if hasattr(gen, '_inferred_var_types') else None
@@ -283,6 +312,10 @@ def _assign_target(gen, tgt, et, ev):
             gen._declare_var(tgt.name, _decl_t)
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
+        # A word of unknown kind landing in an int64_t local: the local is
+        # that word now (see `_dyn_word_locals`).
+        if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
+            gen._dyn_word_locals.add(tgt.name)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` (a var-type-inference join with
         # another branch's plain fn-pointer / lambda value collapsed it to
@@ -311,7 +344,45 @@ def _assign_target(gen, tgt, et, ev):
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'
             sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
+            # No element record for the unpacked value at all: each slot is a
+            # word whose kind only the runtime knows (`r, p, m = TABLE[k]`
+            # over a dict of tuples, `m` a str or None).
+            if (set_et == 'int64_t' and gen._elem_types.get(lp) is None
+                    and lp not in gen._tuple_slot_types
+                    and lp not in gen._nested_elem_types):
+                gen._dyn_word_vals.add(sev)
             gen._assign_target(sub, set_et, sev)
+    elif isinstance(tgt, (gimple_ctypes.MemberExpr, gimple_ctypes.SubscriptExpr)):
+        # `obj.a, obj.b = t` / `d[k], x = t`: an attribute or item slot as an
+        # unpack target. There was no arm for either, so the slot was READ out
+        # of the tuple and then silently dropped -- the store never happened.
+        # The compiled compiler is built on exactly this shape
+        # (`gen.var_types, gen._elem_types, ... = _saved` restores the type
+        # tables after every hermetic scan in resolve_shared), so every scan
+        # left them pointing at a pooled scratch dict that the next scan
+        # reused, and type facts leaked between unrelated functions.
+        #
+        # The value is bound to a fresh local and the ordinary single-target
+        # assignment does the store, so every rule that path applies to an
+        # attribute/item write (struct field coercion, dict setters, global
+        # routing, ownership) applies here unchanged instead of being
+        # re-implemented for the unpack case.
+        # The translation-unit counter the self-shadowing loop targets use
+        # (`_shadow_seq_box`): one monotonic sequence, so a name minted here
+        # can never collide with another in the same function.
+        gen._shadow_seq_box[0] += 1
+        _tmp = f"_unpk{gen._shadow_seq_box[0]}"
+        _tt = et if et else 'int64_t'
+        gen._declare_var(_tmp, _tt)
+        gen._safe_coerce_emit(et, gen.var_types[_tmp], ev, gen._write_dest(_tmp))
+        if ev in gen._dyn_word_vals and gen.var_types[_tmp] == 'int64_t':
+            gen._dyn_word_locals.add(_tmp)
+        if ev in gen._elem_types:
+            gen._elem_types[_tmp] = gen._elem_types[ev]
+        gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
+            target=tgt,
+            value=gimple_ctypes.IdentExpr(name=_tmp, line=getattr(tgt, 'line', 0)),
+            line=getattr(tgt, 'line', 0)))
 
 def _is_except_as_member_target(gen, obj_node) -> bool:
     """True when `obj_node` (a MemberExpr's `.obj`) is a bare identifier
@@ -370,7 +441,7 @@ def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
         if key and sn:
             out.append((key, sn + ' *', cond.args[0]))
 
-def _handler_exc_name(gen, h):
+def _handler_exc_name(gen, h) -> str:
     if h.exc_type is None:
         return None
     # `except (A, B):` stores a list of type-name strings; use the first
@@ -417,7 +488,7 @@ def _handler_exc_name(gen, h):
         return h.exc_type
     return None
 
-def _handler_bind_name(gen, h):
+def _handler_bind_name(gen, h) -> str:
     """The real local variable name this handler's body should bind the
     caught exception to, or None if it doesn't bind one at all. Usually
     just `h.name` (an explicit `except ... as e:`) — but Mojo's `except

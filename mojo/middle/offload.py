@@ -1607,8 +1607,9 @@ def rewrite_gemm(fdef, info: 'GemmInfo', kernel):
         line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
 
 
-def _walk_stmts(node):
-    """Yield every statement in `node`'s tree, descending into bodies.
+def _walk_stmts(node) -> list:
+    """Every statement in `node`'s tree, descending into bodies, as a list
+    in walk order (a list, not a generator: the self-host subset has none).
 
     A host loop lives inside a FUNCTION BODY, not at module top level, so a
     scan that only looked at the top level would never see one -- which is
@@ -1616,11 +1617,12 @@ def _walk_stmts(node):
     count was a literal, and the fusion still did not fire because the loop it
     was looking for was three levels down inside `main`.
     """
+    out: list = []
     for st in (node or ()):
         if not isinstance(st, list):
             st = [st]
         for x in st:
-            yield x
+            out.append(x)
             for attr in ('body', 'then_body', 'else_body', 'elifs', 'args',
                          'operands', 'left', 'right', 'value', 'target'):
                 child = getattr(x, attr, None)
@@ -1630,7 +1632,9 @@ def _walk_stmts(node):
                                                       gctypes.IfStmt,
                                                       gctypes.AssignStmt,
                                                       gctypes.ExprStmt)):
-                    yield from _walk_stmts(child)
+                    for _y in _walk_stmts(child):
+                        out.append(_y)
+    return out
 
 
 def find_fusable_reps(stmts: list, gemm_names: set) -> int:
