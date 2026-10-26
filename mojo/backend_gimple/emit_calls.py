@@ -5182,7 +5182,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
 # dispatch chain — check them against each other if either changes.
 _COMPREHENSION_ITER_TYPES = (
     'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
-    'MojoGenerator *',
+    'MojoGenerator *', 'MojoBytes *',
 )
 
 
