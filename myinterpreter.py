@@ -1381,6 +1381,13 @@ class BoundMethod:
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
+            if isinstance(f, MojoOverloadSet):
+                # An overloaded method taken as a value (and then bound to
+                # an instance) has no single `_invoke` to delegate to; route
+                # through the overload set's own dispatch instead, with `self`
+                # prepended as the receiver. See
+                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
+                return self.interpreter.invoke(f, self.instance, *args, **kwargs)
             interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
             return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
