@@ -832,13 +832,9 @@ def test_a_job_class_covers_its_measured_peak():
     enforced the floor would let every class in it double without a word.
     """
     table = suite.MEASURED_PEAK_GB
-    # `derived` rows are the transient kind (a peak inferred from a sibling
-    # until the job has run once); the table may legitimately hold none, once
-    # every row has been measured (2026-10-25: the bootstrap stage3 rows were
-    # the last, and `--apply-peaks` promoted them).
-    check('ratchet: the table is worth having (enough rows, measured ones)',
+    check('ratchet: the table is worth having (enough rows, both provenances)',
           len(table) >= 10
-          and 'measured' in {how for _p, how in table.values()},
+          and {'measured', 'derived'} <= {how for _p, how in table.values()},
           f'{len(table)} rows, provenances '
           f'{sorted({how for _p, how in table.values()})}')
     stale = sorted(n for n in table if n not in suite.REGISTRY)
@@ -1452,7 +1448,7 @@ def test_a_doc_that_states_a_tests_status_agrees_with_the_registry():
                              f'{said!r}, registry says {want!r}')
 
     check('doc status: the rule is not vacuous — a doc states a marked status',
-          len(stated) >= 2,
+          len(stated) >= 3,
           f'only {len(stated)} marked tests are stated in any table row '
           f'({sorted(stated)}); a rule that matches nothing reports green '
           f'forever, which is the one thing it must not be able to do')
