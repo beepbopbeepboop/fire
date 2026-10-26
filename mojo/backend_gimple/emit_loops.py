@@ -2578,7 +2578,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    gen._declare_var(var, 'char', force=(var == shadow_name))
+    gen._declare_var(var, 'char', force=(var == shadow_name)
+                     or gen.var_types.get(var, 'char') != 'char')
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -2612,7 +2613,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
 def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     """`for x in b:` where `b` is a `MojoBytes *` — x is an int 0-255.
     Mirrors _gen_for_cstr's index-loop shape over mojo_bytes_len/_get."""
-    gen._declare_var(var, 'int64_t')
+    gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_bytes_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2644,7 +2645,7 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
 def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     """`for x in mv:` — x is an int (1-D byte view). Same index-loop shape
     as _gen_for_bytes over mojo_memoryview_len/_get."""
-    gen._declare_var(var, 'int64_t')
+    gen._declare_var(var, 'int64_t', force=gen.var_types.get(var, 'int64_t') != 'int64_t')
     len_t = gen._new_val('int64_t', f"mojo_memoryview_len ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2713,7 +2714,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     # (`any(c in ('t','T','f','F') for c in prefix)`), which compares the
     # target against 1-char STRING literals and so could never match a
     # code.
-    gen._declare_var(var, 'char *')
+    gen._declare_var(var, 'char *', force=gen.var_types.get(var, 'char *') != 'char *')
     len_t = gen._new_val('int64_t', f"mojo_strlen ({it_val})")
     idx_t = gen._new_temp('int64_t')
     gen._emit(f"  {idx_t} = (int64_t)0;")
@@ -2844,7 +2845,8 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             else:
                 _want = 'char *'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
-                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
+                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars) \
+                or (gen.var_types.get(vn, _want) != _want)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
             if i == 0:
                 if int_keys:
