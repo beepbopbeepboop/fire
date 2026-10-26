@@ -21694,9 +21694,10 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     # a store through a `Pointer[Float64]` writes the value's own BITS, so the
     # integer 1 is 0x1 — a denormal, not 1.0 — and the answer the reader is
     # given is `Int(x)`, which is `FCVTZS`.
-    bits = (" So a store through a `Float64` pointee writes the value's own "
+    bits = ("" if pointee_is_float else
+            " So a store through a `Float64` pointee writes the value's own "
             "BITS: `p.value() = 1` would write 0x1, a denormal rather than "
-            "1.0." if pointee_is_float else "")
+            "1.0.")
     return (
         f"the pointee is `{pointee}` and this store writes {where}.{bits} "
         f"{spelled(value)} is a different kind of word from the one the "

@@ -105,19 +105,6 @@ def abandon_empty():
 
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
-    # Master is checked out in the main checkout, where another session may have UNCOMMITTED edits (2026-10-26: a
-    # row-25 edit to module_gen.py). The fast-forward would overwrite them, so git refuses, after a whole gate had passed.
-    # Never touch them: leave out any branch that changes a file the main checkout has dirty; it lands when they commit.
-    dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
-    if dirty:
-        tasks, keep = C.load(), []
-        for n in names:
-            hit = dirty & set(C.git("diff", "--name-only", "master..." + tasks[n]["branch"], check=False).split())
-            if hit:
-                log("holding %s: the main checkout has uncommitted edits to %s" % (n, ", ".join(sorted(hit))))
-            else:
-                keep.append(n)
-        names = keep
     if not names:
         return None
     log("landing %d: %s" % (len(names), " ".join(names)))

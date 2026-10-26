@@ -3110,20 +3110,15 @@ def _rewrite_product2_elem_copy(base, targs, concrete):
     if not _ELEM_COPY_RE.search(concrete):
         return concrete
 
-    # The substitution counter is a one-element list the callback closes over,
-    # not an attribute on the function object (`_sub.n += 1`): the compiled
-    # compiler has no function-attribute storage, so the self-host build
-    # failed on `request for member 'n' in something not a structure`.
-    _n = [0]
-
     def _sub(mo):
         ind = mo.group(1)
-        i = _n[0]
-        _n[0] = i + 1
+        i = _sub.n
+        _sub.n += 1
         src = '_elem_src' if i == 0 else f'_elem_src{i}'
         return (f'{ind}var {src}: {elem} = '
                 f'self._inner_a_elem.unsafe_value()\n'
                 f'{ind}var elem = {src}.copy()')
+    _sub.n = 0
     return _ELEM_COPY_RE.sub(_sub, concrete)
 
 
@@ -3637,43 +3632,26 @@ def _rewrite_ctor_calls(work, stmts):
     inferer cannot solve is the .o route's business, not this pass'.
     """
     gen = work.gen
-    # FLAT string-keyed tables, not a dict of tuple-keyed dicts: the self-hosted
-    # compiler has no representation for a tuple-keyed dict nested in a dict
-    # (`by_base.get(name)` came back an untyped word, and `next(iter(insts))`
-    # on it was refused by the stage1 closure compile). `by_base` maps a base
-    # name to the LIST of its instantiations' argument keys, `mangled_of` maps
-    # `base + US + argkey` to the mangled name; an argument key is the
-    # arguments joined with the ASCII unit separator.
-    _US = '\x1f'
     by_base = {}
-    mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+            by_base.setdefault(base, {})[tuple(args)] = mangled
     if not by_base:
         return
     for st in stmts or ():
         if type(st).__name__ != 'FunctionDef':
             continue
         ret = getattr(st, 'return_type', None)
-        ret_name = None
-        ret_key = None
+        ret_args = None
         if isinstance(ret, str):
             m = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^\]]+)\]\s*$',
                          ' '.join(ret.split()))
             if m:
-                ret_name = m.group(1)
-                ret_key = _US.join([a.strip() for a in m.group(2).split(',')])
+                ret_args = (m.group(1),
+                            tuple(a.strip() for a in m.group(2).split(',')))
         body = getattr(st, 'body', None) or ()
 
-        def visit(n, _rn=ret_name, _rk=ret_key):
+        def visit(n, _ret=ret_args):
             if type(n).__name__ != 'CallExpr':
                 return
             f = getattr(n, 'func', None)
@@ -3683,47 +3661,14 @@ def _rewrite_ctor_calls(work, stmts):
             if not insts:
                 return
             if len(insts) == 1:
-                args = insts[0]
-            elif _rn is not None and _rn == f.name and _rk in insts:
-                args = _rk
+                args = next(iter(insts))
+            elif _ret and _ret[0] == f.name and _ret[1] in insts:
+                args = _ret[1]
             else:
                 return      # ambiguous: the old honest path stands
-            n.func = IdentExpr(name=mangled_of[f.name + _US + args])
+            n.func = IdentExpr(name=insts[args])
             _walk_ast_invalidate(n)
         _walk(list(body), visit)
-
-
-def _bracket_mentions(src: str, name: str) -> list:
-    """The argument keys of every `name[ a, b ]` mention in `src`: each key is
-    the comma-separated arguments, stripped and joined with the ASCII unit
-    separator (the key `_rewrite_intu_ctor_calls`' tables are indexed by).
-    This is the scan `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` makes, written without
-    a run-time regex (the compiled compiler has no engine for a pattern built
-    around a name): NAME on a word boundary, optional whitespace, `[`, one or
-    more non-`]` characters, `]`."""
-    out = []
-    n = len(src)
-    nl = len(name)
-    if nl == 0:
-        return out
-    pos = src.find(name)
-    while pos >= 0:
-        end = pos + nl
-        before_ok = pos == 0 or not (src[pos - 1].isalnum() or src[pos - 1] == '_')
-        after_ok = end >= n or not (src[end].isalnum() or src[end] == '_')
-        if before_ok and after_ok:
-            j = end
-            while j < n and src[j] in ' \t\r\n\f\v':
-                j += 1
-            if j < n and src[j] == '[':
-                close = src.find(']', j + 1)
-                if close > j + 1 and src[j + 1:close].strip() != '':
-                    parts = []
-                    for x in src[j + 1:close].split(','):
-                        parts.append(x.strip())
-                    out.append('\x1f'.join(parts))
-        pos = src.find(name, pos + 1)
-    return out
 
 
 def _rewrite_intu_ctor_calls(work):
@@ -3747,20 +3692,10 @@ def _rewrite_intu_ctor_calls(work):
     the base is mentioned in the record's source, and that one binds every
     bare call to it; zero or several is a refusal to guess (the old path
     stands). The sole-instantiation shortcut needs no mention at all."""
-    # Flat string-keyed tables (see `_rewrite_ctor_calls` for why).
-    _US = '\x1f'
     by_base = {}
-    mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+            by_base.setdefault(base, {})[tuple(args)] = mangled
     if not by_base:
         return
     for rec in work.records.values():
@@ -3780,15 +3715,18 @@ def _rewrite_intu_ctor_calls(work):
             if not insts:
                 return
             if len(insts) == 1:
-                args = insts[0]
+                args = next(iter(insts))
             else:
-                mentions = []
-                for _mk in _bracket_mentions(_src, f.name):
-                    if _mk in insts and _mk not in mentions:
-                        mentions.append(_mk)
+                mentions = set()
+                for m in re.finditer(
+                        rf'\b{re.escape(f.name)}\s*\[\s*([^\]]+)\s*\]',
+                        _src):
+                    a = tuple(x.strip() for x in m.group(1).split(','))
+                    if a in insts:
+                        mentions.add(a)
                 if len(mentions) != 1:
                     return      # ambiguous: the old honest path stands
-                args = mentions[0]
-            f.name = mangled_of[f.name + _US + args]
+                args = next(iter(mentions))
+            f.name = insts[args]
             _walk_ast_invalidate(n)
         _walk(rec['parsed'], visit)

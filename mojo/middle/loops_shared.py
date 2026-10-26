@@ -417,8 +417,7 @@ def _gfl_declare_target_name(gen, shadow_name, vn: str, se: str) -> None:
         for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
             _gfl_declare_target_name(gen, shadow_name, _nv, 'int64_t')
     else:
-        gen._declare_var(vn, se, force=(vn == shadow_name)
-                         or gen.var_types.get(vn, se) != se)
+        gen._declare_var(vn, se, force=(vn == shadow_name))
 
 
 class ZipLongestFillRefusal(ValueError):

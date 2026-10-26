@@ -2800,7 +2800,6 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     must be able to ask "is this a coroutine body, and what did its params
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
-    str_params: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
@@ -2808,12 +2807,8 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
             ct = _KIND_CTYPE[v[1]]
             if ct != 'int64_t':
                 kinds[_cm_as_str(pname)] = ct
-        elif v == 'p':
-            str_params.append(_cm_as_str(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
-    if str_params:
-        body_fd._mojo_coro_param_str_params = str_params
     return body_fd
 
 

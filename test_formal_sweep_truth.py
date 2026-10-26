@@ -37,6 +37,7 @@ import re
 import sys
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
