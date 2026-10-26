@@ -1963,7 +1963,17 @@ def main():
 main()
 """)
 
-    # A class written INSIDE a function body. Every consumer of the module's
+    test_gimple_stdout("gimple_call_nested_def_fetched_from_container", """def keep(kept, base):
+    def inner(x):
+        return x + base
+    kept.append(inner)
+    return inner(1)
+
+kept = []
+print(keep(kept, 10))
+print(len(kept))
+print(kept[0](5))
+""", "11\n1\n15\n")
     # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
     # nested in a `FunctionDef.body` was in none of them, so the class had no
     # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm

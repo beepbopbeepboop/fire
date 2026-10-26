@@ -2097,7 +2097,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
                 and (node.func.obj.name in gen._container_callable_ret
-                     or node.func.obj.name in gen._global_container_callable_ret)):
+                     or node.func.obj.name in gen._global_container_callable_ret
+                     # A module-level container that may have had a callable
+                     # appended to it inside some other function (e.g. a nested
+                     # `def` stored in a global list) is not in either table --
+                     # the store happened in a different scope. Its subscript
+                     # read is still a potential first-class callable, and the
+                     # runtime helper dispatches on the value's actual tag, so
+                     # attempt the call instead of stubbing it to 0.
+                     or node.func.obj.name in getattr(gen, '_global_var_types', {}))):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
