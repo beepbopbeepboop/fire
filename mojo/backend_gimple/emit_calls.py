@@ -3664,6 +3664,12 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # emitted first: freeing before it is a use-after-free, which is what
         # the first version of this did). `_owned_free_runtime_fn` answers ''
         # for a `char *`, which is why the branch it now takes is spelled out.
+        _lit = node.args[0]
+        if (isinstance(_lit, gimple_ctypes.StringLiteral)
+                and not getattr(_lit, 'is_interpolated', False)
+                and not getattr(_lit, 'is_bytes', False)):
+            _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
+            return 'int64_t', gen._new_val('int64_t', str(_cp))
         _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)
