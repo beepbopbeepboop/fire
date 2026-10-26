@@ -166,3 +166,21 @@ the module-level refusal list is UNCHANGED — the same three generators,
 and `iter_files` still at the same one-line refusal, because its callee
 is the `_walk` PARAMETER, not a declared local (see Scope); see that
 doc's 2026-10-26 entry for the follow-up axis it now names.
+
+Gate verdict 2026-10-26 (commit `a2aedec1`): `make gate` 68 passed, 2
+failed of 82 tests (216 jobs, 3210 s wall, peak 37.9 GB). Neither
+failure is attributable to this commit:
+
+1. `bootstrap-stage1-transitive` — the documented pre-existing upstream
+   red (`elab_intu`'s `next(iter(<dict>))` gap, a separate session's
+   file; fails identically on the pre-work baseline and was red on the
+   first gate too).
+2. `sqliteruntime` — a TIMEOUT, load-induced, not a regression: killed
+   at its 600 s wall budget with 6 jobs running in parallel right after
+   the 37.9 GB memory check (this gate's wall was 63 % longer than the
+   first gate's). A solo re-run on the same tree under the same 4 GB
+   memcap is 66/66 checks, exit 0, 68 s, 0.8 GB peak — and emits ZERO
+   self-host `# ERROR` lines, where the loaded gate run had emitted six
+   transient ones (3× emit_infra's `MojoList*`-to-`MojoSet*` coercion,
+   3× elab_intu's dict-iter gap) — all in files this commit does not
+   touch, none on the self-compiled `cpp_core.py` itself.
