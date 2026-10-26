@@ -1,26 +1,5 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
-## Status 2026-10-26 — the star/kwarg unpack-call capability LANDED; this file's refusal is unchanged, as its own entry predicted
-
-The "new, separate capability" this file's 2026-10-25 entry names as
-remainder (1) — a `*`/`**`-unpack call argument through a DECLARED
-callable-value local in a compiled generator/coroutine body — is
-implemented and pinned:
-`bugs/CODEGEN_star_kwargs_unpack_call_argument_refused_in_compiled_
-coroutine.md` (`cpp_core.py`'s `_cpp_try_unpack_call`: the pure-spread
-call lowers as a container copy, `f(*x)` -> `f(mojo_list_copy(x))`, with
-the honest refusals for every shape it cannot prove; 12 regression
-tests, whole runner 253/253). Re-measured on the landed tree (same
-full-package build as the entry below): the module-level refusal list is
-**UNCHANGED** — the same three generators, and `iter_files` still dies at
-the same one-line refusal, because its callee is the `_walk` PARAMETER —
-a polymorphic local, not a declared variadic-family local — beside a
-named `walk=` keyword injection and a `for` that must iterate the call's
-return (the other axis that entry's item 1 also names). The capability
-landed with the one-line repro this entry promised; this file's
-end-to-end shape waits on the parameter-callee axis, which that doc's
-Scope section now tracks as the fsutil follow-up.
-
 ## Status 2026-10-25 — `iter_files`'s lambda guard is FIXED; its refusal moved one layer down, and the tree's CPython-closure gap is the real gate on the other two
 
 Re-measured on the current master after this session's fix (full package build:

@@ -95,11 +95,12 @@ generated C for the OPEN 1 shape — you only find them by running the suite:
   mention, so nothing can hold it, free it", the opposite of fail-closed. The
   body is not per-candidate-set state and no longer resets there.
 
-**A third finding, now fixed:** calling a nested `def` fetched from a container
-(`kept.append(inner); kept[0](5)`) used to answer `0` instead of `base + 5`
-because the container was not recorded as holding a callable. Fixed in the
-subscript-callee dispatch path. That is the boxed/boxed-read half of this
-document's family, and it is not the free.
+**A third finding, deliberately NOT fixed here and filed separately:**
+`bugs/CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md` —
+`kept.append(inner)` compiles and stores correctly, but `kept[0](5)` answers
+`0` instead of `base + 5`. The environment never reaches the container slot, so
+a call through it has nothing to dispatch on. That is the boxed/boxed-read half
+of this document's family, and it is not the free.
 
 **Regression:** `gimple_nested_def_env_is_freed`
 (`test_gimple_runner.py`, `test_gimple_bounded_memory`, 4,000,000 iterations,

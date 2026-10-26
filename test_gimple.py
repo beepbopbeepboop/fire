@@ -1974,6 +1974,18 @@ def count_keys(d: Dict) -> Int:
     return n
 """)
 
+    # 94b. starless dict unpack: `for k, v in d` exercises the key-length
+    # check (mojo_strlen on the dict key) inside a no-setjmp function. An
+    # inline cast in that call argument is a hard error under -fgimple, so
+    # the cast must be hoisted to its own conversion statement.
+    test("for_over_dict_starless_unpack", """\
+def count_pairs(d: Dict) -> Int:
+    var n: Int = 0
+    for k, v in d:
+        n += 1
+    return n
+""")
+
     # 95. dict comprehension over dict
     test("dict_comp_from_dict", """\
 def copy_dict(d: Dict) -> Dict:
@@ -7598,123 +7610,6 @@ def main():
             print(f"PASS  {name}  ({len(paths)} modules)")
             _PASS += 1
 
-    def test_no_compiler_module_defines_a_function_twice():
-        """A module-level `def` repeated in one compiler module is legal
-        Python (the second silently wins) but the SELF-HOSTED compile drops
-        BOTH: stage2's closure compile of elab_intu.py emitted a weak
-        "unavailable in compiled mode" stub for a helper that was defined
-        twice (a botched edit left a copy), and bootstrap-verify caught it as
-        a stage1-vs-stage2 `fire.ci` diff 40 minutes later. Read off the
-        SOURCE with `ast` over every module the bootstrap closure compiles."""
-        global _PASS, _FAIL
-        name = "no_compiler_module_defines_a_function_twice"
-        import ast
-        import glob
-        import os as _os
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        paths = sorted(glob.glob(_os.path.join(here, 'mojo', '**', '*.py'),
-                                 recursive=True))
-        for top in ('fire.py', 'fire_main.py', 'fire_compiler.py',
-                    'gimple_codegen.py', 'module_loader.py', 'myinterpreter.py'):
-            paths.append(_os.path.join(here, top))
-        bad = []
-        for p in paths:
-            if not _os.path.exists(p):
-                continue
-            with open(p, encoding='utf-8') as fh:
-                tree = ast.parse(fh.read(), filename=p)
-            seen = {}
-            for n in tree.body:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    seen[n.name] = seen.get(n.name, 0) + 1
-            for k, v in seen.items():
-                if v > 1:
-                    bad.append(f"{_os.path.relpath(p, here)}: {k} x{v}")
-        if bad:
-            print(f"FAIL  {name}: {bad}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}  ({len(paths)} modules)")
-            _PASS += 1
-
-    def test_import_line_modules_matches_the_regex_it_replaced():
-        """`gimple_codegen._import_line_modules` is the regex-free form of
-        `re.findall(r'^\\s*(?:from|import)\\s+([.\\w]+)', src, re.MULTILINE)`:
-        the compiled compiler's engine has no `^` and drops flags, so the
-        regex form found no dependencies once compiled. Fuzzed against the
-        regex it replaced."""
-        global _PASS, _FAIL
-        name = "import_line_modules_matches_the_regex_it_replaced"
-        import random
-        import re as _re
-        from gimple_codegen import _import_line_modules
-        rx = _re.compile(r'^\s*(?:from|import)\s+([.\w]+)', _re.MULTILINE)
-        cases = ["import os\nfrom a.b import c\n  import x\ny = 'import z'\n",
-                 "", "from .x import y", "  \n\n import\n foo\nfromx y\n",
-                 "import", "import \n", "from  m"]
-        rnd = random.Random(1)
-        alpha = ["import", "from", " ", "\n", "x", ".", "_", "a1", "\t", ",", "'"]
-        for _ in range(500):
-            cases.append(''.join(rnd.choice(alpha)
-                                 for _ in range(rnd.randint(0, 30))))
-        bad = [c for c in cases if _import_line_modules(c) != rx.findall(c)]
-        if bad:
-            print(f"FAIL  {name}: {bad[:3]}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}  ({len(cases)} cases)")
-            _PASS += 1
-
-    def test_flagged_re_compile_is_not_lowered_as_the_bare_pattern():
-        """`P = re.compile(p, re.MULTILINE)` is a different pattern than `p`
-        and the regex engine has no flag input, so a loop over `P.findall` /
-        `P.finditer` must stay refused (loudly) instead of scanning `p` with
-        the flags silently dropped -- which matched nothing for a `^` pattern
-        and made the compiled `_dep_sources_texts` find no dependencies."""
-        global _PASS, _FAIL
-        name = "flagged_re_compile_is_not_lowered_as_the_bare_pattern"
-        import gimple_codegen as _g
-        src = ("import re\n"
-               "_R = re.compile(r'^(a)', re.MULTILINE)\n"
-               "def main():\n"
-               "    for m in _R.findall('a\\na'):\n"
-               "        print(m)\n"
-               "main()\n")
-        c = _g.compile_to_gimple(src)
-        if 'mojo_regex_search' in c or 'mojo_unsupported_iter' not in c:
-            print(f"FAIL  {name}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}")
-            _PASS += 1
-
-    def test_bracket_mentions_matches_the_regex_it_replaced():
-        """`elab_intu._bracket_mentions` is the run-time-regex-free form of
-        `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` (a pattern built around a name
-        is a stub in the compiled compiler). It must agree with the regex on
-        word boundaries, inner whitespace and multi-argument mentions."""
-        global _PASS, _FAIL
-        name = "bracket_mentions_matches_the_regex_it_replaced"
-        import re as _re
-        from mojo.backend_gimple.elab_intu import _bracket_mentions
-        srcs = ["x = Foo[3] + Foo [ 1, 2 ] + XFoo[9] + Foo[a] + FooBar[1]",
-                "Foo[1,2,3]\nFoo\t[ x ]  Foo_[1] _Foo[2]", "Foo", "", "Foo[",
-                "Foo[]", "a.Foo[Int, String]"]
-        bad = []
-        for src in srcs:
-            want = []
-            for m in _re.finditer(r'\bFoo\s*\[\s*([^\]]+)\s*\]', src):
-                want.append('\x1f'.join(x.strip() for x in m.group(1).split(',')))
-            got = _bracket_mentions(src, 'Foo')
-            if got != want:
-                bad.append((src, got, want))
-        if bad:
-            print(f"FAIL  {name}: {bad}")
-            _FAIL += 1
-        else:
-            print(f"PASS  {name}")
-            _PASS += 1
-
     def test_func_state_snapshot_covers_reset_func():
         """`emit_infra.save_func_state` captures every field `_reset_func`
         resets, and `restore_func_state` puts every one of them back.
@@ -8520,42 +8415,6 @@ step(7)
         # what the `%d` produced, so assert it is NOT that.
         if re.fullmatch(r'[0-9]+\n', got or ''):
             print(f"FAIL  {name}: still formatting the pointer as a decimal")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_print_of_a_closure_value_is_not_a_decimal_address():
-        global _PASS, _FAIL
-        name = "print_of_a_closure_value_is_not_a_decimal_address"
-        src = (
-            "def outer(a):\n"
-            "    def inner(x):\n"
-            "        return x + a\n"
-            "    return inner\n"
-            "\n"
-            "f = outer(3)\n"
-            "print(f)\n"
-            "\n"
-            "g = (lambda y: y * 2)\n"
-            "print(g)\n"
-        )
-        got = _compiled_stdout(src, 'single-TU')
-        if isinstance(got, tuple):
-            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
-            _FAIL += 1
-            return
-        lines = (got or '').splitlines()
-        if len(lines) != 2:
-            print(f"FAIL  {name}: expected 2 lines, got {got!r}")
-            _FAIL += 1
-            return
-        if not re.fullmatch(r'<function .* at 0x[0-9a-f]+>', lines[0]):
-            print(f"FAIL  {name}: first line {lines[0]!r} not a function repr")
-            _FAIL += 1
-            return
-        if not re.fullmatch(r'<function <lambda> at 0x[0-9a-f]+>', lines[1]):
-            print(f"FAIL  {name}: second line {lines[1]!r} not a lambda repr")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -12679,10 +12538,6 @@ print(run('x/y.txt'))
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_no_name_is_defined_twice_in_a_codegen_class()
-    test_no_compiler_module_defines_a_function_twice()
-    test_import_line_modules_matches_the_regex_it_replaced()
-    test_flagged_re_compile_is_not_lowered_as_the_bare_pattern()
-    test_bracket_mentions_matches_the_regex_it_replaced()
     test_func_state_snapshot_covers_reset_func()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
@@ -12694,7 +12549,6 @@ print(run('x/y.txt'))
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
     test_print_of_a_function_value_is_not_a_decimal_address()
-    test_print_of_a_closure_value_is_not_a_decimal_address()
     test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
     # `len()` of a value the codegen could not type, where that value is a

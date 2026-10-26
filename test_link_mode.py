@@ -1012,7 +1012,7 @@ def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
     the same file under a different spelling.
 
     Measured 2026-10-23 in the c_analyzer/c_parser cluster (non-formal
-    campaign, failed-import-attempt poisoning cluster): building
+    campaign, bugs/BUGFIX_ROADMAP.md rows 13-16): building
     `Tools/c-analyzer/c_parser/parser/__init__.py` on master, the failed
     `..info` attempt left (a) its guard entries in `_compiling_file_paths`
     (the set is add-only, and the attempt's OWN nested import of

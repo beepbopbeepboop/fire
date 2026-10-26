@@ -1,0 +1,402 @@
+# Bug-fix roadmap: next 28 items
+
+**Snapshot:** 2026-09-25. This is the working queue for the bug-fix campaign. It is
+ordered by user impact and tractability, not by document age. Each item names
+the bug document that owns the detailed evidence. Start at the top, land a real
+fix plus regression coverage, run targeted checks, fix everything the change
+uncovers, and only then run the full gate.
+
+Items marked **BLOCKER** must be resolved before spending time on lower-tier
+compile failures. Items marked **SHARED** change machinery used by many
+consumers and need extra care, not avoidance.
+
+## Generator/iterator feature work (2026-09-25, landed — read this before
+## starting the next generator item)
+
+The user redirected the campaign away from the memory/native-infrastructure
+class ("too soul sucking") toward Python feature work, generators first. What
+landed, all with regression coverage in `test_generators.py` (interpreter),
+`test_gimple_generator_runner.py` (compiled) and `test_gimple_runner.py`:
+
+1. **Generator EXPRESSIONS are real lazy generators on both paths.**
+   `fire_compiler.genexp_body` is the single definition of what
+   `(x for x in xs)` means as statements; `fire_compiler.desugar_genexps`
+   (called from `gimple_codegen`'s one compile choke point, before the
+   coroutine lowering) rewrites each expression into a call to a synthesized
+   module-level generator FUNCTION, and `myinterpreter._generator_expression`
+   hands the same body to `MojoGeneratorObject`. Laziness is observable and
+   tested (early `break` over an unbounded source).
+   - Left on the old eager path ON PURPOSE, because a faithful lowering is
+     not expressible yet: a captured name that is rebound anywhere in the
+     enclosing function (real Python closes over a mutable cell), a `self`
+     reference, and an outermost iterable that is neither a literal, a
+     never-rebound module-level name, nor a call to `range`/`enumerate`/
+     `zip`/`reversed`/`sorted` (inlining an arbitrary call would re-evaluate
+     it on first resume).
+2. **`g.send(v)`** resumes a compiled generator with a value for the yield
+   it is suspended on, including the double bit-cast (new runtime helper
+   `__mojo_gen_send_d`, and the matching unbox for `x = yield <double>` in
+   the body, which previously bound the raw slot bits).
+3. **Standard consumers of a generator**: `sum`/`any`/`all`/`max`/`min`/
+   `list`/`set`/`tuple`/`join`/`in`, plus `sorted` and `zip`, all work over
+   one. `zip(...)` as a value now returns a real `MojoList *` of pair-lists.
+4. **Two silent-wrongness fixes found on the way**: consuming a generator no
+   longer DESTROYS it (a second pass was a use-after-free), and
+   `String`/`Int`/`Float`/`Bool` (Mojo's capitalized constructors) lower
+   like their lowercase builtins instead of as a bare C cast of the
+   argument.
+5. **Two honest refusals** rather than subtly wrong code: `g.throw()` and
+   `g.close()` inject an exception INTO a suspended body, which the A3
+   stack-switch coroutine lowering cannot express (a propagating `.throw()`
+   escapes the caller's `except`; `.close()` skips the body's `finally`).
+
+### The next generator items, in order
+
+6. **`.throw()` / `.close()`** — needs exception injection into a suspended
+   A3 coroutine body: the body's exception-frame slice is currently
+   restored over the caller's live frame, and a `finally` does not run on an
+   injected throw. `runtime/fire_coro_gen.c` already has `__mojo_gen_throw`
+   and `__mojo_coro_destroy` already does the mode-2 close injection.
+7. **Generator expressions over a local/parameter iterable**
+   (`sum(x for x in items)` inside a function) — the most common remaining
+   fallback. Needs container-typed generator parameters (today the A3
+   param-kind inference is scalars only, `coro.py`'s
+   `_scan_callsite_param_kinds`).
+8. **Generators that yield containers** — a compiled generator's value slot
+   carries scalars only, so `yield list(...)` prints a raw pointer. Affects
+   any generator expression whose element is a container.
+9. **`enumerate(x)` / `sorted(x, key=...)` in VALUE position** — both are
+   pre-existing, non-generator gaps: `mojo_enumerate` is an identity
+   passthrough (so `list(enumerate(gen()))` is silently empty) and `sorted`
+   ignores a key function for every input type. The `for i, v in
+   enumerate(x)` form is correct.
+10. **`module_may_have_supported_generator`** does not textually detect a
+    generator expression, so a genexp-only module is routed through the
+    cached compile path. Harmless today (the A3 lowering and the runtime
+    link both key off the generated C, not the source text) but worth
+    making explicit.
+
+## Ordered queue
+
+Rows are removed as they land, not left struck through: a completed item
+whose document has been deleted is indistinguishable from an open one to
+whoever reads this next. Two were removed 2026-09-29 —
+`COMPILE_FAIL_Tools_wasm_wasi___main__.md` and
+`hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, both landed
+2026-09-27 with their docs deleted at the time. The numbering below is the
+ORIGINAL queue number, kept stable so a row can still be referred to by
+the number it was assigned when it was filed.
+
+| # | Bug document | Priority | Why it is here | Next bounded action / done condition |
+|---:|---|---|---|---|
+| 0 | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | **SHARED** | **CODEGEN half DONE 2026-09-26; the only remaining work is PROOFS, and was deliberately left alone 2026-09-27** (that session was redirected away from `formal/`). Unannotated `int` is SIGNED, `common_type` is signed-wins, the loop contracts are parameterised over the loop test, the 8 loop-contract `sorry`s are closed, `test_formal_run.py` is 91/91. "Still open 3" is entirely inside `formal/`: the `dec`-while and `range` MODELS assume a non-negative counter, plus 2 named `sum_range` holes. | Nothing in the compiler. Next session with `formal/` budget: the models — `pred_iff` and `countdown_go` need the `m < 2^63` split a signed `int` forces, `prog_correct`'s step case needs a branch for "the loop does not run", and `sum_range_loop_cond_flag` is restated with a signed order, with a reusable `Nat`-to-two's-complement signed-order lemma in ProofLib as the shared piece. NOT VERIFIED this session: `test_formal.py` was deliberately not run. |
+| 1 | `CODEGEN_bootstrap_resource_blowup.md` | **BLOCKER** | **2026-09-27 round 2: the masking segfault is STILL the first thing that happens, so the `mojo_boxed_is_str` guard fix was deliberately NOT applied this round and the triage behind it is still unmeasured.** Reason, unchanged: `CLAUDE.md`'s `expect=` anti-rot rule turns three marked-for-failure steps into gate FAILURES the moment the binary stops crashing, and nothing behind the first AST walk has been measured, so the honest sequence is to land the guard and triage the new SELFHOST-CRASHED wave as its own piece of work with the gate's time budget for it. Everything else landed this round (two registered compile-and-run suites, `@classmethod` in the oracle, staticmethod generators on both backends, `asyncio.run(<name>)`, the parser's decorator arguments) moves the compiled path but is untestable end-to-end until the binary runs. | Apply the 31-bit-tag-range guard in `mojo_boxed_is_str` (the full chain is in `CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s 2026-09-27 entry), then run `make gate` and triage the SELFHOST-CRASHED set as the real work. **ADVANCED 2026-09-27 (localised, NOT fixed).** The `vmmap` probe this row's own step 3 asked for is done and answers it: on the real self-host input (`./mojoc --dump-full fire_compiler.py`) the malloc zone holds **11.4 GB across 130,462,322 live blocks at t=12 s** (mean 87 B, only 953 mappings, 1% frag) growing linearly to **58.6 GB / 1.24 T instructions / SIGTRAP(133)** — so it is a never-frees ACCUMULATOR of ~670M small objects, not a leak-of-record, not a miscomputed fixed arena, and not one hot loop (a 5 s `sample` is flat). The tokenizer is ruled out as the volume source (14.8 MB of source across the three seed passes vs 670M blocks). **Supersedes BLOW.md §4's "do not go looking for the per-module leak first"**, which was derived from the now-fixed 15.84 GB false-positive. Untested next lever: per-module AST lifetime. See the doc's 2026-09-27 section for the full rule-out list. **MEASURED 2026-10-24, closure-memory profile** (bugs-phase session; `build/remes/r10walk_profile.log` row-10 walk — 315 transitive modules, 161-186 visits, walk-phase peak 79 MB, `parse_cache=0` throughout; `r10walk_profile_driver.log` complete run on the exact CLI path, 0.14 GB; `r10post_fsdec.log` the cold-CLI kill — 8.2 GB breach, 34 rejections, gcc never runs): the walk/discovery phase is SMALL and the parse cache is RULED OUT (`_SELFHOST_PARSE_CACHE` at `mojo/middle/funcs_shared.py:1846` is the self-host seed-pass cache, never populated for a stdlib entry — 0 entries throughout). Where the bytes go: per-module IN-PROCESS COMPILE RETENTION — each import compiled in-process stores its parsed stmt list in the root gen's shared dict (`gen._module_stmts`, `emit_resolve.py:1175`, shared BY REFERENCE across every nested gen at `emit_resolve.py:873`), extends the flat pre-deduped transitive mirror (`_all_transitive_stmts_ordered`/`_ids`, `emit_resolve.py:1186` — the PERF_nested anti-quadratic fix) with every stmt node of every module, and leaks per-import temp gen objects (live gen count 5 -> 4 -> 16 -> 20 over the 186-visit run; holder NOT identified). The boundary that makes the profiled run small while the row-kills are 8-9.6 GB is the WARM state of the shared CAS content-addressed store (`~/.gmojo/cas`, keyed over source + compiler state, `cas.py:47` reads `GMOJO_HOME` at import): the profiled run was a LATER build of the day (~175 imports resolved from prebuilt dylibs, 10-11 compiled in-process, 1-2 rejections, 0.14 GB), while the row-kill CLI runs are the FIRST build of the day for a given compiler tree (every import compiles in-process, ~175 successful compiles retained for the root gen's life -> 8.2-9.6 GB -> memcap kill). Measured discriminant: rejections 34 (cold CLI) vs 1-2 (warm profile); retained in-process modules ~175 vs 10-11; peak 8.2-9.6 GB vs 0.14 GB. The cold-run byte SPLIT across the three retention structures is code-verified + proxied, NOT directly measured (the cold-CAS profile was cancelled by the server restart mid-run and its store had been partially pre-populated, semi-warm) — first measurement of the next session: ONE cold walk under a private empty `GMOJO_HOME` + the existing per-module tracemalloc / deep-node / live-gen instrumentation + `gc.get_referrers` on a live temp gen -> attribute the ~8 GB across the three structures and name what holds the gens. Levers: (1) scoped release of `_module_stmts` + the mirror — three readers at three pipeline points (the seed passes via `_selfhost_parsed_modules`), a safe release needs consumer-counting/phase barriers -> NOT cheap, no implementation; (2) the leaked temp gens — a potentially bounded cheap win IF nothing but a stray reference holds each gen after its module is emitted; the holder is unverified -> candidate, first blocker is the referrer check; (3) CHEAP PROCESS-LEVEL MITIGATION (a scheduling lever, not a fix): pre-warm the shared CAS with a big-closure build before the row builds turns a row-kill run into a warm run (measured 0.14 GB); zero compiler change; applies to the whole 9-row budget class (3/7/8/10/18/20/23/27/28, all die in this same import-closure family). |
+| 3 | `COMPILE_FAIL_importlib_resources_readers.md` | HIGH | **Both generator gaps this doc was opened for are now FIXED with compile-and-RUN coverage, and the file's first blocker has moved twice.** The `@classmethod` `yield from cls.<sibling generator>` gap (round 1) and the `@staticmethod`-generator gap (this round) are both closed on BOTH coroutine backends, by one shared rule: `fire_compiler.method_receiver_kind` — decorator first, first parameter's name second — which replaced three consumers that each read the name alone and therefore each classified a `@staticmethod` as receiver-less. Four fixes: `module_gen.py`'s free-function generator loops now skip by MEMBERSHIP (`_struct_method_ids`) instead of by first-parameter name, so a method's coroutine unit can no longer be emitted under the free-function symbol `_mojogen_<name>`; `coro.py`'s A3 `_eligible`/`_lower_one` read the shared rule, so a `@staticmethod` no longer declares a `self` the caller never passes nor drops its first real parameter; `cpp_async.py`'s `_gen_cpp_generator_unit` accepts a receiver-less method; and `emit_methods.py`'s call site reads the api entry's `receiver` key instead of unconditionally prepending one. Three new cases in `test_gimple_generator_runner.py`, **now registered as `gimplegenerators`** — they were unregistered, so round 1's own regression never ran in the gate. | The file itself is NOT green and this is now measured, not guessed: it gets all the way to gcc and has two errors of its own — a cross-module symbol-name mismatch (`__itertools_only_<hash>` emitted where `_itertools_only_<hash>` is defined) and `re_finditer` (the `re` module falls back to source interpretation, so a call on it inside a coroutine body has no compiled symbol). Fifteen sibling modules of the closure also fail (`pathlib` 19, `_bootstrap_external` 15, `_os` 10, `tokenize` 8, `glob` 7, `statistics` 6, `_common` 6, `random` 4, `numbers` 4, `_functional` 4, `tempfile` 2, `_adapters` 2, `_bootstrap` 1, `fractions` 1) plus an upstream `shutil` `'open' is ambiguous` refusal. **LANDED 2026-09-27 (the symbol-name blocker):** the mismatch was `_register_sym` in `mojo/middle/module_shared.py` — the only one of five module-string→C-prefix manglers that omitted `lstrip('.')`, so `from ._itertools import only` gave the call site `__itertools_only_<hash>` against a `_itertools_only_<hash>` definition. One token (`s.module.lstrip('.')`). Verified on the real file (the `readers.ci:322744` call site now matches the definition; that one line is the only diff) plus a fails-before regression, `test_module_cache.py`'s `test_underscore_prefixed_sibling_import_symbol`, which asserts the call site and definition use ONE identifier spelling — necessary because in the minimal shape a sibling TU accidentally satisfies the bad name and a link/exit-code assertion passes on the broken tree. STILL OPEN: the `re` one (`_sre` objects have no compiled representation — feature-sized) and the fifteen sibling modules. Doc stays. **RE-MEASURED 2026-10-24** (`build/remes/r03pre_probe.log` pre-row-16 master, `r03post_crashloop_8c48013c.log` row-16-only, `r03post.log` both fixes, 8 GB ceiling): on the row-16 rollback ALONE (8c48013c) the build fell into a `list index out of range` crash loop — 120+ lines, 77+ full tracebacks, every one at `module_gen.py`'s class-attr emission `field = _as_list(s.fields)[_pick]` with `_pick == -1` on an empty field list — a latent PRE-EXISTING crash (the same single-file redefinition shape dies identically on master 566ba1c9; the rollback merely exposed it by letting same-named class pairs accumulate in the closure), now fixed (`continue` when the attribute is not declared in this struct's own fields; regression `test_link_mode.py::test_class_redefinition_does_not_crash_class_attr_emission`; doc `CODEGEN_class_attr_emission_indexes_an_empty_field_list_for_a_same_named_struct.md`). After the fix the identical build is crash-free — 0 `list index out of range`, 54 clean deterministic rejections (the `next(...)` / `d.pop` / unterminated-string / generator-`.close()` classes; the master probe finished in minutes at 0.9 GB with 23 of them) — and now does REAL work (much more of the closure actually compiles) until it breaches the 8 GB ceiling at 8.7 GB before finishing (rc=125): the verdict moves from "fast deterministic rejection" to **RESOURCE 8.7 GB @ 8 GB** — the importlib closure family's documented scale (sibling row 23's `importlib/metadata` is the 31.6 GB runaway) — record only; feature/budget-blocked, not started. |
+| 4 | `COMPILE_FAIL_Android_android.md` | HIGH | **The `asyncio.run(<non-literal>)` bridge is built — BOTH halves, not one.** Static: `_scan_handle_vars` accepts a name this function binds from `create_task(...)` or from a call to an `async def` this module actually compiled (new `_ASYNC_FN_NAMES` registry, filled from the same eligibility verdicts that create the `__mgco_<name>_start`). Runtime: `__mojo_async_run_gen` now checks the handle against a live-handle registry — added at the single allocation site, removed at the single free site — and raises `ValueError: a coroutine was expected`, Python's own answer, with the tag spelled as `663468903` so a compiled `except ValueError:` catches it. Also fixed a one-token latent bug in the neighbouring `_scan_task_vars` (it tested `isinstance(s.target, ...)` against the STATEMENT, so a bare `task = create_task(f())` never registered). Regressions on both sides: `test_runtime_diff.py`'s `asyncio_run_of_a_name`, and `runtime/test_fire_coro_gen.c`'s `test_run_gen_rejects_non_handle` (driven at the C level, because every shape the compiler can get wrong is already refused statically). Also closed earlier in round 1: `await` nested in a call's argument list. | The async subset is still refused for all 9 remaining functions (`async_process`, `async_check_output`, `list_devices`, `find_device`, `find_pid`, `logcat_task`, `read_logcat`, `gradle_task`, `run_testbed`) — their `await` targets are `create_subprocess_exec` / `communicate()` / `wait()` / `readexactly()` / a local `wait_for` helper. That is the async-subprocess/stream composition layer, feature-sized, and the same project `COMPILE_FAIL_asyncio_queues.md` describes. The bridge does NOT move it: `android.py`'s own `result` comes from `dispatch[context.subcommand](context)`, a dynamically-obtained coroutine with no statically-named callee, so half 1 still refuses it — correctly. A general dynamic-callee handle would be a separate piece. **RE-MEASURED 2026-10-24** (`build/remes/r04pre.log` pre-fix master `566ba1c9` — this row's first campaign baseline; `r04post.log` post-fix, 8 GB ceiling): UNCHANGED — both trees die on the same top-level refusal before any module rejection: `Error building: cannot compile module: asyncio.run(...) requires either a bare call to a supported compiled async function, or a name this function binds from ...` (byte-identical message, rc=1, peak 0.0 GB on both — 41/40-line logs, only the memcap label line differs). The 9-function async-subprocess gap above stands as measured; feature/budget-blocked per the 2026-10-23 triage, so record only, not started. |
+| 5 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | HIGH | Core `contextlib` module failure affects many stdlib consumers. | Isolate the first non-scalar `__aenter__`/variadic `__aexit__` shape and implement the smallest typed-boxing/packing fix. **RE-MEASURED 2026-10-24** (`build/remes/r05.log` pre-fix, `r05post.log` post-fix, 8 GB ceiling): STILL REFUSED — the first module rejection is byte-identical on both trees (`_collections_abc`'s generator `.close()` on a value with no known generator) and the verdict class is unmoved; the fixed compiler carries the closure further (16 → 48 module rejections, 42 → 74 log lines, 0.6 → 2.7 GB peak) but the `__aenter__`/variadic-`__aexit__` shape this row was opened for is untouched by 8c48013c/765117ff. Feature-sized per the 2026-10-23 triage: record only, not started. |
+| 6 | `COMPILE_FAIL_Lib_socket_request_for_member_module_in_something_not_a_structure_or_union.md` | HIGH | Socket stdlib failure shares the async/module-typing class with contextlib. | Reuse the contextlib fix where possible; otherwise fix the socket-specific receiver/type boundary and add a focused repro. **RE-MEASURED 2026-10-24** (`build/remes/r06.log` pre-fix, `r06post.log` post-fix, 8 GB ceiling): STILL FAILS AT GCC, the error surface widens and re-orders — 71 → 220 gcc error lines, 16 → 56 module rejections (first rejection byte-identical: the `_collections_abc` generator `.close()` class), 26849 → 96246 log lines, 0.6 → 2.7 GB peak. The pre-fix first gcc error (`ast.py:46:10` implicit declaration of `_compiler_compile_432950`) persists (1792 ast.py error lines post-fix) and a NEW earlier surface appears first: the post-fix first gcc error is `keyword.py:63:25` (pointer-from-integer into `mojo_list_len`/`mojo_list_get_str`; ZERO keyword.py errors pre-fix) with `operator.py:342:10 expected expression before 'partial'` behind it — the receiver/type class this row shares with contextlib stands unchanged. Feature-sized per the 2026-10-23 triage: record only, not started. **RE-MEASURED 2026-10-24, post-kw63-fix** (`build/remes/r06post.log` pre-kwfix, `r06post_kwfix.log` post-kwfix, 8 GB ceiling, the uniform fixed compiler plus the keyword.py:63 boxed-global-container fix): the `keyword.py:63` pointer-from-integer surface is GONE — 4 keyword.py error lines → 0 — and the first gcc error moves to the next named surface, `operator.py:342:10 expected expression before 'partial'` (present directly behind it pre-kwfix; the receiver/type class this row shares with contextlib), gcc error lines 220 → 192, module rejections unchanged (56, first rejection byte-identical: the `_collections_abc` generator `.close()` class), the `ast.py` persistence unchanged (8 error lines / 1792 mention lines on both runs), 2.7 → 2.5 GB peak. STILL FAILS AT GCC at the next measured blocker; record only, the row does not close. |
+| 7 | `COMPILE_FAIL_Apple___main__.md` | HIGH | Compile stage is fixed but runtime still fails through a stubbed argparse subsystem. | Finish the smallest runtime-backed argparse path needed by the real file; keep unsupported APIs honest rather than silently stubbing them. **RE-MEASURED 2026-10-24** (`build/remes/r07.log` pre-fix, `r07post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.3 GB > 8.0 GB (104%)` rc=125, post-fix `BREACH 9.9 GB > 8.0 GB (123%)` rc=125, both killed in the import-closure phase (23 → 57 module rejections logged before the kill, 278 → 312 log lines; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The argparse blocker this row names is downstream of the closure — `argparse.py` itself is present in the checkout but refused on the `d.pop(key, default)` class before any runtime stage (post-fix log) — and was never reached on either tree. Note: this row's doc file (`COMPILE_FAIL_Apple___main__.md`) is deleted from the tree (untracked in git) — the block records the measurements; restoring the doc is a separate fix. Record only, not started. |
+| 8 | `COMPILE_FAIL_Mac_BuildScript_build-installer.md` | HIGH | A real packaging script still has one stale global-type error, and the inline path can silently miscompile the same pattern. | Fix the global type join across `global` reassignment; done when both link-mode and inline generated C agree and the file builds. **ATTEMPTED AND REJECTED 2026-09-27** (see the doc's new top section): a first version DID make `fire.py build` succeed with zero errors, but `--dump-full` still declared `char * FW_VERSION_PREFIX` and cast a `MojoList *` into it — a silent miscompile that links — and making the paths agree regressed link mode from 1 error to 10. Diagnosis is now much narrower than "high-risk shared machinery": **three** sites re-derive this global's type (Phase 1.7, `_gscan_declare_global`, and an as-yet-unidentified `_<mod>_toplev` field emitter — `global_decls` is NOT emitted, `module_gen.py:7281`), and `_phase17_value_type` has no `BinaryOp` row at all, so it reports no container evidence for `FW_PREFIX[:] + [...]`. An implementation is preserved in `stash@{0}`. The bar stands: build AND link/inline agreement. **RE-MEASURED 2026-10-24** (`build/remes/r08.log` pre-fix, `r08post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.2 GB > 8.0 GB (102%)` rc=125, post-fix `BREACH 9.3 GB > 8.0 GB (116%)` rc=125, both killed in the import-closure phase (13 → 53 module rejections logged before the kill, 18 → 58 log lines; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The receiver/`FW_PREFIX` typing blocker this row names is downstream of the closure and was never reached on either tree; the `stash@{0}` implementation and the bar stand untouched. Record only, not started. |
+| 9 | `COMPILE_FAIL_ctypes_macholib_dyld.md` | HIGH | Platform stdlib module failure has historically caused wrong C symbol/ABI behavior. | Reproduce the smallest dyld/find-library expression and fix its type/receiver lowering without weakening diagnostics. **RE-MEASURED 2026-10-24** (`build/remes/r09.log` pre-fix, `r09post.log` post-fix, 8 GB ceiling): STILL REFUSED — the first module rejection is byte-identical on both trees (the `_collections_abc` generator `.close()` class) and the verdict class is unmoved; the fixed compiler carries the closure further (16 → 43 module rejections, 42 → 69 log lines, 0.5 → 1.7 GB peak), but the dyld/find-library type/receiver blocker this row names is downstream of the upstream refusals and unreached. Record only, not started. |
+| 10 | `COMPILE_FAIL_ctypes_util.md` | HIGH | Core ctypes utility failure blocks other platform modules. | Reduce to the first failing helper, fix its argument/return typing, and run the focused ctypes suite. **RE-MEASURED 2026-10-24** (`build/remes/r10.log` pre-fix `566ba1c9`, `r10post.log` post-fix `765117ff`, 8 GB ceiling): the pre-fix 67-gcc-error state (2.2 GB, rc=1; by module: ctypes/__init__ 19, util 13, subprocess 9, ntpath 7, os 5, _aix_support 5, sysconfig 3, threading 2, _endian 2, selectors 1 — the FIRST two being `_endian.py:63:27`/`:70:27` no-member `BigEndianStructure`/`BigEndianUnion`) does not survive the fixed compiler: post-fix `memcap: BREACH 9.6 GB > 8.0 GB (119%)` rc=125, killed in the import-closure phase (34 module rejections logged, first rejection = the `_collections_abc` generator `.close()` class, gcc never runs, idxerr=0) — the r16 rollback fix carries the closure deeper until it hits the ceiling, the row-3 advance pattern (0.9 → 8.7 GB). **LANDED 2026-10-24** (fix commit `2b5fb5fe`): the first failing helper the pre-fix census names is the `_endian` pair, fixed at its root — `eval_const` folded `sys.platform` but not `sys.byteorder`, so _endian's top-level conditional emitted BOTH branches and the dead branch's plain `BigEndianStructure = Structure` assignment referenced a global the live branch's same-named class never registers as a lookable member (minimal shape measured: `no member named 'BE'; did you mean 'LE'`, `r10d1_prefix_765117ff.log`); two more consumers of the same statement list stacked behind it — the emission loop ran the foldable IfStmt as a RUNTIME branch (run-time `getattr(sys, "byteorder")` → AttributeError; class refs → `0` stubs, so `LE == Base` "printed True" as `0 == 0`; class defs dropped as `/* TODO: StructDef */`) and `all_struct_defs` — feeding every struct pass — was built from the RAW list (branch classes: stub structs, NULL-receiver dispatch, `AttributeError: v`). One rule, three consumers: the `sys.byteorder` fold in `comptime.eval_const` (host constant, AttributeError-safe, self-host declines), the emission loop over the Phase-1.7 `_flatten_resolved_conditionals`, and `all_struct_defs` flattened for own + imported lists. Measured: minimal shape builds and prints 7 = CPython (`r10d1_postfix.log`); the real file loses both `_endian` errors (zero `_endian` lines) and stays RESOURCE-class at the ceiling (`BREACH 8.6 GB`, 108%, rc=125, 34 rejections, gcc unreached — `r10post_final.log`), with the pre-fix residual classes (util.py:221 `shutil_which_15d274`, `os_fsdecode`/`os_fsencode` 0-arg stubs, ntpath implicit-declaration family) named downstream of the kill in the doc, which stays OPEN per the no-forced-close rule; regression `test_link_mode.py::test_byteorder_conditional_toplevel_emits_only_the_host_branch` fails-before (single gcc error) and pins the real value after; the two landed campaign regressions pass on the fixed tree; gate 53/53 green (2026-10-24). **RE-MEASURED 2026-10-24, post-fsdec-fix** (`build/remes/r10post.log` pre-fix, `r10post_fsdec.log` post-fix, 8 GB ceiling): this row's own blocker is UNCHANGED — the import-closure phase still breaches the ceiling (9.6 → 8.2 GB observed; run-to-run load variance, both > 8.0), 34 module rejections both runs, gcc never runs (0 error lines both) — the RESOURCE class does not move. What the fix DOES move for this row: the `os_fsdecode`/`os_fsencode` 0-arg-stub class the 2026-10-24 entry names as a downstream next blocker no longer exists as a gcc class at all (the nested-def scanner fix, measured on rows 24/25 and in the standalone ntpath dump pair `fsdec_ntpath_prefix_6b80a973.ci` / `fsdec_ntpath_postfix_5ad80ae8.ci` in this row's closure: the 25 `os_fs*` extern/call lines → 0). The named next blockers behind the kill are now: util.py:221's `shutil_which_15d274`, the ntpath implicit-declaration family, and — where the budget reaches runtime — the weak-stub fallback the `os.fsdecode`/`os.fsencode` call sites now lower to (a per-call `mojo_print("fsdecode: unavailable in compiled mode")` + return 0: loud, not a silent fold). STILL FAILS — RESOURCE class, record only. |
+| 11 | `COMPILE_FAIL_Modules__decimal_tests_randdec.md` | MEDIUM | Numeric correctness test module remains a useful precision/typing canary. | Fix the first numeric literal or conversion mismatch and add a boundary regression before chasing the rest. **RE-MEASURED 2026-10-24** (`build/remes/r11.log` pre-fix, `r11post.log` post-fix, 8 GB ceiling): STILL REFUSED — the first module rejection is byte-identical on both trees (the `_collections_abc` generator `.close()` class) and the verdict class is unmoved; the fixed compiler carries the closure further (20 → 56 module rejections, 46 → 82 log lines, 0.5 → 2.4 GB peak), but the numeric literal/conversion mismatch this row names is downstream of the upstream refusals and unreached. Record only, not started. |
+| 12 | `COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md` | MEDIUM | Shared c-analyzer utility failure affects several analyzer entry points. | Fix the shared consumption-ordering/parameter-value path once, then verify all analyzer consumers instead of patching each caller. **RE-MEASURED 2026-10-24** (`build/remes/r12.log` pre-fix, `r12post.log` post-fix, copied tree): UNCHANGED — the two logs are byte-identical apart from the memcap label line: rc=1, peak 0.1 GB, the same two `.iterutil` `next(...)`-on-MojoList rejections, and the same top-level `_iter_filenames` generator refusal (unresolved callee `process(...)` in a compiled generator body). Item 16's rollback does not touch this row. Record only, not started. |
+| 13 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | MEDIUM | Only a small number of generator refusals remain after earlier fixes. | Finish the remaining generator shape(s) with focused compile-and-run tests. **RE-MEASURED 2026-10-23** (`build/remes/r13.log` pre-fix, `r13fix2.log` post-fix, copied tree): the failed-attempt rollback (item 16) removes 17 `c_analyzer/__main__.py` sites (pointer-from-int assignments, `logging_Printer_*` implicit decls) plus the `c_analyzer/match.py`, `c_parser/match.py` and `analyze.py` pointer-assignment class — 36 unique error sites down to 18. Two current first errors remain: (a) `conflicting types for 'info_get_default_storage_9f63a2'` — the text-scan re-export extern (module_gen.py's `/* from .info */` block, typed from the scanner's int64 default for the UNANNOTATED def) beside the same-TU definition typed `char *` from the body's own returns; the hazard documented in that emitter's own comment, unmasked because `c_parser.info` now compiles in the TU — present identically (same line, same pair) in the six-registry and the narrowed measurement, i.e. independent of the signature-rollback choice; fix shape = extend the emitter's `_func_return_type_for_call` consult (already used by its `MojoTuple_` branch) to the unannotated-return case; (b) the `_common.py:50` `_ind` 15d274 residue (implicit declaration, "did you mean 0f1876") — the by-design guard-dedup refusal AFTER a successful compile falling to the stale bare slot: feature-sized, recorded in item 16's doc. |
+| 14 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` | MEDIUM | Analyzer info module has a bounded remaining failure after one prior fix. | Reproduce current first error, fix its narrow type/consumer boundary, and keep unrelated analyzer failures separate. **RE-MEASURED 2026-10-23** (`r14.log` → `r14fix2.log`): 11 → 14 unique sites — the three `c_parser/match.py` pointer-assignments and the stale `_common.py` 15d274 are GONE; the seven newly exposed are the same `info_get_default_storage_9f63a2` conflicting-types (now at `c_parser/info.py:401` itself — the definition site) plus deeper `c_parser/info.py` errors (`mojo_list_get_int`/`mojo_list_len` int-conversions, expected-expression) that only surface once the module compiles further. Same next action as row 13(a). |
+| 15 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_datafiles.md` | MEDIUM | Data-file parser has a dynamic-callee/tuple-unpack gap. | Add a minimal dynamic-callee test and implement the missing value provenance, not a broad dynamic fallback. **RE-MEASURED 2026-10-23** (`r15.log` → `r15fix2.log`): UNCHANGED — one site, `c_common/tables.py:289:1 invalid conversion in gimple call`, identical before and after the rollback; item 16's fix does not touch this one. |
+| 16 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | MEDIUM | Parser package is shared by the analyzer tools and exposes a specific value-flow gap. | Fix the smallest parser-only repro, then run the c-analyzer parser tests. **RE-MEASURED 2026-10-23 — the original 2-error `_ind` pair is CLOSED** (see the doc's 2026-10-23 section): the failed-import-attempt rollback in `emit_resolve.py::_compile_imported_module` (three leak classes: the add-only `_compiling_file_paths` guard entries, the never-truncated `_sub_toplevels` tail, the spelling-CLAIM registries — signature registries deliberately NOT rolled back) removes the master C's `parser__regexes__ind_15d274` no-definition call site and its seven dangling toplevels; the fixed C unifies all 35 `_ind` references on `0f1876` (incl. the `_common.py:50` site) with zero dangling toplevels, and the C-side `.ci` compiles CLEAN. The new current first error is the proven PRE-EXISTING companion `.cpp`: 11 g++ errors in `_mojogen__iter_source_impl` (`SourceInfo.__init__` default-arg fill, `({0,0,0})[N]` placeholders, pointer/integer compares) — byte-identical cpp on master vs fixed, so a feature-sized companion-emitter residue, not a regression. Regression: `test_link_mode.py::test_failed_import_attempt_does_not_poison_later_spelling` (fails before / passes after, through the suite's own `driver.compile_program` path). |
+| 17 | `COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` | MEDIUM | Table utilities remain blocked by the same callable-parameter/tuple-unpack family. | Reuse the datafiles/parser value-provenance fix and add a table-specific regression. **RE-MEASURED 2026-10-24** (`build/remes/r17.log` pre-fix, `r17post.log` post-fix, copied tree): UNCHANGED — the two logs are byte-identical apart from the memcap label line: rc=1, peak 0.0 GB, the same two `.iterutil` `next(...)`-on-MojoList rejections, and the same top-level `read_table` generator refusal (`a for over a call through the callable-valued local '_get_reader(...)' is not supported in a compiled generator body`). Item 16's rollback does not touch this row. Record only, not started. |
+| 18 | `COMPILE_FAIL_Tools_jit__targets.md` | MEDIUM | JIT tooling is blocked by async eligibility and `TemporaryDirectory()` support. | First fix the async shape that blocks the smallest target, then handle the context-manager path separately. **RE-MEASURED 2026-10-24** (`build/remes/r18.log` pre-fix, `r18post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.9 GB > 8.0 GB (110%)` rc=125, post-fix `BREACH 9.4 GB > 8.0 GB (117%)` rc=125, both killed in the import-closure phase (12 → 32 module rejections logged before the kill; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The async-eligibility and `TemporaryDirectory()` blockers named above are downstream of the closure and were never reached on either tree. Record only, not started. |
+| 19 | `COMPILE_FAIL_Tools_gdb_libpython.md` | MEDIUM | Large but well-decomposed gdb/libpython build failure. | Reduce to the first remaining `.cpp` coroutine error family and land one shared fix at a time; avoid re-chasing already-fixed earlier errors. **RE-MEASURED 2026-10-24** (`build/remes/r19.log` pre-fix, `r19post.log` post-fix, 8 GB ceiling): STILL REFUSED — first module rejection byte-identical on both trees (the `_collections_abc` generator `.close()` class); the fixed compiler carries the closure further (16 → 49 module rejections, 42 → 75 log lines, 0.5 → 1.5 GB peak) but the `.cpp` coroutine-error family this row names is downstream of the upstream refusals and unmoved. Record only, not started. |
+| 20 | `COMPILE_FAIL_Tools_importbench_importbench.md` | MEDIUM | Benchmark tooling has documented unreachable blockers; only fix it if a live repro shows a reachable root cause. | Re-verify current failure shape; if still unreachable, mark the stale doc closed rather than spending implementation time. **RE-MEASURED 2026-10-24 / CLOSED** (`build/remes/r20.log` pre-fix, `r20post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.0 GB > 8.0 GB (100%)` rc=125, post-fix `BREACH 8.9 GB > 8.0 GB (111%)` rc=125, both killed in the import-closure phase (13 → 28 module rejections logged before the kill, 18 → 33 log lines; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The doc's two-function refusal shape — `benchmark_wo_bytecode` (unresolved `cache_from_source(...)`, requiring inlining of CPython's frozen `_bootstrap_external`) and `from_cache` (non-plain-target `module.__file__ = ...`, the documented heap-object attribute-write family), re-verified byte-identical through 2026-08-26 — is STALE against the measured shape: neither tree's log ever reaches importbench's own functions (zero mentions of `benchmark_wo_bytecode`/`from_cache`/`cache_from_source` in either), and both structural gaps remain out of reach as documented, so there is no live repro to fix. Per this row's own done-condition the stale doc is CLOSED — the row-20 importbench doc deleted, this block standing as its record; no implementation. The residual question (can it compile under a larger budget) sits in the RESOURCE class tracked by rows 3/23 — record only per triage. |
+| 21 | `COMPILE_FAIL_Tools_scripts_summarize_stats.md` | MEDIUM | Closure-returning nested `def` blocks a real script. | Add the smallest closure-return/value-passing capability needed by the script, with a runtime check. **RE-MEASURED 2026-10-24** (`build/remes/r21.log` pre-fix, `r21post.log` post-fix, 8 GB ceiling): STILL REFUSED — first module rejection byte-identical on both trees (the `_collections_abc` generator `.close()` class); the fixed compiler carries the closure further (18 → 50 module rejections, 45 → 76 log lines, 0.6 → 3.4 GB peak); the closure-returning nested `def` this row names is downstream of the upstream refusals. Record only, not started. |
+| 22 | `COMPILE_FAIL_Tools_cases_generator_parsing.md` | MEDIUM | Polymorphic `yield from self.<field>.tokens()` exposes a real generator-receiver gap. | Add a minimal polymorphic-receiver generator test and implement receiver lowering without erasing the call shape. **RE-MEASURED 2026-10-24** (`build/remes/r22.log` pre-fix, `r22post.log` post-fix, 8 GB ceiling): STILL FAILS AT GCC, the error surface widens — 113 → 282 gcc error lines, 16 → 48 module rejections (first rejection byte-identical: the `_collections_abc` generator `.close()` class), 31743 → 104326 log lines, 0.6 → 2.8 GB peak. The first gcc error is UNCHANGED: `Tools/cases_generator/parsing.py:1575:3 unknown type name 'MojoTuple_4b512f0f1ff7'` (this row's named tuple-yield shape), with new earlier-surface errors behind it (the `keyword.py` pointer-from-integer class, the same surface row 6's post-fix measurement records). Record only, not started. **RE-MEASURED 2026-10-24, post-kw63-fix** (`build/remes/r22post.log` pre-kwfix, `r22post_kwfix.log` post-kwfix, 8 GB ceiling, the uniform fixed compiler plus the keyword.py:63 boxed-global-container fix): the first gcc error is STILL UNCHANGED — `parsing.py:1575:3 unknown type name 'MojoTuple_4b512f0f1ff7'`, this row's named tuple-yield blocker — but the `keyword.py` pointer-from-integer class present behind it pre-kwfix is GONE (4 error lines → 0), gcc error lines 282 → 254, module rejections unchanged (48, first rejection byte-identical: the `_collections_abc` generator `.close()` class), 2.8 GB peak both runs. STILL FAILS AT GCC at the same first blocker; record only, the row does not close. |
+| 23 | `COMPILE_FAIL_importlib_metadata___init__.md` | MEDIUM | Loop-variable/field typing leaks into nested helper parameters. | Fix the loop-variable field provenance at its source, then verify the importlib metadata path end-to-end. **RE-MEASURED 2026-10-23** (`build/remes/r23.log`, pre-fix, 30 GB ceiling): STILL a pure RESOURCE failure, no verdict — `memcap: BREACH 31.6 GB > 30.0 GB (105%)`, exit 125, 2716 s, zero `error:` lines; 28 sibling modules compiled (as soft fallbacks) before the kill and the last diagnostic is still `glob.py`'s `next(...)` refusal — the same shape the 2026-10-01 entry recorded, so the runaway (8.9 GB at 8 GB / 20.7 GB at 20 GB then) grows again at every raised ceiling and the file's verdict (whether it compiles at all) remains UNMEASURED on both trees; the post-fix re-measurement is BUDGET-BLOCKED per the 2026-10-23 triage (a 31 GB+ runaway does not fit the campaign's machine-wide budget while the rest of the batch runs) — record only, not chased here, per the 2026-10-01 entry's "the integrator's call" rule. |
+| 24 | `COMPILE_FAIL_zipfile___init__.py` | MEDIUM | Archive tooling has multiple independent blockers and a prior attempted fix regressed self-host. | Split the doc into independent sub-bugs; do not retry the reverted broad fix. Land the smallest memoryview/generator or link-mode slice independently. **RE-MEASURED 2026-10-24** (`build/remes/r24.log` pre-fix, `r24post.log` post-fix, 8 GB ceiling): STILL FAILS AT GCC, the error surface widens — 191 → 357 gcc error lines, 20 → 62 module rejections (first rejection byte-identical: the `_collections_abc` generator `.close()` class), 59536 → 150142 log lines, 0.9 → 2.6 GB peak. The named first gcc error persists at the SAME site (`Lib/ntpath.py:287:9` implicit declaration) with one spelling drift — the mangled cross-module symbol lost its module qualifier, `posixpath_abspath_9f63a2` → `abspath_9f63a2` — and the `os_fsdecode` 0-arg-stub class (`too many arguments to function 'os_fsdecode'; expected 0, have 1`, ntpath.py:317/:373) is unchanged behind it. Record only, not started. **RE-MEASURED 2026-10-24, post-kw63-fix** (`build/remes/r24post.log` pre-kwfix, `r24post_kwfix.log` post-kwfix, 8 GB ceiling, the uniform fixed compiler plus the keyword.py:63 boxed-global-container fix): the first gcc error is STILL UNCHANGED — `ntpath.py:287:9` implicit declaration of `abspath_9f63a2` — and the `os_fsdecode` 0-arg-stub class behind it is unchanged (11 lines both runs), but the `keyword.py` pointer-from-integer class present behind those pre-kwfix is GONE (4 error lines → 0), gcc error lines 357 → 329, module rejections unchanged (62, first rejection byte-identical: the `_collections_abc` generator `.close()` class), 2.6 → 2.5 GB peak. STILL FAILS AT GCC at the same first blocker; record only, the row does not close. **RE-MEASURED 2026-10-24, post-fsdec-fix** (`build/remes/r24post_kwfix.log` pre-fix, `r24post_fsdec.log` post-fix, 8 GB ceiling, the fixed compiler plus the keyword.py:63 fix plus the nested-def scanner fix): the `os_fsdecode`/`os_fsencode` 0-arg-stub class is GONE — 27 error lines (11 `too many arguments to function 'os_fsdecode'` + 16 `'os_fsencode'`) → 0 — gcc error lines 329 → 302, the first gcc error is STILL UNCHANGED at `ntpath.py:287:9` (implicit declaration of `abspath_9f63a2`), module rejections unchanged (62, first rejection byte-identical: the `_collections_abc` generator `.close()` class), peak 2.5 → 2.6 GB. Mechanism, measured: the importer's text scan (`module_loader._scan_source`) stripped every line before matching, so the nested `def fsdecode(filename):` inside os.py's `_fscodec` factory (module-level binding `fsencode, fsdecode = _fscodec()`) registered as a module-level fn export, and the scan's param extraction drops UNANNOTATED params (`if ':' in param`) while stdlib's nested defs are unannotated — the entry came out `int64_t fsdecode (void)` and the importer emitted `extern int64_t os_fsdecode (void);` for `os.fsdecode(x)`. The symbol does not exist at all: a nested def compiles to a lifted closure named after the ENCLOSING function (`closure_lifted_name`: `outer_inner`), so the static path was doubly wrong; the module-level binding is a VALUE. The fix is the indent block stack in `_scan_source`: a `def`/`fn` whose innermost open block is a function is a nested closure and is skipped; module-level defs under module-level control flow and class methods register exactly as before, and the overload-COUNTING pre-pass is byte-identical (a module-level def that shares a name with a nested one keeps its measured variadic treatment). os.py's scan went 61 → 55 entries and the six removed are exactly the six indented defs (`fsdecode`, `fsencode`, `encode`, `decode`, `encodekey`, `check_str` — each verified indented in the source). Post-fix the `os.fsdecode(name)` call sites lower to the weak "unavailable in compiled mode" stub (a per-call `mojo_print` + return 0 — loud, not a silent fold; this row dies at gcc long before the runtime is reached). The standalone ntpath dump pair `fsdec_ntpath_prefix_6b80a973.ci` / `fsdec_ntpath_postfix_5ad80ae8.ci` shows the class gone from the C: 25 `os_fs*` lines (the `(void)` externs plus all 13 call sites) → 0, the same 13 call sites now emitted through the stub. STILL FAILS AT GCC at the same first blocker; record only, the row does not close. |
+| 25 | `CODEGEN_generator_function_Lib_mailbox.md` | MEDIUM | Mailbox is blocked by a non-generator module refusal, not the old tuple-yield issue. | Fix the current foreign-base-class/struct refusal first; only then revisit mailbox-specific behavior. **RE-MEASURED 2026-10-24** (`build/remes/r25.log` pre-fix, `r25post.log` post-fix, 8 GB ceiling): STILL FAILS AT GCC, the error surface widens — 149 → 301 gcc error lines, 28 → 68 module rejections (first rejection byte-identical: the `_collections_abc` generator `.close()` class), 73399 → 168219 log lines, 0.8 → 3.5 GB peak. The pre-fix first gcc error (`calendar.py:663:9` implicit declaration of `_colorize_get_colors_b152e5`) persists (9 error lines post-fix) while a new earlier surface takes first place: `keyword.py:63:25` (pointer-from-integer into `mojo_list_len`/`mojo_list_get_str` — the same surface rows 6/22 record post-fix). The foreign-base-class/struct refusal this row names is downstream of the gcc stage and unreached. Record only, not started. **RE-MEASURED 2026-10-24, post-kw63-fix** (`build/remes/r25post.log` pre-kwfix, `r25post_kwfix.log` post-kwfix, 8 GB ceiling, the uniform fixed compiler plus the keyword.py:63 boxed-global-container fix): the `keyword.py:63` pointer-from-integer surface is GONE (4 error lines → 0) and the first gcc error moves to the next surface, `reprlib.py:71:7` (assignment to `int64_t` from `char *` — the `cls = type(x)` line of `Repr.repr1`; present behind it pre-kwfix, 1 error line both runs), gcc error lines 301 → 273, module rejections unchanged (68, first rejection byte-identical: the `_collections_abc` generator `.close()` class), the `calendar.py:663` persistence unchanged (9 error lines both runs), 3.5 → 3.0 GB peak. STILL FAILS AT GCC at the next measured blocker; record only, the row does not close. **RE-MEASURED 2026-10-24, post-fsdec-fix** (`build/remes/r25post_kwfix.log` pre-fix, `r25post_fsdec.log` post-fix, 8 GB ceiling, the fixed compiler plus the keyword.py:63 fix plus the nested-def scanner fix): the `os_fsdecode`/`os_fsencode` 0-arg-stub class is GONE — 14 error lines (6 `os_fsdecode` + 8 `os_fsencode`) → 0 — gcc error lines 273 → 259, the first gcc error is STILL UNCHANGED at `reprlib.py:71:7`, the `calendar.py:663` persistence unchanged (9 lines), module rejections unchanged (68, first rejection byte-identical: the `_collections_abc` generator `.close()` class), peak 3.0 → 3.5 GB (run-to-run variance). Same mechanism and same fix as row 24's block above (the nested-def scanner skip in `module_loader._scan_source`; the class lived in this closure's ntpath/posixpath TUs exactly as there). STILL FAILS AT GCC at the same first blocker; record only, the row does not close. |
+| 26 | `CODEGEN_generator_function_Lib_enum.md` | MEDIUM | Enum’s dynamic metaclass attributes are the real blocker, not just generator syntax. | Model the minimum `EnumMeta.__new__` classdict-to-class-attribute flow with a real test; refuse only what is genuinely unsupported. **RE-MEASURED 2026-10-24** (`build/remes/r26.log` pre-fix, `r26post.log` post-fix, 8 GB ceiling): STILL REFUSED — the first module rejection is byte-identical on both trees (the `_collections_abc` generator `.close()` class) and the verdict class is unmoved; the fixed compiler carries the closure further (16 → 56 module rejections, 42 → 82 log lines, 0.5 → 2.3 GB peak), but the `EnumMeta.__new__` classdict-to-class-attribute flow this row names is downstream of the upstream refusals and unreached. Record only, not started. |
+| 27 | `CODEGEN_generator_function_Lib_test_test_string_test_string.md` | MEDIUM | Nested class-in-function support is larger than the old tuple-shape diagnosis. | Implement the three pieces named by the doc: hoist nested struct, seed class attributes from generator bodies, and allocate/seed instances correctly. **RE-MEASURED 2026-10-24** (`build/remes/r27.log` pre-fix, `r27post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.2 GB > 8.0 GB (102%)` rc=125, post-fix `BREACH 9.6 GB > 8.0 GB (119%)` rc=125, both killed in the import-closure phase (13 → 29 module rejections logged before the kill, 18 → 34 log lines; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The three pieces this row names (hoist nested struct, seed class attributes from generator bodies, allocate/seed instances) are downstream of the closure and were never reached on either tree. Record only, not started. |
+| 28 | `CODEGEN_generator_function_Lib_test_test_frame.md` | MEDIUM | Real stdlib generator consumer remains refused. | Isolate its first unsupported generator shape and land a shared fix if it overlaps items 3/22; otherwise add a focused emitter change. **RE-MEASURED 2026-10-24** (`build/remes/r28.log` pre-fix, `r28post.log` post-fix, 8 GB ceiling): STILL RESOURCE, no verdict on either tree — pre-fix `memcap: BREACH 8.2 GB > 8.0 GB (102%)` rc=125, post-fix `BREACH 9.4 GB > 8.0 GB (118%)` rc=125, both killed in the import-closure phase (13 → 31 module rejections logged before the kill, 18 → 36 log lines; first rejection byte-identical: the `_collections_abc` generator `.close()` class). The first unsupported generator shape this row names is downstream of the closure and was never reached on either tree, so no shared fix with items 3/22 was attempted. Record only, not started. |
+| 29 | ~~`hard/CODEGEN_function_scoped_import_module_not_inlined.md`~~ | ~~SHARED~~ | **LANDED 2026-09-29 — doc DELETED.** Both pipelines now agree with CPython on every one of its rows (11/11 shapes measured, incl. a no-import control). The link-mode half was three independent defects, not the one the doc predicted: (1) `mojo/middle/funcs_shared.py::_parsed_import` could not resolve a bare, non-dotted, local `.py` sibling at all (`imports.resolve_source` is MOJO_PATH-relative, `_resolve_test_relative_module` is `.mojo`-only), so `_register_link_imports` got `source=None` and registered nothing — now falls back to `_submodule_source_path`, the resolver `_compile_imported_module` already used for the same name, so the two can no longer disagree; (2) the source-text classifier that routes a name with no concrete export was written out TWICE inside `_register_link_imports` and neither copy knew `class X:` (a hard keyword to `fire_compiler._parse_struct`), so a class import was never inlined at all — now ONE `_classify_unresolved_export`; (3) `gen_module_impl` had a second, hand-rolled copy of the inline-compile loop for link mode that skipped the cross-module hint pre-passes, so a struct in a link-inlined sibling compiled with int64_t field defaults and the client's constructor became a hard GIMPLE `non-trivial conversion` — now one loop, two sources for the module set. A fourth defect surfaced doing the work and is in the same family: the mangled symbol's qualifier half is computed in two places and they disagreed on a DOTTED module name (`sub_tri_...` vs the real `p_sub_tri_...`). The doc's own suggested item 2 (stop the weak stub being silently callable from a call site the compiler knows is a real import) needs no separate work: such call sites no longer reach it. | Regression coverage is in `test_link_mode.py` (5 new cases, each comparing against CPython run on the same text in the same directory, through the real `driver.compile_program`) and `test_gimple.py` (`user_defined_dunder_repr_is_called`, `user_defined_dunder_repr_value` — the latter runs BOTH pipelines). Residue found while re-triaging, filed separately and NOT part of this bug: `CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md` (a `linkmode` gate step already red on master), `CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md`, `CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md`, `CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_spellings.md`. **One of those residue docs is now CLOSED** (2026-09-30, `work/codegen-old-divergences`): `CODEGEN_return_type_not_inferred_from_a_method_call_result.md` — the enclosing return type now takes the method-call case, and its doc is deleted. |
+| 30 | ~~`hard/CODEGEN_ctor_arg_field_type_scalars_only.md`~~ | ~~SHARED~~ | **LANDED 2026-09-27 — doc DELETED** by `0e87ed4` ("redo the discarded ctor-arg fix, plus 9 more real codegen bugs"). All three shapes now type the field correctly: a container literal, a field value round-tripped through a local (`t = self.f; return t`), and the residue — a container reached through one extra hop (a local bound to a container literal, or a `self.<field>` read of a field the caller's own struct sets to a container literal). The residue's fix is a third purely-syntactic evidence pass beside the existing literal-argument one, feeding the SAME unanimity-gate dicts — not the context observer (`_arg_scalar_type`) a prior attempt tried and reverted after it broke `test_selfhost.py` (that observer runs after the field-write pass that needs its answer, and on the wrong `GimpleGen` instance for an imported module). **Do not resurrect this doc:** an earlier "DONE" marker on this row referred only to the *prerequisite* that `test_gimple_runner.py`/`test_gimple_generator_runner.py` were registered in `check` — real and worth keeping, but not this bug. | `test_gimple.py` 326/326 (two new regression tests), `test_selfhost.py` green, `test_gimple_runner.py`/`test_gimple_generator_runner.py` unaffected (both pre-existing failures on `master` confirmed unrelated via `git stash`). |
+
+## Recently completed or intentionally excluded
+
+- **`CODEGEN_class_attr_emission_indexes_an_empty_field_list_for_a_same_named_struct.md` — the
+  class-attr emission crash landed 2026-10-24, CLOSED.** The emission loop's
+  `range(-1, 0)` read `s.fields[-1]` on a same-named struct with no fields of its
+  own (`_class_attrs` is name-keyed; a same-home redefinition keeps the bare name
+  and no `_struct_cname_by_id` rename, so it walked the loop with the owner's
+  non-empty attribute map). A latent crash present on master — the single-file
+  `class Box: tag = 1` + later bare `class Box:` shape dies on `566ba1c9` — that
+  the row-16 rollback (8c48013c) merely EXPOSED at scale: readers.py carried
+  same-named class pairs into the closure and every module reaching the loop died
+  (77+ tracebacks, one line, across `io`/`stat`/`genericpath`/`operator`/
+  `keyword`/`types`/...). Fixed with a `continue` when the attribute is not
+  declared in this object's own fields (behavior-preserving — the non-empty-
+  `fields` spelling was already an implicit no-op). Regression
+  `test_link_mode.py::test_class_redefinition_does_not_crash_class_attr_emission`
+  fails before on BOTH `566ba1c9` and `8c48013c`, passes after printing `1` ==
+  CPython (asserting the real value, not just a clean build); `test_link_mode.py`
+  19/19; 53-job bucket 53/53. The related cross-module same-named-class gap (two
+  DIFFERENT modules each defining `class Box` — a C `implicit declaration of
+  'box_0_Box_m_a'` or a silent wrong value, identical on all three trees) is
+  recorded in the doc as a separate feature-sized item, NOT chased here.
+- **`COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` (row 16) — the
+  failed-import-attempt rollback landed 2026-10-23, PARTIALLY.**
+  `_compile_imported_module`'s except handler now rolls back a failed attempt's
+  guard entries in `_compiling_file_paths`, its tail of `gen._sub_toplevels`, and
+  its spelling-CLAIM registry keys (`_imported_func_home` / `_imported_struct_home`
+  / `_inline_module_qualifiers`); the SIGNATURE registries are deliberately not
+  rolled back (spelling-isolated values, and the only signature source for units
+  compiling before the definer's successful attempt). The entry's original two gcc
+  errors are closed and measured (master C: one no-definition `parser__regexes__
+  _ind_15d274` call site + seven dangling toplevels; fixed C: 35 unified
+  `0f1876` references, zero dangling, C-side `.ci` compiles clean), but the file
+  is still red at a PROVEN PRE-EXISTING companion `.cpp` (11 g++ errors around the
+  `_iter_source` generator — byte-identical cpp on master and fixed), so the doc
+  is KEPT with a dated section rather than deleted (working rule 5). Regression:
+  `test_link_mode.py::test_failed_import_attempt_does_not_poison_later_spelling`
+  (fails before / passes after). Cluster re-measurements: rows 13/14 (both now
+  first blocked by the text-scan-extern return-type hazard, unmasked — not caused
+  — by the rollback), row 15 unchanged.
+- `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — item 0, partially landed 2026-09-26 (signedness + the loop-contract parameterisation); the doc keeps ownership of the loop-model gap.
+- `CODEGEN_boxed_method_name_list_set_ambiguity.md` — fixed.
+- `CODEGEN_container_free_registry_dangling_entries.md`,
+  `CODEGEN_container_no_deallocation_unbounded_growth.md`,
+  `CODEGEN_call_result_container_never_freed.md` and
+  `CODEGEN_large_dict_accumulation_exit_crash.md` — all fixed and
+  regression-tested; their docs deleted 2026-09-30 per the
+  fully-fixed-is-deleted rule. The registry doc's own subject grew two
+  members while it was open and both are now closed too: the per-slot
+  KINDS side table, whose delete left a probe gap that stripped the
+  element kinds off every OTHER live list sharing the cluster (a
+  heterogeneous list read with no kinds hands a double's IEEE-754 bit
+  pattern to `strlen`), and the bound-method registry, which had no free
+  at all until the closure-env work needed one.
+- the `struct` module and the `bytes` value type — both landed, and every
+  hard-bug report covering them has since been REMOVED per the
+  fully-fixed-is-deleted rule. The last of them,
+  `hard/CODEGEN_struct_kwargs_and_inline_unpack.md`, was deleted 2026-10-02:
+  both its items closed 2026-09-27 (keyword arguments bound per CPython
+  3.14's measured signature table — `_STRUCT_CALL_SIGS` in
+  `mojo/backend_gimple/emit_methods.py`; mixed int/float formats correct
+  through every statically-indexed read), and the residue it kept — a read
+  with no compile-time slot index has no single right C type in a
+  `MojoList`, and a `Struct` reached through a class attribute has no
+  recoverable format — **also closed 2026-09-29** by moving the per-slot
+  kinds onto the VALUE (a side table on the live `MojoList` address) and
+  boxing a read with no compile-time index (`mojo_list_set_kinds` /
+  `mojo_list_get_boxed` / `mojo_repr_boxed` in runtime/fire_runtime.c). The
+  mechanisms live in those definitions and in `_STRUCT_CALL_SIGS`. The
+  `f"{list}"`/`str(list)` gap found on the way was its own doc,
+  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`, also since deleted.
+  `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
+  2026-09-27** (plus three more wrong values found on the way:
+  `partition`'s swapped no-match arms, its empty-separator case, and four
+  `str` predicates that did not exist and answered `0`), and kept only
+  **item 6a**: `partition`/`rpartition`'s container TYPE.
+  **CLOSED AND REMOVED 2026-09-29.** Item 6a's stated blocker — "which
+  cannot be fixed without introducing a tuple type — this runtime has none,
+  and a tuple literal is a marked `MojoList`" — was **false**: a tuple type
+  is exactly that marked `MojoList`, already used at eight construction sites
+  and already read by `isinstance(x, tuple)`. The marker was decorative
+  (read by `repr` only), so the fix was to make it load-bearing, not to add a
+  container type. Twelve further silent wrong values in the
+  bytes/memoryview/`str` surface were found by a differential sweep in the
+  same pass and fixed. Two test expectations that asserted the CPython-wrong
+  answers had been corrected earlier, not worked around.
+- `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed, report removed 2026-09-26; live residue went to `hard/CODEGEN_coro_captured_param_capture_crashes.md`, which is itself **closed and removed 2026-09-29**: item 1 (capturing an enclosing function's *parameter* crashed the compiler) 2026-09-27; item 2 (the regression file orphaned at 0/9, one case asserting the pre-Increment-E answer) 2026-09-27, now 10/10 and registered as `coro-nested-capture`; item 3 (a capture-independent `async for`-over-a-generator gap printing `0` where CPython prints `11`) 2026-09-29 — plus three residues that re-testing the doc's own "Verified genuinely fixed" list turned up: a wait-descriptor bound as the `async for` loop variable (a heap address, exit 0), two nested `async def`s sharing one captured local (a generated-code argument-count error), and Increment D's honest refusal not existing on the `MOJO_CORO=cpp` backend.
+- `COMPILE_FAIL_Tools_build_umarshal.md` and `COMPILE_FAIL_Tools_build_deepfreeze.md` — compile blockers resolved; remaining items are runtime/adjacent and need a new doc if pursued.
+- `hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — excluded from this queue because the documented candidate optimizations are unsafe without a new design.
+- `hard/CODEGEN_same_bare_name_struct_collision_across_modules.md` — **closed and removed 2026-09-29**: the deferred high-risk shared machinery landed (module-qualified C identity for colliding same-named structs), and the doc is gone rather than kept as a monument; the mechanism and what shipped are summarised in `bugs/hard/README.md`.
+- `CODEGEN_compiled_path_gaps_round2.md` — **NEW 2026-09-27 round 2.** Four
+  compiled-path gaps found by synthetic probe while landing this round's
+  fixes, none of which any tracked doc covered: an inherited `@classmethod`
+  / generator method is neither resolved nor rebound through a subclass; `x ==
+  None` is False for a NULL `char *` (so every `d.get(k) == None` guard
+  takes the wrong branch — pre-existing, found by accident); a heterogeneous
+  `dict | dict` has no static value type; and a cross-module symbol-name
+  mismatch (`__itertools_only_<hash>` emitted where `_itertools_only_<hash>`
+  is defined) that blocks a whole module. Each is ordered there by how likely
+  it is to bite real code. **#1 is closed in full and #2/#4 were already
+  fixed; only #3 remains, and it remains open BY CONSTRUCTION rather than by
+  decision** — its next action is "measure the blast radius
+  (`compile_stdlib.py`'s `U` count) before refusing a heterogeneous union",
+  and a whole-stdlib compile is not affordable in a light-worker session, so
+  taking it would mean refusing ~dozens of modules on no measurement at all.
+  That is the one thing CLAUDE.md's type-resolution warning is about, so the
+  honest state is "not started", not "half done".
+- **`work/bugs4-1`, 2026-10-02 — six compiled-path claims closed, one doc
+  deleted, three filed.** In claim order: a class defined inside a function had
+  no methods at all (`CODEGEN_class_defined_inside_a_function_has_no_methods.md`
+  **DELETED**, its residue becoming
+  `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`, which is
+  still open and is the honest remainder); a `bool`-annotated struct field and
+  parameter (doc kept — `isinstance`/`type` still answer int, and that is
+  Option A, a `_TYPE_MAP` change with its own blast radius); a callable's
+  return type at two more hops; calling a function value held in a subscript;
+  a bare `import <sibling>` + `<sibling>.<free_fn>(...)` answering 0 on the
+  link/build path; and a callable-valued parameter called in an ordinary
+  generator. Two docs were filed rather than fixed from what those turned up:
+  `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
+  `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
+  A merge in the same batch left `gimple_codegen.GimpleGen` carrying the
+  `emit_dict_int_value_store` delegation TWICE — the merge was resolved file by
+  file, and `gimple_codegen.py` is the aggregator both copies of the shared
+  file fed. Python keeps the last, both bodies were identical, and no test could
+  see it, which is why another branch's doc read the same name as DROPPED and
+  filed four `bytes`-dict tests against `'GimpleGen' object has no attribute
+  '_emit_dict_int_value_store'` — an `AttributeError` during codegen that no
+  exit code anywhere reports. Deduplicated (so the doc's subject was never real
+  on this tree) and both halves closed: `test_gimple.py`'s `ast`-based
+  `no_name_is_defined_twice_in_a_codegen_class` reads the SOURCE rather than
+  the class object, which is exactly where the evidence is gone, and
+  `test_suite.py`'s "the backend never calls a gen method GimpleGen does not
+  have" now checks the whole delegation family rather than the one name. The
+  doc is deleted with the dedup.
+- **The nested-`def` closure environment is freed**
+  (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
+  OPEN 2, the `{mut}` capture box, is still open and is now the only thing in
+  it). This also found and fixed a **stale-read class of bug the ownership
+  analysis had everywhere**: the body a "how is this local USED?" question was
+  asked about was a second field that only `begin_function` assigned, so during
+  a lifted closure every such question was answered about some top-level
+  function's body instead of the closure's. It is one field now. Worth
+  knowing before trusting any ownership decision reached through a closure.
+- `CODEGEN_noshim_dumpfull_preexisting_divergence.md` — already-active investigation, not a new queue item.
+- `hard/CODEGEN_generator_lambda_expr_unsupported.md` — deliberately guarded miscompile; only revisit with a new supported-shape design.
+
+## Claims triaged 2026-10-02 and left UNSTARTED, with the reason and the cost
+
+Three of `work/bugs4-1`'s claims are not waiting on understanding. Each is
+blocked on a budget this worker did not have, and each was checked against its
+own doc and the registry rather than re-derived — so a next session does not
+repeat the triage. **Nothing here is "half done": no code was written and no
+result is claimed.**
+
+| claim | state | what unblocks it, and what it costs |
+|---|---|---|
+| `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` (row 0) | the CODEGEN half landed 2026-09-26 and is verified; "still open 3" is **entirely inside `formal/`** (the `dec`-while and `range` models assume a non-negative counter, plus two named `sum_range` holes) | a session with `formal/` budget. `test_formal_run.py` is 91/91 today; the gap is model-level, and the shared piece is a reusable `Nat`-to-two's-complement signed-order lemma in ProofLib. |
+| `CODEGEN_bootstrap_resource_blowup.md` (row 1) | both cheap wins landed (`33f4b72d`); the remaining lever is per-module AST lifetime, untried, with the starting question written down (`_SELFHOST_PARSE_CACHE` and its three readers at three different pipeline points, so a bounded release scheme rather than a clear) | one `./mojoc` build plus the ~30-58 GB dump. `--dump-full` is already CAS-cached by real inputs, so `make native` is cheap to re-enter; the DUMP is not. |
+| `CODEGEN_ab_native_fails.md` | registered `disabled=` on purpose, and correctly: 20.5 GB measured, exclusive, every gate — which is `CLAUDE.md`'s own rule (a known failure too expensive to run gets `disabled=`, not `expect=`) | nothing until the python-vs-native codegen divergence it measures is worth 20.5 GB of an exclusive reservation. The doc is the switch, so a fix cannot land without re-enabling it. |
+
+The pattern worth carrying forward: all three are **known-shape, budget-blocked**
+work, and in each the doc already says what the next step is. The only thing
+that was missing was the statement "this was looked at and deliberately not
+started", which is what this table is.
+
+## 2026-10-24 — correction to the 12e9ff38 memory-model sentence (A3 + row-B terminals)
+
+12e9ff38's "bytes go to per-module retention structures" sentence is
+REFUTED. The A3 standalone-inline terminal (3 h wall guard, exit 0,
+visit 324) measured retention at 29 modules / ~0.2 GB
+(`_module_stmts entries=29 shallow=1128 trans=1440`) for the whole
+run, while the process held ≤979 MB RSS / 0.25 GB traced across all
+324 visits. The bytes at traced scale are the walk's own machinery
+and the `'\n'.join` assembly (terminal top sites: `emit_infra.py:6635`
+62.3 MB/36 blocks and growing from A2's 13.0 MB/20; `exprtypes.py:158`
+parent-memo 30.1 MB over 640,700 blocks).
+
+A3 also REFUTES the same-process-sequence + retry-amplification
+hypothesis at WALK SCALE: it ran the exact sequence (failed link-mode
+walk, then inline fallback) with 13 rejects / max ×2, and the walk
+stayed flat — against row-B's 34 rejects / max ×10 at full closure
+scale.
+
+Row-B terminal (the no-memcap CLI run, ctypes/util.py): SIGKILL
+(rc 137) at ~5.5 h, peak RSS ≈ 62.8 GB, store 0 files, no binary —
+the walk never completed, so the nine rows do not get cheaper.
+Ranked open candidates for the ≥62.8 GB regime: (1) CLI retry
+amplification at full-closure scale — `_WALK_AST_PARENTS` is a
+never-cleared module-level dict and the terminal top site #2 at only
+324 visits; (2) the post-walk whole-program `'\n'.join`, the growing
+#1 site A3 never reached; (3) link-mode residual state (weak). Ruled
+out: gcc coprocess, closure difference.
+
+PROVENANCE GATE: A3 and row-B both ran the PRE-MERGE compiler
+(d20e7984 state, in memory since launch); the merged selfhost chain
+edited module_gen.py (+146) and gimple_codegen.py. The row-10 walk
+shape must be re-measured COLD on the merged tree before concluding
+the selfhost chain didn't move the picture.
+
+## 2026-10-25 — the `name 'n'` walk-state class resolves to a missing import (no new fix needed) + the :1199 diagnostic gap is named
+
+The `name 'n' is not defined` class (recorded 2026-10-24 as a NEW named
+class from the cold walk; A3 visit 300, `collections`) is RESOLVED without
+a new commit. Root cause measured: a bare read of a compiler module global
+that was never imported — `gimple_codegen.py`'s import line carried
+`py_tokenize, Parser, _as_str, _as_structdef_node, _as_funcdef_node` but
+not `_as_int`, so `gimple_codegen.py:4469` (`return _as_int(
+_SCALAR_CTYPE_SIZE[ctype])`, the mutable-local box path) NameError'd on
+any module whose shape reached it — 27 latent stdlib-build failures, not a
+scope-chain/walk-state artifact. The call site is rare, which is why only
+a large in-process stdlib walk surfaced it. The fix is already in the
+tree: 61adf216 (in via the mojo-reference2 merge b35a79ea) added the
+import — its own message: "Also adds missing _as_int import in
+gimple_codegen.py (fixes 27 stdlib codegen failures: name '_as_int' is
+not defined)".
+
+A3's six `n` instances (abc/ntpath/collections/importlib.
+machinery/weakref), missing a DIFFERENT name than the clean tree's
+`_as_int`: A3 ran on the merge's mid-edit working tree (proven two ways —
+its CAS key prefix matches no clean checkout; the missing name differs),
+so they were a SECOND, transient missing global in that state. Full-
+coverage no-repro on clean trees: the standalone-driver walk probe (entry
+ctypes/util.py, private empty store, first-error traceback capture) gives
+e214bcd2 = HIT at visit 34 (enum.py, the `_as_int` traceback above) and
+da0cd410 + 26ff6613 + e214bcd2-with-the-import = zero `is not defined`
+across 250+ visits covering all six victim modules. Evidence:
+/private/var/folders/bt/pjzl0n_w8xn64y008k907xch0000gs/T/opencode/fsdec/
+probe_name_n{,_e214,_e214b,_da0}.log + probe_name_n.py + key_match.py.
+
+The `emit_resolve.py:1199` reject-handler wrapper is the diagnosed
+DIAGNOSTIC GAP, not the mechanism: it prints `str(e)` only, which is what
+turned a one-line missing import into a "walk-state class". Closing it is
+feature-sized on the self-hosted path (the handler's own comment records
+that `print(..., flush=True)` is the only diagnostic channel that works in
+the compiled binary, and lowering a real traceback into the self-hosted
+compiler is a codegen feature, not a one-liner). Roadmap input, not
+implemented.
+
+## 2026-10-25 — remesC terminal: the merged tree reproduces the row-B regime; provenance gate answered; peak correction
+
+The provenance-gate re-measure (remesC: the row-10 walk shape COLD on the
+merged tree, identical shape to row-B — no-memcap CLI, private empty
+GMOJO_HOME store, tree head 26ff6613 = selfhost chain + f234a398 +
+baa9854b) terminated:
+
+- SIGKILL (rc 137) at t=18267 s (~5.1 h; row-B died at ~19750 s), peak
+  RSS **75.72 GB** (t=9047 s), store 0 files, no binary — the walk never
+  completed. **The merged selfhost chain did NOT move the walk's memory
+  picture**: same regime, same terminal, within a few percent of the
+  pre-merge peak. The 12e9ff38-correction candidates for the >=78 GB
+  regime stand (CLI retry amplification at full-closure scale; the
+  post-walk whole-program `'\n'.join`).
+- PEAK CORRECTION: row-B's TRUE peak was **78.2 GB** (80103.5 MB,
+  t=4893 s = 81 min in; the monitor's `top:` value with the tree hint =
+  the walk PID). The 26ff6613 block's "peak RSS ≈ 62.8 GB" was a
+  mid-oscillation sample (t=19362 s), not the peak. remesC's 75.72 GB
+  therefore tracks row-B's 78.2 GB, not 62.8.
+- REJECT-SET DIFF (the baa9854b field check): row-B 14 distinct / 34
+  total rejects; remesC 13 distinct / 33 total. GONE: `dis 504:36` and
+  `fractions 478:21` unterminated string literal — the f-string
+  format-spec fix works in the cold full-closure walk. NEW: `dis:
+  next(...) on next(IdentExpr) (receiver typed MojoList *)` — dis.py
+  now PARSES (the f-string fix) and fails DEEPER, in the known
+  next()-receiver codegen class: progress, not a regression. No
+  `name 'X'` instances in either (the _as_int fix, 61adf216, holds in
+  the full CLI walk).
+- The nine budget-class rows remain budget-blocked (the walk still
+  dies before publishing; publish is on completion only — a killed walk
+  publishes nothing). CAS pre-warm remains the only cheap scheduling
+  lever; zero lever on a cold day.
+
+## Working rules
+
+1. One queue item at a time; do not bundle unrelated fixes.
+2. Reproduce before editing and add a regression that fails before the fix.
+3. Run the smallest relevant test immediately, then the full gate once targeted work is clean.
+4. If a fix changes a previously tracked `.ci` baseline, record the baseline change and prove it is intentional before accepting it.
+5. Do not call a doc closed because the first error disappeared; verify the original end-to-end file or explicitly record the remaining independent blocker.
+6. Update this roadmap when an item is fixed, split, or proven stale so future sessions do not repeat triage.

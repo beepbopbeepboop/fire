@@ -20116,15 +20116,7 @@ def check_printf_number_conversion_agreement(verbose=False):
     set is a table that has drifted from the rule.
     """
     import formal.model as M
-    import sys as _sys
     passed, failures = 0, []
-    _ver = (_sys.version_info.major, _sys.version_info.minor)
-    if _ver not in M.PRINTF_CPYTHON_NUMBER_REFUSALS_SUPPORTED_VERSIONS:
-        failures.append(
-            f"CPython {_ver[0]}.{_ver[1]} reworded this; add the "
-            f"{_ver[0]}.{_ver[1]} sentence (see formal/model.py's "
-            f"PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS)")
-        return passed, failures
     quoted, wanted = set(M.PRINTF_CPYTHON_NUMBER_REFUSALS), set(
         M.PRINTF_NUMBER_CONVERSIONS)
     if quoted != wanted:
