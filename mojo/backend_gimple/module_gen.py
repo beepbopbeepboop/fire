@@ -2173,6 +2173,8 @@ def _emit_reflection_dispatch(self, parts):
                "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
                "    if (mojo_is_registered_dict(val))\n"
                "      return _mojo_repr_dict((MojoDict *)(intptr_t)val);\n"
+               "    if (mojo_is_registered_bytes(val))\n"
+               "      return mojo_bytes_repr((MojoBytes *)(intptr_t)val);\n"
                "    int64_t _tag = mojo_read_type_tag_safe(val);\n")
             + f"{tag_cases_repr_elem}\n"
             + ("    return mojo_repr_str((char *)(intptr_t)val);\n"

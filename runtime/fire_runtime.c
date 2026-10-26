@@ -1407,7 +1407,8 @@ int mojo_boxed_is_str(int64_t v) {
      * shipped in the first place. */
     if (!(_mojo_ptr_shaped(v))) return 0;
     if (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
-        || mojo_is_registered_set(v) || mojo_is_boxed(v)) return 0;
+        || mojo_is_registered_set(v) || mojo_is_boxed(v)
+        || mojo_is_registered_bytes(v)) return 0;
     /* Pointer-shaped and not a container: the sound half the range test could
      * never give. A LIVE heap allocation is a real pointer and no bare integer
      * is one, and a registered non-heap string is the codegen's `__rodata`
@@ -9342,6 +9343,19 @@ MojoList *mojo_str_chars(char *s)
  * generated branch must have a value of the right C type. */
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
+    /* A type-erased bytes value iterates its bytes as ints 0-255
+     * (CPython), the same element source the statically-typed
+     * `MojoBytes *` arm of `_materialize_as_list` uses. Before this arm,
+     * `mojo_boxed_is_str` (which now excludes registered bytes) was the
+     * only discriminator and a registered bytes fell through to the
+     * not-iterable raise; test the bytes registry first. */
+    if (mojo_is_registered_bytes(v)) {
+        MojoBytes *b = (MojoBytes *)(intptr_t)v;
+        MojoList *l = mojo_list_new();
+        for (int64_t i = 0; i < mojo_bytes_len(b); i++)
+            mojo_list_append_int(l, mojo_bytes_get(b, i));
+        return l;
+    }
     if (mojo_boxed_is_str(v))
         return mojo_str_chars((char *)(intptr_t)v);
     mojo_raise_type_error((char *)"object is not iterable");
@@ -11376,6 +11390,8 @@ static char *_container_key_str(int64_t v) {
    ask it here rather than guessing a direction. */
 char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
+    if (mojo_is_registered_bytes(v))
+        return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_registered_list(v)) return _container_key_str(v);
     return _int_str_transient(v);
 }
@@ -11429,7 +11445,7 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
      registered list is the only value that produces this kind of string, so
      the two cannot disagree about which allocation `s` is. */
-    if (mojo_is_registered_list(orig)) { free(s); return; }
+    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
