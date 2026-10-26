@@ -5622,6 +5622,19 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
+int64_t mojo_dict_slot_kind(MojoDict *d, char *key)
+{
+    _DictSlot *sl = _dict_lookup(d, key);
+    return sl ? sl->kind : -1;
+}
+
+char *mojo_dict_repr_slot(MojoDict *d, char *key)
+{
+    _DictSlot *sl = _dict_lookup(d, key);
+    if (!sl) return mojo_str_from_int(0);
+    return mojo_dict_slot_repr(sl->val, sl->kind);
+}
+
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
