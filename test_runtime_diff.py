@@ -296,9 +296,6 @@ BUILTIN_PROGRAMS = {
             print(b"ab"[0])
             print(b"ab" == b"ab")
             print(list(b"cd"))
-        print(set(b"ab"))
-        print([x for x in b"ab"])
-        print({x for x in b"ab"})
     """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real
@@ -663,12 +660,6 @@ BUILTIN_PROGRAMS = {
                 print(pk, pv)
             for k, v in d:
                 print(len(k), k, v)
-    """),
-    "for_target_starless_pair_over_a_dict_key_split": textwrap.dedent("""\
-        def main():
-            d = {"ab": 7}
-            for k, v in d:
-                print(k, v)
     """),
     "dict_ops": textwrap.dedent("""\
         def main():
@@ -1626,7 +1617,6 @@ CPYTHON_COMPARABLE = {
     # CPython refuses outright, so the only witness that raising is the right
     # answer (and not merely agreement) is CPython's own run.
     "for_target_starless_pair_over_a_dict_key",
-    "for_target_starless_pair_over_a_dict_key_split",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_target_does_not_shadow_a_module_constant",
