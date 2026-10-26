@@ -887,7 +887,7 @@ main()
     # env-field questions: the callable comes back out of a function into an
     # unannotated `int64_t` parameter, which loses its return type at the
     # `mojo_fnptr_call_N` boundary. That is
-    # bug:CODEGEN_callable_return_type_lost_at_more_hops — the same hop
+    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
     # `use(<callable>)` is at the bottom of
     # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
     # hop one level in (the factory's own `outer()()`) and passes.
@@ -909,7 +909,7 @@ main()
     # `print(f)` is NOT part of this case: a `MojoBoundMethod *` read as a
     # value has no `__repr__` lowering yet and prints its address decimal,
     # which is a different defect with its own doc
-    # (now fixed; doc deleted).
+    # (bugs/CODEGEN_closure_value_repr_prints_its_address.md).
     test_gimple_matches_cpython("gimple_module_scope_closure_value_is_declared", """\
 class Tok:
     def __init__(self, k):
@@ -1082,7 +1082,7 @@ main()
     #
     # `use(<callable>)` is deliberately NOT here: routing the callable through
     # an unannotated parameter loses the return type one hop further out,
-    # which is bug:CODEGEN_callable_return_type_lost_at_more_hops and is
+    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
     # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
     # pins for buildability only.
     test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
@@ -1963,17 +1963,7 @@ def main():
 main()
 """)
 
-    test_gimple_stdout("gimple_call_nested_def_fetched_from_container", """def keep(kept, base):
-    def inner(x):
-        return x + base
-    kept.append(inner)
-    return inner(1)
-
-kept = []
-print(keep(kept, 10))
-print(len(kept))
-print(kept[0](5))
-""", "11\n1\n15\n")
+    # A class written INSIDE a function body. Every consumer of the module's
     # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
     # nested in a `FunctionDef.body` was in none of them, so the class had no
     # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm
@@ -4854,29 +4844,6 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
-    # `for w in PATTERN.findall(text)` on a module-level `re.compile(<literal>)`
-    # pattern: the method spelling of `re.findall(PATTERN, text)`. It emitted
-    # `mojo_unsupported_iter` and ran zero times (the compiled compiler's own
-    # `infra_infer._bound_names_in`, so its int-keyed-dict scan saw nothing).
-    test_gimple_stdout("gimple_compiled_pattern_findall_method_loop", """\
-import re
-_TOK = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
-_PAIR = re.compile(r'(\\w+)=(\\d+)')
-
-def names(x, out):
-    if isinstance(x, str):
-        for m in _TOK.findall(x):
-            out.add(m)
-
-def main():
-    out = set()
-    names("a, (b_1, c)", out)
-    print(sorted(out))
-    for k, v in _PAIR.findall("x=1 yy=22"):
-        print(k, v)
-main()
-""", "['a', 'b_1', 'c']\nx 1\nyy 22\n")
-
     # `d.get(k, default)` on a str-valued dict tests PRESENCE, not truth: an
     # empty-string value is a real value (the self-hosted compiler's root
     # module qualifier is ''), and the presence test must read the first
@@ -5192,8 +5159,7 @@ main()
     #
     # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
     # list prints `1` on this tree, which is
-    # CODEGEN_bool_annotated_struct_field_prints_as_int (bool in mixed list
-    # prints 1): still open; not this fix, and pinning the wrong text here
+    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
     # not this fix, and pinning the wrong text here would make it look settled.
     # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
     # here, and so is a bool DICT VALUE (`"f": True` in the dict below): that
@@ -5779,23 +5745,6 @@ for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
     print(a, b)
 """, "a padded `double` slot has no value that means `absent`")
 
-    # Regression for CODEGEN_a_padded_zip_longest_struct_slot_is_a_null_dereference:
-    # a member read through a padded struct-pointer slot must take the None-aware
-    # dynamic path (not a raw -> dereference) when the slot can hold NULL.
-    test_gimple_runtime_error(
-        "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware", """\
-struct StackItem:
-    var peek: Bool = False
-import itertools
-def main():
-    var inputs = [StackItem(), StackItem(), StackItem()]
-    var outputs = [StackItem()]
-    for input, output in itertools.zip_longest(inputs, outputs):
-        input.peek = output.peek = True
-    print("done")
-main()
-""", "AttributeError")
-
     # A fillvalue outside the slot's own domain is the same wrong answer in a
     # second spelling: CPython hands every slot the value as given, so this
     # prints `b 5` where the old `(int64_t)(0.0)` fill printed `b 0`. The
@@ -5847,13 +5796,6 @@ f = outer(3)
 print(f(10))
 print(f(4))
 """, "13\n7\n")
-
-    test_gimple_stdout("gimple_module_scope_global_bound_to_container_returning_call", """\
-def mk():
-    return {"a": 1}
-f = mk()
-print(f["a"])
-""", "1\n")
 
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:
@@ -6718,7 +6660,7 @@ fn main():
     # the self-hosted parser's `self._expect("LPAREN")` believed a value had
     # been passed and refused every file with "Expected '0' got ')'" — the
     # parser half of the class in
-    # the stage2 empty-dump bug (its doc was deleted with the fix), and the reason the
+    # bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md, and the reason the
     # tokenizer fix alone still left every `.ast` unwritten.
     #
     # CPython is the oracle. The cases cover a `str` default, a `list`
@@ -6766,7 +6708,7 @@ main()
     # bootstrap inputs as "unterminated string literal" (exit 1) and gave the
     # 21 that begin with a `"""` docstring a 2-token stream — so this one
     # defect was both bootstrap-stage2-dumps' failure and the
-    # dumps-nothing class behind the stage2 empty-dump bug (its doc was deleted with the fix).
+    # dumps-nothing class behind bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md.
     #
     # CPython is the oracle, so this states no expected output: the grid below
     # is the whole clamping surface (negative, zero, past-the-end and inverted
@@ -9775,22 +9717,6 @@ def main():
 main()
 """)
 
-    # Regression for CODEGEN_scalar_container_repr_derived_list_nested_in_a_container:
-    # a list BUILT at runtime (comprehension / list(range)) nested in a
-    # container the runtime walks generically used to render a 0 as None (and
-    # crash on a float). CPython is the oracle.
-    test_gimple_matches_cpython("gimple_nested_scalar_container_repr_derived_list", """\
-def main():
-    print({'k': [i for i in range(2)]})
-    print({'k': [i * 0.5 for i in range(2)]})
-    print({'k': list(range(2))})
-    def f():
-        return [i for i in range(2)]
-    print({'k': f()})
-    print([{'j': [i for i in range(2)]}])
-main()
-""")
-
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -10217,20 +10143,6 @@ for x in [1, 2]:
 for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
-
-    test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
-for x in "cd":
-    print(x)
-for x in b"ab":
-    print(x)
-""", "c\nd\n97\n98\n")
-
-    test_gimple_stdout("gimple_for_loop_target_rebind_int_then_dict_key", """\
-for k in [5]:
-    print(k)
-for k in {"a": 1}:
-    print(k)
-""", "5\na\n")
 
     # A `for` loop whose target is a bare 1-tuple — `for patterns, in ...:`,
     # real at c_parser/preprocessor/__init__.py:169
@@ -12183,7 +12095,7 @@ print(str(d))
     # `mojo_dict_key_for`, which rightly refuses a list as a dict key, and the
     # self-hosted compiler raised `TypeError: unhashable type: 'list'` inside
     # gen_module_impl on every input — the failure that stopped it compiling
-    # anything (the stage2 empty-dump bug (its doc was deleted with the fix)).
+    # anything (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
     #
     # CPython is the oracle and the program states no expected output, because
     # the addresses differ. What has to match is the SEMANTICS: the token is
@@ -12295,18 +12207,6 @@ def main():
 
 main()
 """)
-
-    test_gimple_stdout("gimple_star_spread_of_string_beside_own_slot", """\
-def tup_str(a: str) -> tuple:
-    return (0, *a)
-
-def list_str(a: str) -> list:
-    return [0, *a]
-
-print(tup_str('ab'))
-print(list_str('ab'))
-print([*'ab'])
-""", "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
 
     _parser_struct_and_symbols()
 

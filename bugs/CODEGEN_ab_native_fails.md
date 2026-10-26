@@ -1,15 +1,13 @@
 # CODEGEN: `ab-native` is disabled, not run — what fails, what would fix it, how to turn it back on
 
-## Status (2026-10-26 — re-run with existing mojoc; 29/30 PASS, only match_stmt diverges)
+## Status (2026-09-30 — the test is REGISTERED and NOT RUN; its outcome is known and it is not cheap)
 
 `ab-native` is the python-vs-native byte-parity A/B sweep
 (`test_ab_native.py`): 27 built-in `--dump` snippets plus 3 `--dump-full`
 sibling-import scenarios, 30 gated cases in all (`test_simple.mojo` is
-informational and not counted). Re-run via `python3 tools/memslot.py --gb 8 --label ab-native-test -- python3 test_ab_native.py`
-(uses existing `mojoc`; no self-host build). Results: 29 passed, 1 failed (`match_stmt`).
-Peak: 0.1 GB (far below 4 GB line). `test_scratch_isolation`: 26 passed.
-Remaining divergence is the `match_stmt` case; root cause is the gimple lowering
-`_gen_stmt_MatchStmt` (see `bugs/CODEGEN_the_gimple_match_lowering_drops_the_capture_and_reads_every_pattern.md`).
+informational and not counted). It was a known failure carrying
+`expect=SELFHOST_TOKENIZE_BLOWUP`, and it ran in full on every gate to reach
+that same verdict. Measured, from the 2026-09-30 gate:
 
 | | |
 |---|---|

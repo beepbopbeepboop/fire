@@ -813,7 +813,7 @@ def _():
     # `fire_compiler.py::_source_lines` asks
     # `_LINE_TERMINATORS.split(src)` for a file's physical lines, so every
     # source tokenized as ZERO lines self-hosted and every `.ci` came out
-    # empty (the stage2 empty-dump bug (its doc was deleted with the fix)).
+    # empty (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
     #
     # The cases pin Python's three rules this has to match: the pieces BETWEEN
     # the matches, the CAPTURING GROUPS interleaved between them, and the

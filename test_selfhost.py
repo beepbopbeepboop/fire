@@ -175,8 +175,8 @@ def dylib_module_path_refuses_a_generated_cpp() -> bool:
     keeps the `extern` declarations and the calls, and the object references
     `_mojogen_*` symbols nothing defines. In a dylib that links anyway
     (`-undefined dynamic_lookup`) and every client falls back to source with no
-    diagnostic; in an executable it is a link failure. The refusal fixes the
-    silent drop of `generated_cpp` (see the fix in `build_stdlib_dylib.py`).
+    diagnostic; in an executable it is a link failure. See
+    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
     """
     sys.path.insert(0, REPO)
     from build_stdlib_dylib import (_DylibGeneratedCppError,
@@ -317,8 +317,8 @@ def closure_coroutines_are_lowerable() -> bool:
     for name, left in offenders:
         print(f"  ✗ {name}: the C++20 coroutine path claims "
               f"{', '.join(sorted(set(left)))}, and that path's definitions "
-              f"the refusal in build_stdlib_dylib.py; definitions live in a "
-              f"companion .cpp this build does not link)")
+              f"live in a companion .cpp this build does not link (see "
+              f"bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md)")
     for name, left in fell_back:
         print(f"  · {name}: {', '.join(sorted(set(left)))} declined by BOTH "
               f"backends, so the module refuses and is interpreted from "

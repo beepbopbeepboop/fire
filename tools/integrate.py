@@ -159,10 +159,6 @@ def main():
                          "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
                          "one integrator, never by a worker. Landing still requires the FULL gate; a --jobs run "
                          "only reports (it never fast-forwards master).")
-    ap.add_argument("--stdlib", action="store_true",
-                    help="LIGHT GATE (owner's swarm policy): the gate is just the stdlib compile (`suite.py stdlib-syntax`); "
-                         "green lands on master. The wider checks (`make check`, stdlib-dylib) run AFTER landing, in "
-                         "tools/verify_landed.py, which files a fixer if they go red")
     ap.add_argument("--no-fixers", action="store_true",
                     help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
                          "(used by the bisect probes, which re-merge the same branches many times)")
@@ -245,7 +241,7 @@ def main():
             for n in merged: reg[n]["state"] = "integrated"
         print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
         return
-    if a.quick and not a.jobs and not a.stdlib:
+    if a.quick and not a.jobs:
         print("quick tier for %s: %s" % (merged, " ".join(QUICK)))
         qrc = run(["python3", "tools/suite.py"] + QUICK, INTEG, os.path.join(INTEG, "quick.log"))
         if qrc != 0:
@@ -255,8 +251,7 @@ def main():
             print(subprocess.run("sed -n '/^FAILED:/,/^suite:/p' quick.log | head -12", shell=True, cwd=INTEG,
                                  capture_output=True, text=True).stdout)
             sys.exit(1)
-    gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
-                else ["python3", "tools/suite.py", "stdlib-syntax"] if a.stdlib else ["make", "gate"])
+    gate_cmd = ["python3", "tools/suite.py"] + a.jobs if a.jobs else ["make", "gate"]
     print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
     rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
     if a.jobs:

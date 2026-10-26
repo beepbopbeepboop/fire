@@ -2920,33 +2920,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             for ta in type_args:
                 base = ta.split('[', 1)[0].strip()
                 if '[' in ta and base in gen._imported_generic_structs:
-                    # Strip EXACTLY ONE trailing `]` — the annotation's own
-                    # closing bracket — not EVERY trailing one. `.rstrip(']')`
-                    # tore `Variant[NicheableType, EmptyAndTrivial[0]]` (a
-                    # `size_of[...]` type arg whose LAST argument is itself a
-                    # nested type application) apart as
-                    # `NicheableType, EmptyAndTrivial[0`, dropping the last
-                    # argument's own bracket. The corrupted arg monomorphized
-                    # into the Variant body as the unbalanced
-                    # `_VariantStorageFor[NicheableType, EmptyAndTrivial[0]`,
-                    # and the re-parse of the instantiated .mojo died with
-                    # `Expected RBRACKET got KW('comptime')` at the following
-                    # `comptime __del__is_trivial = ...` line, so EVERY niche-
-                    # variant instantiation was refused (measured 2026-10-27
-                    # on test/utils/test_variant.mojo's
-                    # `test_variant_niche_optimization_size`: the three
-                    # `size_of[Variant[...]]` sites, the last arg `EmptyAnd-
-                    # Trivial[0]`/`[1]` in each). The same hazard
-                    # stmts_shared._bracket_inner's docstring records for
-                    # `dict[str, dict[str, tuple[str, int]]]`. `ta` here is
-                    # always the balanced rendering `_type_expr_to_ann` built
-                    # (`base[inner]`), so its final char is its own `]`; the
-                    # guard keeps a malformed, unterminated arg degrading the
-                    # way the old rstrip left it (unbalanced -> refused
-                    # downstream), never worse.
-                    inner = ta.split('[', 1)[1]
-                    if inner.endswith(']'):
-                        inner = inner[:-1]
+                    inner = ta.split('[', 1)[1].rstrip(']')
                     sub_args = [a.strip() for a in gimple_ctypes._split_top_level_commas(inner)]
                     # _is_concrete_type_arg only inspects the OUTER base
                     # name — "DictEntry[Self.K, Self.V, Self.H]" (inside

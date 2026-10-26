@@ -1294,6 +1294,24 @@ class MojoInstance:
     def __init__(self, mojo_class):
         self._mojo_class = mojo_class
 
+    def __getattr__(self, name):
+        # Python's built-in `getattr(obj, name)` (which the interpreter
+        # exposes as the `getattr` builtin) only consults real instance
+        # attributes and class attributes, never the Mojo method table, so a
+        # method fetched dynamically (`getattr(c, "tag")`) raised
+        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`'s
+        # method resolution here so the two spellings agree.
+        cls = self._mojo_class
+        method = cls.methods.get(name)
+        if method is not None:
+            if name in cls.static_methods:
+                return method
+            if name in cls.class_methods:
+                return BoundClassMethod(method, cls, cls.interpreter)
+            return BoundMethod(method, self, cls.interpreter)
+        if name in cls.comptime_aliases:
+            return cls.comptime_aliases[name]
+        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
         method, if the struct defines one, and return the accumulated text —
@@ -1381,29 +1399,6 @@ class BoundMethod:
         self.interpreter.scope = Scope(parent=self.interpreter.scope)
         self.interpreter.scope.define('self', self.instance)
         try:
-            if isinstance(f, MojoOverloadSet):
-                # An overloaded method taken as a value (and then bound to
-                # an instance) has no single `_invoke` to delegate to; route
-                # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver. See
-                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
-                #
-                # The receiver is folded into the `*`-unpack (`invoke(f,
-                # *_merged, **kwargs)`) rather than written as an explicit
-                # positional before it (`invoke(f, self.instance, *args,
-                # **kwargs)`): the codegen cannot lower an explicit positional
-                # that PRECEDES a `*`-unpack in the same call — it emits the
-                # positional as a separate C argument (casting it to the
-                # `*args` MojoList*) instead of folding it into the unpacked
-                # list, so the call comes out with one argument too many and
-                # the self-host's `gcc -fgimple` refuses it ("too many
-                # arguments to 'myinterpreter_Interpreter_invoke'"). The
-                # `func, *args, **kwargs` shape below (no leading positional
-                # before the unpack) is the one it lowers. Semantics are
-                # unchanged: both pass func=f, the receiver prepended to the
-                # `*args`, and `**kwargs`.
-                _merged = [self.instance] + list(args)
-                return self.interpreter.invoke(f, *_merged, **kwargs)
             interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
             return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
@@ -5025,13 +5020,6 @@ class Interpreter:
             raise NotImplementedError(f"{self._loc(expr)}No handler for {type(expr).__name__}")
 
         return method(expr)
-
-    def eval_FunctionType(self, expr: N.FunctionType):
-        """A comptime function-type alias survives as a signature node.
-        At runtime it cannot be evaluated, but that's okay for the regression
-        test which only needs the alias to be something other than _comptime_expr.
-        """
-        return expr  # Return the node itself as a value
 
     def eval_WalrusExpr(self, expr: N.WalrusExpr):
         """Walrus `(name := value)`: evaluate value, bind name in the current

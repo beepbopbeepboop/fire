@@ -1710,7 +1710,8 @@ def _emit_reflection_dispatch(self, parts):
     elem_repr_names = set()
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
-        if len(fields) == 0:
+        _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
+        if len(fields) == 0 and not _mm_arms_sn:
             continue
         get_lines = []
         set_lines = []
@@ -2077,9 +2078,15 @@ def _emit_reflection_dispatch(self, parts):
             "  return strdup(\"None\");\n"
             "}\n")
         parts.extend(refl_parts)
+        _getattr_emitted = list(reflect_emitted)
+        for _sn2 in reflect_structs:
+            if _sn2 in _getattr_emitted:
+                continue
+            if _as_str(_sn2) in (self._getattr_method_arms or {}):
+                _getattr_emitted.append(_sn2)
         tag_cases_get = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
-            for sn in reflect_emitted)
+            for sn in _getattr_emitted)
         tag_cases_set = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
             for sn in reflect_emitted)
@@ -2173,8 +2180,6 @@ def _emit_reflection_dispatch(self, parts):
                "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
                "    if (mojo_is_registered_dict(val))\n"
                "      return _mojo_repr_dict((MojoDict *)(intptr_t)val);\n"
-               "    if (mojo_is_registered_bytes(val))\n"
-               "      return mojo_bytes_repr((MojoBytes *)(intptr_t)val);\n"
                "    int64_t _tag = mojo_read_type_tag_safe(val);\n")
             + f"{tag_cases_repr_elem}\n"
             + ("    return mojo_repr_str((char *)(intptr_t)val);\n"
@@ -3725,38 +3730,6 @@ def gen_module_impl(self, stmts):
             _seed_selfhost_module_globals(self)
             _seed_selfhost_struct_dict_field_types(self)
             _seed_selfhost_return_elem_types(self)
-
-    # Root fix for cyclic-closure import of a container global with no
-    # independent type yet (bug:CODEGEN_cyclic_closure...): seed this
-    # module's own literal/container globals BEFORE its imports compile,
-    # so a from-import of an ancestor-in-progress can resolve the owner's
-    # field instead of falling to the unknown-identifier 0.
-    _mod_name = self.module_name if len(self.module_name) > 0 else "root"
-    for _s in stmts:
-        if isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr):
-            _n = _s.target.name
-            _v = _s.value
-            _semantic = None
-            if isinstance(_v, IntLiteral) or isinstance(_v, BoolLiteral):
-                _semantic = 'int'; _cdecl = 'int'
-            elif isinstance(_v, StringLiteral):
-                _semantic = 'char *'; _cdecl = 'char *'
-            elif isinstance(_v, (ListExpr, TupleExpr)) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('list', 'List')):
-                _semantic = 'MojoList *'; _cdecl = 'int64_t'
-            elif isinstance(_v, (SetExpr,)) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('frozenset', 'set')):
-                _semantic = 'MojoSet *'; _cdecl = 'int64_t'
-            elif isinstance(_v, DictExpr) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('dict', 'Dict')):
-                _semantic = 'MojoDict *'; _cdecl = 'int64_t'
-            if _semantic is not None:
-                self._global_to_module.setdefault(_n, _mod_name)
-                self._global_var_types.setdefault(_n, _semantic)
-                self._global_c_decl_types.setdefault(_n, _cdecl)
 
     imported_code = []
     imported_stmts = []
@@ -8557,7 +8530,6 @@ def gen_module_impl(self, stmts):
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, False)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
-    self._coro_str_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -8636,11 +8608,6 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
-        _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
-        if _ps_body:
-            _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
-            for _ps_k in _ps_body:
-                _ps_d.add(_as_str(_ps_k))
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params
@@ -11825,35 +11792,6 @@ def gen_module_impl(self, stmts):
             # usable when every callable in it agrees).
             self._global_container_callable_ret[_gname] = \
                 _lambda_pairs_ret_type(self, _value.pairs)
-        elif isinstance(_value, CallExpr) and isinstance(_value.func, IdentExpr):
-            # Package-scope global whose RHS is a call: the callee's return
-            # type is already final at Phase 1.7 for module-level defs, so
-            # use it directly for the C declaration (fixes container-returning
-            # calls kept at the int64_t default; see doc: the missing
-            # declaration in the middle is the struct field type).
-            _ret = self.func_return_types.get(_value.func.name) or \
-                self._infer_return_type(_value.func.name)
-            if isinstance(_ret, str) and _ret.endswith(' *'):
-                _phase17_set_gtype(_gname, _ret, _own)
-                if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                            'MojoGenerator *'):
-                    # A container return is the SAME global as a dict/list/set
-                    # LITERAL one (the branches above): the C FIELD is the
-                    # int64_t box, the pointer stays the SEMANTIC type. The
-                    # store path resolves its destination through
-                    # `_global_c_decl_types` FIRST (falling back to
-                    # `_global_var_types`), and this branch ran before it
-                    # without a cdecl entry — so the store saw the semantic
-                    # pointer and emitted an uncast assignment into the boxed
-                    # `int64_t` field (`_root_globals.f = _t2` with `_t2` a
-                    # `MojoDict *`; measured 2026-10-27 on the
-                    # gimple_module_scope_global_bound_to_container_returning_
-                    # call regression: `f = mk()` over `mk() -> {"a": 1}`,
-                    # the gcc `-Wint-conversion` pair in `_toplevel`).
-                    # Non-container pointers (a `char *` return) keep the
-                    # pointer field the 12278/12292 rule gives every other
-                    # kind, so they are deliberately left unset here.
-                    self._global_c_decl_types[_gname] = 'int64_t'
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return
             # type is `join_all([_quick_type(body)])` -- exactly what
@@ -12122,15 +12060,8 @@ def gen_module_impl(self, stmts):
                     and isinstance(_scan_stmt.value.func.obj, IdentExpr)
                     and _scan_stmt.value.func.obj.name in _COMPILE_TIME_CALL_MODULES
                     and _scan_stmt.value.func.member == 'compile'
-                    and len(_scan_stmt.value.args) == 1
-                    and not _scan_stmt.value.kwargs
+                    and _scan_stmt.value.args
                     and isinstance(_scan_stmt.value.args[0], StringLiteral)):
-                # ONE argument and no keyword: a flagged `re.compile(p,
-                # re.MULTILINE)` is a different pattern than `p`, the
-                # engine has no flag input, and recording only the string
-                # lowered `for m in P.findall(s)` to a scan that silently
-                # matched nothing (the compiled `_dep_sources_texts` found no
-                # dependencies). Unrecorded, the loop is refused loudly.
                 self._regex_patterns[_gname] = _scan_stmt.value.args[0].value
             if _gname in _pre_declared_globals:
                 continue
@@ -12851,25 +12782,7 @@ def gen_module_impl(self, stmts):
             _gn = _rs.target.name
             if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
                 _crt = self.func_return_types.get(_rs.value.func.name, '')
-                # A CONTAINER return stays in the int64_t box the literal
-                # branches give its twin (`f = mk()` is the same global as
-                # `f = {"a": 1}`): the C field is the box, the store boxes
-                # the pointer through `(int64_t)(void *)`, and the read
-                # unboxes (see the Phase 1.7 CallExpr branch, which boxes
-                # these four return kinds, and the working literal store
-                # `_root_globals.f = (int64_t)(void *)_t1`). Widening one
-                # of these here — which this loop did unconditionally — left
-                # the boxed FIELD with an uncast `_root_globals.f = _t2`
-                # store where `_t2` is the raw `MojoDict *`, the
-                # gcc -Wint-conversion pair that broke
-                # gimple_module_scope_global_bound_to_container_returning_
-                # call (measured 2026-10-27: `f = mk()` over
-                # `mk() -> {"a": 1}`). Non-container pointer returns are
-                # exactly the shape this loop was written for, and they
-                # still widen below.
-                if isinstance(_crt, str) and _crt.endswith(' *') \
-                        and _crt not in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                                         'MojoGenerator *'):
+                if isinstance(_crt, str) and _crt.endswith(' *'):
                     self._global_c_decl_types[_gn] = _crt
                     self._global_var_types[_gn] = _crt
                     # Mirror into this instance's own overlay: the widened
@@ -13283,12 +13196,8 @@ def gen_module_impl(self, stmts):
         # The self-host forward declaration must match the definition's
         # arity or the closure fails with "conflicting types for
         # 'compile_to_gimple'". `auto_gpu` is keyword-with-default at every
-        # call site, but a 4th PARAMETER still changes the type. `_Bool`,
-        # not `int`: the definition is emitted from the `bool` parameter
-        # annotations (6a88e6ea's entry-point unification added them) and
-        # maps them to `_Bool`, so an `int` here is a different C type —
-        # "conflicting types for 'compile_to_gimple'".
-        'char *compile_to_gimple(char *mojo_src, _Bool do_imports, char *filename, _Bool auto_gpu);',
+        # call site, but a 4th PARAMETER still changes the type.
+        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename, int auto_gpu);',
         'int64_t mojo_open_file(char *path);',
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
@@ -14932,22 +14841,6 @@ def gen_module_impl(self, stmts):
     struct_defs = [s for s in stmts if isinstance(s, StructDef)]
     if not self.do_imports:
         struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
-    # The method prototypes below can carry a `MojoGenerator *` return
-    # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
-    # generator block that DEFINES the type emits later in this section.
-    # In the entry section that order left every generator-typed forward
-    # decl ahead of its own typedef: `unknown type name 'MojoGenerator'`
-    # plus a cascading `conflicting types for 'Mailbox___iter__'` (measured
-    # 2026-10-25/26, row-25 entry C, the 93d13780-era 14->2 residual pair).
-    # Emit the typedef first; the generator block below then skips its own
-    # copy (membership guard) so the section still carries exactly one.
-    # Full-closure TUs are unaffected: earlier inlined module sections
-    # already emit the identical typedef, and C11 permits identical
-    # redeclarations — the entry's one typedef merely moves earlier within
-    # its own section (measured: no other C output moves).
-    if (self._supported_generators or self._generator_method_api
-            or self._generator_api):
-        parts.append('typedef struct MojoGenerator MojoGenerator;')
     _emit_struct_method_prototypes(self, parts, struct_defs)
 
     if self.emit_struct_defs:
@@ -15309,11 +15202,7 @@ def gen_module_impl(self, stmts):
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
     if self._supported_generators or self._generator_method_api or self._generator_api:
-        # The typedef may already have been emitted ahead of the
-        # method-prototype pass (declaration-before-typedef cascade fix,
-        # see that site) — keep exactly one in the section.
-        if 'typedef struct MojoGenerator MojoGenerator;' not in parts:
-            parts.append('typedef struct MojoGenerator MojoGenerator;')
+        parts.append('typedef struct MojoGenerator MojoGenerator;')
         # `self._generator_api: dict[str, dict] = {}` (and `_generator_
         # method_api`'s matching declaration) has a bare `dict` nested-value
         # annotation, not `dict[str, dict[str, str]]` — the same "no nested-

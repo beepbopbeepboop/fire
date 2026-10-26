@@ -29,8 +29,9 @@ Layout
   <common-git-dir>/control/tasks.json   the registry (shared by all worktrees)
 
 Sessions that work from a checkout OTHER than the one the fleet runs in (a clone, a hand-run
-agent) still reach the fleet's registry: the default is the fleet checkout's .git/control,
-overridable with CONTROL_CTL_DIR=<abs path to that checkout's .git/control>.
+agent) must point control.py at the fleet's registry with CONTROL_CTL_DIR=<abs path to that
+checkout's .git/control>; the default resolves relative to the checkout they are in, which in a
+clone is a private, empty registry that the fleet never reads.
 
 Claims are how two workers are kept off the same problem. A claim is a string:
 `module:os`, `bug:CODEGEN_foo`, or a repo path (`tools/formal_sweep.py`). Two
@@ -66,22 +67,19 @@ _CTL_WARNED = []
 def ctl_dir():
     """Where the shared registry lives.
 
-    The registry is FLEET state, not checkout state. The default is the
-    fleet's own registry (the checkout the fleet runs from); the fleet also
-    lands here because it IS that checkout. Override with
-    CONTROL_CTL_DIR=<abs path to a .git/control> when the fleet runs from
-    a different checkout than this default. The warning below covers the
-    default itself pointing at a missing/moved registry. (The previous
-    default was this checkout's own .git/control, which in a clone is a
-    private, empty registry the fleet never reads — exactly the split that
-    was hit on 2026-10-25: `control.py claims` in a clone printed nothing
-    while four workers were live in the other tree's registry.)"""
+    The registry is FLEET state, not checkout state: it lives in the
+    <git-common-dir>/control of the checkout the fleet runs from. A session working from ANOTHER
+    checkout (a clone, e.g. .fire-fire, whose own .git/control is an empty private copy) must set
+    CONTROL_CTL_DIR to the ABSOLUTE path of the fleet's control dir; otherwise this checkout would
+    read/write its own empty registry and its claims would be invisible to the fleet (and vice
+    versa), silently defeating the whole claim system. The warning below exists because exactly
+    that split was hit on 2026-10-25: `control.py claims` in a clone printed nothing while four
+    workers were live in the other tree's registry."""
     env = os.environ.get("CONTROL_CTL_DIR")
     if env:
         d = os.path.realpath(env)
     else:
-        d = os.path.realpath(os.path.expanduser(
-            "~/net/chatgpt/claude/mojo-reference/.git/control"))
+        d = os.path.join(os.path.realpath(os.path.join(MAIN, git("rev-parse", "--git-common-dir"))), "control")
         if not _CTL_WARNED and not any(os.path.exists(os.path.join(d, f)) for f in ("tasks.json", "external.json", "feed.json")):
             _CTL_WARNED.append(1)
             sys.stderr.write("warning: control registry %s is empty. If the fleet runs from another "
@@ -476,9 +474,10 @@ def cmd_refill(a):
                   open(breaker_path(), "w"))
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
-    if not any(pick_model(i["model"] or MODEL) for i in (json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json"))):
-        print("%s refill: every queued task's model is out of quota (%s), starting nothing" % (
-            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u))) for m, u in dead_models().items())), flush=True)
+    model = pick_model(MODEL)
+    if model is None:
+        print("%s refill: every model is out of quota (%s), starting nothing" % (
+            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F", time.localtime(u))) for m, u in dead_models().items())), flush=True)
         return
     if time.time() < breaker_until():
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
@@ -489,16 +488,13 @@ def cmd_refill(a):
     items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
                    key=lambda i: i["added"])
     started = 0
-    items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     for it in items:
-        if live + started >= a.target and not it["name"].startswith("fix-landed"):
-            continue                      # a red master is repaired at once, whatever the slot count
+        if live + started >= a.target:
+            break
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL))
-        if not ns.model:
-            continue                      # this task's model (and every fallback) is out of quota; others may not be
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -963,8 +959,7 @@ def main():
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
     s.add_argument("--needs", nargs="*"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_enqueue)
-    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8)
-    s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
+    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)

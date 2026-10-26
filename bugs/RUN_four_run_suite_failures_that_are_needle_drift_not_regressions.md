@@ -18,7 +18,7 @@ formal run: PASS=1326 FAIL=6
 
 (the run under `/opt/homebrew/bin/python3` reports `FAIL=20`; fourteen of the
 extra fourteen are a CPython-version artefact with its own doc —
-the printf-number-conversion check's CPython wording drift.)
+`bugs/RUN_the_printf_number_conversion_check_greens_only_on_one_cpython.md`.)
 
 Two of the six were fixed on this branch and are not here:
 

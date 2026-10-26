@@ -10835,11 +10835,7 @@ PRINTF_NUMBER_CONVERSIONS = (frozenset(PRINTF_32_BIT_INTEGER_CONVERSIONS)
 #: conversion. Both are the interpreter's own wording and quoting anything else
 #: would be the "a list is required, not int" mistake this table exists to
 #: avoid.
-# CPython reworded these messages in 3.15, so the table is keyed by minor
-# version: the check (`test_formal_run.check_printf_number_conversion_agreement`)
-# selects the entry for the interpreter running the build, and refuses to
-# guess a wording for a minor version nobody has measured.
-PRINTF_CPYTHON_NUMBER_REFUSALS_3_14 = {
+PRINTF_CPYTHON_NUMBER_REFUSALS = {
     "d": "%d format: a real number is required, not {t}",
     "i": "%i format: a real number is required, not {t}",
     "u": "%u format: a real number is required, not {t}",
@@ -10855,35 +10851,6 @@ PRINTF_CPYTHON_NUMBER_REFUSALS_3_14 = {
     "G": "must be real number, not {t}",
     "*": "* wants int",
 }
-
-PRINTF_CPYTHON_NUMBER_REFUSALS_3_15 = {
-    "d": "format argument: %d requires a real number, not {t}",
-    "i": "format argument: %i requires a real number, not {t}",
-    "u": "format argument: %u requires a real number, not {t}",
-    "o": "format argument: %o requires an integer, not {t}",
-    "x": "format argument: %x requires an integer, not {t}",
-    "X": "format argument: %X requires an integer, not {t}",
-    "c": "format argument: %c requires an integer or a unicode character, not {t}",
-    "e": "format argument: %e requires a real number, not {t}",
-    "f": "format argument: %f requires a real number, not {t}",
-    "g": "format argument: %g requires a real number, not {t}",
-    "E": "format argument: %E requires a real number, not {t}",
-    "F": "format argument: %F requires a real number, not {t}",
-    "G": "format argument: %G requires a real number, not {t}",
-    "*": "format argument 1: * requires int, not {t}",
-}
-
-PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS = {
-    (3, 14): PRINTF_CPYTHON_NUMBER_REFUSALS_3_14,
-    (3, 15): PRINTF_CPYTHON_NUMBER_REFUSALS_3_15,
-}
-
-import sys as _sys
-_PRINTF_CPYTHON_VERSION = (_sys.version_info.major, _sys.version_info.minor)
-PRINTF_CPYTHON_NUMBER_REFUSALS_SUPPORTED_VERSIONS = frozenset(
-    PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS)
-PRINTF_CPYTHON_NUMBER_REFUSALS = PRINTF_CPYTHON_NUMBER_REFUSALS_VERSIONS.get(
-    _PRINTF_CPYTHON_VERSION, {})
 
 
 def _printf_length_modifier(spec: str) -> str:
@@ -21694,9 +21661,10 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     # a store through a `Pointer[Float64]` writes the value's own BITS, so the
     # integer 1 is 0x1 — a denormal, not 1.0 — and the answer the reader is
     # given is `Int(x)`, which is `FCVTZS`.
-    bits = (" So a store through a `Float64` pointee writes the value's own "
+    bits = ("" if pointee_is_float else
+            " So a store through a `Float64` pointee writes the value's own "
             "BITS: `p.value() = 1` would write 0x1, a denormal rather than "
-            "1.0." if pointee_is_float else "")
+            "1.0.")
     return (
         f"the pointee is `{pointee}` and this store writes {where}.{bits} "
         f"{spelled(value)} is a different kind of word from the one the "
@@ -35394,73 +35362,6 @@ def comprehension_result_is_flat(expr) -> bool:
     return True
 
 
-def _descendant_builds_a_non_literal_container(e) -> bool:
-    """True when the subtree under `e` builds a container the element's own
-    emission does not reserve at a LITERAL site.
-
-    The question `comprehension_element_is_relocatable` asks of a container
-    literal's children, and it is `_expr_builds_a_container` narrowed to the
-    answer the relocation needs: a container literal is not the answer, it is
-    a branch into its children (the relocation gives each such literal its own
-    per-iteration slot), while a comprehension, a slice, a call and a star
-    splat each build their blob where its own emission does not move it per
-    iteration — a comprehension reserves its result in `_emit_comprehension`
-    before its walk and reuses it, a slice reserves its result in its own
-    emission, a call's returned block is parked above the blob region by
-    `container_returned_blob_sites`, and a star literal appends into its blob
-    at its own site — so any such blob's address in the element's words would
-    point at one frame location every iteration shares, the aliasing the flat
-    copy is refused for. A star is the same answer for its own reason: its
-    literal lowers by APPENDING (`_emit_list_star`), which cannot target a
-    slot the append does not read its count from.
-    """
-    if e is None or isinstance(e, str):
-        return False
-    if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
-        if isinstance(e, F.DictExpr):
-            pairs = e.pairs or []
-            if any(isinstance(k, F.UnaryOp) and k.op in ("**", "*")
-                   for k, _v in pairs):
-                return True
-            children = [x for pair in pairs for x in pair]
-        else:
-            if any(isinstance(el, F.UnaryOp) and el.op == "*"
-                   for el in e.elements or []):
-                return True
-            children = list(e.elements or [])
-        return any(_descendant_builds_a_non_literal_container(c)
-                   for c in children)
-    return _expr_builds_a_container(e)
-
-
-def comprehension_element_is_relocatable(element) -> bool:
-    """True when a comprehension ELEMENT's containers are given a per-iteration
-    BASE rather than a per-iteration COPY.
-
-    THE predicate for the element a byte copy cannot make per-iteration and a
-    base can: the element's region carries the ADDRESS of a container the same
-    emission built, so a copy would share it, and the sound materialisation is
-    to build each such container in the slot ITS iteration owns — a slot of a
-    `cap`-sized array indexed by the result count, recomputed at run time —
-    which the emitters' `_emit_list`/`_emit_dict` do when the element is this
-    shape. It is here rather than in either backend so the two architectures
-    cannot relocate — or refuse — the same element differently.
-
-    The shape is a container LITERAL whose container-building descendants are
-    all container literals — a list of lists, a tuple holding a list, a dict
-    pair holding one — because those are the blobs the element's own emission
-    reserves at the element site and the relocation can move. What is not this
-    shape keeps `comprehension_element_blob_refusal`: a nested comprehension
-    (its result is reserved in `_emit_comprehension` and reused), a slice (its
-    result is a separate blob of its own), a call (its returned block is
-    parked elsewhere), and a star splat (its literal appends at its own site).
-    """
-    if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
-                                F.DictExpr)):
-        return False
-    return not _descendant_builds_a_non_literal_container(element)
-
-
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container and
@@ -35473,13 +35374,9 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     because a byte copy of its result is sound. What reaches this refusal is
     the element that a byte copy of would STILL alias or that this path cannot
     size, the same shapes the predicate's docstring names: a nested
-    comprehension, a slice whose base carries a scratch
+    comprehension, a list of lists, a slice whose base carries a scratch
     address, a constructor call, and every non-literal expression — a call, a
     subscript or a member read whose result this path cannot type among them.
-    A container literal that holds containers of its own (a list of lists
-    among them) is the OTHER materialisation, the one
-    `comprehension_element_is_relocatable` answers with a per-iteration base
-    rather than a per-iteration copy, so it does not reach this refusal.
     `comprehension_element_is_flat_container` is the shared predicate and
     `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
     pins both sides.
@@ -35499,13 +35396,11 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                               CPython: 63   this path: 93
 
     **Both of those are now materialised per iteration** by
-    `comprehension_element_is_flat_container`, so this message fires only on
-    the shapes whose per-iteration copy is unsound and whose containers the
-    relocation does not build at the element site: a nested comprehension
-    whose produced values are containers, a slice whose base carries a scratch
-    address and a constructor call. A container literal that holds containers
-    of its own (a list of lists among them) is materialised per iteration by
-    the relocation, and its rows answer rather than refuse. The paragraph above is the
+    `comprehension_element_is_flat_container`, so this message fires only on the
+    shapes whose per-iteration copy is unsound: a container literal with a nested
+    container in it, a nested comprehension whose produced values are containers,
+    a list of lists, a slice whose base carries a scratch address and a
+    constructor call. The paragraph above is the
     measurement that made the refusal the right answer for THEM; the two
     reproducers are kept because they are what a copy must answer, and are the
     rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
@@ -54628,12 +54523,10 @@ def struct_is_context_manager(struct_def) -> bool:
         own `TemporaryDirectory` and `nullcontext` both keep more than one
         attribute, so the honest mirror of either is representable.
       * `__enter__` takes no argument other than the receiver and RETURNS a
-        value.  `__exit__` takes the receiver alone, CPython's own
-        `(self, exc_type, exc_val, tb)`, or the variadic spelling
-        `(self, *exc)` — and each wider spelling is accepted ONLY when the
-        method never reads the words it would receive
-        (`context_exit_ignores_its_exception_words` /
-        `context_exit_variadic_ignores`).  Those three words are a
+        value.  `__exit__` takes either the receiver alone or CPython's own
+        `(self, exc_type, exc_val, tb)` — and the four-parameter spelling is
+        accepted ONLY when the method never reads its last three words
+        (`context_exit_ignores_its_exception_words`).  Those three words are a
         question about the unwinder this path does not have (see
         `refuse_dropped_handler_arm`): there is nothing to pass them, and a
         `__exit__` that acted on them could not act on a value this path
@@ -54663,17 +54556,10 @@ def struct_is_context_manager(struct_def) -> bool:
     # unwinder), so passing a made-up value to a method that looks at it would be
     # a lie; a method that ignores them is the cleanup-only shape and lowers
     # with the receiver alone plus three words it never looks at.  See
-    # `context_exit_ignores_its_exception_words`.  The variadic spelling of the
-    # same shape, `__exit__(self, *exc)` with `exc` unread, is the second half of
-    # that predicate (`context_exit_variadic_ignores`) and is called with the
-    # receiver alone, which binds it to the empty tuple.
-    if params == -1:
-        if not context_exit_variadic_ignores(exit_):
-            return False
-    elif params == 4:
-        if not context_exit_ignores_its_exception_words(exit_):
-            return False
-    elif params != 1:
+    # `context_exit_ignores_its_exception_words`.
+    if params not in (1, 4):
+        return False
+    if params == 4 and not context_exit_ignores_its_exception_words(exit_):
         return False
     return not context_exit_returns_truthy(exit_)
 
@@ -54996,28 +54882,17 @@ def _exit_return_folds_truthy(value_node) -> bool:
 
 
 def _dunder_receiver_params(method) -> int:
-    """How many parameters a method declares, receiver included; -1 if variadic.
+    """How many parameters a method declares, receiver included; -1 if unknown.
 
     `*args`/`**kwargs` cannot be counted from the tree and are -1, which fails
     every comparison here — a variadic context-manager method is refused rather
     than assumed, for the same reason a variadic call is
-    (`refuse_variadic_parameter_read`) — **except** for the one variadic shape a
-    context manager really writes, which `context_exit_variadic_ignores` decides
-    and `__exit__`'s gate lets through.
-
-    **The star is read from the parameter LIST, not from an attribute.**  This
-    used to ask `getattr(method, "vararg", None)`, and no `FunctionDef` on this
-    front end has that attribute — the parser keeps the star IN the name it
-    appends to `params` (`("*args", …)` / `("**kwargs", …)`,
-    `fire_compiler.py::_parse_funcdef`).  So `def __exit__(self, *args)` came
-    out as arity 2, was refused with a message about "1 parameters after the
-    receiver", and the variadic branch below was dead.  `function_param_shape`
-    is the one reader of that list for the whole file, so the two cannot drift.
+    (`refuse_variadic_parameter_read`).
     """
-    shape = function_param_shape(method)
-    if shape.variadic:
+    params = list(getattr(method, "params", None) or ())
+    if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
         return -1
-    return len(shape.fixed)
+    return len(params)
 
 
 def _param_names(params) -> list:
@@ -55059,63 +54934,17 @@ def context_exit_ignores_its_exception_words(method) -> bool:
     conservative direction: it is not a read, and refusing it costs a shape no
     real context manager writes.
     """
-    shape = function_param_shape(method)
-    if shape.variadic or len(shape.fixed) != 4:
+    params = list(getattr(method, "params", None) or ())
+    if len(params) != 4 or getattr(method, "vararg", None) or \
+            getattr(method, "kwarg", None):
         return False
-    names = set(_param_names(list(getattr(method, "params", None) or [])[1:]))
+    names = set(_param_names(params[1:]))
     if len(names) != 3 or None in names:
         return False
-    return not _body_reads_any_name(method, names)
-
-
-def _body_reads_any_name(method, names) -> bool:
-    """Whether any of `names` occurs as an identifier in `method`'s body.
-
-    The shared half of the two ignoring predicates below — the four-fixed-word
-    shape and the variadic one — so a name read inside a nested `def`, a
-    closure, or as an assignment TARGET is one occurrence either way (the
-    conservative direction `context_exit_ignores_its_exception_words` states).
-    """
     for node in iter_nodes(getattr(method, "body", None) or ()):
         if isinstance(node, F.IdentExpr) and getattr(node, "name", None) in names:
-            return True
-    return False
-
-
-def context_exit_variadic_ignores(method) -> bool:
-    """True when `__exit__(self, *exc)` never reads its catch-all.
-
-    **The variadic spelling of the same ignoring shape
-    `context_exit_ignores_its_exception_words` accepts**, and it is the one
-    `with` signature this path used to refuse for a reason that stopped being
-    true.  CPython calls `__exit__(type, value, tb)` POSITIONALLY, so a method
-    that catches them catches them in `*exc`:
-
-        class TempDir:
-            def __enter__(self): ...
-            def __exit__(self, *exc): self.close()      # ignores the triple
-
-    On a normal exit CPython binds `exc = (None, None, None)`; this path calls
-    the method with the receiver alone, so `exc` binds the empty tuple.  A body
-    that never looks at `exc` cannot tell the two apart, which is exactly the
-    evidence the four-word predicate uses — so the two are one question and this
-    is its second spelling rather than a second rule.
-
-    **Two clauses are structural rather than about reading, and both are the
-    call shape.**  A *positional* catch-all is required: `def __exit__(self,
-    **kw)` is not a context manager in CPython either (three positional
-    arguments against a keyword-only signature is a `TypeError`), so a `kwarg`
-    with no `vararg` is refused.  And the receiver must be the ONLY fixed
-    parameter: `def __exit__(self, exc_type, *rest)` would leave `exc_type`
-    unbound on the receiver-only call this path makes, so it stays refused even
-    though `rest` is ignored — a value the method could read would be the
-    caller's leftover, which is the failure this whole family refuses.
-    """
-    shape = function_param_shape(method)
-    if shape.vararg is None or len(shape.fixed) != 1:
-        return False
-    names = {n for n in (shape.vararg, shape.kwarg) if n}
-    return not _body_reads_any_name(method, names)
+            return False
+    return True
 
 
 def context_exit_arity(struct_def) -> int:
@@ -55124,12 +54953,10 @@ def context_exit_arity(struct_def) -> int:
     The ONE reader of "what does the exit call pass", for the lowering that
     builds the call (`formal/build.py::_one_with_item`).  It answers from the
     same `_dunder_receiver_params` the gate does, so the call and the gate cannot
-    disagree; a receiver-only `__exit__` is 1, CPython's own three-word spelling
-    is 4, and the variadic shape (`(self, *exc)`, `_dunder_receiver_params` -1)
-    is 1 — it catches the words in an empty tuple the body never reads.  A struct
-    that is not a context manager this path lowers gets the receiver-only
-    answer, which is the shape the resource arm (`open`) uses and the only one
-    its `close` builtin takes.
+    disagree; a receiver-only `__exit__` is 1 and CPython's own three-word
+    spelling is 4.  A struct that is not a context manager this path lowers gets
+    the receiver-only answer, which is the shape the resource arm
+    (`open`) uses and the only one its `close` builtin takes.
     """
     for m in struct_methods(struct_def):
         if getattr(m, "name", None) == CONTEXT_EXIT:
@@ -55330,27 +55157,6 @@ def with_context_manager_defect(struct_def) -> str:
         if params == 1:
             continue
         if params < 0:
-            if name == CONTEXT_EXIT and context_exit_variadic_ignores(
-                    methods[name]):
-                # The gate accepts this shape, so reaching here is impossible —
-                # kept so the sentence and the decision cannot come apart if
-                # `struct_is_context_manager` is ever reordered.
-                continue
-            if name == CONTEXT_EXIT:
-                shape = function_param_shape(methods[name])
-                if shape.vararg and len(shape.fixed) == 1:
-                    return (
-                        f"it declares both dunders, but its `{CONTEXT_EXIT}` "
-                        f"takes CPython's three exception words through a "
-                        f"variadic `*{shape.vararg}` and READS it. Those three "
-                        f"words are a question about an UNWINDER this backend "
-                        f"does not have: there is no exception value, no "
-                        f"traceback and no type word to pass, so any value this "
-                        f"path supplied would be a lie the method then acted on. "
-                        f"Drop the reads (or the catch-all): a `{CONTEXT_EXIT}` "
-                        f"that IGNORES it is the cleanup-only shape, it is what "
-                        f"`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` "
-                        f"declares, and it lowers")
             return (f"it declares both dunders, but its `{name}` is variadic "
                     f"(`*args`/`**kwargs`), which cannot be counted from the "
                     f"tree — so this path refuses it rather than assume it "

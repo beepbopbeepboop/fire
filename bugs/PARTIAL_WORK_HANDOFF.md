@@ -68,7 +68,7 @@ third, purely-syntactic evidence pass beside the existing literal-argument
 one in `module_gen.py` (traces an `IdentExpr`/`self.<field>` ctor argument
 to its own container-literal assignment, feeding the same unanimity-gate
 dicts the literal pass already uses) — not the context observer a prior
-attempt wired in and reverted. See the ctor-arg field-type campaign record for the
+attempt wired in and reverted. See `bugs/BUGFIX_ROADMAP.md` item 30 for the
 verification record (`test_gimple.py` 326/326, `test_selfhost.py` green).
 
 **Re-measured 2026-10-02, and the "still" below is now half stale.** Of the

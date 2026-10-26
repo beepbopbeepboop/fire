@@ -397,9 +397,8 @@ class _DylibGeneratedCppError(RuntimeError):
     """`compile_module_to_c` produced a C++20 coroutine translation unit it has
     no way to hand to the dylib link. Named so a caller that DOES know how to
     link one (`compile_module_to_c_given_gen`, used by the executable path) can
-    tell it apart from a genuine compile failure. The refusal is the fix for
-    the silent drop of `generated_cpp` by `compile_module_to_c` (dylib module
-    path); the root cause is that the C++20 definitions had no link line."""
+    tell it apart from a genuine compile failure. See
+    bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md."""
 
 
 def compile_module_to_c(src: str, path: str, module_name: str,
@@ -470,7 +469,7 @@ def compile_module_to_c(src: str, path: str, module_name: str,
             # pins the second), so this costs no `skip` line today. It is
             # `fire.py dylib` over a project's own Python-family modules where
             # it bites, which is a tree whose `.py` files are in neither list.
-            # the refusal that stops `generated_cpp` being dropped silently.
+            # See bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
             #
             # `linkable=False` for a caller that has NO link line — which is
             # `compile_stdlib.py`'s syntax sweep, the one instrument that reads
@@ -880,8 +879,8 @@ class _OutputLock:
               "__mojogen_build_stdlib_dylib__output_lock_resume"
 
         `test_selfhost.py`'s `closure_coroutines_are_lowerable` is the guard
-        that keeps it out; the root cause is the silent drop of `generated_cpp`
-        by the dylib module path, now refused.
+        that keeps it out; the root cause is filed as
+        `bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md`.
 
     A plain function pair (`_acquire`/`_release` around an explicit
     `try`/`finally`) is the other generator-free shape and lowers correctly
