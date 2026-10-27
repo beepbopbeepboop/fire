@@ -2384,7 +2384,7 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     disabled='bugs/CODEGEN_ab_native_fails.md',
+     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
 # principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
