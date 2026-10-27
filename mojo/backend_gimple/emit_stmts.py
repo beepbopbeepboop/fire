@@ -1899,25 +1899,6 @@ def _gen_stmt_AssignStmt(gen, node):
             _reified = gimple_ctypes.reify_empty_container_literal(gen, vtype, field_type, node.value)
             if _reified is not None:
                 vtype, v = field_type, _reified
-            # A nullable receiver (a padded `zip_longest` slot that can hold
-            # the model's NULL `None`, recorded in `_nullable_ptrs` by the
-            # zip_longest loop lowering) must not be dereferenced raw on a
-            # member WRITE either: CPython raises AttributeError for
-            # `None.field = v`, and a raw `output->peek = t` on a NULL slot
-            # is a segfault (measured 2026-10-27: the merge's own regression
-            # gimple_zip_longest_struct_padded_slot_member_read_is_none_
-            # aware, `input.peek = output.peek = True` over a padded
-            # `StackItem` slot, exited -11). This is the write twin of the
-            # None-aware read dispatch `_lower_MemberExpr` added by the same
-            # work, whose comment scoped the fix to reads ("Writes are
-            # unaffected") and so left this dereference behind.
-            if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
-                    and node.target.obj.name in getattr(gen, "_nullable_ptrs", ())
-                    and '*' in ot):
-                _nul = gen._new_temp('void *')
-                gen._emit(f'  {_nul} = (void *){ov};')
-                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
-                    f"\x27NoneType\x27 object has no attribute \x27{node.target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
             # store — the word store above is the payload; the adjacent
@@ -3375,6 +3356,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
     for target in node.targets:
         if isinstance(target, gimple_ctypes.IdentExpr):
             tname = target.name
+            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype)
             # A chained assignment's IdentExpr target(s) can be a real
             # GLOBAL exactly like _gen_stmt_AssignStmt's single-target
             # case (either via an explicit `global x` inside a real
@@ -3529,20 +3511,6 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             # conversion in gimple call"/assignment) — not merely a
             # warning, a hard compile failure.
             field_type = gen.struct_field_types.get(sn, {}).get(target.member, vtype)
-            # Nullable-receiver guard: the chained-assignment twin of the
-            # identical check in _gen_stmt_AssignStmt's MemberExpr branch
-            # just above — a padded `zip_longest` slot is a NULL struct
-            # pointer on the short sequence's extra iterations, and a raw
-            # `output->field = v` there is a segfault where CPython raises
-            # AttributeError (`input.peek = output.peek = True` is a
-            # MultiAssignStmt, which is why this branch needed its own copy).
-            if (isinstance(target.obj, gimple_ctypes.IdentExpr)
-                    and target.obj.name in getattr(gen, "_nullable_ptrs", ())
-                    and '*' in ot):
-                _nul = gen._new_temp('void *')
-                gen._emit(f'  {_nul} = (void *){ov};')
-                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
-                    f"\x27NoneType\x27 object has no attribute \x27{target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(target.member)}")
         elif isinstance(target, gimple_ctypes.SubscriptExpr):
             ot, obj_v = gen.lower_expr(target.obj)
