@@ -103,6 +103,13 @@ one-line recipes that call it, so `make check-<x>` and
 same work twice — see the gate section. Pick one per intent: `check` while
 iterating, `gate` once at the end.
 
+**Interpreter floor:** every recipe here is bare `python3`; the tree needs
+3.12+ (`str | None` annotations in `gimple_codegen.py`/`formal/` are evaluated
+at def time = PEP 604, and `formal/arm64_proof_gen.py` uses PEP 701 f-string
+backslashes). Use `/opt/homebrew/bin/python3` (3.14) or `python3.12+`; a 3.9–3.11
+host gets a raw `TypeError` at `formal/model.py:1668` instead of a clear
+interpreter message.
+
 Reading a run: the screen shows only failures, skips, a resource breach, a
 30-second heartbeat, and the final tally. **Everything else — a PASS line per
 job with its full argv, exit code, duration and measured peak, the complete
