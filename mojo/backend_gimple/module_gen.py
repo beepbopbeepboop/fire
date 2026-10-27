@@ -3300,7 +3300,9 @@ def gen_module_impl(self, stmts):
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
     self._toplevel_dep_init_modules: list[str] = []
+    self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
+    # Handle FromImportStmt (from X import NAME)
     for _fis in stmts:
         if not isinstance(_fis, FromImportStmt):
             continue
@@ -3322,6 +3324,24 @@ def gen_module_impl(self, stmts):
                 if isinstance(_found['v'], str):
                     self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
+    # Handle ImportStmt (import X; later X.NAME) - populate per-module comptime table
+    for _fis in stmts:
+        if isinstance(_fis, ImportStmt):
+            try:
+                _imp_path, _imp_src, _imp_stmts = self._parsed_import(_fis.module)
+            except Exception:
+                continue
+            if not _imp_stmts:
+                continue
+            # _fis.module is the name X in "import X"
+            module_qualifier = _fis.module
+            self._import_module_comptime_vals[module_qualifier] = {}
+            # Scan all ComptimeVarStmt at module level in the imported module
+            for _cn in _imp_stmts:
+                if isinstance(_cn, ComptimeVarStmt):
+                    _cv = self._eval_const(_cn.value)
+                    if _cv is not None:
+                        self._import_module_comptime_vals[module_qualifier][_cn.target] = _cv
     self._import_scope_stack.append({})
     _generator_fns: dict[int, FunctionDef] = {}
     _async_fns: dict[int, FunctionDef] = {}
@@ -11835,25 +11855,6 @@ def gen_module_impl(self, stmts):
                 self._infer_return_type(_value.func.name)
             if isinstance(_ret, str) and _ret.endswith(' *'):
                 _phase17_set_gtype(_gname, _ret, _own)
-                if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                            'MojoGenerator *'):
-                    # A container return is the SAME global as a dict/list/set
-                    # LITERAL one (the branches above): the C FIELD is the
-                    # int64_t box, the pointer stays the SEMANTIC type. The
-                    # store path resolves its destination through
-                    # `_global_c_decl_types` FIRST (falling back to
-                    # `_global_var_types`), and this branch ran before it
-                    # without a cdecl entry — so the store saw the semantic
-                    # pointer and emitted an uncast assignment into the boxed
-                    # `int64_t` field (`_root_globals.f = _t2` with `_t2` a
-                    # `MojoDict *`; measured 2026-10-27 on the
-                    # gimple_module_scope_global_bound_to_container_returning_
-                    # call regression: `f = mk()` over `mk() -> {"a": 1}`,
-                    # the gcc `-Wint-conversion` pair in `_toplevel`).
-                    # Non-container pointers (a `char *` return) keep the
-                    # pointer field the 12278/12292 rule gives every other
-                    # kind, so they are deliberately left unset here.
-                    self._global_c_decl_types[_gname] = 'int64_t'
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return
             # type is `join_all([_quick_type(body)])` -- exactly what
@@ -12851,25 +12852,7 @@ def gen_module_impl(self, stmts):
             _gn = _rs.target.name
             if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
                 _crt = self.func_return_types.get(_rs.value.func.name, '')
-                # A CONTAINER return stays in the int64_t box the literal
-                # branches give its twin (`f = mk()` is the same global as
-                # `f = {"a": 1}`): the C field is the box, the store boxes
-                # the pointer through `(int64_t)(void *)`, and the read
-                # unboxes (see the Phase 1.7 CallExpr branch, which boxes
-                # these four return kinds, and the working literal store
-                # `_root_globals.f = (int64_t)(void *)_t1`). Widening one
-                # of these here — which this loop did unconditionally — left
-                # the boxed FIELD with an uncast `_root_globals.f = _t2`
-                # store where `_t2` is the raw `MojoDict *`, the
-                # gcc -Wint-conversion pair that broke
-                # gimple_module_scope_global_bound_to_container_returning_
-                # call (measured 2026-10-27: `f = mk()` over
-                # `mk() -> {"a": 1}`). Non-container pointer returns are
-                # exactly the shape this loop was written for, and they
-                # still widen below.
-                if isinstance(_crt, str) and _crt.endswith(' *') \
-                        and _crt not in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                                         'MojoGenerator *'):
+                if isinstance(_crt, str) and _crt.endswith(' *'):
                     self._global_c_decl_types[_gn] = _crt
                     self._global_var_types[_gn] = _crt
                     # Mirror into this instance's own overlay: the widened
