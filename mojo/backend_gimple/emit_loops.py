@@ -1523,15 +1523,8 @@ def _gen_for_zip_longest(gen, node):
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
     # wins semantics preserved — later loops over the same names reuse
     # these real types instead of inheriting an int64_t lock-in).
-    # A padded struct-pointer (or any pointer-typed) slot can hold the
-    # model's NULL `None`, so the loop variable is nullable: a member read
-    # on it must take the None-aware dynamic path instead of a raw `->`
-    # dereference.  Recorded per local for `_lower_MemberExpr`.
-    gen._nullable_ptrs = getattr(gen, "_nullable_ptrs", set())
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
         gen._declare_var(vn, elem)
-        if "*" in str(elem):
-            gen._nullable_ptrs.add(vn)
 
     len_ts = []
     for ptr, _elem in seqs:
@@ -2875,7 +2868,22 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `vtype = (char *)0;` into an `int64_t vtype;` declaration — a
         # hard -Wint-conversion error (real: gimple_gen_funcs.py's
         # `for vname, vtype in ci.captures:`).
+        #
+        # `_slot_cnames` records each slot's C identifier AT ITS OWN
+        # declaration moment, before a LATER slot can re-point the shared
+        # name: a DUPLICATE target name (`for _, _ in ...`) makes slot 1's
+        # declaration force=True (its requested ctype differs from the
+        # first-decl-wins one), which mints a fresh `_shadowN_n` and
+        # overwrites `gen._c_names[name]` — so an assignment resolved through
+        # `gen._cname(name)` at emission time would route EVERY slot's store
+        # into the LAST slot's variable. The dict arm's boxed binding then
+        # wrote slot 0's `char *` key into the slot-1 `int64_t` variable
+        # (`assignment to 'int64_t' from 'char *'` — real: test_grapheme's
+        # `for _, _ in StringSlice("").grapheme_indices():`, the only
+        # duplicate-named target this sweep reaches, and a hard gcc error
+        # while every other stdlib file passed).
         _slot_ctypes = []
+        _slot_cnames = []
         for i, vn in enumerate(var_names):
             if i == star_idx:
                 # A starred slot holds a LIST of the remaining CHARACTERS of the
@@ -2890,6 +2898,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                                          starred_slot_name(vn), 'MojoList *')
                 gen._elem_types[starred_slot_name(vn)] = 'char *'
                 _slot_ctypes.append('MojoList *')
+                _slot_cnames.append(gen._cname(starred_slot_name(vn)))
                 continue
             # With a star, every slot is a CHARACTER of the key, so `char *` —
             # including the ones after the star, which the starless lowering
@@ -2914,6 +2923,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 else:
                     gen._int_key_loop_vars.discard(vn)
             _slot_ctypes.append(gen.var_types.get(vn, _want))
+            _slot_cnames.append(gen._cname(vn))
     elif int_keys:
         # The key is an integer: retype a name an earlier loop declared as a
         # string rather than let first-decl-wins keep the pointer type.
@@ -3036,7 +3046,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 _chr = gen._new_val('char *',
                                     f"mojo_cstr_slice ((char *) {key_tmp}, "
                                     f"{_as_str(_pos)}, {_as_str(_plus)})")
-                gen._emit(f"  {gen._cname(_svn)} = {_chr};")
+                gen._emit(f"  {_slot_cnames[_si]} = {_chr};")
         else:
             # A starless tuple target over a DICT unpacks the KEY, and a
             # key is a string, so this loop's arity is the key's LENGTH and
@@ -3126,7 +3136,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # unpacks a str — `for a, b in {"ab": 1}` binds a='a', b='b'.
                 # The arity check above already guarantees len(key) == nslots.
                 for _si, _svn in enumerate(var_names):
-                    _cvn = gen._cname(_svn)
+                    _cvn = _slot_cnames[_si]
                     _from = gen._new_val('int64_t', f"{_si}LL")
                     _to = gen._new_val('int64_t', f"{_si + 1}LL")
                     _chr = gen._new_val('char *',
@@ -3139,8 +3149,14 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 # would write `char *` into the int64_t non-key slots (a
                 # pointer-into-integer C error) and re-type the shared
                 # variable as a string, which is what refused the body.
+                # `_slot_cnames`, not a fresh `_cname` lookup: a duplicate
+                # target name (`for _, _ in ...`) makes a LATER slot's
+                # force-declaration re-point `_c_names[name]`, so resolving
+                # here would route slot 0's `char *` key store into the
+                # slot-1 `int64_t` variable (measured: test_grapheme's
+                # `assignment to 'int64_t' from 'char *'` gcc error).
                 vn0 = var_names[0]
-                cvn0 = gen._cname(vn0)
+                cvn0 = _slot_cnames[0]
                 vt0 = _slot_ctypes[0]
                 if vt0 in ('int64_t', 'int', 'int32_t'):
                     vp = gen._new_val('void *', f'(void *){key_tmp}')
@@ -3150,7 +3166,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     gen._emit(f"  {cvn0} = (char *) {key_tmp};")
                 for _vi in range(1, len(var_names)):
                     vn = var_names[_vi]
-                    cvn = gen._cname(vn)
+                    cvn = _slot_cnames[_vi]
                     vt = _slot_ctypes[_vi]
                     if vt in ('int64_t', 'int', 'int32_t'):
                         gen._emit(f"  {cvn} = (int64_t)0;")

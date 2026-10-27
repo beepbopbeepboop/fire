@@ -403,7 +403,7 @@ def main():
 # added the table. The compiled path is deliberately NOT asserted on the
 # same programs: it drops a bracketed call to a function with no RUNTIME
 # parameters to a literal 0 on every pipeline
-# (CODEGEN_bracket_call_to_a_runtime_paramless_function_is_a_zero, fixed),
+# (bugs/CODEGEN_bracket_call_to_a_runtime_paramless_function_is_a_zero.md),
 # so a two-engine diff here would be pinning the wrong answer on one side.
 #
 # name -> (source, expected stdout).

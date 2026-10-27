@@ -2142,17 +2142,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if not _vt:
                     _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
-        if isinstance(node.func, gimple_ctypes.SubscriptExpr):
-            # A bracket-parametrized call to a function that needs
-            # link-mode specialisation (comptime parameters bound at
-            # call site) — the single-TU path has no mechanism for
-            # this, so refusing loudly is the correct answer (see
-            # bugs/CODEGEN_bracket_call_to_a_runtime_paramless_function_
-            # is_a_zero.md). Returning 0 was a silent wrong answer.
-            _base_name = node.func.obj.name if isinstance(node.func.obj, gimple_ctypes.IdentExpr) else repr(node.func.obj)
-            raise RuntimeError(
-                f"cannot compile module: a bracketed call {_base_name}[...]() "
-                f"needs link-mode specialisation, which this build does not do")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -3336,8 +3325,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # STRING'S OWN ADDRESS — the miss flag and the default were both
             # already correct in the emitted C, and `_t9 = missed ? dflt :
             # raw` was computed and then formatted with `%ld`. That is the
-            # whole of the dynamic-attribute string-read miss (missing cast to
-            # the default's domain) — see fix commit
+            # whole of bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md's
             # residual 2: not a missing ternary, a missing CAST, in the
             # opposite direction from the one that branch was looking for.
             _res = dt if dt in ('char *', 'double') else 'int64_t'

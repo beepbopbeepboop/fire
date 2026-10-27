@@ -3726,38 +3726,6 @@ def gen_module_impl(self, stmts):
             _seed_selfhost_struct_dict_field_types(self)
             _seed_selfhost_return_elem_types(self)
 
-    # Root fix for cyclic-closure import of a container global with no
-    # independent type yet (bug:CODEGEN_cyclic_closure...): seed this
-    # module's own literal/container globals BEFORE its imports compile,
-    # so a from-import of an ancestor-in-progress can resolve the owner's
-    # field instead of falling to the unknown-identifier 0.
-    _mod_name = self.module_name if len(self.module_name) > 0 else "root"
-    for _s in stmts:
-        if isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr):
-            _n = _s.target.name
-            _v = _s.value
-            _semantic = None
-            if isinstance(_v, IntLiteral) or isinstance(_v, BoolLiteral):
-                _semantic = 'int'; _cdecl = 'int'
-            elif isinstance(_v, StringLiteral):
-                _semantic = 'char *'; _cdecl = 'char *'
-            elif isinstance(_v, (ListExpr, TupleExpr)) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('list', 'List')):
-                _semantic = 'MojoList *'; _cdecl = 'int64_t'
-            elif isinstance(_v, (SetExpr,)) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('frozenset', 'set')):
-                _semantic = 'MojoSet *'; _cdecl = 'int64_t'
-            elif isinstance(_v, DictExpr) or (
-                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
-                    and _v.func.name in ('dict', 'Dict')):
-                _semantic = 'MojoDict *'; _cdecl = 'int64_t'
-            if _semantic is not None:
-                self._global_to_module.setdefault(_n, _mod_name)
-                self._global_var_types.setdefault(_n, _semantic)
-                self._global_c_decl_types.setdefault(_n, _cdecl)
-
     imported_code = []
     imported_stmts = []
     # ONE inline-compile loop, TWO sources for the module set. The do_imports
@@ -11825,16 +11793,6 @@ def gen_module_impl(self, stmts):
             # usable when every callable in it agrees).
             self._global_container_callable_ret[_gname] = \
                 _lambda_pairs_ret_type(self, _value.pairs)
-        elif isinstance(_value, CallExpr) and isinstance(_value.func, IdentExpr):
-            # Package-scope global whose RHS is a call: the callee's return
-            # type is already final at Phase 1.7 for module-level defs, so
-            # use it directly for the C declaration (fixes container-returning
-            # calls kept at the int64_t default; see doc: the missing
-            # declaration in the middle is the struct field type).
-            _ret = self.func_return_types.get(_value.func.name) or \
-                self._infer_return_type(_value.func.name)
-            if isinstance(_ret, str) and _ret.endswith(' *'):
-                _phase17_set_gtype(_gname, _ret, _own)
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return
             # type is `join_all([_quick_type(body)])` -- exactly what

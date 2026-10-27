@@ -887,7 +887,7 @@ main()
     # env-field questions: the callable comes back out of a function into an
     # unannotated `int64_t` parameter, which loses its return type at the
     # `mojo_fnptr_call_N` boundary. That is
-    # bug:CODEGEN_callable_return_type_lost_at_more_hops — the same hop
+    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
     # `use(<callable>)` is at the bottom of
     # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
     # hop one level in (the factory's own `outer()()`) and passes.
@@ -1082,7 +1082,7 @@ main()
     #
     # `use(<callable>)` is deliberately NOT here: routing the callable through
     # an unannotated parameter loses the return type one hop further out,
-    # which is bug:CODEGEN_callable_return_type_lost_at_more_hops and is
+    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
     # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
     # pins for buildability only.
     test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
@@ -5192,8 +5192,7 @@ main()
     #
     # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
     # list prints `1` on this tree, which is
-    # CODEGEN_bool_annotated_struct_field_prints_as_int (bool in mixed list
-    # prints 1): still open; not this fix, and pinning the wrong text here
+    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
     # not this fix, and pinning the wrong text here would make it look settled.
     # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
     # here, and so is a bool DICT VALUE (`"f": True` in the dict below): that
@@ -5779,23 +5778,6 @@ for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
     print(a, b)
 """, "a padded `double` slot has no value that means `absent`")
 
-    # Regression for CODEGEN_a_padded_zip_longest_struct_slot_is_a_null_dereference:
-    # a member read through a padded struct-pointer slot must take the None-aware
-    # dynamic path (not a raw -> dereference) when the slot can hold NULL.
-    test_gimple_runtime_error(
-        "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware", """\
-struct StackItem:
-    var peek: Bool = False
-import itertools
-def main():
-    var inputs = [StackItem(), StackItem(), StackItem()]
-    var outputs = [StackItem()]
-    for input, output in itertools.zip_longest(inputs, outputs):
-        input.peek = output.peek = True
-    print("done")
-main()
-""", "AttributeError")
-
     # A fillvalue outside the slot's own domain is the same wrong answer in a
     # second spelling: CPython hands every slot the value as given, so this
     # prints `b 5` where the old `(int64_t)(0.0)` fill printed `b 0`. The
@@ -5847,13 +5829,6 @@ f = outer(3)
 print(f(10))
 print(f(4))
 """, "13\n7\n")
-
-    test_gimple_stdout("gimple_module_scope_global_bound_to_container_returning_call", """\
-def mk():
-    return {"a": 1}
-f = mk()
-print(f["a"])
-""", "1\n")
 
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:

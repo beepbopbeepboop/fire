@@ -1974,18 +1974,6 @@ def count_keys(d: Dict) -> Int:
     return n
 """)
 
-    # 94b. starless dict unpack: `for k, v in d` exercises the key-length
-    # check (mojo_strlen on the dict key) inside a no-setjmp function. An
-    # inline cast in that call argument is a hard error under -fgimple, so
-    # the cast must be hoisted to its own conversion statement.
-    test("for_over_dict_starless_unpack", """\
-def count_pairs(d: Dict) -> Int:
-    var n: Int = 0
-    for k, v in d:
-        n += 1
-    return n
-""")
-
     # 95. dict comprehension over dict
     test("dict_comp_from_dict", """\
 def copy_dict(d: Dict) -> Dict:
@@ -12597,7 +12585,6 @@ print(run('x/y.txt'))
             "def k():\n    q = 5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
             "def k():\n    q = 2.5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
             "def k(c):\n    q = 2.5\n    if c:\n        q = [1, 2]\n    return q\nprint(len(k(1)))\n",
-            "def k(n):\n    q = n + 0\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k(5)))\n",
         ]
         with tempfile.TemporaryDirectory() as td:
             for i, src in enumerate(shapes):

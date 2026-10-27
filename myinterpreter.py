@@ -5026,13 +5026,6 @@ class Interpreter:
 
         return method(expr)
 
-    def eval_FunctionType(self, expr: N.FunctionType):
-        """A comptime function-type alias survives as a signature node.
-        At runtime it cannot be evaluated, but that's okay for the regression
-        test which only needs the alias to be something other than _comptime_expr.
-        """
-        return expr  # Return the node itself as a value
-
     def eval_WalrusExpr(self, expr: N.WalrusExpr):
         """Walrus `(name := value)`: evaluate value, bind name in the current
         scope, and return the value (was "No handler for WalrusExpr" — hit by
@@ -5040,8 +5033,6 @@ class Interpreter:
         value = self.eval_expr(expr.value)
         self.scope.define(expr.name, value)
         return value
-
-    def eval_WhileStmt(self, node: N.WhileStmt):
 
     def eval_LambdaExpr(self, expr: N.LambdaExpr):
         """`lambda <params>: <expr>` — an anonymous function. Returns a

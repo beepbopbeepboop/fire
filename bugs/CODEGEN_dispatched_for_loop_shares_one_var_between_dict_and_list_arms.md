@@ -1,14 +1,6 @@
 # CODEGEN: the dict/list runtime dispatch in `_gen_for_iter` shares ONE C variable between two arms, so the dict arm's `char *` wins a list-of-ints loop and `print(i)` SIGSEGVs
 
-## Status (2026-10-26 — measured, root cause unchanged, BLOCKED on representation choice)
-
-Measured reproduction still SIGSEGV (exit -11) on compiled path `for i in o.read(): print(i)`; subscripting (`o.read()[0]`) correct at `10`. Root cause confirmed at `emit_loops.py` lines 1219/1229 (`share_var_with_sibling_arm=True`) and `_fl_ctype` line 2263: dict arm's `char *` wins the shared C declaration when element type is unknown.
-
-Blocker: the fix requires choosing between (a) `int64_t` — fixes int list, regresses string-keyed dict to pointer-decimal silent wrong value; (b) runtime query (`mojo_list_get_kinds` / `_dyn_word_locals`) — touches element-type bookkeeping (`_elem_of`, `_nested_elem_types`, `gen._actual_types`) that is shared with `bug-codegen-ctor-temp-field-read-loses-e-8778` (`_field_elem_types`) and the `PARTIAL_WORK_HANDOFF.md` §2.1 inference gap. Both paths touch claims outside this worker's write set — per CLAUDE.md and claim-checks, not this doc's author's call alone.
-
-Regression test written at `test_reg_dispatched_for_loop.py` (FAILS at compiled-run verification; Python-level assertion passes — the bug is codegen, not source parsing).
-
-No fix committed; doc kept; tree clean except new test + doc update.
+## Status (2026-10-02 — measured, root-caused to three lines, NOT fixed: the fix has to choose a representation and that is not this doc's author's call alone)
 
 Found while re-measuring `bugs/PARTIAL_WORK_HANDOFF.md` §2.1, whose own claim
 ("`len`/`[i]` work and `for x in b.items` segfaults") is still exactly true and
