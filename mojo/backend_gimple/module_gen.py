@@ -3726,6 +3726,38 @@ def gen_module_impl(self, stmts):
             _seed_selfhost_struct_dict_field_types(self)
             _seed_selfhost_return_elem_types(self)
 
+    # Root fix for cyclic-closure import of a container global with no
+    # independent type yet (bug:CODEGEN_cyclic_closure...): seed this
+    # module's own literal/container globals BEFORE its imports compile,
+    # so a from-import of an ancestor-in-progress can resolve the owner's
+    # field instead of falling to the unknown-identifier 0.
+    _mod_name = self.module_name if len(self.module_name) > 0 else "root"
+    for _s in stmts:
+        if isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr):
+            _n = _s.target.name
+            _v = _s.value
+            _semantic = None
+            if isinstance(_v, IntLiteral) or isinstance(_v, BoolLiteral):
+                _semantic = 'int'; _cdecl = 'int'
+            elif isinstance(_v, StringLiteral):
+                _semantic = 'char *'; _cdecl = 'char *'
+            elif isinstance(_v, (ListExpr, TupleExpr)) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('list', 'List')):
+                _semantic = 'MojoList *'; _cdecl = 'int64_t'
+            elif isinstance(_v, (SetExpr,)) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('frozenset', 'set')):
+                _semantic = 'MojoSet *'; _cdecl = 'int64_t'
+            elif isinstance(_v, DictExpr) or (
+                    isinstance(_v, CallExpr) and isinstance(_v.func, IdentExpr)
+                    and _v.func.name in ('dict', 'Dict')):
+                _semantic = 'MojoDict *'; _cdecl = 'int64_t'
+            if _semantic is not None:
+                self._global_to_module.setdefault(_n, _mod_name)
+                self._global_var_types.setdefault(_n, _semantic)
+                self._global_c_decl_types.setdefault(_n, _cdecl)
+
     imported_code = []
     imported_stmts = []
     # ONE inline-compile loop, TWO sources for the module set. The do_imports
