@@ -35394,6 +35394,73 @@ def comprehension_result_is_flat(expr) -> bool:
     return True
 
 
+def _descendant_builds_a_non_literal_container(e) -> bool:
+    """True when the subtree under `e` builds a container the element's own
+    emission does not reserve at a LITERAL site.
+
+    The question `comprehension_element_is_relocatable` asks of a container
+    literal's children, and it is `_expr_builds_a_container` narrowed to the
+    answer the relocation needs: a container literal is not the answer, it is
+    a branch into its children (the relocation gives each such literal its own
+    per-iteration slot), while a comprehension, a slice, a call and a star
+    splat each build their blob where its own emission does not move it per
+    iteration — a comprehension reserves its result in `_emit_comprehension`
+    before its walk and reuses it, a slice reserves its result in its own
+    emission, a call's returned block is parked above the blob region by
+    `container_returned_blob_sites`, and a star literal appends into its blob
+    at its own site — so any such blob's address in the element's words would
+    point at one frame location every iteration shares, the aliasing the flat
+    copy is refused for. A star is the same answer for its own reason: its
+    literal lowers by APPENDING (`_emit_list_star`), which cannot target a
+    slot the append does not read its count from.
+    """
+    if e is None or isinstance(e, str):
+        return False
+    if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
+        if isinstance(e, F.DictExpr):
+            pairs = e.pairs or []
+            if any(isinstance(k, F.UnaryOp) and k.op in ("**", "*")
+                   for k, _v in pairs):
+                return True
+            children = [x for pair in pairs for x in pair]
+        else:
+            if any(isinstance(el, F.UnaryOp) and el.op == "*"
+                   for el in e.elements or []):
+                return True
+            children = list(e.elements or [])
+        return any(_descendant_builds_a_non_literal_container(c)
+                   for c in children)
+    return _expr_builds_a_container(e)
+
+
+def comprehension_element_is_relocatable(element) -> bool:
+    """True when a comprehension ELEMENT's containers are given a per-iteration
+    BASE rather than a per-iteration COPY.
+
+    THE predicate for the element a byte copy cannot make per-iteration and a
+    base can: the element's region carries the ADDRESS of a container the same
+    emission built, so a copy would share it, and the sound materialisation is
+    to build each such container in the slot ITS iteration owns — a slot of a
+    `cap`-sized array indexed by the result count, recomputed at run time —
+    which the emitters' `_emit_list`/`_emit_dict` do when the element is this
+    shape. It is here rather than in either backend so the two architectures
+    cannot relocate — or refuse — the same element differently.
+
+    The shape is a container LITERAL whose container-building descendants are
+    all container literals — a list of lists, a tuple holding a list, a dict
+    pair holding one — because those are the blobs the element's own emission
+    reserves at the element site and the relocation can move. What is not this
+    shape keeps `comprehension_element_blob_refusal`: a nested comprehension
+    (its result is reserved in `_emit_comprehension` and reused), a slice (its
+    result is a separate blob of its own), a call (its returned block is
+    parked elsewhere), and a star splat (its literal appends at its own site).
+    """
+    if not isinstance(element, (F.ListExpr, F.TupleExpr, F.SetExpr,
+                                F.DictExpr)):
+        return False
+    return not _descendant_builds_a_non_literal_container(element)
+
+
 def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                        bytes_: int) -> str:
     """The diagnostic for a comprehension ELEMENT that opens a container and
@@ -35406,9 +35473,13 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
     because a byte copy of its result is sound. What reaches this refusal is
     the element that a byte copy of would STILL alias or that this path cannot
     size, the same shapes the predicate's docstring names: a nested
-    comprehension, a list of lists, a slice whose base carries a scratch
+    comprehension, a slice whose base carries a scratch
     address, a constructor call, and every non-literal expression — a call, a
     subscript or a member read whose result this path cannot type among them.
+    A container literal that holds containers of its own (a list of lists
+    among them) is the OTHER materialisation, the one
+    `comprehension_element_is_relocatable` answers with a per-iteration base
+    rather than a per-iteration copy, so it does not reach this refusal.
     `comprehension_element_is_flat_container` is the shared predicate and
     `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` is the row set that
     pins both sides.
@@ -35428,11 +35499,13 @@ def comprehension_element_blob_refusal(spelling: str, element, cap: int,
                                               CPython: 63   this path: 93
 
     **Both of those are now materialised per iteration** by
-    `comprehension_element_is_flat_container`, so this message fires only on the
-    shapes whose per-iteration copy is unsound: a container literal with a nested
-    container in it, a nested comprehension whose produced values are containers,
-    a list of lists, a slice whose base carries a scratch address and a
-    constructor call. The paragraph above is the
+    `comprehension_element_is_flat_container`, so this message fires only on
+    the shapes whose per-iteration copy is unsound and whose containers the
+    relocation does not build at the element site: a nested comprehension
+    whose produced values are containers, a slice whose base carries a scratch
+    address and a constructor call. A container literal that holds containers
+    of its own (a list of lists among them) is materialised per iteration by
+    the relocation, and its rows answer rather than refuse. The paragraph above is the
     measurement that made the refusal the right answer for THEM; the two
     reproducers are kept because they are what a copy must answer, and are the
     rows `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES` now assert.
