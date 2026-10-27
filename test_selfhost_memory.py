@@ -23,7 +23,7 @@ Two cases, both measured with the binary's own RUSAGE_CHILDREN peak:
            Budget 16 GB: a tripwire against the 23 GB-class regressions
            (a per-call dict copy) rather than a claim that 12 GB is acceptable;
            ratchet it down as the remaining sites in
-           bugs/PERF_selfhost_memory_leak_hunt.md are closed.
+           the content-keyed tuple-key leak-hunt fixes are closed.
 
 `python3 test_selfhost_memory.py snippet|fire|all` (default: snippet). Needs a
 built `./mojoc` (`make mojoc`). Run the `fire` case through tools/memslot.py.

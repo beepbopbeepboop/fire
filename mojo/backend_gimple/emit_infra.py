@@ -3281,7 +3281,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # so `d[(p, mtime)]` never found the entry an equal tuple stored, every
         # miss re-inserted, and with no GC the tuple leaked per miss (about 16
         # of the 19 GB live on `mojoc --dump-full fire.py`; see
-        # bugs/PERF_selfhost_memory_leak_hunt.md).
+        # the content-keyed tuple-dict leak hunt (fixed by mojo_dict_key_for, see test_dict_tuple_key.py).
         #
         # The fix is in the runtime (`mojo_dict_key_for` renders a tuple's
         # CONTENT into a length-delimited key) and this is the half that routes
