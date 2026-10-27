@@ -576,7 +576,7 @@ def test_bracket_mixing_keyword_and_positional():
     the resulting ParseError into the `IdentExpr('_comptime_expr')` placeholder —
     so the alias read as a placeholder at every use, and the file-open flags
     built from it were a wrong answer rather than a refusal
-    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
+    (CODEGEN_comptime_function_type_alias (fixed in af167139),
     part 2).
 
     Both elements must SURVIVE, and in order: the old code parsed a bare
@@ -738,7 +738,7 @@ def test_comptime_rhs_misparse_is_refused():
     alias as a placeholder, and the stdlib's `O_CREAT`/`O_APPEND`/`O_CLOEXEC`
     file-open flags were built from a placeholder rather than from
     `0x200 | 0x400 | 0x1000`. A wrong answer, invisibly
-    (bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md,
+    (CODEGEN_comptime_function_type_alias (fixed in af167139),
     parts 1 and 2).
 
     So a misparse is now a `SyntaxError` naming the line, and the deliberate
