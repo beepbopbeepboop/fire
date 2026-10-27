@@ -1239,7 +1239,7 @@ def for_target_tree(target: object):
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 
-_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?|\~)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.(?:\d|_\d)*(?:[eE][+-]?\d(?:\d|_\d)*)?|\.\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?|\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.(?:\d|_\d)*(?:[eE][+-]?\d(?:\d|_\d)*)?|\.\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?|\d[\d_]*[eE][+-]?\d(?:\d|_\d)*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?|\~)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 
 # ── T-string helpers: handle nested braces/interpolations ────────────────────────
@@ -4846,6 +4846,47 @@ class Parser:
             if self._peek().kind == "COLON":
                 self._advance()  # skip colon
                 self._parse_type_ann()  # parse and discard type annotation
+                # Skip an optional `where <expr>` clause AFTER the annotation —
+                # the mid-statement form the funcdef/struct-head `where` skips
+                # (see _parse_funcdef's own and _parse_struct's) have no
+                # business with: `comptime F: Trait where conforms_to(T,
+                # Movable & Deinitable) = ...`. Every std/collections
+                # container (Array, List, Deque, LinkedList, Dict) spells its
+                # `IteratorOwnedType` alias exactly this way, MULTI-LINE:
+                #
+                #     comptime IteratorOwnedType: Iterator where conforms_to(
+                #         Self.T, Deinitable & Movable
+                #     ) = _ListIterOwned[Self.T]
+                #
+                # Without this the next token after the annotation is the NAME
+                # `where`, not `ASSIGN`, so the function returned
+                # ExprStmt(IdentExpr(name)) — the alias silently dropped — and
+                # the continuation `where conforms_to(...) = ...` parsed as an
+                # ORDINARY assignment statement, which _parse_struct then put
+                # into StructDef.fields, where every `.name` reader (elaborate
+                # .py's _struct_layout_anns is the measured crash) died with
+                # "AttributeError: 'AssignStmt' object has no attribute
+                # 'name'".
+                #
+                # The clause is an EXPRESSION (`conforms_to(...) and
+                # conforms_to(...)` — Dict's is two calls joined by `and` with
+                # no enclosing parens), followed by `= <RHS>`, so it is parsed
+                # as one expression and discarded — a skip-to-NEWLINE (the
+                # funcdef form) would swallow the `= <RHS>` for the single-line
+                # spelling, since NEWLINE is only emitted once brackets balance.
+                # The fallback token-skip (on a misparse of the clause itself)
+                # stops at the `=` so the RHS stays reachable.
+                if self._peek().kind == "NAME" and self._peek().value == "where":
+                    self._advance()  # where
+                    _where_saved = self._pos
+                    try:
+                        self._parse_expr(0)
+                    except (SyntaxError, ValueError, TypeError, AttributeError,
+                            IndexError, KeyError):
+                        self._pos = _where_saved
+                        while self._peek().kind not in (
+                                "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
+                            self._advance()
             # A multi-target comptime binding: `comptime a, b = expr(...)`, which
             # unpacks ONE compile-time value into two names. Collected BEFORE the
             # ASSIGN test below, because at this point the next token is the
@@ -5915,7 +5956,26 @@ class Parser:
             # `print("*" * 0x2000_0000)`).
             self._advance(); return IntLiteral(_parse_int_literal(t.value), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
-            self._advance(); return FloatLiteral(float(t.value.replace('_', '')), line=line, col=col)
+            self._advance()
+            # A FLOAT whose token ENDS in `.` is a trailing-dot literal with
+            # the member as a BARE NAME — `3.__mlir_index__()` (the
+            # monomorphized form of `Self.length.__mlir_index__()` in
+            # std/collections/array.mojo's `comptime type = __mlir_type[...]`
+            # once `length` binds to an int literal) and CPython's own
+            # `1.0.__class__`. The dot is part of the NUMBER token, so the
+            # DOT branch of the `_parse_postfix` loop below never fires and
+            # the NAME would be left dangling (measured: "Expected RBRACKET
+            # got NAME('mlir_index__')" — the Array[Int, 3] degradation in
+            # bugs/CODEGEN_generic_struct_elaboration_failure_lowers_a_
+            # different_program.md). A trailing-dot float followed by a NAME
+            # is member access and nothing else in valid source.
+            if t.value.endswith('.') and self._peek().kind in ("NAME", "KW"):
+                _member = self._advance().value
+                return MemberExpr(
+                    obj=FloatLiteral(float(t.value.replace('_', '').rstrip('.')),
+                                     line=line, col=col),
+                    member=_member, line=line, col=col)
+            return FloatLiteral(float(t.value.replace('_', '')), line=line, col=col)
         if t.kind == "IMAG":
             self._advance(); return ImagLiteral(float(t.value[:-1]), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):
