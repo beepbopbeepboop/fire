@@ -11835,25 +11835,6 @@ def gen_module_impl(self, stmts):
                 self._infer_return_type(_value.func.name)
             if isinstance(_ret, str) and _ret.endswith(' *'):
                 _phase17_set_gtype(_gname, _ret, _own)
-                if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                            'MojoGenerator *'):
-                    # A container return is the SAME global as a dict/list/set
-                    # LITERAL one (the branches above): the C FIELD is the
-                    # int64_t box, the pointer stays the SEMANTIC type. The
-                    # store path resolves its destination through
-                    # `_global_c_decl_types` FIRST (falling back to
-                    # `_global_var_types`), and this branch ran before it
-                    # without a cdecl entry — so the store saw the semantic
-                    # pointer and emitted an uncast assignment into the boxed
-                    # `int64_t` field (`_root_globals.f = _t2` with `_t2` a
-                    # `MojoDict *`; measured 2026-10-27 on the
-                    # gimple_module_scope_global_bound_to_container_returning_
-                    # call regression: `f = mk()` over `mk() -> {"a": 1}`,
-                    # the gcc `-Wint-conversion` pair in `_toplevel`).
-                    # Non-container pointers (a `char *` return) keep the
-                    # pointer field the 12278/12292 rule gives every other
-                    # kind, so they are deliberately left unset here.
-                    self._global_c_decl_types[_gname] = 'int64_t'
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return
             # type is `join_all([_quick_type(body)])` -- exactly what
@@ -12851,25 +12832,7 @@ def gen_module_impl(self, stmts):
             _gn = _rs.target.name
             if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
                 _crt = self.func_return_types.get(_rs.value.func.name, '')
-                # A CONTAINER return stays in the int64_t box the literal
-                # branches give its twin (`f = mk()` is the same global as
-                # `f = {"a": 1}`): the C field is the box, the store boxes
-                # the pointer through `(int64_t)(void *)`, and the read
-                # unboxes (see the Phase 1.7 CallExpr branch, which boxes
-                # these four return kinds, and the working literal store
-                # `_root_globals.f = (int64_t)(void *)_t1`). Widening one
-                # of these here — which this loop did unconditionally — left
-                # the boxed FIELD with an uncast `_root_globals.f = _t2`
-                # store where `_t2` is the raw `MojoDict *`, the
-                # gcc -Wint-conversion pair that broke
-                # gimple_module_scope_global_bound_to_container_returning_
-                # call (measured 2026-10-27: `f = mk()` over
-                # `mk() -> {"a": 1}`). Non-container pointer returns are
-                # exactly the shape this loop was written for, and they
-                # still widen below.
-                if isinstance(_crt, str) and _crt.endswith(' *') \
-                        and _crt not in ('MojoDict *', 'MojoList *', 'MojoSet *',
-                                         'MojoGenerator *'):
+                if isinstance(_crt, str) and _crt.endswith(' *'):
                     self._global_c_decl_types[_gn] = _crt
                     self._global_var_types[_gn] = _crt
                     # Mirror into this instance's own overlay: the widened

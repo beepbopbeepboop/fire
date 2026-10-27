@@ -18442,11 +18442,11 @@ COMPREHENSION_ELEMENT_CASES = [
     # lists_…`, `a_slice_element_is_a_distinct_object_per_iteration`) sit beside
     # the nested ones. The rows after them are the shapes whose per-iteration
     # materialisation is still refused — a nested comprehension whose own result
-    # holds containers and a slice whose base carries a scratch address — and
-    # the list-of-lists rows are the shape the relocation answers instead of a
-    # byte copy: each container the element builds is written in the slot its
-    # own iteration owns. The refusal needle is the CONSTRUCT and not the
-    # remedy, so a refusal about anything else fails the case.
+    # holds containers, a list of lists, a slice whose base carries a scratch
+    # address, and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_
+    # runtime_blob_base.md`) a constructor call, whose runtime blob base is
+    # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
+    # so a refusal about anything else fails the case.
     # same copy over the shared predicate. A SLICE whose base is a NAME is
     # accepted by the same copy and no relocation at all
     # (`a_slice_element_of_a_name_is_per_iteration`): a slice copies its base's
@@ -18458,12 +18458,13 @@ COMPREHENSION_ELEMENT_CASES = [
     # fact about the call SITE, and `test_formal_value_model.py`'s
     # `a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_
     # one` is the row that decides it. The rows after the accepted shapes are the
-    # ones whose per-iteration materialisation is still refused — a nested
-    # comprehension whose own result holds containers and a slice whose BASE
-    # builds a container that itself holds one; a list of lists is the shape
-    # the relocation answers (the rows below) rather than one of them. The
-    # refusal needle is the CONSTRUCT and not the remedy, so a refusal about
-    # anything else fails the case.
+    # ones whose per-iteration materialisation is still refused \u2014 a nested
+    # comprehension whose own result holds containers, a list of lists, and a
+    # slice whose BASE builds a container (see
+    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`),
+    # whose runtime blob base is genuinely needed. The refusal needle is the
+    # CONSTRUCT and not the remedy, so a refusal about anything else fails the
+    # case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -18676,59 +18677,15 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", len(d))\n"
      "    return 0\n",
      "refuse:opens a container", None),
-    # A container built inside a container LITERAL, which the byte copy cannot
-    # make per-iteration — the copy would carry the INNER list's address and
-    # every iteration would share it — and the shape the RELOCATION answers
-    # instead: each container the element builds is written in the slot its own
-    # iteration owns, a `cap`-slot array indexed by the result count (the
-    # element is built before the append that increments it, so the count is
-    # this iteration's ordinal). The write-through-read below is the read a
-    # shared inner blob would answer `9 9 9` to and the slots answer `9 20 30`;
-    # CPython 3.14 answers the same. Refused on both architectures before, with
-    # the needle this row used to pin.
-    ("a_list_of_lists_as_the_element_is_per_iteration",
+    # A container built inside a container LITERAL is the shallow-copy boundary
+    # the flat predicate refuses: copying `[[y]]` per iteration would carry the
+    # INNER list's address and every iteration would share it.
+    ("a_list_of_lists_as_the_element_is_refused",
      "def main() -> Int:\n"
      "    var r = [[[y]] for y in [10, 20, 30]]\n"
-     "    r[0][0][0] = 9\n"
-     "    printf(\"%d %d %d\", r[0][0][0], r[1][0][0], r[2][0][0])\n"
+     "    printf(\"%d\", r[0][0][0])\n"
      "    return 0\n",
-     0, "9 20 30"),
-    # …and the same relocation one slot deeper: three nested literal lists,
-    # each with its own per-iteration slot, and the read that a shared inner
-    # blob would answer with the last iteration's value three times.
-    ("a_list_of_a_list_of_a_list_as_the_element_is_per_iteration",
-     "def main() -> Int:\n"
-     "    var r = [[[[y]]] for y in [10, 20, 30]]\n"
-     "    printf(\"%d %d %d\", r[0][0][0][0], r[1][0][0][0], r[2][0][0][0])\n"
-     "    return 0\n",
-     0, "10 20 30"),
-    # …and through the TUPLE emitter, which lowers to the same list blob: a
-    # tuple holding a list is the same relocation and a fix scoped to
-    # `ListExpr` alone would leave it aliasing.
-    ("a_comprehension_element_that_is_a_tuple_holding_a_list_is_per_iteration",
-     "def main() -> Int:\n"
-     "    var r = [(y, [y]) for y in [10, 20, 30]]\n"
-     "    printf(\"%d %d %d\", r[0][1][0], r[1][1][0], r[2][1][0])\n"
-     "    return 0\n",
-     0, "10 20 30"),
-    # …and through the DICT emitter: a pair literal whose value holds a list
-    # gets its per-iteration slot in the pair blob, and the inner list its own
-    # slot. The read is over the KEYS, because a subscript of a comprehension
-    # result does not yet classify its dict element for a key lookup — and the
-    # key sum is the read that separates the slots from one shared pair blob:
-    # a shared blob holds the LAST pair, so both elements would sum to 20 and
-    # the total to 40, where CPython sums 10 + 20.
-    ("a_comprehension_element_that_is_a_dict_holding_a_list_is_per_iteration",
-     "def main() -> Int:\n"
-     "    var r = [{y: [y, y + 1]} for y in [10, 20]]\n"
-     "    var s = 0\n"
-     "    for k in r[0]:\n"
-     "        s = s + k\n"
-     "    for k in r[1]:\n"
-     "        s = s + k\n"
-     "    printf(\"%d\", s)\n"
-     "    return 0\n",
-     0, "30"),
+     "refuse:the element `[[y]]` opens a container", None),
     # The SAME shallow-copy boundary one level in: a nested comprehension whose
     # own ELEMENT builds a container is not `comprehension_result_is_flat`, so
     # copying its result would carry the address of the inner container the
