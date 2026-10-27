@@ -2,10 +2,7 @@
 
 **Area:** `test_formal_run.py`'s build-and-run cases.
 
-**Status: OPEN, measured, not fixed.** Each of the four needs a judgement about
-which refusal the construct *should* draw, which is the work; this doc records
-what each one does today so that judgement starts from a measurement rather than
-from the row.
+**Status: PARTIAL — cases 1–3 measured and pinned; case 4 (tag-generator host-import wall) remains with `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`.** Cases 1 (`deref_refuse_a_binary64_value_store_of_an_integer`) already passes on master; cases 2 (`type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container`) and 3 (`comptime_binding_with_a_literal_value_still_builds`) had needle drift and are now pinned to their measured refusal messages (`refuse:the function which created it...` and `refuse:Refused rather than read as an index...` respectively), verified by `test_formal_run.py` and `test_regression_needle_drift.py`. Case 4 is out of scope per the doc's own instruction.
 
 ## What I ran
 
