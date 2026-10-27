@@ -1442,14 +1442,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._list_cursor = (self._frame_recv_bytes + self._ret_frame_bytes
                             + self._ret_blob_bytes)
         self._materialised = {}
-        # The comprehension-element RELOCATION context: `(res_offset, cap)`
-        # pushed by `_emit_compr_gen`'s leaf around an element
-        # `model.comprehension_element_is_relocatable` accepts, so the
-        # container literals the element builds reserve a `cap`-slot array
-        # and recompute their base from the result's count
-        # (`_emit_relocated_list_base`) instead of one shared blob the
-        # per-iteration copy would alias. Empty otherwise; x86-64's twin.
-        self._compr_reloc = []
         self._for_list_depth = 0
         self._compr_depth = 0
         # The RESULT blob size of the most recently emitted comprehension, so a
@@ -5485,33 +5477,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             "is computed from the former and the blob from the latter")
         reserved = self._dict_caps.get(id(expr), n)
         size = 8 * (1 + 2 * reserved)
-        if self._compr_reloc:
-            # The per-iteration base for a dict pair literal in a relocated
-            # element: the same slot as the list path, over a pair blob. The
-            # splats write nothing into the pair blob, so the slot needs no
-            # room for them and they run where the fixed path runs them.
-            res_offset, slots = self._compr_reloc[-1]
-            array_off = self._reserve_blob(slots * size,
-                                           "comprehension element array")
-            self._materialised[id(expr)] = (array_off, size)
-            for se in splat_exprs:
-                self._emit_expr(se)
-            self._emit_relocated_list_base(res_offset, array_off, size)
-            self._emit_mov_imm("X10", n)
-            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
-            pair_i = 0
-            for k, v in static_pairs:
-                self._emit_expr(k)
-                self._emit_relocated_list_base(res_offset, array_off, size)
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (1 + 2 * pair_i)))
-                self._emit_expr(v)
-                self._emit_relocated_list_base(res_offset, array_off, size)
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (2 + 2 * pair_i)))
-                pair_i += 1
-            if n == 0:
-                self._emit_relocated_list_base(res_offset, array_off, size)
-            self.asm.emit(encode_mov_zr_xn(0, 9))
-            return
         if self._list_cursor + size > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
                 "a dict literal", self._list_cursor + size, self._blob_cap))
@@ -8353,30 +8318,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         n = len(expr.elements)
         cap = max(n, self._list_caps.get(id(expr), n))
         size = 8 * (1 + cap)
-        if self._compr_reloc:
-            # The per-iteration base in place of a fixed blob. This literal is
-            # the ELEMENT (or a container inside the element) of a
-            # comprehension whose element `model.comprehension_element_is_
-            # relocatable` accepts, so iteration i writes the container into
-            # slot i of a `cap`-slot array: the base is the array plus the
-            # result's count times the slot size, read at run time, and it is
-            # recomputed after every element emission exactly the way the
-            # fixed path recomputes after one.
-            res_offset, slots = self._compr_reloc[-1]
-            array_off = self._reserve_blob(slots * size,
-                                           "comprehension element array")
-            self._materialised[id(expr)] = (array_off, size)
-            self._emit_relocated_list_base(res_offset, array_off, size)
-            self._emit_mov_imm("X10", n)
-            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
-            for i, el in enumerate(expr.elements):
-                self._emit_expr(el)
-                self._emit_relocated_list_base(res_offset, array_off, size)
-                self._emit_blob_store(9, 8 * (i + 1), 0)
-            if n == 0:
-                self._emit_relocated_list_base(res_offset, array_off, size)
-            self.asm.emit(encode_mov_zr_xn(0, 9))
-            return
         if self._list_cursor + size > self._blob_cap:
             raise CodegenError(M.frame_blob_refusal(
                 "a list literal", self._list_cursor + size, self._blob_cap))
@@ -11509,34 +11450,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
-    def _emit_relocated_list_base(self, res_offset: int, array_off: int,
-                                  slot_size: int) -> None:
-        """X9 = slot i of the element array, where i is the result's count.
-
-        The relocation twin of `_emit_list_base` for a container literal the
-        comprehension element position builds: the slot is
-        `array_off + i * slot_size` and i is the result blob's count word —
-        the number of elements appended so far — read from `res_offset`,
-        because the element is built before the append that increments it.
-        The count is read into X10, which the caller's count store
-        overwrites, and the slot size into X11, so the sequence clobbers
-        only X10 and X11 besides X9 itself. x86-64's twin is
-        `_emit_relocated_blob_base` over the same arithmetic.
-        """
-        self._emit_list_base(res_offset)
-        self.asm.emit(encode_ldr_xt_xn_imm(10, 9, 0))
-        self._emit_list_base(array_off)
-        self._emit_mov_imm("X11", slot_size)
-        self.asm.emit(encode_mul_xd_xn_xm(11, 10, 11))
-        self.asm.emit(encode_add_xd_xn_xm(9, 9, 11))
-
     def _materialize_compr_element(self, element, res_offset: int, cap: int,
                                    before: int) -> None:
         """Give the element its OWN container per iteration, or refuse.
 
         X0 on entry holds the element's blob (the scratch the element site
         reserved), and on exit holds the per-iteration copy that
-        `_compr_append_elem` appends. The four outcomes:
+        `_compr_append_elem` appends. The three outcomes:
 
           * an element `M.comprehension_element_is_flat_container` accepts — a
             container literal with no nested container in it, a `+` over two of
@@ -11547,11 +11467,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             elements appended so far, so the append that follows stores the copy
             and not the scratch. The copy is `memcpy`, which returns the
             destination in X0 for free.
-          * an element `M.comprehension_element_is_relocatable` accepts — a
-            container literal that holds containers of its own — was built by
-            its own emission in the per-iteration slot it owns (see
-            `_emit_relocated_list_base`), so X0 is already the per-iteration
-            storage and nothing here moves.
           * anything else that allocated keeps `_refuse_an_element_blob`, whose
             message names the construct and the explicit-loop remedy.
 
@@ -11587,14 +11502,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         elif M.comprehension_result_is_flat(element) \
                 and self._last_compr_result_size > 0:
             blob_size = self._last_compr_result_size
-        elif M.comprehension_element_is_relocatable(element):
-            # A container literal that holds containers of its own (a list of
-            # lists among them): each such container reserved its OWN
-            # per-iteration array at the element's own site (see
-            # `_emit_relocated_list_base`), and the element's emission left X0
-            # on the slot this iteration owns, so the append appends it as-is
-            # and nothing here moves.
-            return
         else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
@@ -11878,22 +11785,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                                              self._list_cursor - _before)
                 self._compr_append_pair(res_offset, cap)
             else:
-                # An element the relocation accepts builds each container it
-                # opens in the slot its own iteration owns (see
-                # `_emit_relocated_list_base`): the context tells the literal
-                # emitters that this element is that shape, and the decision
-                # is `model.comprehension_element_is_relocatable`'s so both
-                # backends relocate the same elements.
-                reloc = (cap > 1
-                         and M.comprehension_element_is_relocatable(
-                             expr.element))
-                if reloc:
-                    self._compr_reloc.append((res_offset, cap))
-                try:
-                    self._emit_expr(expr.element)
-                finally:
-                    if reloc:
-                        self._compr_reloc.pop()
+                self._emit_expr(expr.element)
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
