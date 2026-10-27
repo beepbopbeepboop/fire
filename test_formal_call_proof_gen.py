@@ -2813,6 +2813,35 @@ class TestNestedConditionFactSharing(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_the_increment_not_the_total_is_the_growth_measure(self):
+        """Regression for the stale total-bound: the fixed offset (3 per walk)
+        makes total ratios noisy at small k (9 -> 21 reads x2.33), but the
+        per-path increment (12 -> 24) is exactly x2. The bound must apply to
+        the increment, not to counts[k]/counts[k-1]."""
+        tmp = tempfile.mkdtemp(prefix="hprior_reg_")
+        try:
+            counts = {}
+            for k in (2, 3, 4):
+                proof = self._proof(tmp, k)
+                counts[k] = proof.count("have hprior_")
+            # The 3 fixed entry-block facts create a constant offset; totals
+            # 9 / 21 / 45 give 2.33, which would falsely fail a total-bound.
+            self.assertEqual(counts[2], 9)
+            self.assertEqual(counts[3], 21)
+            self.assertEqual(counts[4], 45)
+            inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
+            # Per-path increment exactly doubles: 12 -> 24.
+            self.assertEqual(inc[3], 12)
+            self.assertEqual(inc[4], 24)
+            for k in (4,):
+                ratio = inc[k] / inc[k - 1]
+                self.assertLessEqual(
+                    ratio, 2.2,
+                    f"increment ratio at k={k} exceeded 2.2: "
+                    f"{inc[k-1]} -> {inc[k]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestACompareWithTheImmediateOnTheLeft(unittest.TestCase):
     """`if 0 == n:` must behave exactly like `if n == 0:` — on both layers.
