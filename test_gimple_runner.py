@@ -887,7 +887,7 @@ main()
     # env-field questions: the callable comes back out of a function into an
     # unannotated `int64_t` parameter, which loses its return type at the
     # `mojo_fnptr_call_N` boundary. That is
-    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
+    # bug:CODEGEN_callable_return_type_lost_at_more_hops — the same hop
     # `use(<callable>)` is at the bottom of
     # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
     # hop one level in (the factory's own `outer()()`) and passes.
@@ -1082,7 +1082,7 @@ main()
     #
     # `use(<callable>)` is deliberately NOT here: routing the callable through
     # an unannotated parameter loses the return type one hop further out,
-    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
+    # which is bug:CODEGEN_callable_return_type_lost_at_more_hops and is
     # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
     # pins for buildability only.
     test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
