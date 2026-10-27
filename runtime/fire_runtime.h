@@ -1378,6 +1378,8 @@ char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
+int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
+char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
