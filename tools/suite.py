@@ -2341,6 +2341,19 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
+# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
+# blowup it used to describe; the blowup is closed (bugs/CODEGEN_ab_native_fails.md,
+# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
+# divergence. `2f75609d` turned the job back from disabled= to expect=
+# referencing the constant `58192261` had removed, so every import of this
+# module (i.e. every `make gate`) died with a NameError before any test ran.
+# The "1 failing" is load-bearing, not decoration: _expect_count_drift
+# re-counts the run's "Results: N passed, M failed" line against it, so a
+# second divergence cannot be absorbed silently by the marker.
+SELFHOST_TOKENIZE_BLOWUP = (
+    'bugs/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    '(29/30 byte-identical; the blowup this constant was named for is '
+    'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
