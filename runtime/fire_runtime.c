@@ -9413,7 +9413,7 @@ MojoList *mojo_iter_boxed_list(int64_t v)
  * computed with a parser that is not a parser until the first attribute read
  * off the result died with an `AttributeError` naming an attribute of a class
  * the program never built
- * (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+ * (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
  *
  * Raising at the CALL is the point where it becomes true, and it is
  * catchable, so a program that legitimately probes for the capability can

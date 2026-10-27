@@ -1260,7 +1260,7 @@ def _uncompiled_module_marker(gen, node) -> str:
     with a parser that is not a parser, silently, until the first attribute
     read off the result died with an `AttributeError` naming an attribute of a
     class the program never built
-    (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
 
     Keyed on `_module_alias_names`, NOT `imported_symbols`, for the reason that
     set's own docstring gives at length (an unresolved `from X import name`

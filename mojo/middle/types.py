@@ -789,7 +789,7 @@ _DISPATCH_TABLE_GLOBAL_CTYPES = {
 # nothing reads it.
 #
 # `_uncompiled_module_marker`'s raise (see
-# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md) therefore
+# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md (DELETED)) therefore
 # has to exclude these modules: it answers “is this a marker for a module this
 # compile never compiled”, which is true for `re` and irrelevant, because the
 # compile-time recogniser already holds the answer. Raising there turned

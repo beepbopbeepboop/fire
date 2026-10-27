@@ -6528,7 +6528,7 @@ fn main():
     # built: CPython's own `Apple/__main__.py --help` printed usage and exited
     # 0, and this printed `Unhandled exception: AttributeError:
     # cross_build_dir` and exited 0 too
-    # (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    # (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md; module-marker stub now loud)
     #
     # The raise happens at the CALL, which is where it becomes true, and it is
     # catchable — which is the second half of the assertion: a program that
@@ -6563,6 +6563,18 @@ def main():
     except NotImplementedError as e:
         print("fell back")
 """, "fell back\n")
+
+    # Pinning regression — DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md
+    # (already fixed: stub raises NotImplementedError at call site, not silent 0)
+    test_gimple_stdout("gimple_argparse_parse_args_pin", """\
+import argparse
+def main():
+    try:
+        p = argparse.ArgumentParser()
+        p.parse_args(["--help"])
+    except NotImplementedError as e:
+        print("stub-loud", e)
+""", "stub-loud NotImplementedError: argparse.ArgumentParser: module 'argparse' is not compiled into this binary\n")
 
     # The other end of the same marker: a member that IS a C library
     # function. `math.floor(1.5)` used to print `0` and exit 0 (the generic
