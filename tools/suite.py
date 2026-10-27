@@ -2695,7 +2695,7 @@ test('prooflib', [PY, '-c',
             "Lean's own -M is 12 GB for a library build (6144 for a generated "
             'proof) and a 4 GB ceiling is not a tighter policy but a red suite, '
             'measured: see formal/lean.py and '
-            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. `module` (24) is '
+            'measured (see MEASURED_PEAK_GB["prooflib"]). `module` (24) is '
             'the smallest class covering 1.5x of 9.0 = 13.5 GB; `small` (8) is '
             'not, and a RESOURCE verdict here takes down every proof job that '
             'deps on it. See ' + MEM_DEBT_DOC,
@@ -2924,7 +2924,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'whose work it can now do itself rather than like the pure-python '
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
-            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. See ' + MEM_DEBT_DOC,
+            'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
