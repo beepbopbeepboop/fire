@@ -2160,7 +2160,6 @@ def _dict_value_locals(gen, body: list) -> tuple[dict, dict]:
     can be typed when `d["k"]` holds a list or a string). First-store-wins
     for both, and they are overlaid together so they cannot disagree about
     which `d` they describe.
-    """
 
     The companion to `_prebound_local_ctypes`, for the subscript case: a
     container literal bound to a NAME is found by the former, but a

@@ -5041,8 +5041,6 @@ class Interpreter:
         self.scope.define(expr.name, value)
         return value
 
-    def eval_WhileStmt(self, node: N.WhileStmt):
-
     def eval_LambdaExpr(self, expr: N.LambdaExpr):
         """`lambda <params>: <expr>` — an anonymous function. Returns a
         MojoFunction whose body is the single statement `return <expr>` and
