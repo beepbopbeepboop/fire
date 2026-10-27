@@ -2149,10 +2149,49 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # this, so refusing loudly is the correct answer (see
             # bugs/CODEGEN_bracket_call_to_a_runtime_paramless_function_
             # is_a_zero.md). Returning 0 was a silent wrong answer.
-            _base_name = node.func.obj.name if isinstance(node.func.obj, gimple_ctypes.IdentExpr) else repr(node.func.obj)
-            raise RuntimeError(
-                f"cannot compile module: a bracketed call {_base_name}[...]() "
-                f"needs link-mode specialisation, which this build does not do")
+            #
+            # The refusal is OWNERSHIP-scoped, though: it fires only for a
+            # callee THIS translation unit defines itself (in
+            # func_return_types, not in imported_symbols) — the measured
+            # shape, `def a[T: Int](): ...; a[7]()`, where the compiler
+            # owns the callee, knows it has a comptime parameter, and
+            # simply has no single-TU specialisation, so a loud refusal is
+            # the honest answer (pinned by
+            # test_comptime_bracket_params.py::test_paramless_function_
+            # bracket_refused_in_single_tu). A name that crosses the module
+            # boundary (`size_of` from std.sys, `SIMD`/`Array` from
+            # std.collections, `llvm_intrinsic`, `alloc`, `global_constant`,
+            # ...) does NOT refuse: the single-TU module-boundary discipline
+            # for imported symbols is forward declaration + zero stub, and
+            # link mode is what resolves the real symbol. Refusing there
+            # instead took 180 of the 610 stdlib modules down at once
+            # (measured 2026-10-27: every one of the failures was this
+            # catch-all raising on an imported name — `count * size_of
+            # [type]()` at std/memory/memory.mojo:149, `Array[Byte,
+            # CONTAINER_SIZE](fill=...)` at
+            # _parsing_numbers/parsing_floats.mojo:127 — each of which the
+            # pre-refusal build emitted as the stub below, byte for byte).
+            # A non-plain-Name base (`a[i]['k']()`) has no ownership answer
+            # either, and keeps the stub. A base that is a GENERIC STRUCT —
+            # local or imported (`SIMD` inside std/simd.mojo itself, `Bar`
+            # in test_some.mojo, `StringDict`, `TakesStringLiteral`,
+            # `_fdopen`): the constructor dispatch above already tried the
+            # struct elaboration and bailed (a type arg it will not guess,
+            # e.g. a keyword-bound `foo=Foo[4]()`), and the pre-refusal
+            # build stubbed those bail-outs too; rejecting them instead
+            # left exactly these six modules red. Struct bases are in
+            # _imported_generic_structs either way (a same-file struct is
+            # registered under its own filename, see
+            # _register_imported_generic_structs), which the condition
+            # above uses to keep the stub.
+            if (isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                    and node.func.obj.name in gen.func_return_types
+                    and node.func.obj.name not in gen.imported_symbols
+                    and node.func.obj.name not in gen._imported_generic_structs):
+                _base_name = node.func.obj.name
+                raise RuntimeError(
+                    f"cannot compile module: a bracketed call {_base_name}[...]() "
+                    f"needs link-mode specialisation, which this build does not do")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
