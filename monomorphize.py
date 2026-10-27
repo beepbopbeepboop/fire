@@ -419,6 +419,36 @@ def _sub_variadic(src: str, tp: str, items: list, element_map: dict = None,
     named refusal, the standard discipline for this area."""
     bare = tp[1:]
     join = ', '.join(items)
+    # 1a. the unpack as a VARIADIC PARAMETER ANNOTATION (`*args: *Self.
+    # element_types`): a parameter annotation is ONE type — the parser
+    # reads exactly one `_parse_type_ann()` for it — so the comma-joined
+    # list is wrong there in the one way a list is never wrong inside a
+    # bracket argument list (`Tuple[*Self.element_types]` DOES want every
+    # inner). The join left the SECOND inner as a spurious next-parameter
+    # name, and an inner with its own bracket arguments (`ComptimeInt[3]`)
+    # had its `[3]` skipped as a LIFETIME bracket, dropping the list's
+    # COMMA — or, for the last inner, the parameter list's RPAREN — onto
+    # the parameter-NAME position: `SyntaxError: 147:71: Expected NAME or
+    # KW got COMMA` for `Coord[ComptimeInt[5], Int32, ComptimeInt[3],
+    # Int64]` and `147:53: ... got RPAREN` for `Coord[Int,
+    # ComptimeInt[1]]` (coord.mojo:323's `def __init__(out self, var
+    # *args: *Self.element_types)`, emitted line 147 — the first
+    # MULTI-inner variadic PARAMETER the stdlib has: every measured
+    # wrapper spelled its inners in a bracket list, where the full join
+    # is the right answer, so pass 1's two regexes never saw this
+    # context). The `: *` prefix is the marker: an unpack whose text
+    # immediately precedes a colon-and-star is a parameter annotation,
+    # and the only legal Mojo unpack in an annotation position is the
+    # variadic parameter's own. The annotation's text is otherwise inert
+    # for the artifact — the TU's C signature for the `*args` slot comes
+    # from `_signature_ctypes`' own `startswith('*')` branch (the packing
+    # sentinel / `MojoList *`), never from the annotation — so the FIRST
+    # inner is the honest single-type spelling (the wrapper families'
+    # element convention is `Self.Ts[0]`; a one-inner instantiation
+    # already degenerates `join` to exactly this text, byte for byte).
+    src = re.sub(rf':\s*\*\s*Self\.{re.escape(bare)}\b', f': {items[0]}', src)
+    src = re.sub(rf':\s*\*\s*(?<![\w.])' + re.escape(bare) + r'\b',
+                 f': {items[0]}', src)
     # 1. the unpack
     src = re.sub(rf'\*\s*Self\.{re.escape(bare)}\b', join, src)
     src = re.sub(rf'\*\s*(?<![\w.])' + re.escape(bare) + r'\b', join, src)
@@ -834,8 +864,31 @@ def monomorphize_source(template_src: str, type_args: dict,
         # (`var _inner: T.Element` — the `_check_no_value_shadow` annotation
         # case, where `T` is the parameter and `.Element` follows it) is
         # still rewritten exactly as before.
-        src = _sub_outside_spans(rf'(?<!\.)\b{re.escape(tp)}\b', str(concrete),
-                                 src, spans)
+        #
+        # `(?![ \t]*=(?!=))`: a KEYWORD LABEL of a bracket/call argument is
+        # not a reference to this template's parameter, either. The stdlib
+        # SIMD struct spells its reduction entry points
+        # `self.reduce[max[dtype=Self.dtype], size_out]()` (simd.mojo:3106;
+        # `min[dtype=Self.dtype]` at 3146) — the `dtype` before the `=` is
+        # the CALLEE's comptime-parameter name, a label, and the unit pass
+        # above has just rewritten its VALUE (`Self.dtype` -> the concrete
+        # arg) beside it. Rewriting the label too produced
+        # `max[exp.dtype=exp.dtype]` (for the `__pow__` call site's
+        # `SIMD[exp.dtype, self.length]` spelling) — and, identically,
+        # `max[Float32=Float32]` for the fully concrete `SIMD[Float32, 8]`:
+        # EVERY SIMD instantiation hit the same line, and the re-parse died
+        # with `Expected RBRACKET got ASSIGN('=')` where the label's `=`
+        # sat inside the outer `reduce[...]` argument list (measured
+        # 2026-10-27 on SIMD_5_dtype_14_exp_....mojo:2662, the reduce_max
+        # body: template line 3106 is generated line 3106-445+1). A label is
+        # the parameter immediately followed by a single `=` (the `(?!=)`
+        # tail keeps a `==` comparison — where the parameter IS a reference
+        # — substitutable); `[ \t]*` rather than `\s*` so a parameter at
+        # end of line whose NEXT line begins a `=` (an annotation with a
+        # wrapped default) is still a reference and still rewritten.
+        src = _sub_outside_spans(
+            rf'(?<!\.)\b{re.escape(tp)}\b(?![ \t]*=(?!=))', str(concrete),
+            src, spans)
     return mangled, src
 
 
