@@ -1899,25 +1899,6 @@ def _gen_stmt_AssignStmt(gen, node):
             _reified = gimple_ctypes.reify_empty_container_literal(gen, vtype, field_type, node.value)
             if _reified is not None:
                 vtype, v = field_type, _reified
-            # A nullable receiver (a padded `zip_longest` slot that can hold
-            # the model's NULL `None`, recorded in `_nullable_ptrs` by the
-            # zip_longest loop lowering) must not be dereferenced raw on a
-            # member WRITE either: CPython raises AttributeError for
-            # `None.field = v`, and a raw `output->peek = t` on a NULL slot
-            # is a segfault (measured 2026-10-27: the merge's own regression
-            # gimple_zip_longest_struct_padded_slot_member_read_is_none_
-            # aware, `input.peek = output.peek = True` over a padded
-            # `StackItem` slot, exited -11). This is the write twin of the
-            # None-aware read dispatch `_lower_MemberExpr` added by the same
-            # work, whose comment scoped the fix to reads ("Writes are
-            # unaffected") and so left this dereference behind.
-            if (isinstance(node.target.obj, gimple_ctypes.IdentExpr)
-                    and node.target.obj.name in getattr(gen, "_nullable_ptrs", ())
-                    and '*' in ot):
-                _nul = gen._new_temp('void *')
-                gen._emit(f'  {_nul} = (void *){ov};')
-                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
-                    f"\x27NoneType\x27 object has no attribute \x27{node.target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
             # store — the word store above is the payload; the adjacent
@@ -3270,14 +3251,20 @@ def _gen_stmt_MatchStmt(gen, node):
 
     Switch-style equality dispatch (see fire_compiler.py's MatchStmt
     docstring for why this isn't full structural pattern matching):
-    lowered as a chain of `if (subject == p1 | subject == p2 | ...)`
-    checks, reusing the existing `==` lowering (_lower_BinaryOp already
-    knows how to compare strings via mojo_str_eq/strcmp vs. plain value
-    equality for everything else) rather than duplicating that type
-    dispatch here. The subject is lowered exactly once, up front, into a
-    temp — each pattern comparison references that temp via a synthetic
-    IdentExpr rather than re-lowering `node.subject`, since re-lowering
-    would re-evaluate it (with side effects) once per pattern."""
+    lowered as a chain of `if (subject == p1 || subject == p2 || ...)`
+    checks with C short-circuiting, reusing the existing `==` lowering
+    (_lower_BinaryOp already knows how to compare strings via
+    mojo_str_eq/strcmp vs. plain value equality for everything else)
+    rather than duplicating that type dispatch here. The subject is
+    lowered exactly once, up front, into a temp — each pattern comparison
+    references that temp via a synthetic IdentExpr rather than re-lowering
+    `node.subject`, since re-lowering would re-evaluate it (with side
+    effects) once per pattern."""
+    # Formal model support for structural pattern refusal.
+    # This function has to import formal.model here, not at the top, to avoid
+    # circular imports:
+    from formal import model as formal_model
+
     subj_type, subj_v = gen.lower_expr(node.subject)
     subj_ref = gimple_ctypes.IdentExpr(name=subj_v)
 
@@ -3290,57 +3277,49 @@ def _gen_stmt_MatchStmt(gen, node):
         has_more = i + 1 < len(node.cases)
         next_check_bb = gen._new_bb() if has_more else bb_merge
 
-        # An explicit loop, NOT `any(isinstance(p, IdentExpr) and
-        # p.name == '_' for p in match_case.patterns)`: `pattern` elements
-        # are heterogeneous Expr nodes with no tracked element type, so the
-        # element binds as a bare int64_t — for which `isinstance` emits a
-        # REAL `mojo_read_type_tag` check (unlike the constant-false
-        # `isinstance(<char *>, ...)` static guard). The generator-
-        # comprehension form instead materialized an empty list plus
-        # `mojo_list_any` (`/* TODO: comprehension over int64_t */`), i.e.
-        # always False, which emitted `case _:` as `case 0:` on the
-        # self-hosted path (native vs python3 `--dump match_stmt.mojo`).
-        is_wildcard = False
-        for _wp in match_case.patterns:
-            if isinstance(_wp, gimple_ctypes.IdentExpr) and _wp.name == '_':
-                is_wildcard = True
+        # The gimple path must decide per-pattern: wildcard (_) is always true
+        # and ends the pattern list; bare bound name is a comparison; bare
+        # unbound name is a capture (assign subject and irrefutable); structural
+        # patterns are refused by name.
+        # Build the case's test as a chained || for short-circuit in C.
+        # A list that ends in a capture/w Wildcard: the arm runs when reached,
+        # but no later patterns are evaluated — pattern list stops here.
+        condition = None
+        pattern_refs = []
+        for pattern in match_case.patterns:
+            # Ask the formal model whether this pattern is allowed here.
+            kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
+            if kind in formal_model.MATCH_REFUSED_KINDS:
+                # Emit a refusal error message and raise.
+                raise formal_model.CodegenError(formal_model.match_pattern_refusal(
+                    kind, formal_model.spelled(pattern),
+                    getattr(gen, 'function_name', '<module>'),
+                    getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0))
+            if kind == "wildcard":
+                # Irrefutable, binds nothing — any truth value works for a chain.
+                condition = "1"
                 break
-        if is_wildcard:
-            # A bare `_Bool x; x = 1;` is a "non-trivial conversion" under
-            # -fgimple's strict mode (an int constant assigned straight
-            # into a _Bool isn't automatically allowed, unlike normal C).
-            # `_lower_BoolLiteral` sidesteps this the same way: type the
-            # temp as plain `int` (a same-type, always-trivial `int = 1`
-            # assignment) rather than `_Bool` — used below only as an
-            # `if (...)` condition or combined via `_ensure_bool_cond`,
-            # both of which accept a plain int fine (see BUG-2026-017,
-            # found via cpp_parser's `match name: ... case _:` wildcard).
-            match_bool = gen._new_temp('int')
-            gen._emit(f"  {match_bool} = 1;")
-        else:
-            match_bool = None
-            for p in match_case.patterns:
-                ct, cv = gen.lower_expr(gimple_ctypes.BinaryOp(op='==', left=subj_ref, right=p))
-                cv = gen._ensure_bool_cond(ct, cv)
-                if match_bool is None:
-                    match_bool = cv
-                else:
-                    combined = gen._new_temp('_Bool')
-                    gen._emit(f"  {combined} = {match_bool} | {cv};")
-                    match_bool = combined
+            if kind == "capture":
+                # Unbound bare name: assign subject to it, then this arm always
+                # runs (the pattern list stops here). The formal emitter's
+                # _lower_one_case has already bound this name in its local set.
+                gen._emit(f"  {pattern.name} = {subj_v};")
+                condition = "1"
+                break
+            # 'name' or 'value': compare subject with pattern via ==.
+            ct, cv = gen.lower_expr(gimple_ctypes.BinaryOp(op='==', left=subj_ref, right=pattern))
+            cv = gen._ensure_bool_cond(ct, cv)
+            if condition is None:
+                condition = cv
+            else:
+                condition = f"{condition} || {cv}"
+        # If no pattern in the list is a capture or wildcard, but there are patterns,
+        # `condition` is a chained || expression — C's short-circuit works.
         if match_case.guard is not None:
             gt, gv = gen.lower_expr(match_case.guard)
             gv = gen._ensure_bool_cond(gt, gv)
-            # match_bool is plain `int` for the wildcard branch above,
-            # `_Bool` otherwise — coerce before combining so `combined`
-            # (declared `_Bool`) is only ever assigned a real `_Bool`
-            # value, not a mixed int/_Bool bitwise-AND result (the same
-            # "non-trivial conversion" trap the wildcard fix addresses).
-            match_bool = gen._ensure_bool_cond('int' if is_wildcard else '_Bool', match_bool)
-            combined = gen._new_temp('_Bool')
-            gen._emit(f"  {combined} = {match_bool} & {gv};")
-            match_bool = combined
-        gen._emit(f"  if ({match_bool}) goto {case_bbs[i]}; else goto {next_check_bb};")
+            condition = f"{condition} && {gv}"
+        gen._emit(f"  if ({condition}) goto {case_bbs[i]}; else goto {next_check_bb};")
 
     for i, match_case in enumerate(node.cases):
         gen._emit_label(case_bbs[i])
@@ -3529,20 +3508,6 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             # conversion in gimple call"/assignment) — not merely a
             # warning, a hard compile failure.
             field_type = gen.struct_field_types.get(sn, {}).get(target.member, vtype)
-            # Nullable-receiver guard: the chained-assignment twin of the
-            # identical check in _gen_stmt_AssignStmt's MemberExpr branch
-            # just above — a padded `zip_longest` slot is a NULL struct
-            # pointer on the short sequence's extra iterations, and a raw
-            # `output->field = v` there is a segfault where CPython raises
-            # AttributeError (`input.peek = output.peek = True` is a
-            # MultiAssignStmt, which is why this branch needed its own copy).
-            if (isinstance(target.obj, gimple_ctypes.IdentExpr)
-                    and target.obj.name in getattr(gen, "_nullable_ptrs", ())
-                    and '*' in ot):
-                _nul = gen._new_temp('void *')
-                gen._emit(f'  {_nul} = (void *){ov};')
-                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
-                    f"\x27NoneType\x27 object has no attribute \x27{target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(target.member)}")
         elif isinstance(target, gimple_ctypes.SubscriptExpr):
             ot, obj_v = gen.lower_expr(target.obj)

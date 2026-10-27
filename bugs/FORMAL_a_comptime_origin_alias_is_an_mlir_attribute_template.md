@@ -15,27 +15,7 @@ that shows the recommendation CANNOT reach the case it was written for**, which 
 why this doc is not deleted. **Link 1 — `std/origin/__init__.mojo`'s `comptime`
 alias whose value is an MLIR attribute template — is still open and is claimed by
 another lane.** So this document stays, for link 1 and because §6's fix is a
-message improvement rather than a build. **Re-verified 2026-10-27 on this tree**
-(`/Users/mrs/net/gcc/gcc/.mojo/fire/.fire-fire`; the checkout `module_loader`
-resolves is `/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib`, and this
-worktree has no `../new-modular` of its own): the classifier half holds — all
-seven `test_formal_run.py` rows `sub_multi_index_comptime_params*` PASS,
-including §6's `…_names_the_culprit_when_a_builtin_type_is_spelled` ("element 1
-`StaticString` is a type this image knows; and element 2 `ImmStaticOrigin` is a
-bare name this image cannot resolve to a declaration. That is where the missing
-word is.") and the `refuse_without` row `…_of_literals_says_nothing_extra`. In
-the checkout, `std/sys/arg.mojo`'s build now stops at an earlier, separate wall
-than this doc's own §"What I ran" terminal — its `std.ffi` import closure hits
-the bare template call's inference gap (`FORMAL_a_bare_call_to_a_template_
-whose_type_arguments_are_inferrable.md`, still open), byte-identical on arm64
-and x86_64, so `Span[StaticString, ImmStaticOrigin]` sits downstream of that
-wall rather than being the checkout's terminal; the two-round chain probe
-(`formal_chain_probe.py 2 arm64 --stdlib <checkout> <std>/sys <std>/_gpu`) ends
-on the same wall, exit 0. Link 1 remains the open claim and the reason this doc
-stays: `std/origin/__init__.mojo` still refuses with "the module-level comptime
-binding 'AnyOrigin' is initialized from an MLIR attribute template … there is
-no MLIR on this path for the template to become", byte-identical to this doc's
-recorded measurement through its first sentence.
+message improvement rather than a build.
 
 ## 6. What landed 2026-10-05: `StaticString` is a TYPE this image knows, so the
 ## contrast fires and the reader is told which element to go and look at
