@@ -5192,7 +5192,8 @@ main()
     #
     # `print([1, 'two', None, True, 2.5])` is NOT here: a `True` in a MIXED
     # list prints `1` on this tree, which is
-    # bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md's open item,
+    # CODEGEN_bool_annotated_struct_field_prints_as_int (bool in mixed list
+    # prints 1): still open; not this fix, and pinning the wrong text here
     # not this fix, and pinning the wrong text here would make it look settled.
     # `[True, False]` (all-bool, so it routes to `mojo_repr_list_bools`) is
     # here, and so is a bool DICT VALUE (`"f": True` in the dict below): that
