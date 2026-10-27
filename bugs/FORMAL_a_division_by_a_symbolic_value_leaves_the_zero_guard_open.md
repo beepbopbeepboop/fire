@@ -28,45 +28,6 @@ exact next step" below are still the right three, but option 1 is now a claim
 about a block the walk does not walk at all, which moves option 2 from third to
 first.
 
-## Status 2026-10-27 (this tree): the state re-verified — the route is still gone,
-## and the class is still blind by name
-
-Re-ran the classes this doc names as its measurement, in one run:
-
-```console
-$ python3 tools/memslot.py --gb 8 --label t -- python3 -m unittest \
-    test_formal_call_proof_gen.TestTheZeroDivisorGuardIsAFalseGoal \
-    test_formal_call_proof_gen.TestTheZeroDivisorGuardAgainstLean \
-    test_formal_call_proof_gen.TestTheDiv0FixtureHaltsAtTheCompilerTrap -v
-Ran 8 tests in 146.519s
-FAILED (failures=5)
-```
-
-All five failures are the three rows of
-`TestTheZeroDivisorGuardAgainstLean` (its two-spelling subTests counted
-separately), and every one fails with the class's own named blindness rather
-than with a diagnosis: `the generator SUBSTITUTED q_compiles_correctly_universal
-with the announced reachability theorem (q_reaches_call_at_…) … there is no
-all_goals (first | done | sorry) in the tail for tail.replace(_ADMIT, _TRACE) to
-patch, so this class cannot trace the div0 residual until the walk can discharge
-a call on a conditional path`. That is the Status above — "the three rows … are
-red for exactly that reason" — re-measured, and it is the same count the
-sibling's 2026-10-12 re-measurement recorded (3 tests, 5 subTest failures).
-The five Lean-free rows pass: `TestTheZeroDivisorGuardIsAFalseGoal` keeps the
-defect itself pinned (fdiv64's div0 arm is the literal `0`; `10 // 0` leaves the
-image with status 1 and prints nothing, both backends; the fixture's outcome is
-the announced substitution rather than a silent empty tail; and the `// 4`
-literal-divisor image still carries both `q_compiles_correctly_universal` and
-the walk terminal's admission), and `TestTheDiv0FixtureHaltsAtTheCompilerTrap`
-keeps the substitution pinned (no universal theorem,
-`theorem q_reaches_call_at_0x100000504`, zero `_ADMIT`). Nothing in "The exact
-next step" moves: item 1 of the sibling's step list — this doc's option 2, the
-divergence treatment, a change to the theorem's shape — is still the step, and
-it is still held by
-`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
-through `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`.
-The three rows stay red and unmarked on purpose.
-
 ## Status 2026-10-13 (`work/formal295-docs`): the unreached-residual doc is absorbed here
 
 `FORMAL_the_div0_residual_goal_is_no_longer_reached_by_the_terminal_value_flow`

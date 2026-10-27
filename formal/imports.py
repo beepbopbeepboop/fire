@@ -4281,7 +4281,7 @@ def module_dylib_path(out_dir: str, module_identity: str, source_path: str,
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                        arch: str = "arm64", project_root: str = None,
                        _stack=(), _parent: str = None,
-                       demands: dict = None) -> str:
+                       demands: dict = None, closure: dict = None) -> str:
     """Compile `source_path` in full into a dylib; return its path.
 
     "In full" = every public function the module defines. Its own imports are
@@ -4416,8 +4416,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     for other, wanted in instantiation_demands(
             source_path, module_source_text(source_path),
             project_root=project_root or source_path,
-            own_templates=MM.template_names(module_source_text(source_path))
-            ).items():
+            own_templates=MM.template_names(module_source_text(source_path)),
+            closure=closure).items():
         merged = dict(below.get(other) or {})
         for tmpl, args in wanted.items():
             merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
@@ -4450,7 +4450,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
         d = build_module_dylib(_mod, dep_path, out_dir, arch,
                                project_root=project_root or source_path,
                                _stack=_stack + (os.path.abspath(source_path),),
-                               _parent=module_identity, demands=below)
+                               _parent=module_identity, demands=below,
+                               closure=closure)
         if d:
             dep_dylibs.append(d)
 

@@ -1811,12 +1811,16 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # turns `Pair[Int]()` into the concrete `Pair_Int()` — afterwards the
         # brackets are gone and the answer would be empty.
         from formal.imports import (check_library_free_calls, instantiation_demands,
-                                    library_free_edges, module_source_text)
+                                    library_free_edges, module_source_text,
+                                    template_closure)
+        # ONE closure walk for all direct imports — the product that §4a measures.
+        closure = template_closure(
+            [path for _, path in resolved], project_root=source_path)
         demands = {}
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
-                    project_root=source_path).items():
+                    project_root=source_path, closure=closure).items():
                 merged = dict(demands.get(other) or {})
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
@@ -1838,7 +1842,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
                                            project_root=source_path,
-                                           _parent=parent, demands=demands)
+                                           _parent=parent, demands=demands,
+                                           closure=closure)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -20551,15 +20556,12 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name,
         alias_st = M.with_alias_struct(struct, structs_by_name)
         if alias_name is not None and alias_st is not None:
             alias_structs[alias_name] = alias_st
-    # `__exit__` takes the receiver alone, CPython's own three exception words,
-    # or the variadic `(self, *exc)`.  A wider shape is accepted only when the
-    # method never reads the words it would receive
-    # (`model.context_exit_ignores_its_exception_words` /
-    # `model.context_exit_variadic_ignores`), so the three zeros below are the
-    # `None, None, None` CPython passes on a normal exit — spelled as the only
-    # value this word-based model has for "nothing" — and nothing in the callee
-    # looks at them.  `context_exit_arity` is 4 only for the fixed-word shape;
-    # the variadic one is 1, and its catch-all binds to the empty tuple.
+    # `__exit__` takes the receiver alone, or CPython's own three exception
+    # words.  The four-word shape is accepted only when the method never reads
+    # them (`model.context_exit_ignores_its_exception_words`), so the three
+    # zeros below are the `None, None, None` CPython passes on a normal exit —
+    # spelled as the only value this word-based model has for "nothing" — and
+    # nothing in the callee looks at them.
     exit_args = [F.IdentExpr(tmp)]
     if M.context_exit_arity(struct) == 4:
         exit_args += [F.IntLiteral(value=0, line=0, col=0, raw="")] * 3
