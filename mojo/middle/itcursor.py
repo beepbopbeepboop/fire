@@ -135,9 +135,21 @@ def read_at(gen, rec, idx):
     # directly to a call result in an assignment RHS is rejected by
     # gcc -fgimple, so read through a temp: first grab the int word, then cast
     # the temp (not a call rhs).
-    if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
-                 'MojoSet *' in elem or 'MojoBytes *' in elem or
-                 'MojoStr *' in elem or elem.endswith(' *')):
+    #
+    # `suf == 'int'` is the guard that keeps the branch honest: it fires
+    # exactly when the per-slot getter reads a WORD. `char *` is a pointer
+    # element that ends in ` *` but is NOT a container — its slots hold the
+    # string pointer itself and `list_suffix` gives it the 'str' getter
+    # (`mojo_list_get_str`), which returns the pointer, not a word. Letting
+    # `endswith(' *')` route it here declared the word temp `int64_t` and
+    # gcc refused the `char *`-into-`int64_t` assignment (measured 2026-10-27
+    # on test/iter/test_next.mojo's `assert_equal(next(it2), "hi")` over
+    # `l2 = ["hi", "hey", "hello"]` — the sweep's only next()-over-a-string-
+    # list; the pre-merge build read it as a plain `char *` via the final
+    # return below). Every container the branch was written for (MojoList *,
+    # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
+    # `suf == 'int'`, so this changes nothing for them.
+    if elem and elem.endswith(' *') and suf == 'int':
         raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
         return elem, gen._new_val(elem, f"({elem}){raw}")
     return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
