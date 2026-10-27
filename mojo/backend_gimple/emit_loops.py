@@ -1523,8 +1523,15 @@ def _gen_for_zip_longest(gen, node):
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
     # wins semantics preserved — later loops over the same names reuse
     # these real types instead of inheriting an int64_t lock-in).
+    # A padded struct-pointer (or any pointer-typed) slot can hold the
+    # model's NULL `None`, so the loop variable is nullable: a member read
+    # on it must take the None-aware dynamic path instead of a raw `->`
+    # dereference.  Recorded per local for `_lower_MemberExpr`.
+    gen._nullable_ptrs = getattr(gen, "_nullable_ptrs", set())
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
         gen._declare_var(vn, elem)
+        if "*" in str(elem):
+            gen._nullable_ptrs.add(vn)
 
     len_ts = []
     for ptr, _elem in seqs:

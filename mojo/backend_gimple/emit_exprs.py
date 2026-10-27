@@ -2367,6 +2367,24 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
 
     op = '->' if '*' in ot else '.'
     struct_name = gimple_exprtypes._struct_name_of(ot)
+    # A local recorded as nullable (e.g. a padded `zip_longest` slot that
+    # can hold the model's NULL `None`) must not be dereferenced raw when a
+    # member is read: route through the None-aware runtime dispatch instead,
+    # mirroring a `None`-typed (`int64_t`) receiver.  Writes are unaffected.
+    if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name in getattr(gen, "_nullable_ptrs", ())
+            and ot.endswith(" *")
+            and struct_name in getattr(gen, "struct_field_types", {})
+            and node.member in gen.struct_field_types.get(struct_name, {})):
+        _ft = gen.struct_field_types[struct_name][node.member]
+        _vp = gen._new_val('void *', f'(void *){ov}' if ot != 'void *' else ov)
+        _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                             [('void *', _vp), ('char *', f'"{node.member}"')])
+        if _ft != 'int64_t':
+            _t = gen._new_val(_ft, f'({_ft}){_raw}')
+            return _ft, _t
+        gen._dyn_word_vals.add(_raw)
+        return 'int64_t', _raw
     # `obj.__dict__` on a value whose struct type is statically known
     # (Step 0 of “setting/getting an arbitrary attribute on a generically-typed object”)
     # — a real MojoDict* view of the struct's OWN already-known fields,
