@@ -1529,7 +1529,8 @@ def _gen_for_zip_longest(gen, node):
     # dereference.  Recorded per local for `_lower_MemberExpr`.
     gen._nullable_ptrs = getattr(gen, "_nullable_ptrs", set())
     for vn, (_ptr, elem) in zip(tgt_names, seqs):
-        gen._declare_var(vn, elem)
+        force = gen.var_types.get(vn) not in (None, elem)
+        gen._declare_var(vn, elem, force=force)
         if "*" in str(elem):
             gen._nullable_ptrs.add(vn)
 
@@ -1799,9 +1800,12 @@ def _gen_for_zip(gen, node):
             # holding this slot's own element — zip yields one tuple per
             # iteration, so the remainder after `a` is exactly this slot.
             # Declared as the list it is; `_zip_bind_slot` below fills it.
-            gen._declare_var(starred_slot_name(vn), 'MojoList *')
+            star_name = starred_slot_name(vn)
+            force = gen.var_types.get(star_name) not in (None, 'MojoList *')
+            gen._declare_var(star_name, 'MojoList *', force=force)
             return
-        gen._declare_var(vn, elem)
+        force = gen.var_types.get(vn) not in (None, elem)
+        gen._declare_var(vn, elem, force=force)
 
     for _di in range(len(tgt_names)):
         _declare_zip_slot(tgt_names[_di], seq_ptrs[_di], seq_elems[_di])
@@ -2048,7 +2052,7 @@ def _gen_for_enumerate(gen, node):
             list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
-    gen._declare_var(idx_var, 'int64_t')
+    gen._declare_var(idx_var, 'int64_t', force=gen.var_types.get(idx_var) not in (None, 'int64_t'))
     star_elem = None
     if val_is_star:
         # The starred slot is a LIST of what follows the index, not the
@@ -2061,7 +2065,9 @@ def _gen_for_enumerate(gen, node):
             'str': 'char *', 'double': 'double'}.get(
                 gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
     elif not val_is_tuple:
-        gen._declare_var(val_var, elem if elem else 'int64_t')
+        val_ctype = elem if elem else 'int64_t'
+        force = gen.var_types.get(val_var) not in (None, val_ctype)
+        gen._declare_var(val_var, val_ctype, force=force)
         # An element of a sequence whose element kind nothing recorded is a
         # word of unknown kind (see `_dyn_word_locals`): `f'{ct}'` over
         # `enumerate(params)` of an untyped `params` has to ask the runtime
@@ -2117,7 +2123,8 @@ def _gen_for_enumerate(gen, node):
             if vname == '_':
                 continue
             cv = gen._cname(vname)
-            gen._declare_var(vname, pair_elem)
+            force = gen.var_types.get(vname) not in (None, pair_elem)
+            gen._declare_var(vname, pair_elem, force=force)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':
