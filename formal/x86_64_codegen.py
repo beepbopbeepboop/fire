@@ -1410,14 +1410,6 @@ class X86_64Codegen:
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
         self._materialised = {}
-        # The comprehension-element RELOCATION context: `(res_offset, cap)`
-        # pushed by `_emit_compr_gen`'s leaf around an element
-        # `model.comprehension_element_is_relocatable` accepts, so the
-        # container literals the element builds reserve a `cap`-slot array
-        # and recompute their base from the result's count
-        # (`_emit_relocated_blob_base`) instead of one shared blob the
-        # per-iteration copy would alias. Empty otherwise; arm64's twin.
-        self._compr_reloc = []
         # Blocks for CONTAINERS this function RECEIVES from a callee that
         # returns one, and the COPY after each such call that fills them.  The
         # third kind of block in the same region as the constructor frames and
@@ -3713,25 +3705,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
-    def _emit_relocated_blob_base(self, res_offset: int, array_off: int,
-                                  slot_size: int) -> None:
-        """R11 = slot i of the element array, where i is the result's count.
-
-        The x86-64 twin of arm64's `_emit_relocated_list_base` over the same
-        arithmetic: the slot is `array_off + i * slot_size` and i is the
-        result blob's count word — the number of elements appended so far —
-        read into R10 from `res_offset`, because the element is built before
-        the append that increments it. The size goes through RDI and the
-        caller's count store overwrites R10 next, so the sequence touches
-        only R10, R11 and RDI besides computing R11.
-        """
-        self._emit_blob_base(res_offset, Reg.R11)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
-        self._emit_blob_base(array_off, Reg.R11)
-        self._emit_mov_imm(Reg.RDI, slot_size)
-        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
-        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
-
     def _materialize_compr_element(self, element, res_offset: int, cap: int,
                                    before: int) -> None:
         """Give the element its OWN container per iteration, or refuse.
@@ -3770,14 +3743,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         elif M.comprehension_result_is_flat(element) \
                 and self._last_compr_result_size > 0:
             blob_size = self._last_compr_result_size
-        elif M.comprehension_element_is_relocatable(element):
-            # A container literal that holds containers of its own (a list of
-            # lists among them): each such container reserved its OWN
-            # per-iteration array at the element's own site (see
-            # `_emit_relocated_blob_base`), and the element's emission left
-            # RAX on the slot this iteration owns, so the append appends it
-            # as-is and nothing here moves.
-            return
         else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
@@ -4063,25 +4028,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             flat.append(el)
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
-        if self._compr_reloc:
-            # The per-iteration base in place of a fixed blob: the same slot
-            # arithmetic arm64's `_emit_list` emits, recomputed after every
-            # element emission the way the fixed path recomputes after one.
-            res_offset, slots = self._compr_reloc[-1]
-            size = 8 * (1 + cap)
-            array_off = self._reserve_blob(slots * size,
-                                           "comprehension element array")
-            self._materialised[id(expr)] = (array_off, size)
-            self._emit_relocated_blob_base(res_offset, array_off, size)
-            self._emit_mov_imm(Reg.R10, n)
-            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-            for i, el in enumerate(flat):
-                self._emit_expr(el)
-                self._emit_relocated_blob_base(res_offset, array_off, size)
-                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
-            self._emit_relocated_blob_base(res_offset, array_off, size)
-            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
-            return
         offset = self._reserve_blob(8 * (1 + cap), "a list literal")
         self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
@@ -7426,31 +7372,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # word holds only `pairs_written`. arm64's `_emit_dict` has the same
         # arrangement and the same reason (`model.dict_store_capacity`).
         reserved = self._dict_caps.get(id(expr), n)
-        if self._compr_reloc:
-            # The per-iteration base for a dict pair literal in a relocated
-            # element: the same slot as the list path, over the pair blob.
-            res_offset, slots = self._compr_reloc[-1]
-            size = 8 + 16 * reserved
-            array_off = self._reserve_blob(slots * size,
-                                           "comprehension element array")
-            self._materialised[id(expr)] = (array_off, size)
-            self._emit_relocated_blob_base(res_offset, array_off, size)
-            self._emit_mov_imm(Reg.R10, n)
-            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-            for i, (k, v) in enumerate(pairs):
-                self._emit_expr(k)
-                self._emit_relocated_blob_base(res_offset, array_off, size)
-                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 + 16 * i, Reg.RAX))
-                if v is not None:
-                    self._emit_expr(v)
-                else:
-                    self._emit_mov_imm(Reg.RAX, 0)
-                self._emit_relocated_blob_base(res_offset, array_off, size)
-                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 16 + 16 * i,
-                                                  Reg.RAX))
-            self._emit_relocated_blob_base(res_offset, array_off, size)
-            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
-            return
         offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
         self._materialised[id(expr)] = (offset, 8 + 16 * reserved)
         self._emit_blob_base(offset, Reg.R11)
@@ -10101,22 +10022,7 @@ preference.
                                              self._list_cursor - _before)
                 self._compr_append_pair(res_offset, cap)
             else:
-                # An element the relocation accepts builds each container it
-                # opens in the slot its own iteration owns (see
-                # `_emit_relocated_blob_base`): the context tells the literal
-                # emitters that this element is that shape, and the decision
-                # is `model.comprehension_element_is_relocatable`'s so both
-                # backends relocate the same elements.
-                reloc = (cap > 1
-                         and M.comprehension_element_is_relocatable(
-                             expr.element))
-                if reloc:
-                    self._compr_reloc.append((res_offset, cap))
-                try:
-                    self._emit_expr(expr.element)
-                finally:
-                    if reloc:
-                        self._compr_reloc.pop()
+                self._emit_expr(expr.element)
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)

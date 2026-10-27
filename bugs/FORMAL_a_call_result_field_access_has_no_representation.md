@@ -10,14 +10,6 @@ host-import ratchet §3 hands off is now CLEAN (2026-10-08) — every dead host
 import the tree had is deleted, and the importlib.util row it exposed is named
 in full.**
 
-Re-verified 2026-10-27 on this tree: the landed LOCAL half is intact
-(`test_formal_value_model.py a_call_result_bound_to_a_local_reads_its_sole_field`
-passes, `formal value model: PASS=6 FAIL=0`) and the ratchet is green
-(`test_formal_host_import_shapes.py`: 26 tests, OK, skipped=2). The §5
-capability — a representation for a value that is more than one 64-bit word,
-reachable from a WORD, for the host-module rows — remains NOT built, so §5's
-next step is unchanged.
-
 **Update 2026-10-08 (`work/formal224-docs`): the LOCAL half of §5 item 1 now
 lowers.** A local bound from a call whose declared `-> T` names a one-field
 struct of THIS IMAGE reads its sole field, where before only a construction
