@@ -13246,8 +13246,12 @@ def gen_module_impl(self, stmts):
         # The self-host forward declaration must match the definition's
         # arity or the closure fails with "conflicting types for
         # 'compile_to_gimple'". `auto_gpu` is keyword-with-default at every
-        # call site, but a 4th PARAMETER still changes the type.
-        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename, int auto_gpu);',
+        # call site, but a 4th PARAMETER still changes the type. `_Bool`,
+        # not `int`: the definition is emitted from the `bool` parameter
+        # annotations (6a88e6ea's entry-point unification added them) and
+        # maps them to `_Bool`, so an `int` here is a different C type —
+        # "conflicting types for 'compile_to_gimple'".
+        'char *compile_to_gimple(char *mojo_src, _Bool do_imports, char *filename, _Bool auto_gpu);',
         'int64_t mojo_open_file(char *path);',
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
