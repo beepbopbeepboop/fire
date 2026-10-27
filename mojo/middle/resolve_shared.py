@@ -1379,6 +1379,57 @@ def _local_value_type(gen, value) -> str:
 _NONE_TYPE_MARKER = 'NoneType'
 
 
+_SCALAR_CTYPES = frozenset(('int64_t', 'int', 'double', '_Bool'))
+
+
+def _is_confident_scalar(gen, value) -> bool:
+    """Whether `value`'s `_quick_type` answer is a REAL scalar rather than
+    this scan's `int64_t` unknown fallback. Used by `_infer_local_var_types`
+    to decide whether an int-vs-container disagreement is trustworthy enough
+    to box the local. A `double`/`_Bool` is always real (they are never the
+    fallback); an `int64_t` is real only when it traces to a literal, a
+    known scalar variable/parameter, or an arithmetic/comparison built
+    entirely from such."""
+    if value is None:
+        return False
+    if isinstance(value, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                          gimple_ctypes.BoolLiteral)):
+        return True
+    if isinstance(value, gimple_ctypes.UnaryOp) and value.op in ('+', '-'):
+        return _is_confident_scalar(gen, value.operand)
+    qt = None
+    try:
+        qt = gen._quick_type(value)
+    except Exception:
+        qt = None
+    if qt not in _SCALAR_CTYPES:
+        return False
+    if isinstance(value, gimple_ctypes.IdentExpr):
+        name = _as_str(value.name)
+        # A known local/parameter (seeded into var_types during the scan)
+        # or a module global whose own type is recorded is a real scalar
+        # read, not the unknown-name fallback.
+        if name in getattr(gen, 'var_types', {}) or {}:
+            return True
+        if name in getattr(gen, '_own_global_var_types', {}) or {}:
+            return True
+        return False
+    if isinstance(value, gimple_ctypes.BinaryOp):
+        # Comparisons always yield a real bool.
+        if value.op in gimple_ctypes._CMP_OPS or value.op in ('in', 'not in'):
+            return True
+        if value.op in ('and', 'or'):
+            return (_is_confident_scalar(gen, value.left)
+                    and _is_confident_scalar(gen, value.right))
+        # Arithmetic: confident only when both sides are confident scalars.
+        return (_is_confident_scalar(gen, value.left)
+                and _is_confident_scalar(gen, value.right))
+    # Conservative for everything else (calls, subscripts, ...): the
+    # `_quick_type` answer may be a real container/pointer or the fallback,
+    # and we cannot tell without deeper analysis.
+    return False
+
+
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
     """Infer local variable types from all assignments in function body.
 
@@ -1394,14 +1445,16 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     # compiling `./mojoc fire.py --dump-full`.
     inferred: dict[str, list] = {}
 
-    # Names assigned a DIRECT numeric literal (`q = 5`, `q = 2.5`). An
-    # `int64_t` in `inferred[vname]` is ambiguous — it is both a real int
-    # and this scan's UNKNOWN fallback (`site = site + slots[...]`
-    # quick-types `site` as int64_t) — so only a literal makes an
-    # int-vs-container disagreement trustworthy enough to box (see the
-    # conflict test at the bottom). A float needs no such marker: `double`
-    # is never the fallback.
-    literal_scalars: set = set()
+    # Names assigned a CONFIDENT scalar (a real int/float/bool value, not
+    # this scan's `int64_t` UNKNOWN fallback). An `int64_t` in
+    # `inferred[vname]` is ambiguous — it is both a real int and the
+    # fallback (`site = site + slots[...]` quick-types `site` as int64_t)
+    # — so only a confident scalar makes an int-vs-container disagreement
+    # trustworthy enough to box (see the conflict test at the bottom). A
+    # float needs no such marker: `double` is never the fallback. Confidence
+    # is tracked through `_quick_type`'s shape, not just direct literals, so
+    # `q = n + 0` (n a real int parameter) boxes too.
+    confident_scalars: set = set()
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -1423,9 +1476,16 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     _scratch_lvt.update(_as_dict(_saved_var_types))
     gen.var_types = _scratch_lvt
     for pname, ptype in (func.params or []):
-        if pname not in gen.var_types and ptype:
-            gen.var_types[pname] = gimple_ctypes._mojo_type(ptype)
-
+        if pname not in gen.var_types:
+            if ptype:
+                gen.var_types[pname] = gimple_ctypes._mojo_type(ptype)
+            else:
+                # Unannotated parameters default to the boxed int64_t word,
+                # matching the compiler's own param typing. Seeding them here
+                # (rather than leaving them to `_quick_type`'s unknown fallback)
+                # is what lets a confident-scalar test (`q = n + 0`) tell a
+                # real int parameter from an unresolved name.
+                gen.var_types[pname] = 'int64_t'
     def collect_assigned_types(nodes: list):
         """Recursively scan statements and collect types assigned to variables."""
         for node in nodes:
@@ -1482,11 +1542,11 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
-                        if _is_scalar_literal_node(_as_node.value) or (
+                        if _is_confident_scalar(gen, _as_node.value) or (
                                 isinstance(_as_node.value, gimple_ctypes.TupleExpr)
                                 and _zi < len(_as_node.value.elements)
-                                and _is_scalar_literal_node(_as_node.value.elements[_zi])):
-                            literal_scalars.add(vname)
+                                and _is_confident_scalar(gen, _as_node.value.elements[_zi])):
+                            confident_scalars.add(vname)
             elif (isinstance(node, gimple_ctypes.VarDecl) and isinstance(node.name, str)
                     and ',' not in node.name):
                 # Fresh local, not a `node` reassignment — see the
@@ -1528,8 +1588,8 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                     _vt = _local_value_type(gen, _vd_node.value)
                 if _vt:
                     inferred.setdefault(vname, []).append(_vt)
-                if _is_scalar_literal_node(_vd_node.value):
-                    literal_scalars.add(vname)
+                if _is_confident_scalar(gen, _vd_node.value):
+                    confident_scalars.add(vname)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
                 # Fresh local, not a `node` reassignment — see the
                 # AssignStmt branch's identical comment above.
@@ -1543,15 +1603,15 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # type. See bugs/hard/CODEGEN_multi_assign_local_var_
                 # type_not_inferred.md.
                 vtype = _local_value_type(gen, _ma_node.value)
-                _ma_lit = _is_scalar_literal_node(_ma_node.value)
+                _ma_conf = _is_confident_scalar(gen, _ma_node.value)
                 for target in _ma_node.targets:
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)
                         if vname not in inferred:
                             inferred[vname] = []
                         inferred[vname].append(vtype)
-                        if _ma_lit:
-                            literal_scalars.add(vname)
+                        if _ma_conf:
+                            confident_scalars.add(vname)
             elif isinstance(node, gimple_ctypes.IfStmt):
                 collect_assigned_types(node.then_body)
                 if node.else_body:
@@ -1585,8 +1645,8 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 if vname not in inferred:
                     inferred[vname] = []
                 inferred[vname].append(gen._quick_type(node.value.value))
-                if _is_scalar_literal_node(node.value.value):
-                    literal_scalars.add(vname)
+                if _is_confident_scalar(gen, node.value.value):
+                    confident_scalars.add(vname)
 
     try:
         collect_assigned_types(func.body)
@@ -1696,10 +1756,10 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         # this scan's unknown fallback. `q = 5` then `q = [1, 2]` boxes;
         # `site = [comprehension]` then `site = site + slots[...]` (whose
         # int64_t is the fallback for the unresolved `site`) does not.
-        _int_literal_conflict = (
-            _as_str(vname) in literal_scalars
+        _int_conflict = (
+            _as_str(vname) in confident_scalars
             and any(gimple_ctypes.TypeLattice.is_int(t) for t in _non_kind))
-        if len(_kinds) > 1 or _float_conflict or _int_literal_conflict:
+        if len(_kinds) > 1 or _float_conflict or _int_conflict:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
     # A conflicting name has no single C type, so its inferred type is the

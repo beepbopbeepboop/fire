@@ -12597,6 +12597,7 @@ print(run('x/y.txt'))
             "def k():\n    q = 5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
             "def k():\n    q = 2.5\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k()))\n",
             "def k(c):\n    q = 2.5\n    if c:\n        q = [1, 2]\n    return q\nprint(len(k(1)))\n",
+            "def k(n):\n    q = n + 0\n    if q > 1:\n        q = [1, 2]\n    return q\nprint(len(k(5)))\n",
         ]
         with tempfile.TemporaryDirectory() as td:
             for i, src in enumerate(shapes):
