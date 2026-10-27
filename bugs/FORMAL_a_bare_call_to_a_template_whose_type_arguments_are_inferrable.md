@@ -10,18 +10,7 @@ longer tells a correct caller to add brackets, and says which side the fault is
 on. The inference is NOT done, and §5b is the measurement of what it would take
 and it REORDERS §5: the matcher bucket §5 called a patch is 2 sites, not 32, and
 the largest of the three pieces is now return-type inference, which §3's step 1
-does not mention at all.**
-
-Re-verified 2026-10-27 on this tree: the inference is still the open work and is
-NOT done. `test_formal_monomorph.py` reports `PASS=47 EXPECTED=0 SKIP=0 FAIL=5`;
-the doc's own pinned cases (the three census cases and the bare-call refusal) all
-pass, and every one of the five failures is on a different subject than this row
-— a formal Bool printing `True` (two cases), a landed comptime-value
-`Tagged[Int, 0]` (two cases), and a class-attribute read through a template name
-— not the inference. `all_instantiation_calls` still reads only bracketed
-callees, so no bare call is a demand and the 123 measured files stay refused.
-
-Measured 2026-10-04 by
+does not mention at all.** Measured 2026-10-04 by
 `project18:export-gate`, §5 by `formal21-1`, §5b by `formal23-1` · **Layer:** 1/5
 of the formal work
 
