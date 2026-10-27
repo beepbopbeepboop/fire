@@ -1378,6 +1378,8 @@ char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
+int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
+char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
@@ -1572,6 +1574,7 @@ typedef struct {
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
+int64_t mojo_dict_iter_key_kind(MojoDictIter *it);
 char *mojo_dict_slot_key(MojoDict *d, int64_t i);
 /* The double twin of that one: the emitted dict repr walks slots by index and
  * a double slot's bits are a pointer-shaped word, so reading one back as an
@@ -1896,6 +1899,8 @@ double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 /* Python bool repr: "True"/"False", not 1/0. */
 char *mojo_repr_bool(int b);
+char *mojo_repr_list_elem_double(int64_t v);
+char *mojo_repr_list_elem_bool(int64_t v);
 
 /* A callable-valued parameter default naming an IMPORTED module's function
  * (`def probe(x, *, g=os.walk)`) — see the block comment on

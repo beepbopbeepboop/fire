@@ -296,6 +296,9 @@ BUILTIN_PROGRAMS = {
             print(b"ab"[0])
             print(b"ab" == b"ab")
             print(list(b"cd"))
+        print(set(b"ab"))
+        print([x for x in b"ab"])
+        print({x for x in b"ab"})
     """),
     # A `List`/`Dict`/`Set` field or local with no initializer is an empty
     # container of the declared kind — the compiled path's answer and real
@@ -661,6 +664,12 @@ BUILTIN_PROGRAMS = {
             for k, v in d:
                 print(len(k), k, v)
     """),
+    "for_target_starless_pair_over_a_dict_key_split": textwrap.dedent("""\
+        def main():
+            d = {"ab": 7}
+            for k, v in d:
+                print(k, v)
+    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -841,7 +850,7 @@ BUILTIN_PROGRAMS = {
     # the result is presented there; a `char *` default makes the expression a
     # `char *`. The int default and the `hasattr` probe beside it are the
     # controls: neither involves the cast. See
-    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
+    # the dynamic-attribute string-read miss fix.
     "getattr_default_on_a_miss": textwrap.dedent("""\
         class C:
             pass
@@ -1296,7 +1305,7 @@ BUILTIN_PROGRAMS = {
     # (`{'x': 1} | {'y': 's'}`), which this dict representation — one
     # int64_t slot plus a `kind` tag — has no static type for; those stay
     # unrecorded rather than being mis-typed, and that gap is tracked in
-    # bugs/BUGFIX_ROADMAP.md item 2.
+    # the remaining heterogeneous dict-union gap.
     "dict_union_get_value_type": textwrap.dedent("""\
         def main():
             a = {"A": "1"}
@@ -1632,6 +1641,7 @@ CPYTHON_COMPARABLE = {
     # CPython refuses outright, so the only witness that raising is the right
     # answer (and not merely agreement) is CPython's own run.
     "for_target_starless_pair_over_a_dict_key",
+    "for_target_starless_pair_over_a_dict_key_split",
     "comprehension_starred_rest",
     "comprehension_target_shadows_an_enclosing_local",
     "comprehension_target_does_not_shadow_a_module_constant",

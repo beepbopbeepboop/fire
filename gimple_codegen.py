@@ -1577,6 +1577,7 @@ class GimpleGen:
         # the name (see _gen_stmt_AssignStmt). See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._global_callable_ret_types: dict[str, str] = {}
+        self._global_func_value_names: dict[str, str] = {}
         self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
@@ -1638,6 +1639,7 @@ class GimpleGen:
         # table cannot match it. See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
+        self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
         # scope, NOT re-created per function the way the value-keyed
@@ -3416,6 +3418,8 @@ class GimpleGen:
         'mojo_str_islower':      ('int',       ['char *']),
         'mojo_bool_to_str':      ('char *',    ['int']),
         'mojo_repr_int':         ('char *',    ['int64_t']),
+        'mojo_repr_list_elem_double': ('char *', ['int64_t']),
+        'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
@@ -4902,8 +4906,8 @@ class GimpleGen:
         return glo._gen_for_bytes(self, var, it_val, body)
     def _gen_for_memoryview(self, var: str, it_val: str, body: list):
         return glo._gen_for_memoryview(self, var, it_val, body)
-    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False):
-        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys)
+    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False, split_key: bool=True):
+        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys, split_key)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:
@@ -5124,6 +5128,8 @@ class GimpleGen:
         return gcc_._cpp_in_link(self, a, a_node, b, b_node, negate)
     def _cpp_try_kwargs_forward_call(self, e):
         return gcc_._cpp_try_kwargs_forward_call(self, e)
+    def _cpp_try_unpack_call(self, e):
+        return gcc_._cpp_try_unpack_call(self, e)
     def _cpp_expr(self, e) -> str:
         return gcc_._cpp_expr(self, e)
     def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
@@ -6260,7 +6266,50 @@ def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
 
 _compile_cache: dict = {}  # key -> str  (in-process L1 for compile_to_gimple_cached)
 
-_IMPORT_LINE_RE = re.compile(r'^\s*(?:from|import)\s+([.\w]+)', re.MULTILINE)
+def _import_line_modules(src: str) -> list:
+    """The module names of every `from X`/`import X` line in `src` -- what
+    `re.findall(r'^\\s*(?:from|import)\\s+([.\\w]+)', src, re.MULTILINE)` answers.
+
+    A plain scan, not that regex: the compiled compiler's regex engine has no
+    `^` anchor and no MULTILINE flag (a flagged `re.compile` is a pattern
+    string with its flags silently dropped), so the pattern lowered to a loop
+    that matched nothing and the compiled `_dep_sources_texts` found no
+    dependencies at all. `\\s` is ASCII whitespace and `\\w` an
+    alphanumeric or `_`, as in the regex."""
+    out = []
+    n = len(src)
+    ws = ' \t\n\r\f\v'
+    i = 0
+    while i <= n:
+        # a match can only start at the beginning of a line
+        if i == 0 or src[i - 1] == '\n':
+            j = i
+            while j < n and src[j] in ws:
+                j += 1
+            kw = 0
+            if src.startswith('from', j):
+                kw = 4
+            elif src.startswith('import', j):
+                kw = 6
+            if kw:
+                k = j + kw
+                m = k
+                while m < n and src[m] in ws:
+                    m += 1
+                if m > k:
+                    e = m
+                    while e < n and (src[e].isalnum() or src[e] == '_'
+                                     or src[e] == '.'):
+                        e += 1
+                    if e > m:
+                        out.append(src[m:e])
+                        i = e
+                        continue
+        nl = src.find('\n', i)
+        if nl < 0:
+            break
+        i = nl + 1
+    return out
 
 
 def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
@@ -6302,7 +6351,7 @@ def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
         return None
 
     def _scan(src: str, fdir: str):
-        for mod in _IMPORT_LINE_RE.findall(src):
+        for mod in _import_line_modules(src):
             path = _resolve(mod, fdir)
             if not path:
                 continue
