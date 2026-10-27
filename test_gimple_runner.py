@@ -5830,6 +5830,13 @@ print(f(10))
 print(f(4))
 """, "13\n7\n")
 
+    test_gimple_stdout("gimple_module_scope_global_bound_to_container_returning_call", """\
+def mk():
+    return {"a": 1}
+f = mk()
+print(f["a"])
+""", "1\n")
+
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:
     return {"mid": 0}

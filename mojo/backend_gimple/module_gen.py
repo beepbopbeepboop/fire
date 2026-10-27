@@ -11793,6 +11793,16 @@ def gen_module_impl(self, stmts):
             # usable when every callable in it agrees).
             self._global_container_callable_ret[_gname] = \
                 _lambda_pairs_ret_type(self, _value.pairs)
+        elif isinstance(_value, CallExpr) and isinstance(_value.func, IdentExpr):
+            # Package-scope global whose RHS is a call: the callee's return
+            # type is already final at Phase 1.7 for module-level defs, so
+            # use it directly for the C declaration (fixes container-returning
+            # calls kept at the int64_t default; see doc: the missing
+            # declaration in the middle is the struct field type).
+            _ret = self.func_return_types.get(_value.func.name) or \
+                self._infer_return_type(_value.func.name)
+            if isinstance(_ret, str) and _ret.endswith(' *'):
+                _phase17_set_gtype(_gname, _ret, _own)
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return
             # type is `join_all([_quick_type(body)])` -- exactly what
