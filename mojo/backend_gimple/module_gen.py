@@ -2372,26 +2372,19 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                 "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
-                "    /* The unquoted arm reads the slot's SPELLING flag, not\n"
-                "     * just keykind. `keykind == 2` means \"this key's text\n"
-                "     * is a canonical decimal\", NOT \"the source wrote an\n"
-                "     * integer\" -- `_canon_int` canonicalises a STR key into\n"
-                "     * that slot too, deliberately, so `d[5]` and `d[\"5\"]`\n"
-                "     * stay the one integer slot they have always been (see\n"
-                "     * _canon_int's comment). Printing `ikey` unquoted for\n"
-                "     * every keykind==2 slot therefore fixed `{10: \"a\"}`\n"
-                "     * but broke `{\"10\": \"a\"}`, which CPython prints as\n"
-                "     * `{'10': 'a'}` -- and CPython's own answer depends on\n"
-                "     * which spelling was inserted LAST, so the slot has to\n"
-                "     * REMEMBER that. `key_from_str` is that memory: the\n"
-                "     * str-domain setter sets it, the integer setter clears\n"
-                "     * it, grow/copy/merge carry it whole, and the repr\n"
-                "     * quotes the key only when the LAST write was a str.\n"
-                "     * The quoted arm needs no stored spelling: `_canon_int`\n"
-                "     * accepts only the canonical decimal, which\n"
-                "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
+                "    /* NOTE the ABSENT arm here. `keykind == 2` means \"this\n"
+                "     * key's text is a canonical decimal\", NOT \"the source\n"
+                "     * wrote an integer\" -- `_canon_int` canonicalises a STR\n"
+                "     * key into that slot too, deliberately, so `d[5]` and\n"
+                "     * `d[\"5\"]` stay the one integer slot they have always\n"
+                "     * been (see _canon_int's comment). Printing `ikey`\n"
+                "     * unquoted for every keykind==2 slot therefore fixes\n"
+                "     * `{10: \"a\"}` and breaks `{\"10\": \"a\"}`, which\n"
+                "     * CPython prints as `{'10': 'a'}` -- and CPython's own\n"
+                "     * answer depends on which spelling was inserted LAST, so\n"
+                "     * the slot has to REMEMBER that. See bug doc. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 2) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -3195,8 +3188,9 @@ def gen_module_impl(self, stmts):
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
     # The self-hosted binary has no auto-offload: `mojo/middle/offload.py` is
-    # not part of the closure `stage2/mojo` is built from (see
-    # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md), so
+    # not part of the closure `stage2/mojo` is built from (see the
+    # `CODEGEN_module_toplevel_undefined_in_selfhost` self-host link failure,
+    # fixed by renaming the colliding `_lens` locals in module_gen.py), so
     # `offload_module` there is a weak "unavailable in compiled mode" stub that
     # returns a bare 0 -- and the tuple-unpack below then walked that 0 and
     # raised "object is not iterable". `__file__` is the uniform `<bootstrap>`
@@ -3271,9 +3265,9 @@ def gen_module_impl(self, stmts):
             # kernel. A NamedTuple._replace keeps every other field, so this
             # cannot silently drop `writable` -- which is the field whose loss
             # would skip a copy-back and leave the output list untouched.
-            _lens = self._device_launch_lengths.get(_nm) or {}
-            if _lens:
-                _tys = [_a._replace(length=_lens[_a.name]) if _a.name in _lens
+            _len_dict = self._device_launch_lengths.get(_nm) or {}
+            if _len_dict:
+                _tys = [_a._replace(length=_len_dict[_a.name]) if _a.name in _len_dict
                         else _a for _a in _tys]
             # Fail here, at the classification pass, rather than at the first
             # call site: an un-marshallable kernel is a build error either
