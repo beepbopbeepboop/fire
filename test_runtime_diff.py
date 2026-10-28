@@ -897,7 +897,7 @@ BUILTIN_PROGRAMS = {
     """),
     # Dynamic `getattr(obj, "method")` must agree with the static spelling
     # `obj.method` and return a callable bound method, not raise AttributeError.
-    "dynamic_getattr_of_a_method": textwrap.dedent("""\\
+    "dynamic_getattr_of_a_method": textwrap.dedent("""\
         class C:
             def __init__(self):
                 self.k = 9
