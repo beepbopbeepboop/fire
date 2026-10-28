@@ -346,7 +346,8 @@ GIMPLE_SOURCES = (
 #            ledger for one job and make it unadmittable on a 64 GB budget.
 #            That exception is `CLASS_ABOVE_PEAK`, with its reason, and the
 #            measurement that would settle it is
-#            bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. The
+#            measurement that would settle it is the unique-memory instrument
+#            (procrun.tree_usage_unique, fixed by the work on formal's peak).
 #            rung stays because MEMLIMIT_GB=96 has to mean something.
 #
 # `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
@@ -1107,7 +1108,7 @@ CLASS_ABOVE_PEAK = {
     # never be admitted AT ALL — which is what test_suite.py's own admission
     # check exists to catch. `program` (55 GB) still covers the measurement at
     # 1.19x. Settling it properly means measuring unique pages instead of the
-    # sum; that is bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md.
+    # sum; settled by the unique-memory instrument (procrun.tree_usage_unique).
     'stdlib-tests': 'the peak is UNSTABLE across runs (34.9 and 52.2 GB for '
                     'the same 321 items) and 52.2 is the worst; `program` (55) '
                     'covers it at 1.05x where class_for_peak wants `stage` '
@@ -2759,9 +2760,8 @@ test('formal', [PY, 'test_formal.py'], j=True,
             'share, so it reads HIGH; `program` covers the measurement at '
             '1.19x, and `stage` would reserve the entire machine-wide ledger '
             'for one job — which also makes it unadmittable outright on a '
-            '64 GB budget. The unique-pages measurement that would settle it '
-            'is the open question in '
-            'bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. Over '
+            '64 GB budget. The unique-pages measurement (procrun.tree_usage_unique)'
+            ' fixes the double-counting that made the sum read HIGH. Over '
             'the 4 GB line and therefore a debt, not a fact. See ' + MEM_DEBT_DOC,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'], mem='tiny',

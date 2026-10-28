@@ -102,7 +102,7 @@ Other measured footprints (same gates):
   The 46.2 and 52.2 are memcap's SUMMED tree RSS, which `procrun.tree_usage` documents
   as an over-count when many processes share pages, so they are upper bounds and the
   unique-pages measurement that would settle both classes is written down in
-  `PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md`. What is NOT in doubt is the
+  'PERF_formal_job_peaks_at_46gb_against_an_8gb_class`. What is NOT in doubt is the
   shape: a per-file compile summed over a corpus, which is the same arithmetic as
   `ab-native` below at 779 files.
 - `formal-x86-endtoend` (`formal/x86_64_endtoend_test.py`, 93 generated proofs, one after
