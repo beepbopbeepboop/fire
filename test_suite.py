@@ -3943,6 +3943,23 @@ _FORMAL_SUITE_REASON = (
     'of one is minutes of real compilation. The construct and its bug doc are '
     'named in the file\'s own docstring.')
 
+# The batch's 46 standalone regression records, one reason for the group on
+# the same footing as the sentence above: a per-file reason would be 46 copies
+# of the same sentence, and the per-file truth (which bug, which fix) lives in
+# each file's own docstring, which this sentence points at.
+_BATCH_REGRESSION_REASON = (
+    'A standalone regression record for one named bug, landed with the '
+    '74-commit batch (08e9229bf): the bug and its fix are named in the '
+    'file\'s own docstring, and the file asserts the fixed behaviour when run '
+    'directly — `python3 <file>` in-process, or the same source through the '
+    'compiled path where the bug lives in codegen — with CPython as the '
+    'oracle where the answer is CPython\'s. Declared as a group on 2026-10-27, '
+    'gate triage: the batch registered none of the 46 and the estate check '
+    'named them at once. Registering is the batch\'s follow-up, not a gate '
+    'triage: CLAUDE.md\'s cost rule wants the cheap ones registered, and a '
+    'registration supersedes its entry here — the estate check\'s `resolved` '
+    'assertion enforces the removal.')
+
 
 UNREGISTERED = {
     # ── RED today: exit non-zero, and no gate, tally or coverage number
@@ -4578,6 +4595,76 @@ UNREGISTERED = {
         "own author's list of what it should reject.",
     'test_type_system_integration.py': 'The type system catching violations '
         'during a real compile, which is the half the fixture list above is not.',
+
+    # ── the batch's 46 standalone regression records, declared as a group ──
+    # 2026-10-27, gate triage of the 53-job gate on 08e9229bf: the batch landed
+    # these with no registration, in no declared family, and the estate check
+    # named all 46 at once. One shared reason for the group; the per-file truth
+    # (which bug, which fix) is in each file's own docstring.
+    'test_ab_native_regression.py': _BATCH_REGRESSION_REASON,
+    'test_budget_census_regression.py': _BATCH_REGRESSION_REASON,
+    'test_char_star_local_regress.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_a_typed_container_local_no_init.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_bootstrap_resource_regression.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_callable_return_type_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_len_nonascii.py': _BATCH_REGRESSION_REASON,
+    'test_comptime_function_alias_r2.py': _BATCH_REGRESSION_REASON,
+    'test_container_constructor_arg_um.py': _BATCH_REGRESSION_REASON,
+    'test_cyclic_closure_regression.py': _BATCH_REGRESSION_REASON,
+    'test_dict_comprehension_repr_regress.py': _BATCH_REGRESSION_REASON,
+    'test_dict_comprehension_repr_regress_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_dict_slot_read_regression.py': _BATCH_REGRESSION_REASON,
+    'test_dunder_repr_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_dylib_generated_cpp_refusal.py': _BATCH_REGRESSION_REASON,
+    'test_dynamic_getattr.py': _BATCH_REGRESSION_REASON,
+    'test_getattr_default_miss_reg.py': _BATCH_REGRESSION_REASON,
+    'test_gimple_match_regression.py': _BATCH_REGRESSION_REASON,
+    'test_imported_callable_default_regression.py': _BATCH_REGRESSION_REASON,
+    'test_infra_py_version_fallback.py': _BATCH_REGRESSION_REASON,
+    'test_lean_proof_verdict_regression.py': _BATCH_REGRESSION_REASON,
+    'test_method_overload_value.py': _BATCH_REGRESSION_REASON,
+    'test_perf_lean_lib_memory_regression.py': _BATCH_REGRESSION_REASON,
+    'test_perf_memory_leak_pin.py': _BATCH_REGRESSION_REASON,
+    'test_pin_dict_content_key_aliases.py': _BATCH_REGRESSION_REASON,
+    'test_procrun_regression.py': _BATCH_REGRESSION_REASON,
+    'test_reg_dispatched_for_loop.py': _BATCH_REGRESSION_REASON,
+    'test_regress_bytes_erased.py': _BATCH_REGRESSION_REASON,
+    'test_regress_interface_request_1.py': _BATCH_REGRESSION_REASON,
+    'test_regress_nested_gen_yield.py': _BATCH_REGRESSION_REASON,
+    'test_regress_nested_gen_yield_direct.py': _BATCH_REGRESSION_REASON,
+    'test_regress_stat_comptime.py': _BATCH_REGRESSION_REASON,
+    'test_regression_bool_isinstance.py': _BATCH_REGRESSION_REASON,
+    'test_regression_ctor_temp_field_read_loses_element_type.py': _BATCH_REGRESSION_REASON,
+    'test_regression_cursor_nested.py': _BATCH_REGRESSION_REASON,
+    'test_regression_enum_cls_refusal.py': _BATCH_REGRESSION_REASON,
+    'test_regression_needle_drift.py': _BATCH_REGRESSION_REASON,
+    'test_regression_partial_work_handoff.py': _BATCH_REGRESSION_REASON,
+    'test_regression_round2_gap.py': _BATCH_REGRESSION_REASON,
+    'test_regression_signed_loop.py': _BATCH_REGRESSION_REASON,
+    'test_regression_smulh.py': _BATCH_REGRESSION_REASON,
+    'test_regression_stale_budget_admitted.py': _BATCH_REGRESSION_REASON,
+    'test_regression_stdlib_concurrency_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_regression_subscript_nested.py': _BATCH_REGRESSION_REASON,
+    'test_regression_unpack_spread.py': _BATCH_REGRESSION_REASON,
+    'test_spread_string_regression.py': _BATCH_REGRESSION_REASON,
+    'test_untested_regression.py': _BATCH_REGRESSION_REASON,
+    'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
+
+    # Landed with 313513c45 (2026-10-28, while this gate triage was running —
+    # the estate re-baseline of the 46 above now has to account for it too):
+    # `control.py`'s own test for the status/prune half, a throwaway-repo unit
+    # test run directly (`python3 tools/test_control_status.py`, 8 registry
+    # cases over one temporary git repo, no compiler). Registered by nobody:
+    # it is the owner's mechanism test and the owner's follow-up to register
+    # it if wanted; a registration supersedes this entry.
+    'tools/test_control_status.py':
+        'control.py\'s status/prune mechanism, tested against a throwaway git '
+        'repo: which registry entries are done-and-gone, that the hidden count '
+        'in `status` matches, that `--all` shows everything, and that prune '
+        'drops exactly the done-and-gone set and never more (dry-run writes '
+        'nothing). Run directly with `python3 tools/test_control_status.py`. '
+        'Declared 2026-10-28, gate triage: it landed mid-triage (313513c45) '
+        'unregistered, which the estate check names.',
 }
 
 
