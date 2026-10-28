@@ -491,7 +491,7 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 616),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 615),   # --fix writes the live figure
     # 610 -> 615 (2026-10-27, gate fixup on the integ batch 08e9229bf):
     # TWO names, both read off the call at 2cf8a3358 ("Partial fix for dict
     # slot read root cause") — `mojo_dict_slot_kind` (the MOJO_KIND byte of
