@@ -18,39 +18,6 @@ now refused EARLIER, at an f-string literal on line 133
 decode.md`), and it holds 13 f-strings of which five are `insn()` call sites — so
 "the source stops spreading" is no longer a one-file mechanical change but a
 chain, and the variadic ABI is the only blocker left.**
-
-**2026-10-28, re-measured on this tree: the LOCAL half's CALL reader was
-silently regressing, and the pin that would have said so was gone with it —
-both restored; the `**`-PARAMETER blocker is unchanged, so this stays
-PARTIAL.** Re-ran this doc's rows and its "Measured" programs. The
-construction half is intact: `P(a=1, **d)` for a single-bound `d = {'b': 2}`
-builds and prints `1 2` on arm64 and x86-64. The call half was a REGRESSION:
-`f(a=1, **d)` was REFUSED on both architectures (`build: call f() spreads 'd'
-with '**'`), where the "Measured" paragraph above (2026-10-12) records it as
-answered. The cause is the merge of the two 2026-10-12 lanes that answered the
-local half: this tree keeps the §0c table (`ValueKinds.dict_inits` /
-`local_dict_literals` / `_unspread_keyword_mappings(…, mappings)`, which is
-what `formal/model.py` has) and not the formal304-docs `spread_items` reader
-this doc's "What landed (2026-10-12)" section describes — and in that merge
-`bind_call_arguments` lost its `mappings` parameter and pass-through, the two
-emitter call sites stopped passing `self._spread_mappings`, and the answered
-rows fell out of `test_formal_run.py`, so nothing could notice. Restored the
-plumbing (`bind_call_arguments` takes `mappings=None` and passes it to
-`_unspread_keyword_mappings`; both emitters pass `self._spread_mappings` at
-the call site) and the two rows under the names this doc carries,
-`a_spread_through_a_local_dict_literal_is_answered` and `…_at_a_call` in
-`SPREAD_CONSTRUCTION_CASES` (construction and call are separate rows because
-they are separate readers). Re-measured after: all eleven
-`SPREAD_CONSTRUCTION_CASES` + `SPREAD_REFUSALS` rows PASS — the five answered
-rows against CPython on both architectures (`1 2` / `12` / `1 3`) and the six
-refusals on both, including the `**`-parameter row; the "Measured" minimal
-reproduction still refuses on both architectures with the same sentence
-(`constructing Insn spreads 'kw' with '**'`). What remains is exactly the
-`**`-PARAMETER half of "The exact next step" — the callee reading its own
-`**kwargs`, the variadic ABI — which is
-`FORMAL_a_variadic_parameter_read_has_no_abi.md` and is claimed, so this doc
-stays open with that remainder.**
-
 Found 2026-10-03 while clearing the single-file causes in
 the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3.2. **The refusal itself is still
 CORRECT** — what changed is that the sentence it used to produce was false about
