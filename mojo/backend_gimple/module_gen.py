@@ -2372,26 +2372,19 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                 "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
-                "    /* The unquoted arm reads the slot's SPELLING flag, not\n"
-                "     * just keykind. `keykind == 2` means \"this key's text\n"
-                "     * is a canonical decimal\", NOT \"the source wrote an\n"
-                "     * integer\" -- `_canon_int` canonicalises a STR key into\n"
-                "     * that slot too, deliberately, so `d[5]` and `d[\"5\"]`\n"
-                "     * stay the one integer slot they have always been (see\n"
-                "     * _canon_int's comment). Printing `ikey` unquoted for\n"
-                "     * every keykind==2 slot therefore fixed `{10: \"a\"}`\n"
-                "     * but broke `{\"10\": \"a\"}`, which CPython prints as\n"
-                "     * `{'10': 'a'}` -- and CPython's own answer depends on\n"
-                "     * which spelling was inserted LAST, so the slot has to\n"
-                "     * REMEMBER that. `key_from_str` is that memory: the\n"
-                "     * str-domain setter sets it, the integer setter clears\n"
-                "     * it, grow/copy/merge carry it whole, and the repr\n"
-                "     * quotes the key only when the LAST write was a str.\n"
-                "     * The quoted arm needs no stored spelling: `_canon_int`\n"
-                "     * accepts only the canonical decimal, which\n"
-                "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
+                "    /* NOTE the ABSENT arm here. `keykind == 2` means \"this\n"
+                "     * key's text is a canonical decimal\", NOT \"the source\n"
+                "     * wrote an integer\" -- `_canon_int` canonicalises a STR\n"
+                "     * key into that slot too, deliberately, so `d[5]` and\n"
+                "     * `d[\"5\"]` stay the one integer slot they have always\n"
+                "     * been (see _canon_int's comment). Printing `ikey`\n"
+                "     * unquoted for every keykind==2 slot therefore fixes\n"
+                "     * `{10: \"a\"}` and breaks `{\"10\": \"a\"}`, which\n"
+                "     * CPython prints as `{'10': 'a'}` -- and CPython's own\n"
+                "     * answer depends on which spelling was inserted LAST, so\n"
+                "     * the slot has to REMEMBER that. See bug doc. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 2) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -9139,9 +9132,24 @@ def gen_module_impl(self, stmts):
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
-            if not isinstance(call.func, IdentExpr):
+            callee = None
+            if isinstance(call.func, IdentExpr):
+                callee = _as_str(call.func.name)
+            elif isinstance(call.func, gimple_ctypes.MemberExpr) \
+                    and isinstance(call.func.obj, IdentExpr):
+                base_name = _as_str(call.func.obj.name)
+                # Module-qualified free function: base resolves to an imported
+                # module (see _global_to_module) and member is a known free
+                # function in the closure.
+                _g2m = getattr(self, '_global_to_module', None) or {}
+                _mod_of_base = _g2m.get(base_name)
+                if (_mod_of_base is not None or
+                        base_name in getattr(self, '_compiled_modules', ())):
+                    member_name = _as_str(call.func.member)
+                    if member_name in _free_params:
+                        callee = member_name
+            if callee is None:
                 continue
-            callee = _as_str(call.func.name)
             pnames = _free_params.get(callee)
             if not pnames:
                 continue
