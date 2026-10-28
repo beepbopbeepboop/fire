@@ -2372,26 +2372,19 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                 "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
-                "    /* The unquoted arm reads the slot's SPELLING flag, not\n"
-                "     * just keykind. `keykind == 2` means \"this key's text\n"
-                "     * is a canonical decimal\", NOT \"the source wrote an\n"
-                "     * integer\" -- `_canon_int` canonicalises a STR key into\n"
-                "     * that slot too, deliberately, so `d[5]` and `d[\"5\"]`\n"
-                "     * stay the one integer slot they have always been (see\n"
-                "     * _canon_int's comment). Printing `ikey` unquoted for\n"
-                "     * every keykind==2 slot therefore fixed `{10: \"a\"}`\n"
-                "     * but broke `{\"10\": \"a\"}`, which CPython prints as\n"
-                "     * `{'10': 'a'}` -- and CPython's own answer depends on\n"
-                "     * which spelling was inserted LAST, so the slot has to\n"
-                "     * REMEMBER that. `key_from_str` is that memory: the\n"
-                "     * str-domain setter sets it, the integer setter clears\n"
-                "     * it, grow/copy/merge carry it whole, and the repr\n"
-                "     * quotes the key only when the LAST write was a str.\n"
-                "     * The quoted arm needs no stored spelling: `_canon_int`\n"
-                "     * accepts only the canonical decimal, which\n"
-                "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
+                "    /* NOTE the ABSENT arm here. `keykind == 2` means \"this\n"
+                "     * key's text is a canonical decimal\", NOT \"the source\n"
+                "     * wrote an integer\" -- `_canon_int` canonicalises a STR\n"
+                "     * key into that slot too, deliberately, so `d[5]` and\n"
+                "     * `d[\"5\"]` stay the one integer slot they have always\n"
+                "     * been (see _canon_int's comment). Printing `ikey`\n"
+                "     * unquoted for every keykind==2 slot therefore fixes\n"
+                "     * `{10: \"a\"}` and breaks `{\"10\": \"a\"}`, which\n"
+                "     * CPython prints as `{'10': 'a'}` -- and CPython's own\n"
+                "     * answer depends on which spelling was inserted LAST, so\n"
+                "     * the slot has to REMEMBER that. See bug doc. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 2) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -10160,6 +10153,21 @@ def gen_module_impl(self, stmts):
             # Not unanimous -> the parameter is genuinely polymorphic here and
             # nothing about it is provable; same refusal the scalar loop makes.
             if len(types) != 1:
+                # Non-unanimous receiver with all-struct-pointer observations is
+                # a polymorphic struct parameter — no single C signature exists.
+                # Refuse loudly rather than silently degrading to a boxed pointer.
+                _all_struct_ptr = True
+                for _t in types:
+                    _t_str = _gmi_as_str(_t)
+                    if not (_t_str.endswith(' *') and _t_str[:-2] in self.struct_field_types):
+                        _all_struct_ptr = False
+                        break
+                if _all_struct_ptr:
+                    _names = ', '.join(sorted(str(_t) for _t in types))
+                    raise RuntimeError(
+                        f"polymorphic struct parameter {pname!r} in {callee!r} "
+                        f"used as method receiver: types {_names} have no single "
+                        f"C signature; fall back to interpreted execution")
                 continue
             # `sorted(...)` + index, NOT `next(iter(...))`: iterating a
             # str-SET lowers to mojo_set_iter_val_int (0 for every string
