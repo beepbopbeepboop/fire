@@ -1811,12 +1811,16 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # turns `Pair[Int]()` into the concrete `Pair_Int()` — afterwards the
         # brackets are gone and the answer would be empty.
         from formal.imports import (check_library_free_calls, instantiation_demands,
-                                    library_free_edges, module_source_text)
+                                    library_free_edges, module_source_text,
+                                    template_closure)
+        # ONE closure walk for all direct imports — the product that §4a measures.
+        closure = template_closure(
+            [path for _, path in resolved], project_root=source_path)
         demands = {}
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
-                    project_root=source_path).items():
+                    project_root=source_path, closure=closure).items():
                 merged = dict(demands.get(other) or {})
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
@@ -1838,7 +1842,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
                                            project_root=source_path,
-                                           _parent=parent, demands=demands)
+                                           _parent=parent, demands=demands,
+                                           closure=closure)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
