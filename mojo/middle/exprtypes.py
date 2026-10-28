@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -125,8 +125,8 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     intermediate per-subtree lists (`result.extend(_walk_ast(child))`
     copied every node once per ancestor level before being discarded).
 
-    Phase 5 (the `_walk_ast` re-scan bug, closed
-    ): this is the whole-program walk utility itself, called by
+    Phase 5 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    rescan.md): this is the whole-program walk utility itself, called by
     the struct-field scans, Pass 1.2's self-assign/self-read collectors,
     gen_func, closure/async pre-passes — every consumer of the flat
     node list. A fresh cProfile of Lib/contextlib.py showed ~29s of its
@@ -997,12 +997,10 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
         if e.func.name in ('len', 'ord'):
             return 'int64_t'
-        if e.func.name == 'mojo_os_scandir':
-            return 'MojoList *'
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
         if e.func.name in ('list', 'set') and len(e.args) == 1 and (len(e.kwargs or []) == 0):
@@ -1310,15 +1308,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr):
             site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t' for el in n.value.elements]
-            # A tuple slot that is a TAGGED word -- a name the body tests with
-            # `isinstance(<name>, tuple)` (so it is a boxed word that is
-            # sometimes a tuple) and otherwise uses as a string -- is a string
-            # in the non-tuple case this yield sits in.
-            for _si, _el in enumerate(n.value.elements):
-                if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
-                        and _el.name in _tuple_tested_names(fn)
-                        and _name_has_str_evidence(_el.name, fn)):
-                    site[_si] = 'char *'
         elif isinstance(n, YieldFromExpr) and generator_api is not None and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name):
             delegate_api = generator_api.get(n.value.func.name)
             delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
@@ -1346,84 +1335,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
                     return (True, None)
             slots = merged
     return (found, slots)
-
-
-def _tuple_tested_names(fn) -> set:
-    """Names `fn`'s own body tests with `isinstance(<name>, tuple)`."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, CallExpr) and isinstance(n.func, IdentExpr)
-                and n.func.name == 'isinstance' and len(n.args) == 2
-                and isinstance(n.args[0], IdentExpr)
-                and isinstance(n.args[1], IdentExpr) and n.args[1].name == 'tuple'):
-            out.add(n.args[0].name)
-    return out
-
-
-def _name_has_str_evidence(name: str, fn) -> bool:
-    """True when `fn`'s body uses `name` in a way only a string supports:
-    subscripted / sliced, a str-method receiver, or the left/right operand of
-    `+` with a string literal."""
-    for n in _walk_own_body(fn.body):
-        if isinstance(n, (SubscriptExpr, SliceExpr)):
-            if isinstance(n.obj, IdentExpr) and n.obj.name == name:
-                return True
-        elif isinstance(n, CallExpr) and isinstance(n.func, MemberExpr):
-            if (n.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
-                                  'split', 'rsplit', 'join', 'replace',
-                                  'startswith', 'endswith')
-                    and isinstance(n.func.obj, IdentExpr) and n.func.obj.name == name):
-                return True
-        elif isinstance(n, BinaryOp) and n.op == '+':
-            for a, b in ((n.left, n.right), (n.right, n.left)):
-                if isinstance(a, IdentExpr) and a.name == name \
-                        and isinstance(b, StringLiteral):
-                    return True
-    return False
-
-
-def _tagged_word_params(fn) -> set:
-    """Parameters of `fn` that the body REBINDS from `<list>.pop(...)` and also
-    tests with `isinstance(<name>, tuple)`: Lib/os.py's `walk(top, ...)` does
-    `top = stack.pop()` where the stack holds path strings AND pushed
-    `(top, dirs, nondirs)` tuples. Such a parameter cannot keep the one C type
-    its call sites gave it; it is the boxed WORD (`int64_t`), and each use
-    narrows it (cast to `char *` / `MojoList *`)."""
-    names = {p[0] if isinstance(p, (tuple, list)) else p for p in (fn.params or [])}
-    tested = _tuple_tested_names(fn) & names
-    if not tested:
-        return set()
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
-                and n.target.name in tested
-                and isinstance(n.value, CallExpr)
-                and isinstance(n.value.func, MemberExpr)
-                and n.value.func.member == 'pop'):
-            out.add(n.target.name)
-    return out
-
-
-def _tuple_guarded_bare_yields(fn) -> set:
-    """ids of the `yield <name>` nodes of `fn` that sit inside an
-    `if isinstance(<name>, tuple):` body (the same name), i.e. yields that are
-    known to hand out a tuple whatever type inference gave the name."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if not isinstance(n, IfStmt):
-            continue
-        c = n.condition
-        if not (isinstance(c, CallExpr) and isinstance(c.func, IdentExpr)
-                and c.func.name == 'isinstance' and len(c.args) == 2
-                and isinstance(c.args[0], IdentExpr)
-                and isinstance(c.args[1], IdentExpr) and c.args[1].name == 'tuple'):
-            continue
-        name = c.args[0].name
-        for sub in _walk_own_body(n.then_body):
-            if (isinstance(sub, YieldExpr) and isinstance(sub.value, IdentExpr)
-                    and sub.value.name == name):
-                out.add(id(sub))
-    return out
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
@@ -1503,13 +1414,6 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 _vct = generator_api[iterable.func.name].get('value_ctype')
                 if _vct is not None:
                     known[target_name] = _vct
-    # `if isinstance(top, tuple): yield top` -- a bare `yield <name>` under an
-    # `isinstance(<name>, tuple)` guard yields a TUPLE (a boxed `MojoList *`)
-    # whatever the name's inferred type is: Lib/os.py's `walk` pops `top` off a
-    # heterogeneous stack (a path string or a pushed `(top, dirs, nondirs)`
-    # tuple), and its bottom-up path yields the popped tuple beside the
-    # top-down `yield top, dirs, nondirs`.
-    _tuple_guarded = _tuple_guarded_bare_yields(fn)
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
@@ -1517,9 +1421,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 if ctype is None:
                     ctype = 'int64_t'
                 continue
-            if id(n) in _tuple_guarded:
-                t = 'MojoList *'
-            elif isinstance(n.value, TupleExpr):
+            if isinstance(n.value, TupleExpr):
                 if any((isinstance(el, (TupleExpr, ListExpr, DictExpr, SetExpr)) for el in n.value.elements)):
                     return None
                 t = 'MojoList *'
@@ -1555,18 +1457,10 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
         elif isinstance(n, YieldFromExpr):
             if isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name == fn.name):
                 continue
-            # `yield from walk(root)` where `walk` is a PARAMETER holding a
-            # callable as a word: what the call yields is an unsolved word.
-            if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
-                    and known is not None
-                    and known.get(n.value.func.name) in ('int64_t', 'char *')
-                    and n.value.func.name in {_p[0] for _p in (fn.params or [])}):
-                t = 'int64_t'
-            else:
-                t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
-                                               local_elem_types,
-                                               generator_method_api,
-                                               self_struct_name)
+            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
+                                           local_elem_types,
+                                           generator_method_api,
+                                           self_struct_name)
             if t is None:
                 return None
             if ctype is None:
@@ -1953,92 +1847,3 @@ def expr_provably_str(e) -> bool:
             return (expr_provably_str(e.left)
                     or expr_provably_str(e.right))
     return False
-
-
-# The statement-lists a `class` statement can be nested inside. A tuple of
-# names, not a dict of attribute name -> is-a-list: the walk has to try EVERY
-# slot on every node type (only the statement types that carry one of them
-# actually have it, and `getattr(..., None)` answers the rest), so the test is
-# "does this attribute hold a statement list", not "is this node a kind that
-# does". Written out rather than reusing the shared `_walk_ast`, for the
-# reason `_gmi_collect_self_assigns`'s own nested-def descent documents:
-# `_walk_ast` does not reliably recurse into a nested `StructDef`/`FunctionDef`
-# self-hosted (the node is misclassified as a scalar leaf), so a walker built
-# on it would find nested classes in the CPython shim and miss them under
-# `mojoc`. Every consumer of "is there a class declared in here" has to be
-# written out, so it is written out once here.
-_NESTED_CLASS_BODY_SLOTS = (
-    'body', 'then_body', 'else_body', 'finally_body', 'items',
-)
-
-
-def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
-                            params=None) -> None:
-    """Every `StructDef` written INSIDE `body`, in source order, as
-    `[node, enclosing_key, params]` TRIPLES rather than 2-tuples.
-
-    The pairs are index-addressed by the one caller for the reason the rest of
-    this file writes index loops instead of `zip()`: the self-hosted backend
-    has no `zip()` lowering, and a 2-tuple unpack in a `for` header boxes both
-    slots to `int64_t` — which here would box the `StructDef` POINTER (losing
-    the node) and the string (losing the name). A list element read by index
-    keeps each slot's own type.
-
-    Recursive over the statement-lists a class can hide in: a plain function
-    body, an `if`/`else`/`while`/`for`/`try`/`with`/`match` body, and a nested
-    `def` or `class` body. `enclosing` is the `current_func_name`-shaped key of
-    the innermost enclosing function — which is exactly the value
-    `current_func_name` holds while that function's body is lowered, so the
-    rename map the caller builds is keyed the same way the constructor call
-    site reads it. `top` is True only for the module-level statement list,
-    whose classes are already module scope and must not be collected again.
-
-    `params` is the parameter list (`(name, annotation)` slots) of the
-    innermost enclosing function or method, or None at module level. It is
-    carried so a class-level attribute whose value is a bare parameter name
-    can take its C type from that parameter's annotation
-    (bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md).
-    """
-    for _nc in (body or []):
-        if isinstance(_nc, StructDef):
-            if not top:
-                out.append([_nc, enclosing, params])
-            # A struct METHOD's enclosing key is `current_func_name`, which the
-            # method emitter sets to `<struct>_<method>` — the class's own name
-            # with no enclosing-function prefix (`closures.discover_closures`
-            # composes it the same way).
-            _cname = _as_str(_nc.name)
-            for _ncm in (_nc.methods or []):
-                if isinstance(_ncm, FunctionDef):
-                    _gmi_nested_struct_defs(
-                        _ncm.body, _cname + '_' + _as_str(_ncm.name), out,
-                        False, _ncm.params)
-            continue
-        if isinstance(_nc, FunctionDef):
-            # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
-            # is the lifted name while its body is lowered — so the key
-            # composes rather than replacing. `closures.discover_closures`'s
-            # `lifted = f"{outer_name}_{inner.name}"` is the other half of
-            # that fact.
-            _gmi_nested_struct_defs(
-                _nc.body,
-                enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
-                out, False, _nc.params)
-            continue
-        if isinstance(_nc, IfStmt):
-            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params)
-            # `elifs` is a list of (condition, body) PAIRS, so the body is an
-            # indexed slot read and not another statement list — the same
-            # shape `_gmi_collect_self_assigns` walks.
-            for _nce in range(len(_nc.elifs or [])):
-                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params)
-            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params)
-            continue
-        if isinstance(_nc, MatchStmt):
-            for _ncmc in (_nc.cases or []):
-                _gmi_nested_struct_defs(
-                    getattr(_ncmc, 'body', None), enclosing, out, False, params)
-            continue
-        for _slot in _NESTED_CLASS_BODY_SLOTS:
-            _gmi_nested_struct_defs(
-                getattr(_nc, _slot, None), enclosing, out, False, params)

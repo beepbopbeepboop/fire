@@ -39,8 +39,8 @@ re-checked against the tree rather than against its own prose. What moved:
   at it, and a check that fails on an INCREASE is the only thing that keeps
   the next set from arriving.
 * Not re-measured, and why: §2.2 and §2.3 name live docs owned by other
-  workers (`the (since-fixed) compiled-generator lambda-expression bug`,
-  `the (since-fixed) c_common/fsutil.py compile failure`), so their
+  workers (`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`,
+  `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`), so their
   bodies are current by construction and re-deriving them here would only
   produce a second copy to disagree with. §2.5's first entry's claim that the
   `async for`-over-a-generator gap now "drives the generator for real" is one
@@ -105,7 +105,7 @@ This gap is owned by another claim (`bug-codegen-container-constructor-argume-r2
 The stale advice to reorder passes in `module_gen.py` has been removed; the correct inference fix would populate `_ctor_lit_param_types` with container element types, analogous to how literal observers thread them.
 
 ### 2.2 Variadic lambda call sites are not packed
-Doc: `the (since-fixed) compiled-generator lambda-expression bug`
+Doc: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
 
 The lifted **definition** is correct — `int64_t main_lambda_1 (MojoList * a)`,
 and the code's own comment says "callers pack the loose args into it". The
@@ -123,7 +123,7 @@ call-site lowering keyed on a signature; the doc records the existing packing
 precedent.
 
 ### 2.3 Invoking a keyword-only parameter as a callee
-Doc: `the (since-fixed) c_common/fsutil.py compile failure`
+Doc: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`
 
 4 of the 6 recorded shapes are still refused, all for this one reason. A
 kw-only param that is merely *not called* compiles and runs fine; calling it

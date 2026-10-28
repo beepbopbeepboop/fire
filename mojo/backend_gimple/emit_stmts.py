@@ -39,7 +39,6 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -201,8 +200,6 @@ def gen_stmt(gen, node):
         gen._gen_stmt_MatchStmt(node)
     elif isinstance(node, gimple_ctypes.DelStmt):
         gen._gen_stmt_DelStmt(node)
-    elif isinstance(node, gimple_ctypes.StructDef):
-        gen._gen_stmt_StructDef(node)
     else:
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
         gen._emit(f"  /* TODO: {node_kind} */")
@@ -230,7 +227,7 @@ def _gen_stmt_PassStmt(gen, node):
 
 
 
-def _try_bind_iter_cursor(gen, name, value, is_decl=False):
+def _try_bind_iter_cursor(gen, name, value):
     """`it = iter(<container-expr>)` — bind `it` to the container plus a
     companion int64_t cursor temp so `next(it)` advances a genuine position
     and a following `for x in it:` resumes from it (single-pass Python
@@ -251,7 +248,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     second list of type names. That is what `test/collections/test_span.mojo`'s
     `var it = iter(span); next(it)` needs, and it was refused for exactly the
     reason ROUND 4 (a) of
-    the user-iterator next() bug (doc deleted in db724c4d6)
+    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
     records: the cursor mechanism gated on `MojoList *`, so a `Span *` — which
     IS a real sequence with a real length — got no cursor, and `next()` then
     had no receiver to dispatch on.
@@ -266,25 +263,11 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
             and value.func.name == 'iter'
             and len(value.args) == 1 and not getattr(value, 'kwargs', None)
             and not gen._locally_binds_name('iter')
+            and name not in gen.var_types
             and name not in gen._global_var_types):
-        return False
-    # A `var` that redeclares a bound name is a NEW binding in its own block
-    # (`ginf._bind_local_decl` gives it a fresh C name); it is never a cursor
-    # bound to the outer name, however the rebinding path below evolves.
-    if is_decl and name in gen.var_types:
-        return False
-    # A name that is ALREADY declared qualifies only as the rebinding
-    # `items = iter(items)` of a parameter/earlier local that holds a plain
-    # container, which is the same container viewed through a fresh cursor.
-    # It must not already be a cursor itself: `iter(<iterator>)` is the
-    # iterator, and restarting its cursor at 0 would rewind it.
-    _rebind = name in gen.var_types
-    if _rebind and itc.cursor_for(gen, gen._cname(name)) is not None:
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
-    if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
-        return False
     data = None
     if at == 'MojoList *':
         kind = 'list'
@@ -300,8 +283,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
         kind = 'span'
         data = (fname, ftype)
     elem = gen._elem_of(av)
-    if not _rebind:
-        gen._declare_var(name, at)
+    gen._declare_var(name, at)
     gen._emit(f"  {gen._write_dest(name)} = {av};")
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')
@@ -382,8 +364,7 @@ def _record_bool_valued(gen, name: str, value) -> None:
 
 
 def _gen_stmt_VarDecl(gen, node):
-    if node.value is not None and _try_bind_iter_cursor(
-            gen, node.name, node.value, is_decl=True):
+    if node.value is not None and _try_bind_iter_cursor(gen, node.name, node.value):
         return
     # A box-producing initializer (2026-10-21 part 4, further,
     # test_python_object): `var py_float = PythonObject(0.123...)` stores
@@ -494,7 +475,7 @@ def _gen_stmt_VarDecl(gen, node):
             ctype = gen._resolve_type(node.type_ann)
             if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
                 gen._ensure_tuple_struct(node.type_ann)
-        ginf._bind_local_decl(gen, node.name, ctype)
+        gen._declare_var(node.name, ctype)
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
@@ -636,8 +617,7 @@ def _gen_stmt_VarDecl(gen, node):
         # `var` whose initializer the codegen cannot vouch for clears the
         # record instead of leaving a stale one. See
         # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
-        gen._track_pointer_actual_type(node.name, actual_dst, v, vtype,
-                                       rhs_is_none=gen._is_none_literal(node.value))
+        gen._track_pointer_actual_type(node.name, actual_dst, v, vtype)
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
@@ -715,8 +695,7 @@ def _gen_stmt_VarDecl(gen, node):
     gen._layout_hint = gimple_solvers.LayoutSolver.HEAP
 
 
-def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
-                               rhs_is_none: bool = False) -> None:
+def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) -> None:
     """When storing a pointer value into an int64_t-declared local (either
     because the local's own type was widened joining another assignment
     site in the same function, or it's simply this codegen's
@@ -758,16 +737,7 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
     # other branch is what keeps this sound rather than optimistic — `k = "s"`
     # later must NOT leave `k` marked, and every RHS this codegen cannot
     # vouch for takes that branch.
-    #
-    # `rhs_is_none`: `None` lowers to the literal `'0'`, which is the SAME
-    # spelling an integer `0` has, so `v in _int_word_vals` is true for it
-    # whenever any `0` literal was seen earlier in the function. A `None` is
-    # a null pointer, not an integer, so it must take the discard branch —
-    # otherwise `callee = None` after `callee = name` marks a `char *` local
-    # as an integer, and its later `in` key is bit-cast into an int word and
-    # released with the pointer as its `orig` (`mojo_cstr_or_int_release`
-    # `-Wint-conversion`, compiling mojo/backend_gimple/cpp_core.py).
-    if v in gen._int_word_vals and not rhs_is_none:
+    if v in gen._int_word_vals:
         gen._int_word_vals.add(tname)
     else:
         gen._int_word_vals.discard(tname)
@@ -875,22 +845,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
     vp_tmp = gen._new_val('void *', f"(void *){obj64}")
     gen._emit_call('void', '', '_mojo_dispatch_setattr',
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
-
-
-def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
-    """Record a dict store's value type under the SOURCE name of a module-scope
-    dict receiver.
-
-    A bare read of a module global loads its field into a FRESH temp
-    (`_lower_IdentExpr`), so a record keyed by the store's lowered temp is
-    never seen by the next `d[k]` read. `_lower_IdentExpr` copies
-    `_dict_val_types[<source name>]` onto every such temp, which is the
-    channel a later read uses. Keyed by name only when the bare name really
-    reads a global (`bare_global_read_plan`), so a local dict is untouched.
-    """
-    if (isinstance(target_obj, IdentExpr)
-            and msh.bare_global_read_plan(gen, target_obj.name)[0]):
-        gen._dict_val_types[target_obj.name] = vtype
 
 
 def _note_global_store_types(gen, tname: str, vtype: str, v: str,
@@ -1043,29 +997,24 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     PRECEDES a later toplevel rebinding to a different generator in a loop
     body; it is the same trade the local path already makes.
     """
-    # Keyed by the DEFINING module, so a same-bare-name global of another
-    # module (the tables are shared across the whole compile) is a different
-    # fact. See `ginf.global_generator_key`.
-    key = ginf.global_generator_key(
-        gimple_ctypes._c_field_name(gen._current_module_ctx or "root"), tname)
-    if key in gen._global_generator_api_poisoned:
+    if tname in gen._global_generator_api_poisoned:
         return
     if not gen._in_toplevel_gen:
-        gen._global_generator_api_poisoned.add(key)
+        gen._global_generator_api_poisoned.add(tname)
         return
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
     if api is None:
-        if key in gen._global_generator_api:
-            gen._global_generator_api_poisoned.add(key)
+        if tname in gen._global_generator_api:
+            gen._global_generator_api_poisoned.add(tname)
         return
-    if key in gen._global_generator_api:
-        known = gen._global_generator_api[key]
+    if tname in gen._global_generator_api:
+        known = gen._global_generator_api[tname]
         if known['base'] != api['base']:
-            gen._global_generator_api_poisoned.add(key)
+            gen._global_generator_api_poisoned.add(tname)
         return
-    gen._global_generator_api[key] = api
+    gen._global_generator_api[tname] = api
 
 
 def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
@@ -1217,7 +1166,6 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             # RHS is a single iterable — lower it, then index each element
             vtype, v = gen.lower_expr(node.value)
-            ggc._refuse_namedtuple_tuple_use(gen, vtype, 'unpacking')
             # A TAGGED nested generator tuple (`args` from
             # `for what, args in scan_opcodes(co):`, see
             # `_emit_generator_tuple_unpack`'s nested-slot path): destructure
@@ -1776,8 +1724,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._maybe_kinds_vals.add(tname)
             if v in gen._struct_formats:
                 gen._struct_formats[tname] = gen._struct_formats[v]
-        gen._track_pointer_actual_type(tname, dst, v, vtype,
-                                       rhs_is_none=gen._is_none_literal(node.value))
+        gen._track_pointer_actual_type(tname, dst, v, vtype)
         gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
     elif isinstance(node.target, gimple_ctypes.MemberExpr):
         # `sys.argv = [...]` — a whole-list rebind. Reads lower to
@@ -2079,7 +2026,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     or vtype.endswith(' *'))
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
                 gen._dict_val_types[obj_v] = vtype
-                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2171,11 +2117,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
                                                   vtype, v, node.value)
-                    # A module-scope dict is boxed as int64_t, so its store
-                    # comes through THIS arm and not the typed one above:
-                    # without the record here the read of the same global
-                    # has no value type and prints the stored double's bits.
-                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2752,7 +2693,6 @@ def _gen_stmt_ReturnStmt(gen, node):
     # unaffected and unchanged.
     if node.value is None:
         ginf.emit_return_frees(gen)
-        gmp._cattr_leave(gen)
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -2794,24 +2734,10 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
-        # A function that is used as a VALUE (passed or stored, never only
-        # called) is invoked by a consumer that cannot know its return type,
-        # so a string/float list it returns carries its slot kind (the
-        # consumer reads it through `mojo_list_get_boxed`). Functions only
-        # ever called by name stay untagged: their callers are typed.
-        if (_as_str(getattr(gen, 'current_func_name', None))
-                in getattr(gen, '_value_used_funcs', ())
-                and _as_str(gen._get_actual_type(vtype, v)) == 'MojoList *'):
-            _rk = {'char *': 'p', 'double': 'd'}.get(
-                _as_str(gen._elem_types.get(_as_str(v))))
-            if _rk:
-                gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
-                               [('MojoList *', _as_str(v)), ('char', "'" + _rk + "'")])
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.
         ginf.emit_return_frees(gen)
-        gmp._cattr_leave(gen)
         # Record the returned container's element type so CALL SITES can
         # unpack/iterate it with the right accessor. The old condition
         # required vtype == 'MojoList *' (only fired for `return <list
@@ -2926,12 +2852,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._callable_ret_types:
             gen._return_callable_ret_types[gen.current_func_name] = \
                 gen._callable_ret_types[v]
-        # A returned CAPTURING closure is a `MojoBoundMethod *` value, which
-        # its lowering recorded in `_bound_method_ret_types` (not the table
-        # above), so the factory's return type is read from there.
-        if gen.current_func_name and v in gen._bound_method_ret_types:
-            gen._return_bound_method_ret_types[gen.current_func_name] = \
-                gen._bound_method_ret_types[v]
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
@@ -3151,10 +3071,8 @@ def _gen_stmt_IfStmt(gen, node):
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
     _narrowed = gen._apply_isinstance_narrowings(node.condition)
-    _bscope = ginf._open_block_scope(gen)
     for s in node.then_body:
         gen.gen_stmt(s)
-    ginf._close_block_scope(gen, _bscope)
     gen._restore_isinstance_narrowings(_narrowed)
     # No `goto {bb_merge}` when the body already ended in `return`/`goto`:
     # a dead `goto` after `return` is not just noise — when GCC INLINES
@@ -3188,10 +3106,8 @@ def _gen_stmt_IfStmt(gen, node):
         gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
         gen._emit_label(next_true)
         _elif_narrowed = gen._apply_isinstance_narrowings(ec)
-        _bscope = ginf._open_block_scope(gen)
         for s in eb:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         gen._restore_isinstance_narrowings(_elif_narrowed)
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
@@ -3200,10 +3116,8 @@ def _gen_stmt_IfStmt(gen, node):
 
     if _n_else > 0:
         gen._emit_label(current_false)
-        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
             _merge_reachable = True
@@ -3217,70 +3131,6 @@ def _gen_stmt_IfStmt(gen, node):
         # (GIMPLE rejects a label with no predecessors) and let the
         # caller's own `_last_was_terminal` handling suppress dead code.
         gen._last_was_terminal = True
-
-
-def _gen_stmt_StructDef(gen, node):
-    """A `class` statement, reached only when it sits inside a function body
-    (a module-level StructDef is emitted by gen_module, never through
-    gen_stmt). The class body runs when the statement executes, so each
-    class-level attribute is stored into its `_classattr_` global HERE, as
-    `ClassName.attr = <value>`, evaluated in the function's own scope.
-
-    Without this the statement lowered to the `/* TODO: StructDef */`
-    no-op and the global was never assigned: a class attribute whose value
-    names an enclosing local (`def f(version=5): class A: __version__ =
-    version`) read 0 at exit 0. module_gen seeds the global at module scope
-    only for literal values, which that scope can evaluate; a non-literal
-    value is left to this store.
-
-    The registry decides WHICH attributes are class attributes
-    (`gen._class_attrs[node.name]`, filled by module_gen), so the
-    classification is not repeated here. Only attributes that carry a value
-    are stored: a no-initializer container field has its default seeded by
-    the allocator, and must not be overwritten with a missing value.
-
-    Per-execution storage: a NON-constant value of a function-scoped class
-    lives in a cell that this execution allocates (`_cattr_cell_type`), and
-    the `_classattr_` global is pointed at it first. An instance keeps the cell
-    it was built under (its hidden `_clscell_` field, seeded by the allocator),
-    so an instance built in one call and read after a later call still sees its
-    own value. Residual, written down in the bug doc: a class object that
-    escapes its function (`return Tag`) and is used in a later call reads that
-    later call's cell.
-    """
-    cattrs = gen._class_attrs.get(node.name)
-    if not cattrs:
-        return
-    for field in node.fields:
-        if isinstance(field, gimple_ctypes.AssignStmt) \
-                and isinstance(field.target, gimple_ctypes.IdentExpr):
-            aname = field.target.name
-        elif isinstance(field, gimple_ctypes.VarDecl) and field.value is not None:
-            aname = field.name
-        else:
-            continue
-        if aname not in cattrs:
-            continue
-        # A per-execution cell (module_gen registration): this execution gets its
-        # OWN storage, and the global is pointed at it before the store below, so
-        # the store and every class-name read in this call reach it, and the
-        # instance built next keeps it. A plain global needs no allocation.
-        _cell_t = gmp._cattr_cell_type(gen, cattrs[aname])
-        if _cell_t is not None:
-            _cp = gen._new_temp(f'{_cell_t} *')
-            _cell_h = gen._c_cell_alloc_helper(_cell_t)
-            _cell_hd = gen._c_helper_def(_cell_h)
-            if _cell_hd:
-                # The accessor's definition, once per TU (see `_c_helper_def`).
-                gen._elaborated_externs.append(_cell_hd)
-                gen._elaborated_externs.append('')
-            gen._emit(f'  {_cp} = {_cell_h} ();')
-            gen._emit(f'  {cattrs[aname]} = {_cp};')
-        gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
-            target=gimple_ctypes.MemberExpr(
-                obj=gimple_ctypes.IdentExpr(name=node.name, line=node.line),
-                member=aname, line=node.line),
-            value=field.value, line=node.line))
 
 
 def _gen_stmt_DelStmt(gen, node):
@@ -3415,31 +3265,6 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit(f"  /* TODO: del on {ot} not supported */")
 
 
-def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
-    """`case .NAME:` as `S.NAME` against a struct-typed subject, or None.
-
-    `.NAME` is Mojo's type-relative spelling of `S.NAME`, where `S` is the type
-    of the matched value. This path knows that type: `subj_type` is the
-    subject's C pointer type (`S *`, e.g. `self` in a method of `S`), and when
-    `S` declares `NAME` as a struct-level comptime alias (`comptime NAME =
-    Self(0)`), the spelled-out reading is the one the source means, and the
-    arm is the ordinary `subject == S.NAME` that the value path lowers. That
-    `==` is `S.__eq__` (see `_user_eq_struct` in emit_exprs.py), which is the
-    comparison Mojo's `case` makes.
-
-    None when the subject is not a struct with that alias, or the struct has no
-    `__eq__` to compare by. The caller then keeps the refusal, because a `==`
-    with nothing to call would be the pointer comparison.
-    """
-    sname = gimple_exprtypes._struct_name_of(subj_type) if subj_type.endswith(' *') else None
-    if not sname or pattern.path not in gen._struct_comptime_aliases.get(sname, {}):
-        return None
-    if '__eq__' not in gen._struct_method_names.get(sname, ()):
-        return None
-    return gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name=sname),
-                                    member=pattern.path)
-
-
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -3454,11 +3279,10 @@ def _gen_stmt_MatchStmt(gen, node):
     references that temp via a synthetic IdentExpr rather than re-lowering
     `node.subject`, since re-lowering would re-evaluate it (with side
     effects) once per pattern."""
-    # The pattern classifier and its refusal sentences come from
-    # `formal.diagnostics`, NOT `formal.model`: importing the 50,000-line
-    # model here put all of it in the self-host closure. Imported here, not at
-    # the top, to avoid circular imports.
-    from formal import diagnostics as formal_model
+    # Formal model support for structural pattern refusal.
+    # This function has to import formal.model here, not at the top, to avoid
+    # circular imports:
+    from formal import model as formal_model
 
     subj_type, subj_v = gen.lower_expr(node.subject)
     subj_ref = gimple_ctypes.IdentExpr(name=subj_v)
@@ -3482,30 +3306,8 @@ def _gen_stmt_MatchStmt(gen, node):
         condition = None
         pattern_refs = []
         for pattern in match_case.patterns:
-            # `.NAME` against a struct-typed subject resolves against that type
-            # here, before the formal model's refusal below, which has no type.
-            if isinstance(pattern, gimple_ctypes.DottedLiteral):
-                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
             # Ask the formal model whether this pattern is allowed here.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
-            if kind == "class pattern (type test)":
-                # `case C():` or positional-capture-only `case C(x):` — isinstance
-                # guard; positional args bind the subject's __match_args__[i]
-                # attribute via runtime getattr so the refusal is cleared.
-                isinstance_node = gimple_ctypes.CallExpr(
-                    func=gimple_ctypes.IdentExpr(name="isinstance"),
-                    args=[subj_ref, pattern.func],
-                )
-                ict, icv = gen._lower_builtin_isinstance(isinstance_node)
-                icv = gen._ensure_bool_cond(ict, icv)
-                condition = icv if condition is None else f"{condition} || {icv}"
-                args = getattr(pattern, 'args', []) or []
-                if args:
-                    # Positional captures: binding via __match_args__ is a
-                    # next-step feature; the instance guard is sufficient to
-                    # lift the refusal for now.
-                    pass
-                continue
             if kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
                 raise formal_model.CodegenError(formal_model.match_pattern_refusal(
@@ -3540,10 +3342,8 @@ def _gen_stmt_MatchStmt(gen, node):
 
     for i, match_case in enumerate(node.cases):
         gen._emit_label(case_bbs[i])
-        _bscope = ginf._open_block_scope(gen)
         for s in match_case.body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
 
     gen._emit_label(bb_merge)
@@ -3573,8 +3373,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
     for target in node.targets:
         if isinstance(target, gimple_ctypes.IdentExpr):
             tname = target.name
-            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype,
-                                       rhs_is_none=gen._is_none_literal(node.value))
+            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype)
             # A chained assignment's IdentExpr target(s) can be a real
             # GLOBAL exactly like _gen_stmt_AssignStmt's single-target
             # case (either via an explicit `global x` inside a real
@@ -3989,10 +3788,8 @@ def _emit_try_loop_exit_exc_pops(gen) -> None:
     _bodies = getattr(gen, '_try_finally_bodies', None) or []
     for _i in reversed(_exited):
         if _i < len(_bodies) and _bodies[_i]:
-            _bscope = ginf._open_block_scope(gen)
             for _s in _bodies[_i]:
                 gen.gen_stmt(_s)
-            ginf._close_block_scope(gen, _bscope)
 
 
 def _gen_stmt_BreakStmt(gen, node):
@@ -4250,10 +4047,7 @@ def _gen_stmt_ExprStmt(gen, node):
         # a callable value, so the indirection is semantics-preserving;
         # see _lower_call's own comment for why a misleading
         # first-decl-wins `char *` decl can't disqualify it.
-        # The module-global half is the same as _lower_call's (a decorated
-        # `def` rebound to a global is a value, not a C symbol), so both
-        # call paths ask the one predicate.
-        if ggc._callee_is_fnptr_value(gen, raw_name):
+        if _var_ctype in ('int', 'int64_t', 'void *', '_Bool') or raw_name in gen.var_types:
             gen._lower_fnptr_call(raw_name, _var_ctype, node.value)
             return
         # Same guard as _lower_CallExpr: don't redirect an *imported*
@@ -4359,6 +4153,24 @@ def _gen_stmt_ExprStmt(gen, node):
         arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
             fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 
+        # For compile_to_gimple: pad with do_imports and filename kwargs
+        if raw_name == 'compile_to_gimple':
+            if 'do_imports' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['do_imports'])
+            elif len(arg_pairs) < 2:
+                arg_pairs.append(('int', '0'))
+            if 'filename' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['filename'])
+            elif len(arg_pairs) < 3:
+                arg_pairs.append(('char *', '0'))
+
+        # For interpret_and_execute: pad with filename kwarg
+        if raw_name == 'interpret_and_execute':
+            if 'filename' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['filename'])
+            elif len(arg_pairs) < 2:
+                arg_pairs.append(('int', '0'))
+
         # General: pad missing args with kwargs when expected param count is
         # known — see _lower_call's identical logic (this is the
         # statement-level twin: a call whose return value is discarded,
@@ -4443,9 +4255,6 @@ def _gen_stmt_ExprStmt(gen, node):
                     arg_pairs.append((_pct, '0'))
                 else:
                     arg_pairs.append(('int', '0'))
-        # Same float-box rule as `_lower_named_call` (see `_box_float_call_args`).
-        arg_pairs = ginf._box_float_call_args(gen, raw_name, arg_pairs)
-        ginf._tag_mixed_list_call_args(gen, raw_name, arg_pairs)
 
         if fname in gen._KNOWN_SIGS:
             ret_type = gen._KNOWN_SIGS[fname][0]
@@ -4713,15 +4522,11 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
         gen._c_names[bind_name] = bound
     gen._last_was_terminal = False
-    _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
         gen.gen_stmt(s)
-    ginf._close_block_scope(gen, _bscope)
     if node.finally_body:
-        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
     # Only emit goto if the exception handler didn't end with a return
     if not gen._last_was_terminal:
         gen._emit(f"  goto {bb_after};")
@@ -4782,9 +4587,6 @@ def _gen_stmt_TryStmt(gen, node):
     # — must happen after the _mojo_exc_top bump above (it indexes the
     # checkpoint table by that level) and before setjmp.
     gen._emit("  mojo_cleanup_checkpoint_save ();")
-    # The cell pointers this region's handler restores (see the bb_exc block
-    # below). Taken before setjmp, so the values survive the longjmp.
-    _cell_snap = gmp._cattr_snapshot(gen)
     # GIMPLE: pass array element directly to setjmp (decays to int*)
     gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
     gen._emit(f"  {cond_t} = {sj_ret} != 0;")
@@ -4816,13 +4618,11 @@ def _gen_stmt_TryStmt(gen, node):
     if bb_finally:
         _frame.bb_finally = bb_finally
     ginf.push_emit_frame(gen, _frame)
-    _bscope = ginf._open_block_scope(gen)
     for s in node.body:
         gen.gen_stmt(s)
         if gen._last_was_terminal:
             _had_terminal = True
             break
-    ginf._close_block_scope(gen, _bscope)
     ginf.pop_emit_frame(gen)
     _return_value = _frame.return_value if _frame.has_return_value else None
     _saw_return = [_frame.saw_return]
@@ -4854,10 +4654,8 @@ def _gen_stmt_TryStmt(gen, node):
     # Run `finally`, then perform the deferred return.
     if bb_finally:
         gen._emit_label(bb_finally)
-        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         if _return_value is not None:
             gen._emit(f"  return {_return_value};")
         elif _saw_return[0]:
@@ -4879,10 +4677,8 @@ def _gen_stmt_TryStmt(gen, node):
     # clause — with an `else`, bb_else runs the finally itself).
     if not _had_terminal and node.finally_body and not bb_else:
         gen._emit_label(bb_finally_done)
-        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_after};")
 
     # Reset terminal state for caller
@@ -4891,11 +4687,6 @@ def _gen_stmt_TryStmt(gen, node):
 
     gen._emit_label(bb_exc)
     gen._emit("  mojo_exc_pop ();")
-    # An exception that unwound out of a call may have left a nested execution's
-    # cell in a function-scoped class's global (see emit_methods._cattr_restore_
-    # begin). This function's own cells are restored here, before any handler
-    # or re-raise can read them.
-    gmp._cattr_restore_emit(gen, _cell_snap)
 
     handlers = node.handlers
     if not handlers:
@@ -5038,23 +4829,17 @@ def _gen_stmt_TryStmt(gen, node):
     # Finally-then-propagate block (see bb_exc_reraise's declaration).
     gen._emit_label(bb_exc_reraise)
     if node.finally_body:
-        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
     gen._emit("  mojo_raise ();")
 
     if bb_else:
         gen._emit_label(bb_else)
-        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         if node.finally_body:
-            _bscope = ginf._open_block_scope(gen)
             for s in node.finally_body:
                 gen.gen_stmt(s)
-            ginf._close_block_scope(gen, _bscope)
         # Only emit goto if the else block didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
@@ -5368,7 +5153,6 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
             gen._emit(f"  _mojo_exc_top = {temp_inc};")
             gen._emit(f"  {temp_top2} = _mojo_exc_top;")
-            _ar_cell_snap = gmp._cattr_snapshot(gen)
             # Checkpoint the cleanup-thunk stack exactly like the try/
             # except idiom: on the longjmp the runtime unwinds to it.
             gen._emit("  mojo_cleanup_checkpoint_save ();")
@@ -5377,7 +5161,6 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
             gen._emit_label(bb_try)
-            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 if type(s).__name__ == 'ReturnStmt':
                     # A `return` out of the block is normal control flow:
@@ -5404,7 +5187,6 @@ def _gen_stmt_WithStmt(gen, node):
                 gen._emit = intercepted_emit
                 gen.gen_stmt(s)
                 gen._emit = original_emit
-            ginf._close_block_scope(gen, _bscope)
 
             if not gen._last_was_terminal:
                 gen._emit("  mojo_exc_pop ();")
@@ -5413,7 +5195,6 @@ def _gen_stmt_WithStmt(gen, node):
 
             gen._emit_label(bb_exc)
             gen._emit("  mojo_exc_pop ();")
-            gmp._cattr_restore_emit(gen, _ar_cell_snap)
             # The block raised, as required: swallow and continue. The
             # exception state (type tag / message) is left as-is — the
             # marker's driver-side bookkeeping owns it, and the next
@@ -5496,7 +5277,6 @@ def _gen_stmt_WithStmt(gen, node):
         # it a second time as unreachable code. A one-element list rather than
         # a `nonlocal`, for the self-hosted compiled path.
         _teardown_done = [False]
-        _bscope = ginf._open_block_scope(gen)
         for s in node.body:
             # break/continue lower to a bare `goto <loop label>;` and jump
             # out of this with's protected region same as an early return
@@ -5538,7 +5318,6 @@ def _gen_stmt_WithStmt(gen, node):
             ginf.pop_emit_frame(gen)
             if _wframe.teardown_done:
                 _teardown_done[0] = True
-        ginf._close_block_scope(gen, _bscope)
         # Only emit cleanup and goto if the with body didn't end with a
         # return — but an early return still leaves the protected region
         # and must pop the exception stack (_mojo_exc_top) exactly like
@@ -5564,8 +5343,6 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_after)
     else:
-        _bscope = ginf._open_block_scope(gen)
         for s in node.body:
             gen.gen_stmt(s)
-        ginf._close_block_scope(gen, _bscope)
         _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)

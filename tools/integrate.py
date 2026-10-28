@@ -44,7 +44,7 @@ QUICK = ["mojoc", "selfhost", "bootstrap-stage1-transitive", "bootstrap-stage2-c
 # `integ` was cut, a merge commit is safe and the gate's verdict still stands; anything else moving means
 # master changed under the round and the round must be redone, not merged.
 CONTROLLER_FILES = ("tools/control.py", "tools/control_prompt.md", "tools/gatewatch.py", "tools/integrate.py",
-                    "tools/autointegrate.py", "CONTROL.html", "doc/POLICY_memory_over_4gb.md")
+                    "tools/autointegrate.py", "CONTROL.html", "bugs/PERF_memory_over_4gb_is_a_bug.md")
 
 
 # TEST INFRASTRUCTURE: code that only decides how, whether and with how much memory the project is TESTED. A
@@ -105,7 +105,7 @@ def land_on_master():
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
-def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
+def pick_candidates(only=None, allow_dirty=(), quiet=False):
     """Tasks whose worker has exited with commits, a clean tree and no NEEDS-INFO/BLOCKED verdict."""
     cands = []
     say = (lambda *_: None) if quiet else print
@@ -117,7 +117,7 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         st = C.state_of(t)
         if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
-        if C.verdict(t) in ("NEEDS-INFO", "BLOCKED") and name not in ignore_verdict:
+        if C.verdict(t) in ("NEEDS-INFO", "BLOCKED"):
             say("skip %s: worker says %s" % (name, C.verdict(t))); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
@@ -149,35 +149,11 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["state"] = "superseded"
 
 
-def enqueue_red_fix(name, t, failing):
-    """A branch that merges clean but turns the landing gate red is handed back to a worker with the failing tests
-    named: queue a fixer that starts from the branch, and supersede the original (registry `needs` keeps the list)."""
-    import argparse as _ap
-    tests = ", ".join(failing) or "the failing gate jobs (see the gate log)"
-    task = ("Branch %s (a finished worker branch; original task: %s) merges onto master but turns the landing gate RED. "
-            "The failing gate jobs with it are: %s. You start on that branch. Make those tests pass by fixing the ROOT CAUSE "
-            "in the branch's own change (not by skipping, marking expect= or disabling a test). Verify with the narrow tests "
-            "for each failing job, each wrapped in python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no "
-            "gate, no self-host build. Never use git stash. Commit, then finish with the REPORT block and a CONTROL-STATUS line."
-            % (t["branch"], t["summary"][:150], tests))
-    mname = "fix-red-" + name
-    if mname in C.load():
-        mname += "-%d" % int(time.time() % 100000)
-    C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None))
-    with C.registry() as reg:
-        reg[name]["state"] = "superseded"
-        reg[name]["needs"] = list(failing)
-
-
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # progress must be visible in a redirected log
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="merge and report, do not gate or land")
     ap.add_argument("--only", nargs="*", help="restrict to these task names")
-    ap.add_argument("--ignore-verdict", nargs="*", default=[], metavar="NAME",
-                    help="take these named tasks although their worker's CONTROL-STATUS says BLOCKED or NEEDS-INFO; "
-                         "an explicit decision by the owner, recorded in the landing log, never automatic")
     ap.add_argument("--jobs", nargs="*", metavar="JOB",
                     help="verify with just these suite jobs (e.g. bootstrap-stage1-transitive bootstrap-stage2-cc) "
                          "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
@@ -187,10 +163,6 @@ def main():
                     help="LIGHT GATE (owner's swarm policy): the gate is just the stdlib compile (`suite.py stdlib-syntax`); "
                          "green lands on master. The wider checks (`make check`, stdlib-dylib) run AFTER landing, in "
                          "tools/verify_landed.py, which files a fixer if they go red")
-    ap.add_argument("--probe", action="store_true",
-                    help="PROBE: merge and gate the named branches exactly as a landing would, then report PROBE GREEN or "
-                         "PROBE RED with the failing jobs. It changes NO registry state and never lands. The swarm uses it to "
-                         "find which branch breaks the gate (a binary search over the batch)")
     ap.add_argument("--no-fixers", action="store_true",
                     help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
                          "(used by the bisect probes, which re-merge the same branches many times)")
@@ -214,7 +186,7 @@ def main():
     except OSError:
         sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
 
-    cands = pick_candidates(a.only, a.allow_dirty, ignore_verdict=a.ignore_verdict)
+    cands = pick_candidates(a.only, a.allow_dirty)
     if a.only:                                       # the caller's order is the merge order (a bisect depends on it)
         cands = sorted(cands, key=lambda n: a.only.index(n))
     if not cands:
@@ -232,7 +204,7 @@ def main():
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
             print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
-            if a.no_fixers or a.probe:               # a probe: just leave it out, no side effects
+            if a.no_fixers:                          # a bisect probe: just leave it out, no side effects
                 print("(probe) %s conflicts: left out" % name)
             else:
                 enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
@@ -283,22 +255,10 @@ def main():
             print(subprocess.run("sed -n '/^FAILED:/,/^suite:/p' quick.log | head -12", shell=True, cwd=INTEG,
                                  capture_output=True, text=True).stdout)
             sys.exit(1)
-    # A landing runs the cheap landing gate (tools/gates.json `landing`) minus every gate that is OFF for a backlog.
-    # The full suite is NOT run here: tools/verify_landed.py runs it once per interval, under this same lock.
     gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
-                else ["python3", "tools/suite.py"] + C.gates_cfg()["landing"] + C.gate_skip_args() if a.stdlib
-                else ["python3", "tools/suite.py", "gate"] + C.gate_skip_args())
-    # The landing gate can be OFF for a backlog (tools/gates.json). If every landing test is OFF there is nothing to
-    # run: the landing goes ungated, and the post-landing full gate (tools/verify_landed.py) is the check that runs.
-    landing_left = [g for g in C.gates_cfg()["landing"]
-                    if not any(re.search(pat, g) for pat in C.gates_cfg().get("off", {}))]
-    if a.stdlib and not a.jobs and not landing_left:
-        print("landing gate OFF for the backlog (%s): landing %s ungated" % (
-            ", ".join(C.gates_cfg()["landing"]), merged))
-        rc = 0
-    else:
-        print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
-        rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
+                else ["python3", "tools/suite.py", "stdlib-syntax"] if a.stdlib else ["make", "gate"])
+    print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
+    rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)
@@ -325,25 +285,6 @@ def main():
     if rc == 0 and bad:
         print("gate exited 0 but suite.log records:\n" + bad + "\ntreating the round as RED")
         rc = 1
-    if a.probe:
-        jobs = failed_job_names(os.path.join(INTEG, "gate.log")) if rc else []
-        files = []                                   # the stdlib sweep names each failing file under this heading
-        gl = os.path.join(INTEG, "build", "suite.log")   # the sweep's own section; gate.log has only the tally
-        if rc and os.path.exists(gl):
-            inside = False
-            for line in open(gl, encoding="utf-8", errors="replace"):
-                if line.startswith("UNEXPECTED failed files:"):
-                    inside = True
-                elif inside and line.startswith("  ") and not line.startswith("    "):
-                    files.append(line.strip())
-                elif inside and line.startswith("    "):
-                    continue                         # the error line under a file
-                elif inside and line.strip():
-                    break                            # the next section starts
-        print("PROBE %s: %s" % ("GREEN" if rc == 0 else "RED", " ".join(merged)))
-        print("FAILED_JOBS: %s" % " ".join(jobs))
-        print("FAILED_FILES: %s" % " ".join(files))
-        sys.exit(rc)
     if rc == 0:
         land_on_master()
         with C.registry() as reg:

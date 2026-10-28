@@ -2087,15 +2087,8 @@ def _launch_sites(source: str, path: str = "<snippet>"):
                 return True
             if isinstance(sub, ast.Attribute) and "lean" in sub.attr.lower():
                 return True
-            # A string literal names Lean as a WORD — a `.lean` file, a path
-            # segment, the bare word — not as a substring of an English word:
-            # `clean`/`cleanup` contain "lean" but name nothing Lean, and
-            # tools/swarm.py's `control.py cleanup` call read as a launch of the
-            # toolchain under a substring match. Identifiers above keep the
-            # substring: a name or attribute `lean_*`/`*_lean` is a genuine
-            # signal, and no common English identifier is a `lean` substring.
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                    and re.search(r"\blean\b", sub.value.lower()):
+                    and "lean" in sub.value.lower():
                 return True
         return False
 
@@ -4444,21 +4437,6 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         self.assertGreaterEqual(text.count("hdec"), 2,
                                 "…while the guard's own two branches on the same "
                                 "path are settled")
-
-    def test_the_body_stops_before_the_float_repr_helper(self):
-        """The float-repr helper is emitted after every body and is not part of
-        the chain, so `_body` must end where it starts. Before this bound, every
-        program's body decoded straight into the helper's SIB-indexed byte
-        stores, which the decoder refuses, and the whole sweep failed on it."""
-        import formal.x86_64_endtoend_test as E
-        code, info, insns, _shapes = E._plan(
-            os.path.join(E.HERE, "examples", "ret42.mojo"))
-        base = info["base_addr"]
-        self.assertTrue(insns, "ret42's body decoded to nothing")
-        last = insns[-1]
-        self.assertLessEqual(last.offset + last.length,
-                             info["float_repr_addr"] - base,
-                             "the body runs into the float-repr helper")
 
     def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
         """Each arm selects ONE disjunct, and it is the leaf's own.

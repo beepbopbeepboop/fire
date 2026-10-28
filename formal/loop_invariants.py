@@ -777,9 +777,7 @@ def _read_for_range(st, shape):
     elif not args:
         return "`range()` with no argument"
     else:
-        return (f"`range` with {len(args)} arguments and a step argument, "
-                "which this layer does not read (it reads the 1- and 2-"
-                "argument forms)")
+        return f"`range` with {len(args)} arguments and no step argument"
     target = getattr(st, "target", None)
     if not isinstance(target, str):
         return f"the loop's target is a {type(target).__name__} and not a name"

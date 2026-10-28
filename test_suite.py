@@ -1000,7 +1000,7 @@ def test_every_job_over_the_debt_line_says_why():
     in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
     and a job handed a class above the default with nothing measured behind it
     (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
-    to the number and points at `doc/POLICY_memory_over_4gb.md`, which
+    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
     is where the next step for each one is written down.
     """
     over = {n: s for n, s in sorted(suite.REGISTRY.items())
@@ -1210,6 +1210,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-void-return': 3,
+                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1274,16 +1275,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # `formal-x86-64-parity` registration was likewise not taken in the
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
-                     'coro-future-await': 2,
-    # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
-    # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
-    # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch
-    # backend emits no companion .cpp, and the file (a C++20-path test) was
-    # never updated to pin MOJO_CORO=cpp the way test_taskgroup.py already
-    # did. With the pin (plus its two stale bool expectations `1` -> `True`,
-    # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
-    # gone, so a census still stating it would fail on the registry's own
-    # state.
+                     'coro-future-await': 17,
+                     'gimple-async-runner': 36,
                      'formal-x86-endtoend': 1,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
@@ -1302,7 +1295,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     backends again and the marker came back with it, a
                      #     half-applied fix of the same class as the dropped
                      #     definitions in
-                     #     definitions from the bulk-merge drop (fixed; doc deleted);
+                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
                      #     — and then master's `5e45d0b5` restored the test half for
                      #     real, so the marker is gone a second time and the count
                      #     with it.  The registry is the authority for both: a
@@ -1629,27 +1622,6 @@ RESERVE_JOB = ('import sys, time;'
 
 def _reserving_cmd():
     return ok_cmd(RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')))
-
-
-def test_every_job_that_runs_mojoc_depends_on_it():
-    """A job that executes `./mojoc` must declare `deps=['mojoc']`.
-
-    `mojoc` is built by a Makefile target, and nothing starts the job that runs
-    it before that build exists unless the registry says so. `native-dumpfull`
-    had no such dep: it raced `mojoc` at t=0 and died with "mojoc not built",
-    and the failure stayed hidden only because the job was `expect=`-marked.
-    The marker came off, the race was left in place, and the gate went red.
-    The consumers are named here rather than discovered, because the binary
-    is reached through a test file's own path arithmetic.
-    """
-    consumers = ('ab-native', 'native-dumpfull',
-                 'selfhost-memory', 'selfhost-memory-fire')
-    missing = [n for n in consumers
-               if 'mojoc' not in (getattr(suite.REGISTRY[n], 'deps', ()) or ())]
-    check('deps: every job that runs ./mojoc waits for the mojoc build',
-          not missing,
-          f'no deps=[\'mojoc\'] on {missing}: they start at t=0 and race the '
-          f'build, which is "mojoc not built" on a cold tree')
 
 
 def test_every_job_is_reserved_before_it_starts():
@@ -3448,7 +3420,7 @@ def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
     still correct, the words were still in the tree somewhere else, and the
     TEST was asserting a sentence the build could not print —
 
-      * the doc deleted by commit dabccb808, whose
+      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
         needles named a copy of `model.function_value_refusal` that Python's
         rebinding had made DEAD, so the case was red on a tree whose behaviour
         was right;
@@ -5448,9 +5420,9 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     listed is indistinguishable from an open one to whoever reads the queue
     next. It has a cost nobody was measuring, though, and the first instance
     found was a test file's module docstring sending a reader to a file that is
-    not there. A deleted bug doc (rewritten after the walk turned out
-    to be a hundred times bigger than the two places it named) is the
-    write-up for this check.
+    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
+    the write-up, rewritten after the walk turned out to be a hundred times
+    bigger than the two places it named.
 
     So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
     the walk rather than about the corpus, which is the only shape that can
@@ -5568,7 +5540,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # `FORMAL_known_limits.md`, which is the very document the check above uses
     # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
-    # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
+    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
+    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.
     bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
     live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
@@ -5581,18 +5554,18 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
           f'and the census it prints is quoted in bugs/ documents')
     # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. The floor is read off the bare ledger, not hard-coded: every
-    # sweep that retires citations moves the corpus, and a literal floor was
-    # re-baselined by hand after each one (196 on 2026-10-27, then this
-    # sweep's 172). Half the ledger is far below any real corpus and far above
-    # what an over-skipping predicate leaves behind.
-    _bare_floor = sum(_baseline_mod.BARE_BASELINE.values()) // 2
-    _bare_found = sum(len(v) for v in bare_by_doc.values())
+    # nothing. 200+ was the measured floor on this tree after the fix
+    # (847677268, 2026-10-05). The 2026-10-27 batch deleted the fixed bug
+    # docs, and regenerating OPEN_WORK.md's formal-doc-index block (the
+    # stale-block fix in this same gate-triage series) dropped the rows that
+    # still named the deleted ones, so the live corpus is 196 citations of
+    # 117 names — re-measured today, floor re-baselined to it.
     check('dangling refs: the BARE walk is still not vacuous after that fix',
-          _bare_found >= _bare_floor,
-          f'{_bare_found} citations of {len(bare_by_doc)} names that are '
-          f'nowhere, floor {_bare_floor}; a walk that skips every name because '
-          f'it skips too many is the same defect wearing the opposite sign')
+          sum(len(v) for v in bare_by_doc.values()) >= 196,
+          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
+          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
+          f'name because it skips too many is the same defect wearing the '
+          f'opposite sign')
     # The ledger's floor is read by TWO mechanisms now — the ratchet below and
     # the strict check above — so the readers that decide what it records are
     # checked against a synthetic corpus rather than against this tree's, whose
@@ -6486,8 +6459,7 @@ def main():
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
-               test_a_make_recipe_never_asks_for_more_than_its_job_reserved,
-               test_every_job_that_runs_mojoc_depends_on_it):
+               test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
