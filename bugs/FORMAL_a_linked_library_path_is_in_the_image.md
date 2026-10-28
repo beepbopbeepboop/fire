@@ -10,25 +10,6 @@ digest the image that carries it (see "What was measured"). No code fix is
 available without relocating libraries or changing where they are published, and
 the doc's two rejected alternatives are still the only two.
 
-**2026-10-28, re-measured on this tree: the limitation is unchanged and the
-pinned property holds — stays OPEN as a limitation.** Ran this doc's named
-quick test, `test_formal_reproducible.py`'s `two CAS roots differ only by the
-library path`: 6/6 checks PASS on both architectures (one content-addressed
-library NAME set for the two roots, same-length images, every differing byte
-inside a path-naming load command or the image's own digests). Re-ran the
-"What was measured" scenario by hand (an importing program, two same-length
-`GMOJO_HOME` roots, `arm64`): `cmp` differs, first at char 809; the images are
-49 632 bytes on both sides with **9 differing runs** — 16 B inside `LC_UUID`,
-1 B inside `LC_LOAD_DYLIB` (the `home1`/`home2` byte), and the rest inside the
-`LC_CODE_SIGNATURE` blob (the `gmojo-<uuid>` identifier hex and the CDHash) —
-the same shape the 2026-10-12 table records, with this tree's offsets and run
-lengths; the module dylib's content-addressed BASENAME is identical on both
-sides. The no-import half is unchanged as well: a program that links nothing
-but libSystem builds byte-identical across two roots (`cmp` clean). Nothing the
-PROGRAM wrote moves, and the alternatives in "Why it is not fixed here" remain
-the only two, both of them design changes this round does not make — so the
-remainder is the same and the doc stays open.**
-
 ## The corrected byte account (2026-10-12), and why the old one was one byte
 
 The original account was taken when `LC_UUID` was the **all-zero constant** this

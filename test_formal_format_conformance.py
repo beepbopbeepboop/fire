@@ -47,16 +47,14 @@ right (`FORMAL printf d renders 32 bits`). Every output call here is
 
 **What this path cannot render is refused, and a refusal is a documented
 answer rather than a missing one.** The rows below name, for each shape, what is
-missing: a container's brackets and separator (a loop emitting text, not a
-conversion of a word), an f-string's buffer (the same missing buffer that
-refuses `+`, `upper` and `join`), and `str`/`repr`/`format`/`%`/`.format()` as
-names with no lowering. The float was the one of these whose answer the backend
-could COMPUTE, so it is a `("value",)` row: CPython's spelling is the shortest
-decimal that round-trips, which is not a libc conversion, and the emitter's
-float-repr helper is that function. Its former refusal used to be a message
-that was FALSE about the source — `print(1.5)` was "cannot tell whether
-FloatLiteral is a string or a number" when the model's own `FLOAT_KIND` says it
-is a `double` — and the value rows are what keep the correction honest.
+missing: a float's SPELLING (CPython's is the shortest decimal that round-trips,
+which is not a libc conversion), a container's brackets and separator (a loop
+emitting text, not a conversion of a word), an f-string's buffer (the same
+missing buffer that refuses `+`, `upper` and `join`), and `str`/`repr`/`format`/
+`%`/`.format()` as names with no lowering. Two of those refusals used to be
+messages that were FALSE about the source — `print(1.5)` was "cannot tell
+whether FloatLiteral is a string or a number" when the model's own `FLOAT_KIND`
+says it is a `double` — and they are the rows that keep them honest.
 
 Run:  python3 test_formal_format_conformance.py [-v] [-k SUBSTRING] [-m]
 """
@@ -131,20 +129,6 @@ ROWS = [
     ("int32_min", in_main('a: Int32 = 0 - 2147483647 - 1', 'print(a)'),
      ("value",)),
     ("int_expr", in_main('a = 6', 'b = 7', 'print(a * b)'), ("value",)),
-
-    # ── float: CPython's spelling is the SHORTEST decimal that round-trips,
-    #    which is not a libc conversion, so the emitter computes it ─────────
-    # The three rows that were the REFUSAL census for this shape, now that the
-    # backend's float-repr helper answers them. A plain value, a zero, and a
-    # float mixed into a multi-argument print.
-    ("float_value", prog('print(1.5)'), ("value",)),
-    ("float_zero", prog('print(0.0)'), ("value",)),
-    ("float_in_a_print", prog('print("x", 1.5)'), ("value",)),
-    # A negative value and the two edges of CPython's fixed/scientific choice:
-    # an integer-valued float (the `.0` must survive) and a fraction.
-    ("float_negative", prog('print(-1.5)'), ("value",)),
-    ("float_int_val", prog('print(123.0)'), ("value",)),
-    ("float_fraction", prog('print(0.1)'), ("value",)),
 
     # ── bool: CPython prints a WORD, and every one of these used to print the
     #    word's own 0/1 ───────────────────────────────────────────────────
@@ -273,6 +257,15 @@ ROWS = [
     ("print_sep_mixed", prog('print(1, 2, sep=",")'), ("value",)),
 
     # ── the shapes this path REFUSES, one row each ────────────────────────
+    # A float: the value is one word and is right; the SPELLING is missing,
+    # because CPython's is the shortest decimal that round-trips and no libc
+    # conversion is that function.
+    ("float_refused", prog('print(1.5)'),
+     ("refuse", "print() of a float is refused")),
+    ("float_zero_refused", prog('print(0.0)'),
+     ("refuse", "print() of a float is refused")),
+    ("float_in_a_print", prog('print("x", 1.5)'),
+     ("refuse", "print() of a float is refused")),
     # A container, per syntax and through a name: the kind is `list:int` in
     # every case and the message says so.
     ("list_refused", prog('print([1, 2])'),

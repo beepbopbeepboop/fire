@@ -4070,17 +4070,6 @@ BUCKETS = {
               # loop; it arrived with `work/formal27-6` in NO bucket and NO
               # `UNREGISTERED`, which is what the estate check named.
               'formal-host-import-wall',
-              # …and `formal-host-import-shapes`, the measurement behind the
-              # wall: its registration says "in `check` because it is the same
-              # area and a red here was the root cause of the dead-import /
-              # importlib.util row bugs", but the batch added the registration
-              # and not the row, which is what the bucket check named. 10 s,
-              # 0.2 GB peak, no Lean; 15.9 s wall through the runner, measured
-              # green 2026-10-28, gate triage. Its one red on the tree (a dead
-              # `types` import in a batch regression record the tree-wide
-              # ratchet named) is fixed in this series, so the everyday loop
-              # runs it green from day one.
-              'formal-host-import-shapes',
               # …and `formal-per-struct-asks`, named by the estate check on the
               # same day for the same reason: in NO bucket and NO
               # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
@@ -4303,12 +4292,6 @@ BUCKETS = {
                # prints, and it is in `check` rather than only here for the
                # `formal-field-walk` reason: no build, no Lean, 0.36 s.
                'formal-host-import-wall',
-               # …and `formal-host-import-shapes`, the wall's measurement, in
-               # both buckets for the same reason the wall is in both: `proofs`
-               # is the whole formal picture in one bucket, and the wall's row
-               # above is its sibling. Named 2026-10-28, gate triage, with the
-               # row in `check` beside it.
-               'formal-host-import-shapes',
                # …and `formal-per-struct-asks`, in both buckets for the
                # `formal-field-walk` reason — the estate check named it in NO
                # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
