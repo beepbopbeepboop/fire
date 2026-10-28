@@ -379,9 +379,12 @@ def breaker_until():
 # A usage limit is per MODEL and long: the paid "Go" plan takes a month to recover, a free model about a day. So a limit
 # is not a reason to wait 30 minutes and retry the same model (that is what minted 2,000 empty branches): it marks the
 # model dead for its recovery time and the work moves to the next model that is not.
-FALLBACKS = os.environ.get("CONTROL_FALLBACKS", "opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free,"
-                           "opencode/minimax-m3.1-flash-free,opencode/mimo-v2.6-flash-free,opencode/nemotron-3-ultra-free,"
-                           "opencode/beam-free,opencode/longcat-2.5-preview-free").split(",")
+FALLBACKS = os.environ.get("CONTROL_FALLBACKS", "openrouter/openrouter/free,opencode/deepseek-v4.1-flash-free").split(",")
+# Free tiers cap requests per day, and a swarm of 20 burns a day's quota in minutes (2026-10-26: 29 workers died on
+# OpenRouter's free-models-per-day, 33 on OpenCode's free limit). So each model has a slot cap: refill never runs more
+# than this many workers on it at once. A model not listed is uncapped.
+MODEL_CAPS = {"openrouter/openrouter/free": 1, "opencode/deepseek-v4.1-flash-free": 1}
+MODEL_CAPS.update({k: int(v) for k, v in (kv.split("=") for kv in os.environ.get("CONTROL_CAPS", "").split(",") if "=" in kv)})
 
 
 def recovery_days(model):
@@ -406,13 +409,26 @@ def mark_dead(model):
     json.dump(d, open(os.path.join(ctl_dir(), "dead_models.json"), "w"), indent=1)
 
 
-def pick_model(preferred):
-    """The first of PREFERRED then FALLBACKS whose limit has not been hit, or None when every one is out."""
+def running_by_model(tasks=None):
+    n = {}
+    for t in (tasks or load()).values():
+        if state_of(t) == "running":
+            n[t.get("model")] = n.get(t.get("model"), 0) + 1
+    return n
+
+
+def pick_model(preferred, busy=None):
+    """The first of PREFERRED then FALLBACKS whose limit has not been hit and whose slot cap (MODEL_CAPS) has room given
+    BUSY (running workers per model), or None when every one is out or full."""
     dead = dead_models()
+    busy = busy or {}
     dead_providers = {provider(m) for m in dead if "free" not in m}   # a paid plan's limit covers all its models
     for m in [preferred] + FALLBACKS:
-        if m and m not in dead and (provider(m) not in dead_providers or "free" in m):
-            return m
+        if not m or m in dead or (provider(m) in dead_providers and "free" not in m):
+            continue
+        if busy.get(m, 0) >= MODEL_CAPS.get(m, 1 << 30):
+            continue
+        return m
     return None
 
 
@@ -485,7 +501,8 @@ def cmd_refill(a):
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
     tasks = load()
-    live = sum(1 for t in tasks.values() if state_of(t) == "running")
+    busy = running_by_model(tasks)
+    live = sum(busy.values())
     items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
                    key=lambda i: i["added"])
     started = 0
@@ -496,9 +513,10 @@ def cmd_refill(a):
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL))
+                                file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL, busy))
         if not ns.model:
-            continue                      # this task's model (and every fallback) is out of quota; others may not be
+            continue                      # this task's model (and every fallback) is out of quota or full; others may not be
+        busy[ns.model] = busy.get(ns.model, 0) + 1
         try:
             cmd_spawn(ns)
         except SystemExit as e:

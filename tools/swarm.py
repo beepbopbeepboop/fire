@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The light-gate swarm: keep N workers on bugs/ docs, land what they finish, verify after landing.
 
-    CONTROL_MODEL='opencode-go/beam-free#high' python3 tools/swarm.py [--target 20] [--interval 120]
+    CONTROL_MODEL=openrouter/openrouter/free python3 tools/swarm.py [--target 2] [--interval 120]
 
 One pass, repeated:
   1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc (not FORMAL_*, which
@@ -120,14 +120,40 @@ def land():
         names = keep
     if not names:
         return None
-    log("landing %d: %s" % (len(names), " ".join(names)))
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + names,
-                       capture_output=True, text=True, cwd=C.MAIN)
-    out = r.stdout + r.stderr
-    for line in out.splitlines():
-        if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
-            log(line[:200])
-    return "GREEN" in out
+    # A red batch must not be retried unchanged (2026-10-26: the same 35-branch batch was gated every 3 minutes all
+    # evening). Key each branch by name@head; a batch whose members were all tried and failed together is not run again,
+    # instead its branches are tried ONE AT A TIME, and the ones that are red alone are set aside until their head moves.
+    heads = {n: C.git("rev-parse", "--short", C.load()[n]["branch"], check=False) for n in names}
+    st = load_state()
+    bad = set(st.get("bad", []))
+    names = [n for n in names if "%s@%s" % (n, heads[n]) not in bad]
+    if not names:
+        return None
+    sig = " ".join(sorted("%s@%s" % (n, heads[n]) for n in names))
+    batches = [names]
+    if len(names) > 1 and sig in st.get("red_batches", []):
+        batches = [[n] for n in names]          # this exact batch already failed: bisect by landing singly
+    landed = False
+    for batch in batches:
+        log("landing %d: %s" % (len(batch), " ".join(batch)))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + batch,
+                           capture_output=True, text=True, cwd=C.MAIN)
+        out = r.stdout + r.stderr
+        for line in out.splitlines():
+            if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
+                log(line[:200])
+        if "GREEN" in out:
+            landed = True
+        elif "RED" in out:
+            if len(batch) == 1:
+                bad.add("%s@%s" % (batch[0], heads[batch[0]]))
+            else:
+                st.setdefault("red_batches", []).append(" ".join(sorted("%s@%s" % (n, heads[n]) for n in batch)))
+            st["bad"] = sorted(bad)
+            json.dump(st, open(state_path(), "w"), indent=1)
+            if len(batch) > 1:
+                break                              # next pass tries them singly
+    return landed
 
 
 def verify_async():
@@ -137,7 +163,7 @@ def verify_async():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", type=int, default=20)
+    ap.add_argument("--target", type=int, default=2)
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
     ap.add_argument("--tries", type=int, default=2, help="feed a doc at most this many times in all")
     a = ap.parse_args()
