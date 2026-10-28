@@ -2,7 +2,8 @@
 """Task controller: dispatch work items to opencode workers, one git worktree each.
 
     control.py spawn NAME --claim KEY [--claim KEY ...] (--task TEXT | --task-file F)
-    control.py status              # one line per task: state, commits, tree, last log line
+    control.py status [--all] [-v] # one line per task that still matters (finished-and-gone ones are hidden; --all lists them)
+    control.py prune [--dry-run]   # drop finished-and-gone entries (terminal, no worktree, nothing outside master) from the registry
     control.py claims              # every live claim (workers read this before starting)
     control.py claim NAME --claim KEY ... [--who WHO] [--pid P | --hours H]   # register work done OUTSIDE control (a Claude
                                    # agent, a hand-run opencode, a local model); exits 1 if a live claim conflicts
@@ -16,7 +17,7 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
-    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them)
+    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them), then prunes finished registry entries (--no-prune keeps them)
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -238,21 +239,67 @@ def sh(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def unmerged_branches():
+    """Branches under refs/heads/ with commits that are NOT in master, in ONE git call (a per-task
+    `rev-list` over hundreds of tasks is what made status take minutes)."""
+    out = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
+                         capture_output=True, text=True, cwd=MAIN).stdout
+    return set(out.split())
+
+
+def done_and_gone(t, unmerged):
+    """A finished task with nothing left to look at: terminal state, no worktree directory, and no commits
+    outside master (its branch is merged or deleted). Such an entry holds no claim (terminal claims are
+    ignored), no process and no work, so `status` hides it and `prune` may drop it."""
+    return (t.get("state") in TERMINAL and not os.path.isdir(t["worktree"])
+            and t.get("branch") not in unmerged)
+
+
 def cmd_status(a):
-    for name, t in sorted(load().items(), key=lambda kv: kv[1]["slot"]):
+    reg = load()
+    unmerged = unmerged_branches()
+    items = sorted(reg.items(), key=lambda kv: kv[1]["slot"])
+    shown = [(n, t) for n, t in items if a.all or not done_and_gone(t, unmerged)]
+
+    def row(nt):
+        name, t = nt
         st = state_of(t)
         dirty = len(git("status", "--short", cwd=t["worktree"], check=False).splitlines()) \
             if os.path.isdir(t["worktree"]) else -1
         last = ""
         lp = os.path.join(t["worktree"], "work.log")
         if os.path.exists(lp):
-            lines = [l for l in open(lp, errors="replace").read().splitlines() if l.strip()]
+            with open(lp, errors="replace") as f:
+                lines = [l for l in f.read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        print("%-20s work-%-3d %-14s %-10s +%d commits, %d dirty | %s" % (name, t["slot"], st, v or "-", ahead(t), dirty, last))
+        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
+        return st, v, n_ahead, dirty, last
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        rows = list(ex.map(row, shown))
+    for (name, t), (st, v, n_ahead, dirty, last) in zip(shown, rows):
+        print("%-20s work-%-3d %-14s %-10s +%d commits, %d dirty | %s" % (name, t["slot"], st, v or "-", n_ahead, dirty, last))
         if a.verbose and v == "NEEDS-INFO":
             for q in questions(t):
                 print("      QUESTION: " + q)
+    if len(shown) < len(items):
+        print("+%d finished tasks hidden (status --all to list)" % (len(items) - len(shown)))
+
+
+def cmd_prune(a):
+    """Drop DONE-AND-GONE entries (see done_and_gone) from the registry so tasks.json stops growing.
+    Never touches a task that is running, has a worktree, has commits outside master, or is in a
+    non-terminal state."""
+    unmerged = unmerged_branches()
+    with registry() as tasks:
+        gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
+        if not a.dry_run:
+            for n in gone:
+                del tasks[n]
+        kept = len(tasks) - (len(gone) if a.dry_run else 0)
+    print("%s %d finished registry entries; %d kept" % ("would prune" if a.dry_run else "pruned", len(gone), kept))
+    return gone
 
 
 def external_path():
@@ -786,6 +833,8 @@ def cmd_cleanup(a):
             for i in range(0, len(gone), 200):
                 subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
             print("deleted %d merged work/* branches" % len(gone))
+    if a.prune:
+        cmd_prune(a)
 
 
 def cmd_memtrim(a):
@@ -958,7 +1007,7 @@ def main():
     s.add_argument("--file", action="append", default=[], help="copy into the worker's .tmp/ (workers cannot read outside their tree)")
     s.add_argument("--base", default="master", help="branch to start from (a fix task starts from the failed task's branch)")
     s.add_argument("--model", default=MODEL); s.set_defaults(f=cmd_spawn)
-    s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.set_defaults(f=cmd_status)
+    s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
     s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
@@ -968,9 +1017,11 @@ def main():
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
     s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--no-prune", dest="prune", action="store_false", help="keep finished registry entries")
     s.add_argument("--no-branches", dest="branches", action="store_false", help="keep merged work/* branches")
     s.add_argument("-j", "--jobs", type=int, default=16, help="parallel `git status` checks")
     s.set_defaults(f=cmd_cleanup)
+    s = sub.add_parser("prune"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_prune)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
     s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
     s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")
