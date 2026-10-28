@@ -182,7 +182,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_proof_coverage_census_2026-10-03.md` | **unclaimed** | FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on |
 | `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | **unclaimed** | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
 | `FORMAL_the_spill_canary_is_red_and_the_row_it_names_is_stale.md` | **unclaimed** | FORMAL_the_spill_canary_is_red_and_the_row_it_names_is_stale |
-| `LEAN_proof_verdict_key_ignores_lib_dir_so_a_relative_repo_root_caches_a_failure_for_everybody.md` | **unclaimed** | one careless `repo_root` poisons the CAS for every other caller |
+| (fixed — `work/bug-lean-proof-verdict-key-ignores-lib-d`; doc deleted, key at v5, absolute LEAN_PATH) | closed | relative repo_root poisoned CAS; fixed by `3cfdf0ad` / `c28fa355f` |
 
 ### `formal/loop_invariants` — 1 document, 0 claimed
 
