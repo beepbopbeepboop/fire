@@ -6099,6 +6099,11 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             f"{len(sub_params) - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
     base = api['base']
+    # Register this callee into the module-level extern-decl map, so the
+    # emitted `.ci` declares `extern "C" ... __mgco__<base>_start(...)`.
+    _refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+    if _refs is not None:
+        _refs.setdefault(base, {'value_ctype': api.get('value_ctype'), 'params': list(api.get('params') or [])})
     vct = api['value_ctype']
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     is_tuple = isinstance(target, list)

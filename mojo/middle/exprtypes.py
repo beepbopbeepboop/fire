@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -1336,6 +1336,7 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             slots = merged
     return (found, slots)
 
+
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
@@ -1348,6 +1349,13 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     guessing int64_t — see _infer_simple_expr_ctype's docstring.
     `generator_api` (self._generator_api, passed the same way) resolves a
     `yield from <call>`'s contributed type via _yield_from_delegate_ctype.
+
+    Loop-bound names (`for <name> in <gen>(...)`) get their value type
+    from the delegate generator's registered `value_ctype`, NOT from
+    `known`'s int64_t default — this overlay WINS over any stale `known`
+    entry (a `for` loop target is always freshly declared as a local, so
+    `known` carries it as the int64_t box default; the generator's actual
+    value_ctype must win, or `yield <loop_var>` sees a wrong type).
     `self_fields` (generator METHODS only) lets `yield self.<field>` resolve
     the field's real scalar type — see _infer_simple_expr_ctype. `async_api`
     (self._async_api, Step D) lets an async function's `return await
@@ -1374,6 +1382,27 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     are) lets a `yield <module constant>` site resolve that constant's real
     type instead of reporting the kind as unresolved — see
     `_infer_simple_expr_ctype`'s own `module_global_types` entry."""
+    # Pre-pass: a `for <name> in <gen>(...)` loop inside this generator binds
+    # <name> to the delegate's yielded VALUE type (the same registry
+    # `_cpp_for_stmt`'s generator-delegate arm and `_yield_from_delegate_ctype`
+    # read). Overlay it onto a COPY of `known` BEFORE the walk below, so a
+    # `yield <loop_var>` resolves the delegate's real value_ctype instead of
+    # falling to `_infer_simple_expr_ctype`'s int64_t default.
+    known = dict(known) if known is not None else None
+    for n in _walk_own_body(fn.body):
+        if isinstance(n, ForStmt):
+            target = n.target
+            if isinstance(target, list) or isinstance(target, tuple):
+                continue  # tuple targets stay out of scope here
+            target_name = target if isinstance(target, str) else None
+            if not target_name:
+                continue
+            iterable = n.iterable
+            if (isinstance(iterable, CallExpr) and isinstance(iterable.func, IdentExpr)
+                    and iterable.func.name in generator_api):
+                _vct = generator_api[iterable.func.name].get('value_ctype')
+                if _vct is not None:
+                    known[target_name] = _vct
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):

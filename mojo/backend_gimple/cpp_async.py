@@ -225,7 +225,9 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
     if not isinstance(iterable, gimple_ctypes.CallExpr):
         return False
     if isinstance(iterable.func, gimple_ctypes.IdentExpr):
-        return iterable.func.name in gen._all_generator_names
+        name = iterable.func.name
+        return (name in gen._all_generator_names
+                or (name in gen._generator_api))
     if isinstance(iterable.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         return bool(_self_struct
