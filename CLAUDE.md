@@ -383,7 +383,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
-| `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
+| `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
 | `gimple-async-runner` | `expect=`, count checked (36) | compiled-path async/await runner | 1.4-15.4 s each, `tiny`; `coroutine` |
 | `coro-detached-async` | `expect=`, count checked (2) | a detached coroutine task | `tiny`; `coroutine` |
 | `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
