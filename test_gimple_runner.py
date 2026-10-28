@@ -9056,6 +9056,36 @@ def main():
 main()
 """, "0 0\n")
 
+    # Receiver-reading variant from bugs/CODEGEN_unresolved_method_receiver_
+    # returns_its_own_pointer.md: distinguishes resolved (2/2) from unresolved
+    # (garbage pointer bits) when the receiver field is read.
+    test_gimple_stdout("gimple_ctor_param_polymorphic_slot_reads_receiver", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel())
+    print(L(U(2)).numel())
+
+main()
+""", "2\n2\n")
+
+
     # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
     # constructor and read by a different function. The mechanism is recorded
     # in `_gmi_phase17_collect_appends`' own docstring
@@ -12332,3 +12362,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
