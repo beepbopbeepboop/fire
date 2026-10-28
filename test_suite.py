@@ -5418,9 +5418,14 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
           f'and the census it prints is quoted in bugs/ documents')
     # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ is the measured floor on this tree after the fix.
+    # nothing. 200+ was the measured floor on this tree after the fix
+    # (847677268, 2026-10-05). The 2026-10-27 batch deleted the fixed bug
+    # docs, and regenerating OPEN_WORK.md's formal-doc-index block (the
+    # stale-block fix in this same gate-triage series) dropped the rows that
+    # still named the deleted ones, so the live corpus is 196 citations of
+    # 117 names — re-measured today, floor re-baselined to it.
     check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 200,
+          sum(len(v) for v in bare_by_doc.values()) >= 196,
           f'{sum(len(v) for v in bare_by_doc.values())} citations of '
           f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
           f'name because it skips too many is the same defect wearing the '
