@@ -1525,11 +1525,47 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     return ok
 
 
+def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
+    """A String passed to a `StringSlice` parameter must reach the callee as a Span
+    (the {_data, _len} fat pointer the callee reads), not as the bare char * that
+    the call site used to cast to `Span *`.
+
+    Before the fix, `get_sign(text)` lowered to `(Span *)(int64_t)text`: the callee
+    read `x->_data` from the character bytes and segfaulted (exit 139, no output).
+    The fix wraps the argument in a `_alloc_Span` whose _data and _len (mojo_strlen)
+    describe the String. The expected value is `-1.0`, which real Mojo prints for
+    this program (`tools/mojo run`, 2026-10-28). The branch sits before the generic
+    `char *` -> pointer cast, which otherwise shadows it."""
+    pkg = {
+        'main.mojo': (
+            'from std.collections.string import StringSlice\n'
+            '\n'
+            'def get_sign(x: StringSlice[_]) -> Tuple[Float64, type_of(x)]:\n'
+            '    if x[byte=0] == "-":\n'
+            '        return (-1.0, x[byte=1:])\n'
+            '    return (1.0, x)\n'
+            '\n'
+            'def main():\n'
+            '    var text = String("-abc")\n'
+            '    var s = get_sign(text)\n'
+            '    print(s[0])\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.mojo', td)
+    ok = rc == 0 and stdout.strip() == '-1.0'
+    if not ok:
+        print(f"  ✗ string_argument_to_stringslice_param_is_wrapped_in_a_span: "
+              f"rc={rc} stdout={stdout!r}")
+    return ok
+
+
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
     test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,
+    test_string_argument_to_stringslice_param_is_wrapped_in_a_span,
     test_transitive_struct_method_is_not_variadic_stubbed,
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
