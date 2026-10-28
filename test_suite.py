@@ -2108,7 +2108,7 @@ STALE_PER_CHILD_BUDGETS = {
         'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
-    'test_formal_admitted.py': 7,
+    'test_formal_admitted.py': 5,  # 5 remain as data-table examples; 7 child budgets converted
     # +1 on 2026-10-05: `work/formal40-4-r2`'s
     # `TestTheDivisionExamplesHaveNoProofToCheck::test_the_image_itself_is_fine_`
     # `without_the_prove` — a `subprocess.run` of the `floordiv`/`udivmod`
