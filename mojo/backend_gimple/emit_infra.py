@@ -2914,7 +2914,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         gen._emit(f'    {_list_unpack_name(_le)}({_lv}, {_bv}, -1);')
         gen._emit(f'    free ({_bv});')
         gen._emit('  }')
-    _release_transient_cstr_args(gen, arg_pairs, fname)
+    _release_transient_cstr_args(gen, arg_pairs)
 
 
 def _emit_str_cat(gen, lv: str, rv: str, free_left: bool = False, free_right: bool = False) -> str:
@@ -3011,36 +3011,19 @@ def _apply_kw_keys(gen, fname: str, arg_pairs: list):
     return fname, out
 
 
-def _release_transient_cstr_args(gen, arg_pairs: list, fname: str = '') -> None:
+def _release_transient_cstr_args(gen, arg_pairs: list) -> None:
     """Free every transient dict-key/compare-operand string among a call's
     arguments, right after that call (see `_char_to_cstr`'s `transient`).
-    An entry is consumed on release, so a key can be released at most once.
-
-    The one caller that learns more from the release than it learns from the
-    free is a DICT STORE: a pooled canonical decimal among the call's
-    arguments is a key that reached the store as an INTEGER, so the store's
-    twin `mojo_dict_key_release` marks the slot the store just wrote with
-    the integer spelling (its repr prints the key unquoted), while a str key
-    of the same characters keeps the quoted spelling the str-domain setter
-    recorded. Every other caller — a get, a membership test, a string
-    compare — frees the block and says nothing, exactly as
-    `mojo_cstr_or_int_release` always did."""
+    An entry is consumed on release, so a key can be released at most once."""
     if not gen._cstr_key_src:
         return
-    _dict = (arg_pairs[0][1] if (arg_pairs
-              and arg_pairs[0][0] == 'MojoDict *') else None)
     for _apair in arg_pairs:
         _k = _as_str(_apair[1])
         if _k in gen._cstr_key_src:
             _orig = gen._cstr_key_src[_k]
             del gen._cstr_key_src[_k]
-            if fname.startswith('mojo_dict_set_') and _dict is not None:
-                gen._emit_call('void', '', 'mojo_dict_key_release',
-                               [('MojoDict *', _dict),
-                                ('int64_t', _orig), ('char *', _k)])
-            else:
-                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
-                               [('int64_t', _orig), ('char *', _k)])
+            gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                           [('int64_t', _orig), ('char *', _k)])
 
 
 def _declared_int_ctype(gen, val: str) -> str | None:
@@ -6119,6 +6102,7 @@ def _repr_boxed_container(gen, value: str):
     bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
     bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
     bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
+    bb_str = gen._new_bb(); bb_not_str = gen._new_bb()
     bb_after = gen._new_bb()
     isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _it64)])
     gen._emit(f'  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};')
@@ -6143,6 +6127,13 @@ def _repr_boxed_container(gen, value: str):
     gen._emit(f'  {_res} = {_lv};')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_list)
+    ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _it64)])
+    gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
+    gen._emit_label(bb_str)
+    _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
+    gen._emit(f'  {_res} = {_sp2};')
+    gen._emit(f'  goto {bb_after};')
+    gen._emit_label(bb_not_str)
     gen._emit(f'  {_res} = mojo_str_from_int ({_it64});')
     gen._emit_label(bb_after)
     return _res

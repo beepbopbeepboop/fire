@@ -728,7 +728,23 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if name in gen._actual_types and gen._actual_types[name].endswith(' *'):
             gen._actual_types[t] = gen._actual_types[name]
         else:
-            gen._actual_types[t] = gtype  # store Mojo type for later dispatch
+            # Multi-kind global read without store-provenance: the module-level
+            # kind has been overwritten by the reassignment's kind, but the
+            # field holds the old value before the reassignment runs. Treat as
+            # boxed container so consumers dispatch through the registries/
+            # mojo_boxed_is_str rather than assuming the stored kind.
+            _mgk = getattr(gen, '_multi_kind_globals', None)
+            _is_mk = False
+            if _mgk is not None:
+                _is_mk = name in _mgk
+            else:
+                _cdecl = gen._global_c_decl_types.get(name, '')
+                _is_mk = (_cdecl == 'int64_t' and gtype.endswith(' *'))
+            if _is_mk and (name not in gen._actual_types
+                           or not gen._actual_types[name].endswith(' *')):
+                gen._boxed_container_vals.add(t)
+            else:
+                gen._actual_types[t] = gtype  # store Mojo type for later dispatch
         # Propagate dict value type even when gtype is int64_t (boxed
         # pointer), so a MojoDict * stored as int64_t in a global still
         # dispatches d["key"] to mojo_dict_get_str — see BUG-2026-044.
@@ -6384,17 +6400,9 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
-        # to strings (e.g. Int key 0 → "0") instead of C-casting the int
-        # to char* which produces NULL for 0. The pooled TRANSIENT decimal
-        # (`mojo_int_str_transient`), not `mojo_str_from_int`'s kept heap
-        # string: the store copies the key and the release returned here
-        # hands the block back to the pool (the old shape leaked one
-        # malloc'd string per literal key), and the release is also where
-        # the store tells the runtime the key's SPELLING — an integer, so
-        # the slot's repr prints the key unquoted.
-        _orig = kv
-        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
-        gen._cstr_key_src[kv] = _orig
+        # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
+        # of C-casting the int to char* which produces NULL for 0.
+        kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
         kt = 'char *'
     elif kt == 'MojoBytes *':
         # A bytes key must keep the MojoBytes pointer — the generic
