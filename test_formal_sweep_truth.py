@@ -5274,5 +5274,22 @@ class TestLabelUniqueness(unittest.TestCase):
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
 
 
+class TestTwoUnownedFormalRedsAreNotStale(unittest.TestCase):
+    """Regression for bugs/TEST_two_unowned_formal_reds_that_are_stale_expectations.md.
+
+    The doc described a stale AXIOM_CLOSURE table (Contracts/ProofLib/Refine/X86/
+    work) after `native_decide` moved 61 sites; the table has since been re-measured
+    and the doc is deleted. This test pins that the five modules the doc named are
+    present in AXIOM_CLOSURE, so a future table drift fails rather than hiding
+    behind a skip.
+    """
+
+    def test_the_five_doc_modules_are_not_stale(self):
+        from test_formal_admitted import AXIOM_CLOSURE
+        for mod in ("Contracts", "ProofLib", "Refine", "X86", "work"):
+            self.assertIn(mod, AXIOM_CLOSURE,
+                          f"{mod} missing from AXIOM_CLOSURE - table regressed")
+
+
 if __name__ == "__main__":
     unittest.main()
