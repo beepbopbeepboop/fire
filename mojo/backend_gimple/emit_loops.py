@@ -3762,6 +3762,8 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     val = gen._new_val(vct, f"{base}_value ({gen_val})")
+    if api.get('boxed_container'):
+        gen._boxed_container_vals.add(val)
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
     else:
@@ -3910,6 +3912,8 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     val = gen._new_val(vct, f"{base}_value ({gen_val})")
+    if api.get('boxed_container'):
+        gen._boxed_container_vals.add(val)
     gen._emit(f"  {cidx} = {ctr};")
     gen._emit(f"  {cval} = {val};")
     gen.loop_stack.append((bb_post, bb_after))

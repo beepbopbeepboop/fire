@@ -75,6 +75,12 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     copies of this block (local-definition vs imported-binding branches
     of _lower_call) so the padding/kwslot/registration logic can't drift.
     """
+    # Record the container kind the value slot will carry
+    if api.get('value_ctype') and api['value_ctype'].endswith(' *'):
+        # Container pointer type (MojoList *, MojoDict *, MojoSet *, etc.)
+        api['boxed_container'] = api['value_ctype'][:-2]
+    else:
+        api['boxed_container'] = None
     # Argument lowering reuses the exact same gen.lower_expr(a)-per-
     # arg + _call_expr/_emit_call path every ordinary function call
     # in this file uses — func_param_types[f"{base}_start"] (registered in
@@ -179,6 +185,8 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
     result = gen._new_val(vct, f"{base}_value ({av})")
+    if api.get('boxed_container'):
+        gen._boxed_container_vals.add(result)
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
@@ -2471,6 +2479,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
                 gen._emit_label(bb_ok)
                 ok_val = gen._new_val(vct, f"{base}_value ({av})")
+                if api.get('boxed_container'):
+                    gen._boxed_container_vals.add(ok_val)
                 gen._safe_coerce_emit(vct, vct, ok_val, result)
                 gen._emit(f"  goto {bb_merge};")
                 gen._emit_label(bb_exhausted)
@@ -2481,6 +2491,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._safe_coerce_emit(dt, vct, dv, result)
                 gen._emit(f"  goto {bb_merge};")
                 gen._emit_label(bb_merge)
+                if api.get('boxed_container'):
+                    gen._boxed_container_vals.add(result)
                 return vct, result
     # `next(obj)` / `next(obj, default)` where `obj` is a USER-DEFINED STRUCT
     # carrying the iterator protocol — Python's `next()` on any object is
