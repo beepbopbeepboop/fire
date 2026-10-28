@@ -4239,7 +4239,7 @@ def _nested_async_free_vars(inner: N.FunctionDef, outer: N.FunctionDef) -> set:
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted (this codebase's original,
     # longest-documented instance of this trap class). See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    # identifier-field-key identity.
     _inner_pnames = set()
     for _pn, _pa in inner.params:
         _inner_pnames.add(_pn)

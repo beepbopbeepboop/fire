@@ -2372,26 +2372,19 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                 "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
-                "    /* The unquoted arm reads the slot's SPELLING flag, not\n"
-                "     * just keykind. `keykind == 2` means \"this key's text\n"
-                "     * is a canonical decimal\", NOT \"the source wrote an\n"
-                "     * integer\" -- `_canon_int` canonicalises a STR key into\n"
-                "     * that slot too, deliberately, so `d[5]` and `d[\"5\"]`\n"
-                "     * stay the one integer slot they have always been (see\n"
-                "     * _canon_int's comment). Printing `ikey` unquoted for\n"
-                "     * every keykind==2 slot therefore fixed `{10: \"a\"}`\n"
-                "     * but broke `{\"10\": \"a\"}`, which CPython prints as\n"
-                "     * `{'10': 'a'}` -- and CPython's own answer depends on\n"
-                "     * which spelling was inserted LAST, so the slot has to\n"
-                "     * REMEMBER that. `key_from_str` is that memory: the\n"
-                "     * str-domain setter sets it, the integer setter clears\n"
-                "     * it, grow/copy/merge carry it whole, and the repr\n"
-                "     * quotes the key only when the LAST write was a str.\n"
-                "     * The quoted arm needs no stored spelling: `_canon_int`\n"
-                "     * accepts only the canonical decimal, which\n"
-                "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
+                "    /* NOTE the ABSENT arm here. `keykind == 2` means \"this\n"
+                "     * key's text is a canonical decimal\", NOT \"the source\n"
+                "     * wrote an integer\" -- `_canon_int` canonicalises a STR\n"
+                "     * key into that slot too, deliberately, so `d[5]` and\n"
+                "     * `d[\"5\"]` stay the one integer slot they have always\n"
+                "     * been (see _canon_int's comment). Printing `ikey`\n"
+                "     * unquoted for every keykind==2 slot therefore fixes\n"
+                "     * `{10: \"a\"}` and breaks `{\"10\": \"a\"}`, which\n"
+                "     * CPython prints as `{'10': 'a'}` -- and CPython's own\n"
+                "     * answer depends on which spelling was inserted LAST, so\n"
+                "     * the slot has to REMEMBER that. See bug doc. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 2) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -5358,7 +5351,7 @@ def gen_module_impl(self, stmts):
         _bsc_idx = 0
         if _bsc_new is not None:
             # Plain unpack loop, NOT a comprehension — see
-            # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+            # identifier-field-key identity.
             _bsc_pnames = []
             for _bpn, _bpt in (_bsc_new.params or []):
                 _bsc_pnames.append(_as_str(_bpn))
@@ -5404,7 +5397,7 @@ def gen_module_impl(self, stmts):
                 # 21577).
                 _cs_key = _as_str(_s.name)
                 # Plain unpack loop, NOT a comprehension — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _cip_list = []
                 for _cipn, _cipt in (_init.params or []):
                     if _cipn != 'self' and not _cipn.startswith('*'):
@@ -7277,7 +7270,7 @@ def gen_module_impl(self, stmts):
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
                         # Plain unpack loops, NOT comprehensions — see
-                        # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                        # identifier-field-key identity.
                         _sip_list = []
                         for _sipn, _sipt in m.params:
                             if _sipn != 'self':
@@ -7503,7 +7496,7 @@ def gen_module_impl(self, stmts):
                 # unambiguous for an index under both evaluators.
                 # Plain loops throughout this block, NOT comprehensions/
                 # genexprs with tuple-unpack targets — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _star_idx = -1
                 for _psi in range(len(_params_no_self)):
                     _psn = _params_no_self[_psi][0]

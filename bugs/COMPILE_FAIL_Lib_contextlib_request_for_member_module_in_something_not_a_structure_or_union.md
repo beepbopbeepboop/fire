@@ -33,7 +33,7 @@ independent, which the single refusal message hides:
    put a `MojoAsync *` or a `MojoList *`. Fixing it means a BOXED return slot
    plus dynamic read-back at every consumer — the same
    `_actual_types`-vs-static-type problem as
-   `bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md`, one level up.
+   `identifier-field-key identity`, one level up.
 2. **`*args`/`**kwargs` in a coroutine frame.** `_exit_wrapper` and
    `__aexit__` take them, and the frame has fixed slots. This is genuinely a
    new capability (a variable-arity coroutine), not a missing branch.

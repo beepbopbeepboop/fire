@@ -4372,8 +4372,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # str ordering for ASCII.
     if op in ('<', '>', '<=', '>=') and (
             lt == 'char *' or rt == 'char *'
-            or gen._actual_types.get(lv) == 'char'
-            or gen._actual_types.get(rv) == 'char'):
+            or gen._actual_types.get(_as_str(lv)) == 'char'
+            or gen._actual_types.get(_as_str(rv)) == 'char'):
         ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv, True)[1]
         rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
@@ -4436,12 +4436,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the character ("Hello, World!" became "72101108111144..." in
     # box.3d/game's ComputerMonitor.print_text). Mirror append's recovery.
     if op == '+' and lt == 'char *' and rt in ('char', 'int', 'int64_t') \
-            and (rt == 'char' or gen._actual_types.get(rv) == 'char'):
+            and (rt == 'char' or gen._actual_types.get(_as_str(rv)) == 'char'):
         rv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
         return 'char *', t
     if op == '+' and rt == 'char *' and lt in ('char', 'int', 'int64_t') \
-            and (lt == 'char' or gen._actual_types.get(lv) == 'char'):
+            and (lt == 'char' or gen._actual_types.get(_as_str(lv)) == 'char'):
         lv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
         return 'char *', t
@@ -6384,17 +6384,9 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
-        # to strings (e.g. Int key 0 → "0") instead of C-casting the int
-        # to char* which produces NULL for 0. The pooled TRANSIENT decimal
-        # (`mojo_int_str_transient`), not `mojo_str_from_int`'s kept heap
-        # string: the store copies the key and the release returned here
-        # hands the block back to the pool (the old shape leaked one
-        # malloc'd string per literal key), and the release is also where
-        # the store tells the runtime the key's SPELLING — an integer, so
-        # the slot's repr prints the key unquoted.
-        _orig = kv
-        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
-        gen._cstr_key_src[kv] = _orig
+        # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
+        # of C-casting the int to char* which produces NULL for 0.
+        kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
         kt = 'char *'
     elif kt == 'MojoBytes *':
         # A bytes key must keep the MojoBytes pointer — the generic
