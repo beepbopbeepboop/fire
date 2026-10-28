@@ -1301,7 +1301,17 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'x86-containers': 1},
+                     'x86-containers': 1,
+     # `ab-native` JOINS on 2026-10-28, gate triage: it was out of this census
+     # while it was DISABLED (a disabled job never runs, so it states no count
+     # and the check has nothing to read from its output) and `2f75609d` turned
+     # it back to `expect=SELFHOST_TOKENIZE_BLOWUP` once the blowup the marker
+     # was named for closed (bugs/CODEGEN_ab_native_fails.md, 2026-10-26: the
+     # run is 0.1 GB / ~10 s). The marker states "1 failing: match_stmt
+     # diverges (29/30 byte-identical)", so the count is 1, read the same way
+     # as the other entries — against the run's "Results: N passed, M failed"
+     # line — which is the marker's own anti-rot for a second divergence.
+                     'ab-native': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
           f'is for. A FANOUT states its count the same way — checked against '
