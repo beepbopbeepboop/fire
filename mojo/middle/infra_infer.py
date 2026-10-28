@@ -1142,8 +1142,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if _has_bytes_destination_param_slice(func.body, pname, _bytes_locals):
                 inferred[pname] = 'MojoBytes *'
                 continue
-            # Phase 3 (the `_walk_ast` re-scan bug,
-            # closed): `analyze_param_usage` is an
+            # Phase 3 (bugs/hard/PERF_nested_module_compile_walk_ast_
+            # quadratic_rescan.md): `analyze_param_usage` is an
             # expensive recursive body scan and a PURE function of
             # (func.body, pname) — no `self.*` state read anywhere in
             # scan_nodes/scan_expr (confirmed by inspection) — so its
@@ -1363,8 +1363,6 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # 'binding'", which took `selfhost`, `mojoc` and
                         # `bootstrap-stage2-cc` down together.
                         inferred[pname] = (_returned_param_containers(func)
-                                          .get(pname)
-                                          or _rebound_param_containers(gen, func)
                                           .get(pname) or 'MojoList *')
 
             # If not subscripted, try to infer from function calls
@@ -1765,23 +1763,6 @@ def _container_literal_ctype(value) -> str:
     return None
 
 
-def _builtin_container_ctor_ctype(value) -> str | None:
-    """The container C type a BUILTIN constructor call produces -- `set(x)`,
-    `list(x)`, `dict(x)`, `sorted(x)` ... -- read from the same table the
-    codegen lowers those calls by (`types._BUILTIN_RET_CTYPES`), or None.
-
-    `_container_literal_ctype` answers for the displays (`{...}`, `[...]`,
-    comprehensions) only, so a local bound by `s = set(xs)` was invisible to
-    `_prebound_local_ctypes` and a parameter it stores into kept whatever
-    usage guess the function's other statements produced. Only container
-    results are answered: `len(x)` and `int(x)` are scalars, which this
-    overlay does not record (the int64_t default is for them)."""
-    if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
-        return None
-    t = gimple_ctypes._BUILTIN_RET_CTYPES.get(_as_str(value.func.name))
-    return t if t in gimple_ctypes._CONTAINER_KIND_TYPES else None
-
-
 def _bare_returned_params(body: list, names: set, out: set) -> None:
     """Add to `out` every name in `names` that some `return <name>` hands back
     VERBATIM — a bare name, not `name[k]` and not `f(name)`.
@@ -1895,42 +1876,6 @@ def _returned_param_containers(func) -> dict:
         if n not in rebound:
             out[n] = ctype
     return out
-
-
-def _rebound_param_containers(gen, func) -> dict:
-    """`{param name: ctype}` for every UNANNOTATED parameter of `func` that the
-    body REBINDS to a container of one definite kind, read from the first
-    binding `_prebound_local_ctypes` already decides for every local.
-
-    The motivating shape is `def walk(stmts, live): live = set(live); ...`.
-    `set(live)` is iteration evidence for `live` (`set` is in
-    `_ITERABLE_CONSUMING_BUILTINS`), so `_infer_param_types` reaches its
-    last-resort container guess, `MojoList *`, for a parameter whose body
-    stores a `MojoSet *` into it. The parameter is then declared a list and
-    the store is refused: "cannot coerce MojoSet * to MojoList * (incompatible
-    container kinds) ... dest='live'". At module scope the call site's
-    `walk({3})` grounds the guess afterwards, which is why the same program
-    compiled there; a nested `def` gets no call-site evidence, so it kept the
-    wrong guess. Pinned by `test_gimple.py`'s
-    `test_nested_def_rebound_param_takes_the_container_it_stores`.
-
-    The same argument as `_returned_param_containers`: the rebinding is a store
-    the codegen already coerces into the parameter's type and refuses on a
-    container-kind mismatch, so reading it here cannot turn a program that
-    compiles today into one that does not. A name whose bindings disagree on
-    the kind is the box (`int64_t` in `_prebound_local_ctypes`) and is not
-    recorded here, because no single container type describes it."""
-    names = set()
-    for pname, ptype in (getattr(func, 'params', None) or []):
-        if ptype is None and not pname.startswith('*') \
-                and _as_str(pname) not in ('self', 'cls'):
-            names.add(_as_str(pname))
-    if not names:
-        return {}
-    bound = _prebound_local_ctypes(gen, getattr(func, 'body', None) or [])
-    return {n: bound[n] for n in names
-            if bound.get(n) in gimple_ctypes._CONTAINER_KIND_TYPES}
-
 
 def _each_binding(body: list, include_defs: bool = False) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing
@@ -2091,8 +2036,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # conservative answer for a name rebound to two kinds.
             cand = 'double'
         else:
-            t = (_container_literal_ctype(n.value)
-                 or _builtin_container_ctor_ctype(n.value))
+            t = _container_literal_ctype(n.value)
             if t:
                 cand = t
             else:
@@ -2372,24 +2316,6 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
     return out
 
 
-def _lambda_call_ret_table(gen, body: list) -> dict:
-    """The `_lambda_call_ret_types` table in force while `body` is inferred:
-    the enclosing table's entries plus this body's own `_lambda_call_ret_locals`.
-    Additive, so a name already in the outer table keeps its entry. The
-    caller saves the table it replaces and restores it when done.
-
-    One helper for both readers of the table: return-type inference, and the
-    local-variable pre-pass (`resolve_shared._infer_local_var_types`), which
-    types `r = f()` from the same call and must answer the same question."""
-    _lambda_rets = _lambda_call_ret_locals(gen, body)
-    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
-    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
-    for _n, _t in _lambda_rets.items():
-        if _n not in _merged_lr:
-            _merged_lr[_n] = _t
-    return _merged_lr
-
-
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
@@ -2460,8 +2386,13 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     # Third table, same window: what CALLING a lambda-bound local produces
     # (`_lambda_call_ret_locals`). Additive for the same reason — a name
     # already carrying a real return type keeps it.
+    _lambda_rets = _lambda_call_ret_locals(gen, body)
     _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
-    gen._lambda_call_ret_types = _lambda_call_ret_table(gen, body)
+    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
+    for _n, _t in _lambda_rets.items():
+        if _n not in _merged_lr:
+            _merged_lr[_n] = _t
+    gen._lambda_call_ret_types = _merged_lr
     try:
         return _infer_return_type_core(gen, body)
     finally:

@@ -355,9 +355,8 @@ posed, and it is a RUNTIME fault in the produced binary, not a codegen one:
    `run_produced_binary`'s own docstring documents (a stub returning nothing
    made every `for node in <stub>(...)` iterate zero times), and is worth
    recording so the next reader does not start there.
- 3. The `CODEGEN_module_toplevel_undefined_in_selfhost` self-host link
-    failure (undefined toplevel symbols from a module-level `_lens`
-    name collision) and
+3. `bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md` and
+   `bugs/CODEGEN_cas_py_never_compiles_so_the_selfhost_closure_has_no_definitions.md`
    are the two live candidates this tree still carries for a self-hosted
    compile-time crash, and neither has been re-measured since the closure
    started linking. Start with whichever the backtrace names.

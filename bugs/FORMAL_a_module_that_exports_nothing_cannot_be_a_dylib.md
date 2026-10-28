@@ -5,65 +5,9 @@ row is GONE (33 of 59 files, measured on both architectures) and the gate is now
 a rule with a tested boundary. The row's TOTAL did not move and no file builds:
 the 33 went one level deeper to `_io.mojo`, which is the same row. The
 `_unicode_lookups` half this document is named for is NOT fixed, and every wall
-§3 describes still stands. Re-measured 2026-10-28 (§0.4): the row is still
-stopped at the same gate in front of the MLIR row, §2's control still builds,
-and the named rows are green — the constants-only message guard had gone red
-in the `aa284e65`/`0b1878c5` two-lane race and is now pinned to the landed
-wording; no wall §3 names moved.** §0 records the measurement in full, including the
+§3 describes still stands.** §0 records the measurement in full, including the
 part of it that is unflattering; nothing below has been re-derived and the
 analysis is the 2026-10-03 one.
-
-## 0.4 Re-measured 2026-10-28: the row is unchanged, the named rows are green,
-##       and the green is a one-line reconciliation, not a feature
-
-**The row did not move.** The §5 row command was re-run on this tree (the
-external stdlib sits at `/Users/mrs/net/chatgpt/claude/new-modular/` on this
-host, where the round's `../new-modular/` path did not resolve): `_unicode.mojo`
-still refuses on the same export gate, on the same file, in FRONT of §3's MLIR
-row — the refusal text is the post-`aa284e65` wording of
-`no_public_api_reason`'s constants-only branch, which names the two owner docs
-as §0.1 says. §2's control is unchanged: `_grapheme_break_lookups.mojo`, the
-same shape with nothing importing it, still builds. The 59-file census of §0
-was not re-run this round (118 builds, not a quick test); §0.1's 56/59 split —
-one storage feature, owned by `FORMAL_module_state_no_storage.md` and not this
-worker's claim — remains the last measured census, and nothing this round
-touches the three walls §3 names.
-
-**The named rows were red for one reason that is not this row's, and are now
-green.** §5's `test_formal_imports.py` rows were run together with
-`test_formal_module_attr.py`'s container-constant rows (the refusal and its
-measured repair), and one row was red on master BEFORE this round:
-`test_a_constants_only_module_is_not_told_nothing_could_be_added`. The cause is
-a two-lane race, not a feature regression: `aa284e65` (2026-10-08, 15:00)
-reworded the constants-only sentence back to the `BACKEND` spelling — "there is
-**nothing an importer could bind**, so the refusal itself is correct" and "a
-**BACKEND** rule that a module nothing binds needs no library at all" — to
-green the guard as it then was, and 18 minutes later `0b1878c5` reconciled the
-guard to the OTHER spelling ("a rule that a module nothing binds…", "no address
-an importer could bind"), so the guard pinned a sentence the merge no longer
-carried. The row's feature itself is intact and measured green: a constants-only
-module is still a library whose two folded values (int and string) reach the
-importer on both architectures against CPython, the unfoldable shape is still
-refused by name, and the container-constant refusal and its accessor repair
-(`10 30`, CPython-agreeing) are unchanged.
-`bugs/FORMAL_no_public_api_reason_lost_the_backend_rule_clause.md` measured the
-same red from the other side (the `BACKEND` clause) and its recorded next step
-— re-run the file and require the one failure to clear — is now satisfied: the
-clause has been in the sentence since `aa284e65`, and the guard now pins the
-landed wording.
-
-**The fix, one line per stale pin.** The guard's two substring assertions were
-reconciled to the landed wording — `"a BACKEND rule that a module nothing
-binds needs no library at all"` and `"nothing an importer could bind"` —
-keeping the intent (the false clause gone, the owning feature named, the
-missing thing stated as a BACKEND rule, the branch's own judgement present, and
-the private sibling's leak check untouched): `0b1878c5`'s own precedent,
-applied in the other direction. Nothing in `formal/build.py` moved. After: all
-six named rows pass, Lean-free.
-
-**The remainder is §0.3's.** The storage feature is `formal28-4`'s claim and
-the MLIR row is behind the export gate; the doc stays open, and this round adds
-a re-measurement rather than a wall.
 
 ## 0.3 Re-measured 2026-10-05: this row is UNCHANGED, and what is left on it is
 ##       another worker's claim

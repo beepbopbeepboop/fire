@@ -44,7 +44,7 @@ QUICK = ["mojoc", "selfhost", "bootstrap-stage1-transitive", "bootstrap-stage2-c
 # `integ` was cut, a merge commit is safe and the gate's verdict still stands; anything else moving means
 # master changed under the round and the round must be redone, not merged.
 CONTROLLER_FILES = ("tools/control.py", "tools/control_prompt.md", "tools/gatewatch.py", "tools/integrate.py",
-                    "tools/autointegrate.py", "CONTROL.html", "doc/POLICY_memory_over_4gb.md")
+                    "tools/autointegrate.py", "CONTROL.html", "bugs/PERF_memory_over_4gb_is_a_bug.md")
 
 
 # TEST INFRASTRUCTURE: code that only decides how, whether and with how much memory the project is TESTED. A
@@ -255,22 +255,10 @@ def main():
             print(subprocess.run("sed -n '/^FAILED:/,/^suite:/p' quick.log | head -12", shell=True, cwd=INTEG,
                                  capture_output=True, text=True).stdout)
             sys.exit(1)
-    # A landing runs the cheap landing gate (tools/gates.json `landing`) minus every gate that is OFF for a backlog.
-    # The full suite is NOT run here: tools/verify_landed.py runs it once per interval, under this same lock.
     gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
-                else ["python3", "tools/suite.py"] + C.gates_cfg()["landing"] + C.gate_skip_args() if a.stdlib
-                else ["python3", "tools/suite.py", "gate"] + C.gate_skip_args())
-    # The landing gate can be OFF for a backlog (tools/gates.json). If every landing test is OFF there is nothing to
-    # run: the landing goes ungated, and the post-landing full gate (tools/verify_landed.py) is the check that runs.
-    landing_left = [g for g in C.gates_cfg()["landing"]
-                    if not any(re.search(pat, g) for pat in C.gates_cfg().get("off", {}))]
-    if a.stdlib and not a.jobs and not landing_left:
-        print("landing gate OFF for the backlog (%s): landing %s ungated" % (
-            ", ".join(C.gates_cfg()["landing"]), merged))
-        rc = 0
-    else:
-        print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
-        rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
+                else ["python3", "tools/suite.py", "stdlib-syntax"] if a.stdlib else ["make", "gate"])
+    print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
+    rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)

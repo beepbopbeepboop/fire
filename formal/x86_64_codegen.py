@@ -1053,9 +1053,6 @@ class X86_64Codegen:
             self._def_labels.append(label)
             self._entry_labels[f.name] = label
 
-        # Float-repr helper labels are internal.
-        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
-
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -1141,9 +1138,6 @@ class X86_64Codegen:
 
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
-
-        # Float-repr helper, once, after all function bodies.
-        self._emit_float_repr_helper()
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # Before `resolve()`, so the startup `call` above and every `call` in a
@@ -4693,287 +4687,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
-        n_floats = sum(1 for o in operands if isinstance(o, M.FloatPrintOperand))
-        if n_floats:
-            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 64 * n_floats))
         self._emit_call(_call("printf", [F.StringLiteral(fmt)] + operands))
         if flush:
             self._emit_call(_call("fflush", [F.IntLiteral(0)]))
-        if n_floats:
-            self.asm.emit(encode_add_r64_imm32(Reg.RSP, 64 * n_floats))
-
-    # ── `print` of a float: the x86-64 half ──────────────────────────
-
-    def _emit_float_print_operand(self, fp) -> None:
-        """The `FloatPrintOperand` arm: the value's bits to the helper, the
-        helper's buffer back as the `%s`'s argument.
-
-        SysV: RDI=bits, RSI=buffer; returns RAX=buffer (out).
-        The buffer is the 64-byte slot in the block `_emit_print` reserved.
-        Each earlier printf arg spills one 16-byte `_push_slot`, so the
-        offset is `16*(1+position) + 64*index` from the current RSP.
-        """
-        self._emit_expr(fp.expr)
-        imm = 16 * (1 + fp.position) + 64 * fp.index
-        self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, imm))
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self.asm.emit(encode_call_rel32(0))
-        self.asm.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
-
-    def _emit_float_repr_helper(self) -> None:
-        """Emit the `FLOAT_REPR_SYMBOL` helper, once, after the function bodies.
-        `char *f(double_bits RDI, char *out RSI) -> RAX=out`.
-        """
-        from formal.x86_64 import (
-            encode_push_r64, encode_pop_r64, encode_ret,
-            encode_mov_r64_r64, encode_mov_r64_rm64, encode_mov_rm64_r64,
-            encode_mov_r64_imm32, encode_lea_r64_rm64,
-            encode_sub_r64_imm32, encode_add_r64_imm32,
-            encode_shift_r64_imm8, encode_and_r64_imm32,
-            encode_cmp_r64_imm32, encode_cmp_r64_r64,
-            encode_jcc_rel32, encode_jmp_rel32,
-            encode_neg_r64, encode_xor_r64_r64, encode_test_r64_r64,
-            encode_imul_r64_r64,
-            encode_movzx_r64_rm8, encode_movzx_r64_rm8_idx,
-            encode_mov_rm8_r8, encode_mov_rm8_r8_idx,
-            encode_movq_r64_xmm, encode_or_r64_imm32,
-            encode_lea_r64_rip,
-        )
-        from formal.x86_64 import Reg
-        RAX, RCX, RDX, RSI, RDI = (Reg.RAX, Reg.RCX, Reg.RDX, Reg.RSI, Reg.RDI)
-        R8, R9, R10, R11, R12 = (Reg.R8, Reg.R9, Reg.R10, Reg.R11, Reg.R12)
-        RBP = Reg.RBP
-        a = self.asm
-        _CC = {"jb": 0x2, "jae": 0x3, "je": 0x4, "jz": 0x4,
-               "jne": 0x5, "jnz": 0x5, "ja": 0x7, "jl": 0xC,
-               "jge": 0xD, "jle": 0xE, "jg": 0xF, "js": 0x8}
-        def shr64(r, n): a.emit(encode_shift_r64_imm8(">>", r, n))
-        def shl64(r, n): a.emit(encode_shift_r64_imm8("<<", r, n))
-        def m64(d, s): a.emit(encode_mov_r64_r64(d, s))
-        def mm64(r, b, o): a.emit(encode_mov_r64_rm64(r, b, o))
-        def mmr64(b, o, s): a.emit(encode_mov_rm64_r64(b, o, s))
-        def lea64(d, b, o): a.emit(encode_lea_r64_rm64(d, b, o))
-        def si(r, v): a.emit(encode_sub_r64_imm32(r, v))
-        def ai(r, v): a.emit(encode_add_r64_imm32(r, v))
-        def mi(r, v): a.emit(encode_mov_r64_imm32(r, v))
-        def cpi(r, v): a.emit(encode_cmp_r64_imm32(r, v))
-        def cpr(x, y): a.emit(encode_cmp_r64_r64(x, y))
-        def jc(c, l): a.emit(encode_jcc_rel32(_CC[c], 0)); a.emit_label_rel32(l, -4)
-        def jp(l): a.emit(encode_jmp_rel32(0)); a.emit_label_rel32(l, -4)
-        def t64(x, y): a.emit(encode_test_r64_r64(x, y))
-        def x64(x, y): a.emit(encode_xor_r64_r64(x, y))
-        def neg64(r): a.emit(encode_neg_r64(r))
-        def mvz(d, b, o): a.emit(encode_movzx_r64_rm8(d, b, o))
-        def mvbi(d, b, s): a.emit(encode_mov_rm8_r8_idx(d, b, s))
-        def mvzbi(d, b, i): a.emit(encode_movzx_r64_rm8_idx(d, b, i))
-        def mvb(d, o, s): a.emit(encode_mov_rm8_r8(d, o, s))
-        def lea_rip(d, lbl):
-            a.emit(encode_lea_r64_rip(d, 0))
-            a.emit_label_rip(lbl, here_offset=-4)
-        def subrr(d, s): a.emit(encode_sub_r64_r64(d, s))
-        def addrr(d, s): a.emit(encode_mov_r64_r64(d, d))
-
-        a.label(M.FLOAT_REPR_SYMBOL)
-        # prologue
-        a.emit(encode_push_r64(RBP))
-        m64(RBP, Reg.RSP)
-        a.emit(encode_push_r64(R12))
-        si(Reg.RSP, 104)
-        mmr64(RBP, -24, RDI)
-        mmr64(RBP, -32, RSI)
-        m64(RAX, RDI); shr64(RAX, 63)
-        mmr64(RBP, -16, RAX)
-        m64(R12, RAX)
-        m64(RAX, RDI); m64(RCX, R12); shl64(RCX, 63)
-        x64(RAX, RCX)
-        mmr64(RBP, -40, RAX)
-        m64(R11, RAX)
-        # specials
-        m64(RAX, R11); shr64(RAX, 52)
-        cpi(RAX, 0x7FF)
-        jc("jb", "fr_zero_or_general")
-        m64(RCX, R11); m64(RDX, R11)
-        shr64(RDX, 52); shl64(RDX, 52)
-        x64(RCX, RDX)
-        t64(RCX, RCX)
-        jc("jz", "fr_inf")
-        lea_rip(RSI, self._intern_string("nan"))
-        jp("fr_copy")
-        a.label("fr_zero_or_general")
-        cpi(R11, 0)
-        jc("jz", "fr_zero")
-        jp("fr_general")
-        a.label("fr_inf")
-        t64(R12, R12)
-        jc("jz", "fr_inf_pos")
-        lea_rip(RSI, self._intern_string("-inf"))
-        jp("fr_copy")
-        a.label("fr_inf_pos")
-        lea_rip(RSI, self._intern_string("inf"))
-        jp("fr_copy")
-        a.label("fr_zero")
-        t64(R12, R12)
-        jc("jz", "fr_zero_pos")
-        lea_rip(RSI, self._intern_string("-0.0"))
-        jp("fr_copy")
-        a.label("fr_zero_pos")
-        lea_rip(RSI, self._intern_string("0.0"))
-        a.label("fr_copy")
-        mm64(RDI, RBP, -32)
-        a.label("fr_copy1")
-        mvz(RAX, RSI, 0)
-        mvb(RDI, 0, RAX)
-        t64(RAX, RAX)
-        jc("jz", "fr_ret")
-        ai(RDI, 1); ai(RSI, 1)
-        jp("fr_copy1")
-        a.label("fr_ret")
-        mm64(RAX, RBP, -32)
-        ai(Reg.RSP, 104)
-        a.emit(encode_pop_r64(R12))
-        a.emit(encode_pop_r64(RBP))
-        a.emit(encode_ret())
-
-        # scan: n = 1..17
-        a.label("fr_general")
-        mi(R12, 1)
-        a.label("fr_scan")
-        lea64(RDI, RBP, -96)
-        mi(RSI, 32)
-        mm64(RDX, RBP, -40)     # a_bits → RDX
-        # Load a_bits into XMM0 as a double (movq xmm0, rdx) BEFORE the format
-        # takes RDX — the SysV snprintf hands the double in XMM0 and the format
-        # in RDX, and loading the format first left RDX = the raw bits, so
-        # snprintf dereferenced them and died (the 5-row x86-64 segfault).
-        a.emit(encode_movq_xmm_rm64(0, RDX))
-        lea_rip(RDX, self._intern_string("%.*g"))
-        m64(RCX, R12)           # n → RCX (4th int arg)
-        mi(RAX, 1)              # 1 XMM register used
-        self._emit_extern_call("snprintf")
-        lea64(RDI, RBP, -96)
-        lea64(RSI, RBP, -48)
-        self._emit_extern_call("strtod")
-        a.emit(encode_movq_r64_xmm(RAX, 0))
-        mm64(RCX, RBP, -40)
-        cpr(RAX, RCX)
-        jc("je", "fr_found")
-        ai(R12, 1)
-        cpi(R12, 18)
-        jc("jne", "fr_scan")
-
-        # parse: collect digits, q, p, n_dot_before, has_e, E10, sign_e
-        # R8=cursor, R9=c, R10=buf, R11=digits, RCX=n_sig, RDX=q,
-        # RSI=p, RDI=n_dot_before/sign_e, RAX=E10, [rbp-56]=has_e
-        a.label("fr_found")
-        lea64(R10, RBP, -96)
-        lea64(R11, RBP, -64)
-        m64(R8, R10)
-        mi(RAX, 0)  # E10
-        mi(RCX, 0)  # n_sig
-        mi(RDX, 0)  # q
-        mi(RSI, 0)  # p
-        mi(RDI, 0)  # n_dot_before / sign_e
-        mi(R9, 0)   # has_e
-        a.label("fr_parse")
-        mvz(R9, R8, 0)
-        t64(R9, R9)
-        jc("jz", "fr_parse_done")
-        cpi(R9, 0x65)
-        jc("je", "fr_set_e")
-        cpi(R9, 0x2E)
-        jc("je", "fr_set_dot")
-        cpi(R9, 0x30)
-        jc("jb", "fr_pnxt")
-        cpi(R9, 0x39)
-        jc("ja", "fr_pnxt")
-        t64(RDX, RDX)
-        jc("jz", "fr_inc_dot")
-        a.label("fr_sig_test")
-        cpi(R9, 0x30)
-        jc("jne", "fr_store")
-        t64(RCX, RCX)
-        jc("jz", "fr_pnxt")
-        a.label("fr_store")
-        t64(RCX, RCX)
-        jc("jz", "fr_set_p")
-        mvbi(R11, RCX, R9)
-        ai(RCX, 1)
-        jp("fr_pnxt")
-        a.label("fr_set_p")
-        m64(RDX, R8); subrr(RDX, R10)
-        m64(RSI, RDX)
-        mvbi(R11, RCX, R9)
-        ai(RCX, 1)
-        jp("fr_pnxt")
-        a.label("fr_inc_dot")
-        ai(RDI, 1)
-        jp("fr_sig_test")
-        a.label("fr_set_e")
-        mi(RDX, 1)
-        mmr64(RBP, -56, RDX)
-        jp("fr_pnxt")
-        a.label("fr_set_dot")
-        t64(RDX, RDX)
-        jc("jz", "fr_set_q")
-        jp("fr_pnxt")
-        a.label("fr_set_q")
-        m64(RDX, R8); subrr(RDX, R10)
-        jp("fr_pnxt")
-        a.label("fr_pnxt")
-        ai(R8, 1)
-        jp("fr_parse")
-
-        # layout
-        # Simplified layout: copy the snprintf buffer to out, with sign
-        # prepended and ".0" appended if the buffer has no dot or 'e'.
-        a.label("fr_parse_done")
-        mm64(RSI, RBP, -32)   # cursor = out
-        mm64(R12, RBP, -16)   # sign
-        # Write sign
-        t64(R12, R12)
-        jc("jz", "L_nosign")
-        mi(RDX, 0x2D)
-        mvb(RSI, 0, RDX)
-        ai(RSI, 1)
-        a.label("L_nosign")
-        # Copy snprintf buffer to out
-        lea64(RDI, RBP, -96)  # buf
-        a.label("L_cpy")
-        mvz(RAX, RDI, 0)
-        mvb(RSI, 0, RAX)
-        ai(RDI, 1)
-        ai(RSI, 1)
-        t64(RAX, RAX)
-        jc("jz", "L_after")
-        jp("L_cpy")
-        a.label("L_after")
-        # Check if buffer has '.' or 'e': scan the buffer
-        lea64(RDI, RBP, -96)
-        a.label("L_chk")
-        mvz(RAX, RDI, 0)
-        t64(RAX, RAX)
-        jc("jz", "L_nul")
-        cpi(RAX, 0x2E)
-        jc("je", "L_nul")
-        cpi(RAX, 0x65)
-        jc("je", "L_nul")
-        cpi(RAX, 0x2D)
-        jc("je", "L_chk")  # '-' might be in "1e-04"
-        ai(RDI, 1)
-        jp("L_chk")
-        a.label("L_nul")
-        # No '.' or 'e' found: add ".0"
-        mi(RDX, 0x2E)
-        mvb(RSI, 0, RDX)
-        ai(RSI, 1)
-        mi(RDX, 0x30)
-        mvb(RSI, 0, RDX)
-        ai(RSI, 1)
-        mi(RAX, 0)
-        mvb(RSI, 0, RAX)
-        jp("fr_ret")
-
-        jp("fr_ret")
 
     def _emit_debug_assert(self, e) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
@@ -8101,9 +7817,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(expr, (M.CtorReceiver, M.CtorField)):
             self._emit_ctor_receiver(expr)
             return
-        if isinstance(expr, M.FloatPrintOperand):
-            self._emit_float_print_operand(expr)
-            return
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm(Reg.RAX, expr.value)
             return
@@ -8959,57 +8672,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self.asm.emit(encode_setp(Reg.RCX))
                 self.asm.emit(encode_or_r8_r8(Reg.RAX, Reg.RCX))
         self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
-
-    def _emit_float_to_int_range_trap(self) -> None:
-        """Trap if the double in XMM0 does not fit in an `Int64` after truncation.
-
-        The run-time twin of the build's `float_to_int_refusal`, and the
-        instruction-level twin of arm64's `_emit_float_to_int_range_trap`: the
-        same two constants (`model.FLOAT_TO_INT_HI` / `FLOAT_TO_INT_LO`), the
-        same inequality, and the same status as the integer overflow trap, so
-        a reader who has seen an overflow stop does not learn a second way a
-        program with no answer leaves. The caller has already moved the word
-        into XMM0 (the CVTTSD2SI that follows does the same thing), so the
-        tests compare against the constants in XMM1; R11 carries each
-        constant's bits there. Nothing is preserved: no call happens in the
-        sequence, and the only live value at this point in the type-constructor
-        path is the double being converted.
-
-        **Both tests read `jae` (CF=0) in a form an UNORDERED compare cannot
-        set.** UCOMISD leaves a NaN at `CF=ZF=PF=1`, and `jae` is taken only
-        on CF=0, so a NaN falls through to CVTTSD2SI and gets the saturation
-        `model.float_int_conversion_note` records rather than a trap — the one
-        input CPython raises ValueError for and the range test cannot take. The upper test is the straight `x >= 2^63` CPython's
-        OverflowError is: `UCOMISD x, HI ; JAE`. The lower test — `x <= LO`,
-        LO being `-2^63 - 2048`, the largest double whose truncation does not
-        fit below the range — is written with the operand order reversed,
-        `UCOMISD LO, x ; JAE`, which reads `LO >= x`; the forward spelling has
-        no NaN-safe flag form, because `x < LO` and the unordered case both
-        leave CF=1.
-        """
-        self._if_counter += 1
-        sid = self._if_counter
-        fn = self.func_name
-        trap = f"{fn}_dovf{sid}_t"
-        ok = f"{fn}_dovf{sid}_k"
-        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_HI))
-        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
-        self.asm.emit(encode_ucomisd_xmm(0, 1))
-        self._record_cond_branch()
-        self._emit_jcc(COND_AE, trap)
-        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_LO))
-        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
-        self.asm.emit(encode_ucomisd_xmm(1, 0))
-        self._record_cond_branch()
-        self._emit_jcc(COND_AE, trap)
-        # In range: skip the block — without it an in-range value falls into
-        # the trap, which is how the first measurement of the arm64 twin
-        # answered `OverflowError` for 3.9.
-        self._emit_jmp(ok)
-        self.asm.label(trap)
-        self._emit_stop_diagnostic(M.float_to_int_trap_message())
-        self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
-        self.asm.label(ok)
 
     def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
         """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
@@ -12587,7 +12249,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"({[k for k, _ in e.kwargs]})")
             return list(e.args or []), []
         slots, dropped, err = M.bind_call_arguments(
-            name, fdef, e.args, e.kwargs, self._spread_mappings)
+            name, fdef, e.args, e.kwargs)
         if err is not None:
             raise CodegenError(err)
         return slots, dropped
@@ -12690,8 +12352,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
             direction, why = M.float_conversion_lowering(
                 name, self._expr_str_kind(operands[0]),
-                f"{name}({M.spelled(operands[0])})",
-                value=M.float_literal_value(operands[0]))
+                f"{name}({M.spelled(operands[0])})")
             if why is not None:
                 raise CodegenError(why)
             if direction is not None:
@@ -12752,15 +12413,12 @@ ctor_field_value=self._ctor_field_value_for(name),
             # The `T` matters: `CVTSD2SI` consults MXCSR's rounding mode, which
             # this backend cannot read or write, so it is the only form whose
             # answer does not depend on state nothing here can see.  A plain
-            # `MOV` of the bits would be the exponent field as an integer.
-            # The range the truncation must fit is checked BEFORE the
-            # conversion — `_emit_float_to_int_range_trap` stops with
-            # `INT_OVERFLOW_TRAP_STATUS` where CPython raises `OverflowError`,
-            # and the build already refused the literals for the same reason;
-            # `model.float_int_conversion_note` records the one input the
-            # check cannot take (a NaN) and what happens to it.
+            # `MOV` of the bits would be the exponent field as an integer;
+            # `model.float_int_conversion_note` records the one input where this
+            # differs from CPython — a NaN or an infinity, where the hardware
+            # saturates and CPython raises — and why no static check can tell
+            # them apart.
             self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
-            self._emit_float_to_int_range_trap()
             self.asm.emit(encode_cvttsd2si_r64_xmm(Reg.RAX, 0))
             info = M.INT_TYPE_CTORS[name]
         width, signed = info

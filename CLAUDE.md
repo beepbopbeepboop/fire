@@ -83,41 +83,6 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
-## Bug rounds — every round must move us closer to the end
-Base directive (user, 2026-10-29): every work round on a bug must move the work
-forward. A round's output may not be "re-verified, still open" with no tree or
-doc change. The valid outputs of a round, in descending order of preference:
-
-1. **A full fix.** The defect the doc describes is resolved and the doc's own
-   named quick test passes. Delete the doc in the same commit (see `## Bug
-   docs` below); if it was already fixed upstream, verify with the named test
-   and delete with a commit saying so.
-2. **A real partial fix.** Real code that lands the doc's own next step (or a
-   self-contained piece of it), with the doc's quick test passing, committed
-   with a dated Status entry stating exactly what landed and what remains. A
-   partial fix must change behaviour or coverage, not just the doc.
-3. **A planning round: a full design and implementation guide.** When the next
-   step is blocked (a decision, a build wall, another lane's work) or is a real
-   program, the round's output is a guide committed into the doc's Status: the
-   measurement that establishes the current state, the decision(s) needed with
-   the readings laid out, the implementation plan (exact files, functions,
-   ordering, interfaces), and the tests that will prove it. It must be
-   complete enough that the next round can execute without re-investigating
-   anything this round established.
-
-A round that only re-reads a doc and re-measures its status without landing
-one of the three above is a failed round. This extends the Bug-fixing-sessions
-rule above: the fourth outcome ("confirmed still broken, nothing landed") is
-not an output, however many "re-verified" entries already sit in the doc.
-
-**Formal lane — structure first, soundness later.** For the formal proof
-machinery (step lemmas, contracts, theorems, proof generators, the Lean model),
-land the FULL STRUCTURE first — statements, induction shapes, the wiring in the
-generators — even with `sorry`/`admit` at the leaves; only once the structure
-is in, close the sorries and admits. A round that lands structural theorems
-whose leaves are named sorries, or discharges sorries an already-landed
-structure carries, is forward progress either way (see `FORMAL.md` §11.3).
-
 ## Running the checks — one runner, named buckets
 `tools/suite.py` runs everything: the buckets, each test's driver, the memory
 ceilings, the ordering, and one pass/fail count. The Makefile's targets are
@@ -175,7 +140,7 @@ which is which). **Each class is assigned from the job's MEASURED peak**
 (`MEASURED_PEAK_GB`, read off a real run's log by the same wrapper that does
 the killing), never from the shape of the workload it resembles, and a class
 over 4 GB carries a one-line `memwhy` pointing at
-`doc/POLICY_memory_over_4gb.md` — over 4 GB is a debt, not a fact.
+`bugs/PERF_memory_over_4gb_is_a_bug.md` — over 4 GB is a debt, not a fact.
 `python3 tools/suite.py --list` prints peak, class, ceiling and ratio per job,
 plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
 every ceiling and is also the answer to a class that no longer fits;
@@ -419,6 +384,8 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
+| `gimple-async-runner` | `expect=`, count checked (36) | compiled-path async/await runner | 1.4-15.4 s each, `tiny`; `coroutine` |
+| `coro-detached-async` | `expect=`, count checked (2) | a detached coroutine task | `tiny`; `coroutine` |
 | `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
 | `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
@@ -486,7 +453,7 @@ why* — and the only thing that decides between them is what running it costs.
    — reported as its own `DISABLED` status with the doc, counted in the tally,
    listed on screen and in `--list` and `--dry-run`, and it reserves **0** from
    the memslot ledger whatever class it carries. **The threshold is the
-   3-4 GB memory standard in `doc/POLICY_memory_over_4gb.md`**, applied
+   3-4 GB memory standard in `bugs/PERF_memory_over_4gb_is_a_bug.md`**, applied
    to time as well: a class over that line is a debt, so a job carrying one is
    too expensive to spend on a known answer; so is one that takes more than a
    few minutes. Measured, not guessed — `ab-native` was `expect=` while using

@@ -196,7 +196,7 @@ def mangle(name: str, type_args: dict) -> str:
     the CAS key (`cas.instantiation_key`) folds in `compiler_fingerprint()`,
     which hashes this file — every previously cached object is therefore
     unreachable rather than silently served under the new spelling. See
-    `bugs/imported-generic-elaboration-defect`.
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
 
     A name with no type arguments is returned unchanged, so a template's
     zero-parameter instantiation keeps its own name (`empty` -> `empty`)."""
