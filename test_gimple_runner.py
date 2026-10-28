@@ -4568,7 +4568,7 @@ def main():
     # step used to malloc a one-character string (mojo_char_to_str) plus a fresh
     # list for each tuple literal, and free neither: ~150 bytes per character,
     # i.e. gigabytes for the self-hosted compiler over its own source
-    # (bugs/PERF_selfhost_memory_leak_hunt.md). The characters are now shared
+    # (the content-keyed tuple key fix, leak-hunt). The characters are now shared
     # immortal strings and a display used only as the right side of `in` is freed
     # after the test. 16M characters here; the leak, if back, is gigabytes.
     test_gimple_bounded_memory("gimple_char_scan_allocates_nothing_per_character", """\

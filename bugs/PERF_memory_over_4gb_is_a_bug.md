@@ -35,7 +35,7 @@ only counts the big numbers is a standard that cannot see the shape.
 **Nothing on this branch moves the 27.6-33.8 GB below.** That number is set by
 item 2 (the leak hunt on `mojoc --dump-full fire.py`) and item 3 (free what a
 pass has finished with), both of which need the whole-closure run the
-integrator owns. `PERF_selfhost_memory_leak_hunt.md`'s site list was re-checked
+integrator owns. the content-keyed tuple key fix's site list was re-checked
 item by item on 2026-10-02: three of its six entries are already fixed or
 mis-attributed, and the one that is genuinely open (the container-kind registry)
 is not fixable at its own site — its size IS the leak count.
