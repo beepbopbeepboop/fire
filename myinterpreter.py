@@ -1294,6 +1294,26 @@ class MojoInstance:
     def __init__(self, mojo_class):
         self._mojo_class = mojo_class
 
+    def __getattr__(self, name):
+        # Python's built-in `getattr(obj, name)` only consults real instance
+        # attributes and class attributes, never the Mojo method table, so a
+        # method fetched dynamically (`getattr(c, "tag")`) raised
+        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`
+        # so the two spellings agree.
+        if name in self.__dict__:
+            return self.__dict__[name]
+        cls = self._mojo_class
+        method = cls.methods.get(name)
+        if method is not None:
+            if name in cls.static_methods:
+                return method
+            if name in cls.class_methods:
+                return BoundClassMethod(method, cls, cls.interpreter)
+            return BoundMethod(method, self, cls.interpreter)
+        if name in cls.comptime_aliases:
+            return cls.comptime_aliases[name]
+        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
+
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
         method, if the struct defines one, and return the accumulated text —

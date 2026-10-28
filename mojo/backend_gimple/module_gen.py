@@ -1710,7 +1710,8 @@ def _emit_reflection_dispatch(self, parts):
     elem_repr_names = set()
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
-        if len(fields) == 0:
+        _mm_arms_sn = self._getattr_method_arms.get(_as_str(sn))
+        if len(fields) == 0 and not _mm_arms_sn:
             continue
         get_lines = []
         set_lines = []
@@ -2077,9 +2078,15 @@ def _emit_reflection_dispatch(self, parts):
             "  return strdup(\"None\");\n"
             "}\n")
         parts.extend(refl_parts)
+        _getattr_emitted = list(reflect_emitted)
+        for _sn2 in reflect_structs:
+            if _sn2 in _getattr_emitted:
+                continue
+            if _as_str(_sn2) in (self._getattr_method_arms or {}):
+                _getattr_emitted.append(_sn2)
         tag_cases_get = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
-            for sn in reflect_emitted)
+            for sn in _getattr_emitted)
         tag_cases_set = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
             for sn in reflect_emitted)
