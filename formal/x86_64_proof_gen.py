@@ -394,7 +394,9 @@ def _decode_function_body(code: bytes, info: dict, func_offset: int,
     from formal import x86_64_decode as DEC
     base = info["base_addr"]
     start = func_offset - base
-    end = DEC.body_end(info)
+    strs = [a for name, a in (info.get("labels") or {}).items()
+            if name.startswith("str_")]
+    end = (min(strs) - base) if strs else len(code)
     if end <= start:
         return [], 0
     try:

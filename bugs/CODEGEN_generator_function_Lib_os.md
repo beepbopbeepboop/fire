@@ -1,9 +1,5 @@
 # CODEGEN_generator_function: Lib/os.py
 
-## Status (2026-10-29 — worktree agent-4796: verified refusal unchanged, regression test committed, root cause remains feature-sized tagged-union redesign)
-
-Verified: `python3 fire.py build Lib/os.py` still fails with the same generator refusal (`mixed tuple / non-tuple yields` / heterogeneous stack value model), unchanged from 2026-09-07. Added `test_regress_lib_os_generator_refusal.py` (passes, pins refusal + open doc). The concrete remaining prerequisites (per 2026-09-07 entry) are: `os.stat_result` structseq modeling, `os.scandir`/`DirEntry` iterator type, and a runtime-tagged container value model for `walk`/`_fwalk`'s mixed `str`/`tuple` `stack`. Genuinely out of scope for a narrow fix; doc stays open.
-
 ## Status (2026-09-07 — "cluster B" feature session: `walk`'s blocker is mixed tuple / non-tuple yield, not slot types)
 
 Feature-build pass on cluster B. The `(dirpath, dirnames, filenames)`

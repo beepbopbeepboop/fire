@@ -5116,11 +5116,6 @@ MATCH_REFUSED_KINDS = (
     "sequence pattern",
     "mapping pattern",
     "class pattern",
-    # `case C():` is refused by the FORMAL path, which has no isinstance in its
-    # model. The compiled path lowers it before its refusal check
-    # (`mojo/backend_gimple/emit_stmts.py`), so this tuple is the formal layer's
-    # refusal list, not the compiled path's.
-    "class pattern (type test)",
     "as-binding",
     "enum pattern",
 )
@@ -5142,9 +5137,6 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     * `"value"` — anything else that is an ordinary expression: a literal, a
       unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
       with `==`, which is CPython's own reading of a literal or dotted pattern.
-    * `"class pattern (type test)"` — `case C():`, which is `isinstance(subject,
-      C)`. Listed in `MATCH_REFUSED_KINDS` for the formal path; the compiled
-      path lowers it (see `mojo/backend_gimple/emit_stmts.py`).
     * one of `MATCH_REFUSED_KINDS` — a PEP 634 structural pattern, refused by
       name.
 
@@ -5168,24 +5160,6 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     if isinstance(pattern, F.DictExpr):
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):
-        # `case C():` with no sub-pattern is a type test, isinstance(subject, C).
-        # Positional-capture-only (`case C(x):`) also lowers via isinstance +
-        # attribute reads; it stays refused until __match_args__ is bound.
-        args = getattr(pattern, 'args', []) or []
-        kwargs = getattr(pattern, 'kwargs', []) or []
-        if not args and not kwargs:
-            return "class pattern (type test)"
-        # Positional-capture-only (bare IdentExpr args, no sub-patterns,
-        # no keyword args) — the compiled path lowers this via isinstance
-        # + getattr(subject, __match_args__[i]); keep refused for all other
-        # structural shapes (keyword sub-patterns, literal sub-patterns,
-        # missing __match_args__ resolved at compile time not here).
-        if args and not kwargs and all(
-            getattr(a, 'name', None) is not None
-            and getattr(a, '__class__', None).__name__ == 'IdentExpr'
-            for a in args
-        ):
-            return "class pattern (type test)"
         return "class pattern"
     if isinstance(pattern, F.BinaryOp):
         if pattern.op == "as":
@@ -5257,13 +5231,6 @@ def match_pattern_refusal(kind: str, spelling: str, fn_name: str,
             "a working feature, and answers a question about the subject with "
             "an answer about a fresh object. Dispatch on a field "
             "(`match p.x:` then `case 0:`) is the spelling that lowers here"),
-        "class pattern (type test)": (
-            "a CLASS TYPE TEST (`case Point():`), which is `isinstance(subject, "
-            "Point)` and binds nothing. The formal model has no isinstance, so "
-            "it cannot state what the test answers; lowering it as an "
-            "expression would CONSTRUCT `Point()` and compare with `==`, which "
-            "answers a different question. Test the type with an explicit "
-            "field or value (`match p.kind:` then `case 0:`) instead"),
         "as-binding": (
             "an `as`-BINDING (`case P as w:`), which matches the whole "
             "subject and ALSO binds it to `w`. This path parses `as` as a "
@@ -7346,248 +7313,6 @@ def read_before_store(fn, params: set = None, placed: set = None,
     return found[0] if found else None
 
 
-def _block_stmt_exprs(s) -> list:
-    """The read-position expressions of a statement that is a BLOCK'S OWN
-    statement, as opposed to a statement in one of its arms.
-
-    A block's `stmts` are the straight-line statements it holds plus, for a
-    control-flow block, the control statement ITSELF — whose arms are separate
-    blocks, each visited on their own. So this answers "what does this block's
-    own text read" and deliberately does not descend into arm bodies: a reader
-    that did would attribute a nested arm's read to the enclosing block, and
-    the enclosing block's entry facts are not the arm's.
-
-    The per-kind list mirrors `read_before_store`'s `walk_stmts` read rules —
-    an `AssignStmt`'s TARGET is a store, not a read, and a `VarDecl` without an
-    initialiser reads nothing — because the two must count the same reads: this
-    list decides where a loop target is read in a possibly-unbound state, and
-    `read_before_store` decides whether that read is accepted at all. A graph
-    and a walk that disagree about one read is a check that appears and
-    disappears with which of them ran."""
-    kind = type(s).__name__
-    if kind == "AssignStmt":
-        return [getattr(s, "value", None)]
-    if kind == "AugAssignStmt":
-        return [getattr(s, "target", None), getattr(s, "value", None)]
-    if kind == "VarDecl":
-        return [getattr(s, "value", None)]
-    if kind == "MultiAssignStmt":
-        return [getattr(s, "value", None)]
-    if kind in ("ForStmt", "ComptimeForStmt"):
-        return [getattr(s, "iterable", None)]
-    if kind == "WhileStmt":
-        return [getattr(s, "condition", None)]
-    if kind == "IfStmt":
-        return [getattr(s, "condition", None)]
-    if kind == "MatchStmt":
-        return [getattr(s, "subject", None)]
-    if kind in ("ReturnStmt", "ExprStmt", "RaiseStmt"):
-        return [getattr(s, "value", None)]
-    if kind == "AssertStmt":
-        return [getattr(s, "value", None), getattr(s, "msg", None)]
-    if kind == "DelStmt":
-        return list(getattr(s, "targets", None) or [])
-    return []
-
-
-def _stmt_store_names(s) -> set:
-    """The names one statement STORES — `_cfg_block_defs`'s rules, one
-    statement at a time, so a block's per-statement walk and the block's `defs`
-    cannot disagree about a `VarDecl`'s missing initialiser or a `WithStmt`'s
-    alias. A `del` stores nothing: on this path a bare `del` is a no-op at run
-    time (the image keeps the name's value), which is the same reason the
-    possibly-unbound dataflow above lets a `kills` set contribute nothing."""
-    kind = type(s).__name__
-    if kind in ("AssignStmt", "AugAssignStmt"):
-        return _store_names(getattr(s, "target", None))
-    if kind == "VarDecl":
-        n = getattr(s, "name", None)
-        if isinstance(n, str) and getattr(s, "value", None) is not None:
-            return {n}
-        return set()
-    if kind == "MultiAssignStmt":
-        out: set = set()
-        for t in (getattr(s, "targets", None) or []):
-            out |= _store_names(t)
-        return out
-    if kind == "WithStmt":
-        out = set()
-        for it in (getattr(s, "items", None) or []):
-            a = getattr(it, "alias", None)
-            if isinstance(a, str):
-                out.add(a)
-        return out
-    if kind == "TryStmt":
-        out = set()
-        for h in (getattr(s, "handlers", None) or []):
-            n = getattr(h, "name", None)
-            if isinstance(n, str):
-                out.add(n)
-        return out
-    if kind == "ComptimeVarStmt":
-        return _store_names(getattr(s, "target", None))
-    return set()
-
-
-def loop_bound_flags(fn, params: set = None) -> dict:
-    """`{name: (id(ForStmt), …)}` for the loop targets this function must
-    guard with a runtime bound flag, or `{}`.
-
-    **The question.** `read_before_store` accepts a read of a `for` target
-    after a loop whose emptiness is a run-time fact (`'maybe'`), because
-    refusing would drop `last(4)`-shaped programs CPython runs. The accepted
-    read is still the defect when the range turns out empty: nothing stores
-    the target, so the read answers the caller's leftover. The build cannot
-    decide which way a given call goes, so the EMITTED image has to ask at
-    run time — one flag per flagged name, zero at entry, set by every store of
-    the name (a loop's `init:` is a store, a comprehension's per-element
-    store is a store), and branched on at a read that may be unbound. This
-    reader decides which names that is; the two backends read the same answer
-    from it, so the two architectures flag the same loops.
-
-    **A name is flagged only when all three of these hold of one of its
-    `'maybe'` loops, and the safe direction is the one that says so:**
-
-    1. the target is a single name — a tuple target is not a word this value
-       model can flag, and a `global` target is not this frame's storage at
-       all;
-    2. **every path does NOT store the name before the loop** — the
-       `_definitely_stored` dataflow, the same one `read_before_store` runs,
-       is the reader, so the two cannot answer "is this name bound here"
-       differently. A name every path stored before the loop holds a value on
-       the zero-iteration edge too, so its check would never fire and the
-       flag stays out of the image (which is where the idiomatic
-       `i = 0; for i in range(…)` stays). A name stored on SOME path is
-       flagged, not excluded: the store that path makes is the store that
-       SETS the flag, and the other path is the one the check fires for.
-       The parameters are the dataflow's seed, and that is what keeps a
-       parameter target out for the sharper reason the emitter states — the
-       prologue's argument store is the one store that does not run the flag
-       hook, so a flag there would fire on a path that holds the caller's
-       word;
-    3. the name is read in a block where it may be unbound. Without it a loop
-       whose target is never read in that state would allocate a flag nothing
-       branches on — dead code in an image whose every word is walked by the
-       proof generators.
-
-    The read test uses the "possibly unbound" dataflow, the dual of
-    `_definitely_stored`: a name is possibly unbound at a block's entry when
-    some path to it left it so. It is initialised from the TOP and narrowed,
-    because the answer being computed is "may be unbound" and a name the
-    analysis failed to track as unbound must not be assumed bound — the
-    opposite of `_definitely_stored`'s question, which is why it is a second
-    array rather than the negation of the first. The header block of a tracked
-    loop contributes its defs WITHOUT the loop target, because on the
-    zero-iteration edge the header does not bind it — that binding happens on
-    the edge into the body (the body's first block `seed`), and a header that
-    bound it would silence exactly the path this flag exists for. `del`
-    contributes nothing, because a bare `del` on this path is a no-op at run
-    time and the image keeps the name's value.
-
-    Module-level entry facts are deliberately NOT passed to the preheader
-    walk: a fact the walk cannot see makes a loop `'maybe'` rather than
-    decided, which flags MORE loops, and a flagged loop whose range turns out
-    non-empty never takes its check — the dead-check direction is the safe
-    one, while a module fact the emitter sees and `read_before_store` does not
-    (or vice versa) would be two machines answering one loop differently.
-    See `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
-    for the residual this reader closes and the cases it deliberately leaves.
-    """
-    params = set(params if params is not None
-                 else (getattr(fn, "params", None) or ()))
-    params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
-    body = getattr(fn, "body", None) or []
-    declared_global: set = set()
-    for node in iter_nodes(body):
-        if type(node).__name__ in ("GlobalStmt", "NonlocalStmt"):
-            declared_global |= {n for n in (getattr(node, "names", None) or ())}
-
-    blocks, entry, _cond_names = _build_cfg(body, None)
-    candidates: list = []
-    hdr_target: dict = {}
-    for s in (n for n in iter_nodes(body) if isinstance(n, F.ForStmt)):
-        t = getattr(s, "target", None)
-        if not (isinstance(t, str) and t.isidentifier()):
-            continue
-        if t in declared_global:
-            continue
-        header = None
-        for b in blocks:
-            if len(b.stmts) == 1 and b.stmts[0] is s:
-                header = b
-                break
-        if header is None:
-            continue
-        consts, seqs = _preheader_facts(blocks, header.index, entry, None)
-        if _for_emptiness(s, consts, seqs) != _MAYBE_RUNS:
-            continue
-        candidates.append((s, t, header))
-        hdr_target[header.index] = {t}
-    if not candidates:
-        return {}
-    tracked = {t for _s, t, _h in candidates}
-
-    # Definitively stored on EVERY path to the header: `_definitely_stored`,
-    # the same dataflow `read_before_store` runs, asked over the same CFG, so
-    # the two answers to "is this name bound here" cannot drift. A name every
-    # path stored before the loop holds a value on the zero-iteration edge too,
-    # so its check would never fire and the flag stays out of the image — which
-    # is also where the idiomatic `i = 0; for i in range(…)` stays flag-free.
-    # The seed is the parameters, and it is what keeps a parameter target
-    # unflagged for the sharper reason the emitter states: the prologue's
-    # argument store is the one store that does not run the flag hook. A name
-    # stored on SOME path is NOT excluded — the store that path makes is the
-    # store that SETS the flag, and the other path is the one the check fires
-    # for, which is the mixed shape the "possibly stored" draft used to leave
-    # as garbage.
-    stored_in, _facts_in, _guarded_in = _definitely_stored(
-        blocks, entry, params, _cond_names)
-
-    # Possibly unbound at entry, the dual: top-initialised and narrowed.
-    mu: dict = {b.index: set(tracked) for b in blocks}
-    changed = True
-    while changed:
-        changed = False
-        for b in blocks:
-            merged = None
-            for p in b.preds:
-                b_p = blocks[p]
-                stored = b_p.defs - hdr_target.get(p, set())
-                e = mu[p] - stored
-                merged = set(e) if merged is None else (merged | e)
-            merged = set(tracked) if merged is None else merged
-            merged -= b.seed
-            if merged != mu[b.index]:
-                mu[b.index] = merged
-                changed = True
-
-    # A read in a MAYBE state, per NAME. The walk is per STATEMENT within a
-    # block rather than per block, because a block's entry state and the state
-    # at its last read differ: `q = 7` and `print(q)` are one block whose entry
-    # says `q` may be unbound (the zero-iteration edge) but whose read is after
-    # the store, so the statement order is what decides. The store rules are
-    # `_cfg_block_defs`'s, one statement at a time, so the two cannot count a
-    # `VarDecl`'s missing initialiser differently.
-    maybe_reads: set = set()
-    for b in blocks:
-        cur = set(mu[b.index])
-        for s in b.stmts:
-            for e in _block_stmt_exprs(s):
-                for n in _expr_reads(e, set()):
-                    if n in tracked and n in cur:
-                        maybe_reads.add(n)
-            cur -= _stmt_store_names(s)
-
-    out: dict = {}
-    for s, t, header in candidates:
-        if t in stored_in.get(header.index, set()):
-            continue
-        if t not in maybe_reads:
-            continue
-        out.setdefault(t, []).append(id(s))
-    return {t: tuple(ids) for t, ids in out.items()}
-
-
 def read_before_store_refusal(name: str, fn_name: str, line) -> str:
     """The one-line diagnostic for a name read before anything stores it.
 
@@ -8527,34 +8252,20 @@ def float_unary_refusal(op: str, operand_kind, spelled: str,
 def float_int_conversion_note() -> str:
     """The one documented divergence from CPython in a double→int conversion.
 
-    A double whose truncated value does not fit in an `Int64`, and an infinity
-    (which is one: CPython raises `OverflowError` for both), is a trap —
-    refused at build time when the source spelled it (`float_to_int_refusal`),
-    checked at run time when it cannot be read (`float_to_int_trap_message`),
-    and stopped with `INT_OVERFLOW_TRAP_STATUS`, which is the one answer this
-    path gives for a program CPython raised.
-
-    The remaining divergence is a NaN. `FCVTZS` and `CVTTSD2SI` SATURATE one,
-    and each answers ITS OWN saturation — measured on both: `FCVTZS` converts
-    a NaN to 0, `CVTTSD2SI` to `INT64_MIN` (`0x8000000000000000`) — while
-    CPython raises `ValueError` for it, so the one input the range test
-    cannot separate is also the one the two machines still part company on.
-    The range test cannot take a NaN — it has no value to check, and both
-    comparisons it is built from are false (unordered) for one — so neither
-    the build's refusal nor the emitters' trap fires for it, and the trap
-    must not be spent on it: this trap is the OverflowError trap, and
-    attributing a stop to a range a NaN does not have would be a false
-    message. That is a divergence on an input rather than an approximation of
-    one, and this note is the record of it.
+    `FCVTZS` and `CVTTSD2SI` SATURATE: a NaN or an infinity converts to
+    `INT64_MIN` (`0x8000000000000000`) rather than trapping, and CPython raises
+    (`ValueError` for a NaN, `OverflowError` for an infinity).  This path has no
+    exception machinery a conversion can raise through, and refusing the
+    conversion in general would refuse the 99.99% of it that is finite — so the
+    finite answers are exact and the two special inputs get the hardware's
+    saturation.  The inputs are not visible to the build: whether a name holds a
+    NaN is a run-time fact, so no static check can separate them, and this is a
+    divergence on an input rather than an approximation of one.
     """
-    return ("a NaN is the one input the range test cannot separate, and each "
-            "hardware answers its own saturation for it — 0 on arm64 "
-            "(FCVTZS), INT64_MIN on x86-64 (CVTTSD2SI) — where CPython "
-            "raises ValueError; a double whose truncated value does not fit "
-            "in an Int64, and an infinity, are refused at build time when the "
-            "source spells them and trapped at run time with the integer "
-            "overflow's status, which is what CPython's OverflowError is on "
-            "this path; every other value is exact")
+    return ("a NaN or an infinity converts to INT64_MIN (the hardware's "
+            "saturating answer) where CPython raises ValueError / "
+            "OverflowError; this path has no exception to raise through, and "
+            "every finite value is exact")
 
 
 #: Type constructors whose VALUE is an IEEE double — `float(x)`, `Float64(x)`.
@@ -8576,8 +8287,7 @@ FLOAT_TO_INT = "from-float"
 FLOAT_FROM_INT = "to-float"
 
 
-def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
-                              value: float = None):
+def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
     """`("from-float" | "to-float" | None, refusal)` for a conversion call.
 
     Two directions, and the asymmetry between them is the whole answer:
@@ -8593,21 +8303,9 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
     `None` with no refusal means "this is not a float conversion", which is the
     answer for every ordinary `Int(x)` over an integer and lets the integer path
     run untouched.
-
-    `value` is the operand's value when the build can read it (a float literal,
-    or one with a unary minus — `float_literal_value`), and it is asked ONLY of
-    the `from-float` direction, where a double the build can read and that does
-    not fit in an `Int64` is refused instead of lowered: CPython raises
-    `OverflowError` for it, and the hardware would answer a saturation instead
-    — `INT64_MAX` on one architecture and `INT64_MIN` on the other, which is a
-    divergence the two machines used to disagree with each other on. A value
-    the build cannot read is not refused here: the emitters check the same
-    range at run time and stop with `INT_OVERFLOW_TRAP_STATUS`.
     """
     if callee_name in INT_TYPE_CTORS:
         if operand_kind == FLOAT_KIND:
-            if value is not None and float_to_int_out_of_range(value):
-                return (None, float_to_int_refusal(spelled))
             return (FLOAT_TO_INT, None)
         return (None, None)
     if callee_name not in FLOAT_TYPE_CTORS:
@@ -8621,113 +8319,6 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
             f"there is no conversion from that kind to one on this path: the "
             f"only two are an integer (SCVTF) and a double (the identity). "
             f"Convert to an integer first, or say what the value is.")
-
-
-#: The two doubles a double→int conversion must check against, and the reason
-#: the lower one is not the smaller side of the `Int64` range itself.
-#:
-#: `FCVTZS`/`CVTTSD2SI` truncate toward zero, and the truncated value must fit
-#: in an `Int64`: `INT64_MIN .. INT64_MAX`. The UPPER boundary is the range
-#: edge — `2**63` is representable, truncates to itself, and does not fit, so
-#: `x >= 2**63` is the whole upper test. The LOWER edge is not: `-2**63`
-#: truncates to `INT64_MIN` and FITS, so the range's own minimum is not the
-#: constant. But a double cannot name the trap: the spacing of binary64 above
-#: `2**63` is 2048, so there is no double between `-2**63 - 2048` and
-#: `-2**63`, and "the value does not fit below the range" over doubles is
-#: exactly `x <= -2**63 - 2048`. Both boundaries are doubles, both are the
-#: extreme members of the trap, and a Python `float` read of either is exact,
-#: so the build-time and run-time halves compare the same two values.
-FLOAT_TO_INT_HI = 2.0 ** 63
-FLOAT_TO_INT_LO = -(2.0 ** 63) - 2048
-
-
-def float_to_int_out_of_range(value: float) -> bool:
-    """Whether a double's truncated value does not fit in an `Int64`.
-
-    The ONE test both halves of the double→int decision mean: the build's
-    refusal asks it of a literal the source spelled, and the emitters' range
-    test is the same inequality over the run-time word. CPython is the
-    oracle: `int()` truncates toward zero and raises `OverflowError` when
-    the truncated value is past `Int64`'s range, and over the set of doubles
-    that is exactly `x >= FLOAT_TO_INT_HI` or `x <= FLOAT_TO_INT_LO` (the
-    boundary arithmetic is the comment on the constants above).
-
-    An infinity answers `True`, which is right: CPython raises `OverflowError`
-    for it, and the hardware would saturate. A NaN answers `False`, because
-    neither comparison holds for one, and a NaN is the one input the trap
-    must NOT take: it has no value to check, `FCVTZS`/`CVTTSD2SI` give it the
-    hardware's saturation, and `float_int_conversion_note` records that
-    divergence rather than a comparison settling it.
-    """
-    return value >= FLOAT_TO_INT_HI or value <= FLOAT_TO_INT_LO
-
-
-def float_literal_value(e):
-    """The value of a float literal, or of one with a unary `+`/`-`, else None.
-
-    The one reader of "can the build read a double", for both backends, for
-    the reason `integer_literal_value` exists: a rule that read the literal
-    with one backend's private spelling is a rule that misses the other
-    spelling. `Int(1e300)` and `Int(-1e300)` are the two shapes the parser
-    keeps — the minus is a node (`UnaryOp('-', FloatLiteral)`) rather than a
-    sign on the literal — and a `0 - 1e300` is a `BinaryOp`, which no build
-    can fold here, so it is None and the run-time range test answers it.
-    """
-    if isinstance(e, F.FloatLiteral):
-        return e.value
-    if isinstance(e, F.UnaryOp) and e.op in ("-", "+"):
-        v = float_literal_value(e.operand)
-        if v is not None:
-            return -v if e.op == "-" else v
-    return None
-
-
-def float_to_int_refusal(spelled: str) -> str:
-    """The build-time half of the double→int range decision.
-
-    Asked from `float_conversion_lowering` when the build can read the operand
-    and `float_to_int_out_of_range` says it does not fit: the source spelled a
-    value, so the answer CPython gives — an `OverflowError`, the program's own
-    next line never reached — is knowable at build time, and the honest move
-    is to say so rather than lower a conversion the hardware would answer with
-    a saturation. The saturation is not one wrong answer: `FCVTZS` clamps at
-    `INT64_MAX` and `CVTTSD2SI` at `INT64_MIN`, so the two architectures used
-    to answer the same source with two different programs, which is the
-    divergence this refusal closes at the place it is decidable. A value the
-    build cannot read is not refused and is checked at run time instead —
-    `float_to_int_trap_message` is that half, and `INT_OVERFLOW_TRAP_STATUS`
-    is the one status both leave behind.
-    """
-    return (f"{spelled} converts a double whose value the build can read, and "
-            f"it does not fit in an Int64: CPython raises OverflowError for "
-            f"an `int()` past the 64-bit range, and the hardware's "
-            f"FCVTZS/CVTTSD2SI would answer a saturation instead — "
-            f"{INT64_MAX} on one architecture and {INT64_MIN} on the other — "
-            f"so this build refuses rather than emit the answer the hardware "
-            f"would give. A value the build cannot read (a name, a parameter, "
-            f"a field) is not refused here: it is checked at run time, and an "
-            f"out-of-range one stops the program with the integer overflow's "
-            f"status.")
-
-
-def float_to_int_trap_message() -> str:
-    """The ONE text a double→int conversion past the range writes to fd 2.
-
-    For BOTH backends, in the shape of `int_overflow_trap_message`: the three
-    things a reader needs and no more — what the target cannot do, what
-    CPython would have said, and that this is a stop rather than an answer.
-    The status it is written for is `INT_OVERFLOW_TRAP_STATUS`, because "this
-    program could not be answered on this target" is one answer on this path,
-    and a reader who has seen an overflow stop should not have to learn that a
-    conversion stops differently.
-    """
-    return ("OverflowError: this program converted a double to an integer, "
-            f"and the double's truncated value does not fit in the signed "
-            f"64-bit range this target has for an integer ({INT64_MIN} .. "
-            f"{INT64_MAX}). CPython raises OverflowError for that program; "
-            "this formal image has no way to raise, so it stops here rather "
-            "than answer the hardware's saturation (which is a different "
-            "number on each architecture).\n")
 
 
 def float_literal_bits(value) -> int:
@@ -13418,12 +13009,6 @@ def integer_text_width(bits: int) -> int:
 # `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
-
-#: Export-rule answers `_export_rule_for` in `build.py` returns when the
-#: defining module declares a name but no exclusion applies (DECLARED), or
-#: never names it at all (ABSENT). Both are `reflect.EXCL_*`-shaped strings.
-EXPORT_RULE_DECLARED = "declared"
-EXPORT_RULE_ABSENT = "absent"
 
 # What an f-string's FIELD has to be for a buffer's bound to be known before
 # the program runs. Read out of the corpus by
@@ -24642,7 +24227,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 726 entry
+# a list that rots, and the shape answers the same question for all 718 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24812,7 +24397,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 726 entry points for that reason looks
+    scalar — and a rule that refuses all 718 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -26110,50 +25695,6 @@ def bool_print_operand(e):
                          col=getattr(e, "col", 0))
 
 
-# The label of the one helper function each backend appends to its image:
-# CPython's shortest-round-trip `repr()` of the `double` whose bit pattern it is
-# handed, written into the caller's buffer. It is a label and not a C symbol on
-# purpose: the image links only the C library, and the whole point of the helper
-# is that the conversion CPython prints is NOT any of that library's, so it has
-# to live in the image's own `__text`. `print` of a float is the only caller,
-# and the name is published here rather than spelled in each backend because the
-# two must emit the same label the same way, and a second spelling is how the
-# call lands on a label nothing defines.
-FLOAT_REPR_SYMBOL = "__fire_float_repr"
-
-
-class FloatPrintOperand:
-    """A `print` operand that is a `double`, rendered by the float helper.
-
-    Not an expression the emitter dispatches on its own: it is a marker the
-    operand slot of `print_call_spelling`'s answer carries, and the emitter's
-    one arm for it evaluates `expr` (the double's bit pattern into the value
-    register) and branches to `FLOAT_REPR_SYMBOL` with a buffer, so the slot
-    the printf's `%s` reads holds the address of CPython's spelling of the
-    value rather than the value's own word. The wrapper exists so that both
-    halves of the decision — which operand is a fragment and which is a value,
-    and that this value is a double whose text is computed, not interned — are
-    made in `print_call_spelling` once, and each backend supplies only the
-    branch and the buffer it can spell on its own machine.
-
-    `index` is the ordinal of this float AMONG THE FLOATS of one print, and
-    `position` its index in the print's OPERAND list (the literals are
-    fragments and not operands, so the two counts differ). They are the
-    machine half of the address of the helper's buffer, which each backend
-    computes from them: the block of buffers is one reservation per print
-    call, `index` picks the 64-byte slot in it, and `position` says how far
-    the call machinery's own argument spills have carried the stack when
-    this operand is evaluated. Both are made here, in the one place that
-    sees the whole operand list, so the two backends cannot number the
-    buffers differently.
-    """
-
-    def __init__(self, expr, index, position):
-        self.expr = expr
-        self.index = index
-        self.position = position
-
-
 # ── `bytes`: the one kind whose CPython rendering is a QUOTED, ESCAPED word ──
 #
 # `print(b)` writes `repr(b)` for a `bytes`, never its text: `b'ab'`, not `ab`,
@@ -26228,28 +25769,64 @@ def bytes_repr_body(value: str) -> str:
     return quote + "".join(out) + quote
 
 
-# ── what a `print` of a FLOAT and of a CONTAINER now gets ──────────────────
+# ── the two refusals a `print` of a FLOAT and of a CONTAINER now gets ───────
 #
-# The FLOAT is RENDERED. Its old refusal ("print() of a float is refused …")
-# was a sentence whose reason was still right — CPython's `str()` of a float is
-# `repr()` of it, the SHORTEST decimal that parses back to the same 64 bits, and
-# no libc conversion is that function: `%g` drops the `.0` CPython writes
-# (`100000` where CPython writes `100000.0`), `%f` is six digits after the
-# point (`1.500000`), `%e` is a fixed scientific spelling CPython uses only
-# outside `[1e-4, 1e16)`, `%.17g` round-trips without being what CPython
-# PRINTS (`0.10000000000000001` where CPython writes `0.1`), and `-0.0` survives
-# only through the round-trip rule's own spelling. The rendering that replaced
-# the refusal is each backend's `FLOAT_REPR_SYMBOL` helper, which computes that
-# shortest decimal over the value's own bits — `%.*g` at the smallest precision
-# that parses back, laid out in CPython's notation, with `inf`/`-inf`/`nan` and
-# `-0.0` from the same reader — and `print_call_spelling`'s `FLOAT_KIND` arm
-# hands the value to it through `FloatPrintOperand`.
+# Both replace a message that was FALSE about the source, which is the defect
+# `FORMAL sweep work map 2026-10-05 b14` §4.2 names for the `rf`/`fr`
+# f-strings ("every one is refused with a sentence that is FALSE about the
+# source").  `print(1.5)` was refused with "print() cannot tell whether
+# FloatLiteral is a string or a number … guessing would print an address as if
+# it were text" — and this path knows perfectly well that `1.5` is neither: the
+# model's own `FLOAT_KIND` says it is a `double`, and `is_number_kind` says
+# no.  The refusal was right and its REASON was a lie about a value the model
+# had already classified, which sends the reader to annotate a literal.
 #
-# The CONTAINER is still refused, for the shape `container_print_refusal`
-# names: a count this build does not know, a loop rather than a conversion.
-# Its message replaced the generic one that was FALSE about the source in the
-# same way the float's was, and the two sentences are the difference between
+# A refusal whose reason names the real absence is the whole difference between
 # "this path cannot do it" and "you wrote something wrong".
+
+
+def float_print_refusal(backend: str) -> str:
+    """Why `print` of a `double` is refused rather than rendered.
+
+    NOT "there is no float here" — there is one 64-bit word holding the
+    IEEE-754 binary64 pattern, and `model.FLOAT_KIND` is the row that says so.
+    The absence is the RENDERING, and it is a specific one: CPython's `str()` of
+    a float is `repr()` of it, which is the SHORTEST decimal string that parses
+    back to the same bits (David Gay / Grisu), and libc's conversions are not
+    that function:
+
+      * `%g` is six significant digits by default and drops the `.0` CPython
+        writes: `repr(100000.0)` is `100000.0` where `%g` writes `100000`;
+      * `%f` is six digits after the point: `1.5` becomes `1.500000`;
+      * `%e` is never CPython's spelling — CPython uses scientific notation only
+        outside `[1e-4, 1e16)`;
+      * `%.17g` round-trips but is not what CPython PRINTS: `repr(0.1)` is `0.1`
+        and `%.17g` writes `0.10000000000000001`;
+      * `-0.0` needs the round-trip rule's own spelling: CPython writes `-0.0`,
+        `%f` writes `-0.000000` and `%g` writes `-0`.
+
+    (`inf`, `-inf` and `nan` are NOT part of this: measured on this target's
+    libc, all four conversions write them the way CPython spells them. An earlier
+    draft of this text claimed otherwise and the measurement corrected it — see
+    `bugs/FORMAL_a_float_has_no_print_spelling.md` §3 for the whole table.)
+
+    So every conversion libc offers is either a wrong number or a wrong
+    SPELLING, and this path's whole rule about output is that what lands on
+    stdout is what the source says.
+    """
+    return (
+        f"print() of a float is refused on the formal {backend} path, and the "
+        f"missing thing is its SPELLING rather than its storage: the value is "
+        f"one 64-bit word holding an IEEE-754 binary64, but CPython's `str()` "
+        f"of a float is the shortest decimal that parses back to the same bits "
+        f"(`repr(0.1)` is `0.1`, `repr(100000.0)` is `100000.0`), which is not "
+        f"any libc conversion — `%f` writes six digits after the point, `%g` drops the "
+        f"`.0`, `%e` is a fixed scientific spelling CPython only uses outside "
+        f"`[1e-4, 1e16)`, and `%.17g` round-trips without being what CPython "
+        f"prints. Refused rather than emitted, because a float printed in a "
+        f"spelling the source never wrote is a wrong answer that looks right. "
+        f"Print an integer if you meant one"
+    )
 
 
 def container_print_refusal(backend: str, kind, node_name: str) -> str:
@@ -26330,16 +25907,10 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
     printf for fewer arguments than it was handed and everything after the first
     literal would be read one slot late.
 
-    Raises `CodegenError` for the shapes this path cannot render, each with
+    Raises `CodegenError` for the five shapes this path cannot render, each with
     a message that says what CPython prints and what is missing here.
     """
     frags, operands = [], []
-    # The ordinal of a float AMONG THE FLOATS of this print — `index` on the
-    # `FloatPrintOperand` — and the operand list's own length, which is its
-    # `position`. Both are needed by the backends' buffer arithmetic (see the
-    # class's docstring), and the operand list is the one this loop builds, so
-    # this loop is the one place both are known together.
-    float_index = 0
     for a in args:
         if isinstance(a, F.StringLiteral):
             # `print_literal` renders a `str` literal's text and a `bytes`
@@ -26392,18 +25963,12 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
         if string_operand_is_string(kind):
             frags.append("%s")
         elif kind == FLOAT_KIND:
-            # Its own arm, and it comes BEFORE the generic refusal below for
-            # the reason that refusal was FALSE about a float: the model
-            # classifies one as `FLOAT_KIND` and `is_number_kind` says no. The
-            # answer is CPython's `repr()` of the value, computed at run time
-            # by the backend's `FLOAT_REPR_SYMBOL` helper — the shortest
-            # decimal that parses back to the same 64 bits, in CPython's
-            # own notation — and the slot the `%s` reads is that helper's
-            # buffer, not the double's own word.
-            frags.append("%s")
-            operands.append(FloatPrintOperand(a, float_index, len(operands)))
-            float_index += 1
-            continue
+            # Its own arm, and it comes BEFORE the generic refusal below
+            # because the generic one is FALSE about a float: the model
+            # classifies one as `FLOAT_KIND` and `is_number_kind` says no, so
+            # "cannot tell whether this is a string or a number" describes a
+            # value the model has already classified.
+            raise CodegenError(float_print_refusal(backend))
         elif is_number_kind(kind):
             # `is_number_kind` and not `== INT_KIND`: a type TAG is a word, so
             # `print(t)` for `t = bool` prints the tag, which is what it
@@ -30807,41 +30372,6 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
     return by_name.get(callee)
 
 
-def _respell_aliased_module_qualifier(name: str, aliases: dict) -> str:
-    """A dotted call rooted at an import alias, re-spelled at the module.
-
-    `import lib2 as L` spells the call `L.answer`, but every export table is
-    filed under the module the alias stands for — `lib2` — so the qualifier
-    `L` has to be translated to `lib2` before the table is asked. This is the
-    ONE re-spelling both readers of a dotted callee use, `dylib_extern_symbol`
-    (which SYMBOL the call binds) and `dylib_callee_export` (whose DECLARATION
-    its arguments bind against), so the two cannot answer about different
-    modules for the same call.
-
-    Only a MODULE binding is re-spelled, and the discriminator is the
-    `imported_bindings` value's own shape: a module import's DEFINING name is
-    the module itself (`L -> (lib2, lib2)`), while a `from m import f as g`
-    alias's defining name is the FUNCTION (`g -> (m, f)`) and a `g.…` chain is
-    a read through a value, not a library qualifier — `defining == module` is
-    what tells the two apart. A non-aliased import spells the qualifier as the
-    module already (`os -> (os, os)`), so `module != qualifier` excludes it and
-    every existing dotted call passes through unchanged. A bare name is
-    returned as it came in: the alias for one of those is a BARE local and the
-    flat map answers it through `dylib_aliased_export`, not this.
-    """
-    if not aliases or "." not in name:
-        return name
-    qualifier, dot, leaf = name.rpartition(".")
-    pair = aliases.get(qualifier)
-    if pair is None:
-        return name
-    module_spelling, defining = pair[0], pair[1]
-    if (module_spelling and defining == module_spelling
-            and module_spelling != qualifier):
-        return module_spelling + dot + leaf
-    return name
-
-
 def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
                         aliases: dict, callee: str):
     """The manifest export entry the call to `callee` binds, or None.
@@ -30880,12 +30410,6 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     `None` means nothing on this link line publishes the name, which is the
     caller's cue to keep whatever answer it has for a callee it cannot resolve
     (`dylib_extern_symbol` is the one that turns it into a refusal)."""
-    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
-    # with the local name, and BOTH lookups below are filed under the module
-    # the alias stands for. Re-spelled once, here, so the declaration reader
-    # and the symbol reader (`dylib_extern_symbol`) cannot answer about two
-    # different modules for the same call.
-    callee = _respell_aliased_module_qualifier(callee, aliases)
     entry = dylib_aliased_export(by_name, by_module, callee, aliases)
     if entry is not None:
         return entry
@@ -31134,12 +30658,6 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             raise CodegenError(dylib_aliased_export_refusal(
                 name, aliases, by_module))
         return (syms or {}).get(name, name)
-    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
-    # with the local name, and the export table is filed under the module the
-    # alias stands for. Re-spelled through the SAME helper the declaration
-    # reader uses, so the symbol and the declaration the arguments bind against
-    # reach the same library.
-    name = _respell_aliased_module_qualifier(name, aliases)
     entry = dylib_export_lookup(by_name, by_module, name, forwarded)
     if entry is not None:
         return entry.get("symbol") or name
@@ -49605,10 +49123,8 @@ def import_bindings(stmt) -> list:
                 continue
             out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
-            # owns; the alias `as` form binds the alias. The parser records the
-            # `as` name in `alias` (there is no `asname`), and it is None when
-            # the import has no `as`, so the guard keeps the base binding alone.
-            alias = getattr(stmt, "alias", None)
+            # owns; the alias `as` form binds the alias.
+            alias = getattr(stmt, "asname", None)
             if alias:
                 out.append((alias, part, part))
         return out
@@ -54865,8 +54381,7 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list,
-                        mappings=None) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -54929,7 +54444,7 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list,
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()", mappings)
+        list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
         return None, [], spread_refusal
     slots: list = list(args or [])

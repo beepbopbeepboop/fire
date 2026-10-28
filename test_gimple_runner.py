@@ -691,7 +691,7 @@ fn main():
     # stdout). The generator instance of the same shape is
     # `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
     # walk=_walk_tree)`, tracked in
-    # the (since-fixed) c_common/fsutil.py compile failure; this is the
+    # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md; this is the
     # ordinary-path twin, which that doc did not mention. Expected text is
     # CPython's for the same source.
     test_gimple_stdout("gimple_callable_valued_parameter_default", """\
@@ -737,7 +737,7 @@ main()
     # directly in the same function and never escapes, the body is inlined at
     # the call site instead, where the name resolves. Covers an int capture, a
     # capture used through a builtin, and a second lambda in the same
-    # function. See the (since-fixed) compiled-generator lambda-expression bug.
+    # function. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_capturing_lambda_inlined_at_call", """\
 fn outer():
     var n = 7
@@ -763,7 +763,7 @@ fn main():
     # gives a capturing lambda a heap env (a `MojoBoundMethod`, env as its
     # first parameter), so it is correct whether or not it escapes. Expected
     # output is now CPython's answer. See
-    # the (since-fixed) compiled-generator lambda-expression bug.
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_escaping_capturing_lambda_still_lifted", """\
 fn apply(f, v):
     return f(v)
@@ -785,7 +785,7 @@ fn main():
     # `_lower_LambdaExpr` now materializes a `MojoVarargFn` (callee, env,
     # leading-parameter count, and which of the three shapes it has), and the
     # runtime dispatch helpers pack. See
-    # the (since-fixed) compiled-generator lambda-expression bug.
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_variadic_lambda_positional_args_packed", """\
 def add(a, b):
     return a + b
@@ -987,7 +987,7 @@ main()
     # plain list, an `enumerate` pair, and a `dict.items()` pair. `zip` is NOT
     # here — `list(zip([1, 2], [3, 4]))` prints decimals for a DIFFERENT reason
     # (a `mojo_zip` result read as plain ints, the element-type half) and is
-    # filed as `CODEGEN_materialized_container_has_no_element_type (fixed)`.
+    # filed as `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
     # The dict key here is a STRING on purpose: an INTEGER key is quoted by
     # this repr (where CPython does not quote it) because a `keykind == 2`
     # slot has to remember whether the source wrote `1` or `"1"` and does
@@ -1106,34 +1106,6 @@ def main():
     print(outer_str()())
     print(outer_dbl()())
     print(outer_nocapture()())
-main()
-""")
-
-    # A lambda inside a nested `def` that reads a local of the enclosing
-    # function's OWN enclosing scope. The `def` never names `n` itself, only
-    # its lambda does, and a lambda is a closure boundary to the capture
-    # analysis, so `inner` used to skip the capture and the lifted lambda read
-    # `n` as 0: exit 0, stdout 4, CPython 6. Also the value the lambda reads
-    # must survive the `def`'s own env: `m` is captured one hop further in.
-    test_gimple_matches_cpython("gimple_lambda_in_nested_def_reads_outer_outer_local", """\
-def outer(x):
-    n = 2
-    def inner(y):
-        g = lambda z: z + n
-        return g(y)
-    return inner(x)
-
-def outer2(x):
-    n = 2
-    m = 10
-    def inner2(y):
-        g = lambda z: z + n + m
-        return g(y)
-    return inner2(x)
-
-def main():
-    print(outer(4))
-    print(outer2(4))
 main()
 """)
 
@@ -1856,7 +1828,7 @@ main()
     # here rather than assumed to follow from the single-level case.
     # (`*args` is deliberately NOT here: a variadic lambda segfaults on this
     # tree at every nesting depth including top level, which is
-    # the (since-fixed) compiled-generator lambda-expression bug's already-fixed
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's already-fixed
     # variadic work sitting in an unlanded branch, not this path.)
     test_gimple_stdout("gimple_lambda_two_deep_nested_def", """\
 def a():
@@ -2115,53 +2087,6 @@ main()
     # had no layout of its own. The hoist APPENDS rather than moves for
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
-    # A method of a class declared inside a function cannot reach that
-    # function's frame yet (bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md).
-    # The full fix threads the environment; until then the
-    # build refuses the read instead of answering 0. The first is the
-    # `functools.cmp_to_key` shape, the second a parameter read, the third a
-    # local read.
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_enclosing_param_is_refused", """\
-def cmp_to_key(mycmp):
-    class K(object):
-        def __lt__(self, other):
-            return mycmp(self.obj, other.obj) < 0
-    return K
-
-def main():
-    return 0
-""", "cannot reach its enclosing function's frame")
-
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_enclosing_local_is_refused", """\
-def mk(n: int):
-    t = n + 1
-    class C:
-        def get(self):
-            return t
-    return C().get()
-
-def main():
-    print(mk(10))
-""", "cannot reach its enclosing function's frame")
-
-    # A method that reads only its own names and a module-level global is not
-    # refused: the refusal is for enclosing-function scope and nothing wider.
-    test_gimple_stdout("gimple_nested_class_method_reads_module_global", """\
-SCALE = 3
-
-def mk(n: int):
-    class C:
-        def get(self, k: int):
-            t = k * SCALE
-            return t
-    return C().get(n)
-
-def main():
-    print(mk(4))
-""", "12\n")
-
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7
@@ -2236,27 +2161,6 @@ def main():
     print(plain())
 main()
 """, "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
-
-    # The RESULT of calling a lambda-bound local, bound to a local of its own.
-    # `r = f()` takes its declared type from `_quick_type` of the call, and a
-    # call through a local lambda was an unknown callee there, so `r` came out
-    # `int64_t` and printed its box (`0`) where CPython prints `False`. The
-    # return-type table the emitter already keeps for that callee was not
-    # visible to the local-variable pre-pass. The `*args, **kwargs` lambda is
-    # the same answer through the variadic value, whose record was missing
-    # from its own arm of `_lower_LambdaExpr`.
-    test_gimple_matches_cpython("gimple_lambda_call_result_bound_to_a_local_keeps_its_type", """\
-def main():
-    f = lambda: False
-    r = f()
-    print(r)
-    h = lambda: True
-    s = h()
-    print(s)
-    g = lambda *args, **kwargs: False
-    print(g())
-main()
-""")
 
     # The MODULE-LEVEL spelling of the test above, and the one that was broken.
     # `gimple_callable_value_keeps_its_return_type` puts its lambdas inside
@@ -2699,8 +2603,9 @@ print(k())
     #
     # Two branches named this same program — the rows below it and the
     # materialized-lambda env family — and only one name survived, because
-    # `CODEGEN_lambda_call_boundary_loses_the_return_type` was fixed. The name
-    # those docs carried is the one kept.
+    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and the
+    # bound-method-in-a-module-global report (since fixed) both CITED it by
+    # name. The name those docs carried is the one kept.
     test_gimple_matches_cpython("gimple_materialized_lambda_keeps_a_double_capture", """\
 def m():
     q = 2.5
@@ -3132,16 +3037,16 @@ main()
     # that only checked the crash could not tell a catchable raise from a
     # hard abort.
     test_gimple_runtime_error("gimple_imported_callable_default_raises", """\
-def probe(x, *, g=os.getloadavg):
+def probe(x, *, g=os.walk):
     return g(x)
 
 def main():
     print(probe("."))
 main()
-""", "NotImplementedError: os.getloadavg is a callable that is not available in compiled mode")
+""", "NotImplementedError: os.walk is a callable that is not available in compiled mode")
 
     test_gimple_stdout("gimple_imported_callable_default_raise_is_catchable", """\
-def probe(x, *, g=os.getloadavg):
+def probe(x, *, g=os.walk):
     return g(x)
 
 def main():
@@ -3149,7 +3054,7 @@ def main():
         r = probe(".")
     except NotImplementedError as e:
         print('NotImplementedError')
-        print('os.getloadavg' in str(e))
+        print('os.walk' in str(e))
     else:
         print('no exception')
 main()
@@ -3161,7 +3066,7 @@ main()
     # spurious exception in every program that merely mentions a callable
     # default.
     test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
-def probe(x, *, g=os.getloadavg):
+def probe(x, *, g=os.walk):
     return x
 
 def main():
@@ -3183,87 +3088,20 @@ main()
 print(sorted([1, 3, 2], key=lambda v: -v, reverse=True))
 """, "[1, 2, 3]\n")
 
-    # A named function as the key. Int elements first; the string-element
-    # case below was once measured as a miscompile
-    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a'], an
-    # unannotated parameter receiving the string bits) and is now correct, so
-    # it is pinned rather than left as a comment about a gap that is gone.
+    # A named function as the key. Deliberately an INT element: with a
+    # string element an unannotated named function's `int64_t` parameter
+    # receives the string bits and `len` misreads them
+    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a']) — a
+    # pre-existing compiled-path string-argument typing gap, independent of
+    # sorted (the same function called directly is correct), so it is not
+    # pinned here as if it worked. A LAMBDA and a BUILTIN key both handle
+    # string elements correctly, and both are covered above.
     test_gimple_stdout("gimple_sorted_key_function", """\
 def negate(x):
     return -x
 
 print(sorted([1, 3, 2], key=negate))
 """, "[3, 2, 1]\n")
-
-    # A named key over STRING elements, with an unannotated parameter: the
-    # shape that used to receive the string's bits in an `int64_t` slot.
-    test_gimple_stdout("gimple_sorted_key_function_string_elements", """\
-def bylen(s):
-    return len(s)
-
-print(sorted(["ccc", "a", "bb"], key=bylen))
-""", "['a', 'bb', 'ccc']\n")
-
-    # `items = iter(items)` rebinds an already-declared PARAMETER to a cursor
-    # over itself (the first line of c_common/iterutil.py's peek_and_iter and
-    # iter_many). Before, only a fresh local got the cursor, so `next(items)`
-    # on the rebound parameter fell to the always-refused `next` extern.
-    # `for` must resume where `next` stopped, and a 2-arg `next` must default.
-    test_gimple_stdout("gimple_iter_rebinds_a_parameter_to_a_cursor", """\
-def rest(items):
-    items = iter(items)
-    a = next(items)
-    out = []
-    for x in items:
-        out.append(x * 10)
-    return a, out
-
-def twice(items):
-    items = iter(items)
-    a = next(items)
-    b = next(items)
-    return a + b
-
-def dflt(items):
-    items = iter(items)
-    return next(items, -1)
-
-print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
-""", "(1, [20, 30]) 9 -1 9\n")
-
-    # A FLAT list parameter whose call sites disagree on the element type
-    # (ints, strings, floats; literal and bound-to-a-name). The contract is
-    # unknown, so the loop reads each slot through mojo_list_get_boxed and the
-    # CALLER records the kind of a string/float list it passes
-    # (`_tag_mixed_list_call_args`). Before, the strings and the second list's
-    # floats printed their addresses/bits, exit 0.
-    test_gimple_stdout("gimple_mixed_kind_flat_list_param_loop", """\
-def show(items):
-    for it in items:
-        print(it)
-
-def go():
-    a = ["p", "q"]
-    show(a)
-    b = [1.5, 2.5]
-    show(b)
-
-show([1, 2])
-show(["a", "b"])
-show([2.5])
-go()
-""", "1\n2\na\nb\n2.5\np\nq\n1.5\n2.5\n")
-
-    # String site FIRST, int site second (an int list records no contract, so
-    # it used to be invisible as a disagreeing call site).
-    test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
-def show(items):
-    for it in items:
-        print(it)
-
-show(["a", "b"])
-show([1, 2])
-""", "a\nb\n1\n2\n")
 
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison
@@ -6256,7 +6094,7 @@ main()
 """, "5\n")
 
     # 21. Builtin `dict` subclassing (Counter/OrderedDict shape) -- see
-    # bug:COMPILE_FAIL_collections___init__ (dict-subclass backing store). `class X(dict)` gets a
+    # bugs/COMPILE_FAIL_collections___init__.md. `class X(dict)` gets a
     # synthesized `_data: MojoDict *` backing store allocated by
     # `_alloc_X`; inherited `d[k]`, `d[k] = v`, `d[k] += n`, `k in d`,
     # `len(d)` route to it, and `__missing__` handles a subscript-read
@@ -6690,7 +6528,7 @@ fn main():
     # built: CPython's own `Apple/__main__.py --help` printed usage and exited
     # 0, and this printed `Unhandled exception: AttributeError:
     # cross_build_dir` and exited 0 too
-    # (DELETED commit 319ab932c; module-marker stub now loud)
+    # (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md; module-marker stub now loud)
     #
     # The raise happens at the CALL, which is where it becomes true, and it is
     # catchable — which is the second half of the assertion: a program that
@@ -6726,7 +6564,7 @@ def main():
         print("fell back")
 """, "fell back\n")
 
-    # Pinning regression — DELETED commit 319ab932c
+    # Pinning regression — DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md
     # (already fixed: stub raises NotImplementedError at call site, not silent 0)
     test_gimple_stdout("gimple_argparse_parse_args_pin", """\
 import argparse
@@ -8166,23 +8004,6 @@ fn main():
 """, "[1, 2.5]\n1\n2.5\n1\n2.5\n2\n[1, 2.0]\n[1, 2, 3]\n['a', 1]\n"
        "1\n2.5\n[1, 2.5]\n[1, 2.5]\n")
 
-    # `list(<a mixed list>)` is a copy of RAW WORDS with the source's kinds,
-    # not a typed walk: a copy read by index, by iteration, or copied again
-    # must answer each slot by its own kind. The typed walk read the int slot
-    # as a double (`[5e-324, 2.5]`) because the promoted element type is
-    # 'double' (CPython: `[1, 2.5]` / `1` / `2.5` / `1` / `2.5` / `[1, 2.5]`).
-    test_gimple_stdout("gimple_list_copy_of_mixed_list_reads_each_slot", """\
-fn main():
-    var f = [1, 2.5]
-    var g = list(f)
-    print(g[0])
-    print(g[1])
-    for y in g:
-        print(y)
-    print(list(list(f)))
-    print(list(f)[0])
-""", "1\n2.5\n1\n2.5\n[1, 2.5]\n1\n")
-
     # A `struct.Struct` handle held in a CLASS ATTRIBUTE has no local name
     # for the codegen to have recorded the handle's format against, so its
     # unpack result had no per-slot kinds at all and a mixed format's float
@@ -8705,7 +8526,7 @@ main()
     # range test, so it calls every positive int64 in [2^31, 2^47) a pointer.
     # They are here because the codegen PROVABLY knows an integer literal is
     # an integer, and supplies the answer rather than asking (see
-    # commit f7343ee40, whose
+    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, whose
     # dict-key spelling has its own test below).
     test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
 class Dialog:
@@ -8909,28 +8730,6 @@ def main():
     print(-1 in e)
 main()
 """, "7\n9\n3\n1\nFalse\nTrue\n")
-
-    # The NONE side of the same provenance. `None` lowers to the literal '0',
-    # the same spelling an integer 0 has, so once any `0` literal is in the
-    # function `callee = None` looked like an integer assignment and carried
-    # the integer mark onto `callee`, which is a `char *` local on the `name`
-    # branch. Its later `in` key was then bit-cast into an int word and the
-    # release got the pointer as its int64_t `orig` (-Wint-conversion, the
-    # self-host `mojoc` build). The `None` store must discard, and the str key
-    # must still find its entry.
-    test_gimple_stdout("gimple_none_store_does_not_mark_str_local_as_int", """\
-def main():
-    zero = 0
-    known = {"foo": 1}
-    name = "foo"
-    if zero == 0:
-        callee = name
-    else:
-        callee = None
-    print(callee in known)
-    print(callee is None)
-main()
-""", "True\nFalse\n")
 
     # The STORE side of the same fact: a large key that is ASSIGNED to a name,
     # rather than written at the subscript. `gen._int_word_vals` was carried
@@ -9686,7 +9485,7 @@ print({"a": 1})
     # parser treated `*` as the conversion character, so the template's
     # operand count never matched its spec count and the WHOLE template
     # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
-    # `0x%0*X` (commit e186f9737's reported
+    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
     # `    (): (0x%0*X, 0x%0*X),` entry lines).
     #
     # Every conversion is exercised, not just the hex one, because the
@@ -10180,7 +9979,7 @@ bytes_keyed()
     # same evidence. `list(d.items())` is separately broken — it reads each pair
     # pointer as an integer, which is the element-type half of
     # `list(<a boxed container>)` and is filed as
-    # `CODEGEN_materialized_container_has_no_element_type (fixed)`.
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
     #
     # `%(s)s` at the end is the SUBSCRIPT store's half: `d['s'] = 'q'` reached a
     # dict through a container global, which reads back as a boxed `int64_t`, so
@@ -10785,39 +10584,6 @@ def main():
 main()
 """)
 
-    # Regression for the list-of-lists parameter whose int and str call sites
-    # made every row print as a pointer decimal (and the nested loop SIGSEGV):
-    # a parameter called with BOTH int and str nested lists must not drop
-    # the container evidence and fall to the int64_t default.
-    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds", """\
-def show(rows):
-    for row in rows:
-        for cell in row:
-            print(cell)
-
-def main():
-    show([[1, 2], [3, 4]])
-    show([["a", "bb"], ["c"]])
-    show([[1, 2], [3, 4]])
-main()
-""")
-
-    # The REPR half of the same join: `print(row)` on each inner list, from
-    # the same two call sites. Before the fix the joined element type made
-    # every row print as its own `MojoList *` decimal.
-    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds_print_row", """\
-def show(rows):
-    for row in rows:
-        print(row)
-        for cell in row:
-            print(cell)
-
-def main():
-    show([[1, 2], [3, 4]])
-    show([["a", "bb"], ["c"]])
-main()
-""")
-
     # The same contract one hop further out: the argument is not a literal at
     # the call site and not a caller-scanned local, it is ANOTHER FUNCTION'S
     # RETURN VALUE. That is the third shape of the same question, and it was
@@ -11359,7 +11125,7 @@ main()
 
     test_qualified_module_struct_construction()
 
-    # the user-iterator next() bug (doc deleted in db724c4d6),
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
     # the part that is fixable without the type-inference project it is
     # parked on: an iterator struct reached through `from mod import Struct`
     # composes its protocol methods' C names with a hand-written
@@ -11803,13 +11569,13 @@ main()
 
     #
     # Every parameter here is ANNOTATED, and that is not decoration: an
-    # unannotated parameter of an IMPORTED function used to be typed from its
-    # call sites, and a module-qualified call site was invisible to the pass
-    # that collects them, so such a parameter fell back to `int64_t` and
-    # `len(x)` on it read a list header. The module-qualified-collector half of
-    # that defect is fixed, so this fixture pins the annotation spelling it
-    # kept as the cross-module shape. This test is about the shape of the
-    # emitted C; a second defect must not be what makes it red.
+    # unannotated parameter of an IMPORTED function is typed from its call
+    # sites, and a call site spelled `mod.f(...)` is invisible to the pass that
+    # collects them, so such a parameter falls back to `int64_t` and `len(x)`
+    # on it reads a list header. Measured, pre-existing, and filed as
+    # bugs/CODEGEN_module_boundary_carries_no_value_types.md — the same reason
+    # this fixture has no cross-module `yield` either. This test is about the
+    # shape of the emitted C; a second defect must not be what makes it red.
     _check_string_pool_declared_once("imported_string_pool_declared_once", {
         'slitpool_rows.py': "def keep(line: str) -> str:\n"
                             "    return line.partition('#')[0]\n",
@@ -12584,22 +12350,10 @@ print(list_str('ab'))
 print([*'ab'])
 """, "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
 
-    test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
-import sys
-import sys as s
-import os as o
-import signal as g
-print(sys.platform == 'linux' or sys.platform == 'darwin')
-print(s.platform == sys.platform)
-print(o.sep == '/' or o.sep == '\\\\')
-print(g.SIGTERM > 0)
-""", "True\nTrue\nTrue\nTrue\n")
-
     _parser_struct_and_symbols()
 
 
 def main():
-    global _FAIL
     gcc = find_gcc()
     result = subprocess.run([gcc, '--version'], capture_output=True)
     if result.returncode != 0:
@@ -12611,24 +12365,6 @@ def main():
     print("=" * 60)
 
     run_tests()
-    # Defined below main(): nothing else calls them, so without this list they
-    # never ran (module-level code after `main()` is unreachable, since main()
-    # ends in sys.exit). The stdout cases count themselves through
-    # test_gimple_stdout; the refusal cases raise AssertionError on a miss,
-    # which is counted here so one failure does not abort the tally.
-    for _late in (test_namedtuple_literal_lowers_and_runs,
-                  test_namedtuple_mixed_literal_types_is_refused,
-                  test_namedtuple_tuple_protocol_is_refused_by_name,
-                  test_nested_class_attr_reads_enclosing_local_regression,
-                  test_nested_class_attr_from_str_param_regression,
-                  test_instance_write_shadows_class_attr_regression,
-                  test_nested_class_attr_rebind_after_construction_regression,
-                  test_namedtuple_shaped_class_runs_regression):
-        try:
-            _late()
-        except AssertionError as e:
-            print(f"FAIL  {_late.__name__}: {e}")
-            _FAIL += 1
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed"
@@ -12636,227 +12372,6 @@ def main():
     sys.exit(0 if _FAIL == 0 else 1)
 
 
-def test_namedtuple_literal_lowers_and_runs():
-    """A module-level `Name = namedtuple('Name', [...])` with literal fields
-    lowers to the static class it denotes (fire_compiler.desugar_namedtuples)
-    instead of the unresolved-import stub that printed `namedtuple: unavailable
-    in compiled mode` and exited 0. Each field takes its type from the literal
-    constructor calls, so an int field and a str field are two namedtuples
-    here, as they must be (one untyped field would print its ints as strings).
-    The two have different arities, so Point's `_replace(3, 4)` is not
-    attributed to Triple.
-    Covers `_replace` returning a new instance and the original unchanged."""
-    test_gimple_stdout("gimple_namedtuple_literal_runs", """\
-from collections import namedtuple
-
-Point = namedtuple('Point', ['x', 'y'])
-Triple = namedtuple('Triple', 'a, b, c')
-
-def main():
-    p = Point(1, -2)
-    q = p._replace(3, 4)
-    print(repr(p))
-    print(q.x)
-    print(q.y)
-    s = Triple('a', 'b', 'c')
-    print(repr(s))
-    print(s.a)
-""", "Point(x=1, y=-2)\n3\n4\nTriple(a='a', b='b', c='c')\na\n")
-
-
-def test_namedtuple_mixed_literal_types_is_refused():
-    """One namedtuple field fed an int and a str literal must be refused by
-    name. Before the typed lowering an untyped field took one type for every
-    call, so `Point(1, 2)` next to `Point('a', 'b')` printed `Point(x='1', ...)`
-    and exited 0."""
-    src = """from collections import namedtuple
-
-Point = namedtuple('Point', ['x', 'y'])
-
-def main():
-    p = Point(1, 2)
-    q = Point('a', 'b')
-    print(repr(p))
-"""
-    try:
-        compile_mojo_to_gimple_exe(src)
-    except RuntimeError as e:
-        if 'namedtuple Point field' in str(e) and 'both int and str' in str(e):
-            return
-        raise AssertionError(f"refused, but not with the named message: {e}")
-    raise AssertionError("mixed int/str namedtuple fields compiled; they must be refused")
-
-
-def test_namedtuple_tuple_protocol_is_refused_by_name():
-    """A namedtuple value used as a TUPLE (indexed, unpacked, passed to `len`,
-    read through `_asdict`) must be refused by name. The lowered class has named
-    fields only, and before this refusal each of these compiled and exited 0:
-    `p[0]` printed a stack address, `a, b = p` bound nothing, `len(p)` was 0."""
-    head = "from collections import namedtuple\n\nPoint = namedtuple('Point', ['x', 'y'])\n\n"
-    bodies = {
-        "indexing": "def main():\n    p = Point(1, 2)\n    print(p[0])\n",
-        "unpacking": "def main():\n    p = Point(1, 2)\n    a, b = p\n    print(a)\n",
-        "len": "def main():\n    p = Point(1, 2)\n    print(len(p))\n",
-        "_asdict": "def main():\n    p = Point(1, 2)\n    print(p._asdict())\n",
-        # Reached through a container: the desugar's name tracking never sees
-        # `p` or `pts[0]` as a namedtuple, so these are refused by the static
-        # struct type at the subscript (emit_calls._refuse_namedtuple_tuple_use).
-        # Before that check each compiled and printed a stack address, exit 0.
-        "container_index": "def main():\n    pts = [Point(1, 2)]\n    print(pts[0][0])\n",
-        "for_index": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        print(q[0])\n",
-        "container_unpack": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        a, b = q\n        print(a)\n",
-        "container_len": "def main():\n    pts = [Point(1, 2)]\n    print(len(pts[0]))\n",
-        # The tuple BUILTINS, each on a container element. Before the
-        # builtin-site checks each compiled and failed at runtime (exit 1,
-        # "object is not iterable"), printed nothing (`reversed`), or crashed
-        # (`max`, SIGSEGV). Each is refused at its own lowering site, where
-        # the operand's static C type is known.
-        "container_list": "def main():\n    pts = [Point(1, 2)]\n    print(len(list(pts[0])))\n",
-        "container_sum": "def main():\n    pts = [Point(1, 2)]\n    print(sum(pts[0]))\n",
-        "container_max": "def main():\n    pts = [Point(1, 2)]\n    print(max(pts[0]))\n",
-        "container_any": "def main():\n    pts = [Point(1, 2)]\n    print(any(pts[0]))\n",
-        "container_sorted": "def main():\n    pts = [Point(1, 2)]\n    print(sorted(pts[0]))\n",
-        "container_reversed": "def main():\n    pts = [Point(1, 2)]\n    for v in reversed(pts[0]):\n        print(v)\n",
-        "container_enumerate": "def main():\n    pts = [Point(1, 2)]\n    for i, v in enumerate(pts[0]):\n        print(i)\n",
-        "container_zip": "def main():\n    pts = [Point(1, 2)]\n    for a, b in zip(pts[0], pts[0]):\n        print(a)\n",
-        "container_for_iter": "def main():\n    pts = [Point(1, 2)]\n    for v in pts[0]:\n        print(v)\n",
-    }
-    for kind, body in bodies.items():
-        try:
-            compile_mojo_to_gimple_exe(head + body)
-        except RuntimeError as e:
-            if 'has no tuple protocol' in str(e):
-                continue
-            raise AssertionError(f"{kind}: refused, but not with the named message: {e}")
-        raise AssertionError(f"{kind}: a namedtuple used as a tuple compiled; it must be refused")
-
-
-
-def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
-    A class-level attribute whose value names an enclosing function's local
-    was lowered as a `class` statement no-op, so the attribute stayed 0 at
-    exit 0. The class statement must store the value when it executes. Each
-    call reads its own value right after its `class` statement, so the two
-    calls must each print their own argument."""
-    test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
-def tag(version: int):
-    class Tag():
-        __version__ = version
-    return Tag().__version__
-
-def main():
-    print(tag(5))
-    print(tag(7))
-""", "5\n7\n")
-
-
-def test_instance_write_shadows_class_attr_regression():
-    """Pins the instance-read half of CPython's class-attribute lookup order.
-    An instance write to a name its class defines as an attribute shadows the
-    class attribute on read; an instance that was never written, and a read
-    through the class name, still see the class value. Reading the class
-    attribute through the instance must consult the instance first, and must
-    not lose the class value when the instance holds nothing
-    (the instance-write-ignored-on-read bug, fixed in 3accbab0f; the fix that
-    followed it dropped the class read entirely, which is what this pins
-    against: `obj.tag` and `self.FIELD` then read nothing)."""
-    test_gimple_stdout("gimple_instance_write_shadows_class_attr", """\
-def f(v: int):
-    class A():
-        x = v
-    a = A()
-    a.x = 9
-    return a.x
-
-def g(v: int):
-    class B():
-        x = v
-    b = B()
-    c = B()
-    c.x = 9
-    print(b.x, c.x, B.x)
-
-class Base:
-    tag = 7
-
-def main():
-    print(f(4))
-    print(f(10))
-    g(3)
-    b = Base()
-    b.tag = 3
-    print(b.tag, Base.tag, Base().tag)
-main()
-""", "9\n9\n3 9 3\n3 7 7\n")
-
-
-def test_nested_class_attr_from_str_param_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
-    A function-scoped class attribute whose value is a bare name of the
-    enclosing function's parameter was typed `int64_t` (the fallback for a
-    value with no literal type), so a `str` argument read back as a pointer-
-    sized integer. The attribute takes its C type from the parameter's
-    annotation, so each call must print its own string."""
-    test_gimple_stdout("gimple_nested_class_attr_from_str_param", """\
-def h(s: str):
-    class C():
-        name = s
-    return C()
-
-def main():
-    a = h("x")
-    b = h("y")
-    print(a.name)
-    print(b.name)
-""", "x\ny\n")
-
-
-def test_nested_class_attr_rebind_after_construction_regression():
-    """Pins the answer any per-execution fix for
-    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
-    must keep. A class attribute rebound on the CLASS after an instance was
-    built is seen by that instance (Python: the instance has no attribute of
-    its own, so it reads the class's current value, 3). A per-instance copy of
-    the attribute, read off the instance field, would answer 5 here."""
-    test_gimple_stdout("gimple_nested_class_attr_rebind_after_construct", """\
-def make(version: int):
-    class Tag():
-        __version__ = version
-    t = Tag()
-    Tag.__version__ = 3
-    return t
-
-def main():
-    t = make(5)
-    print(t.__version__)
-""", "3\n")
-
-
-def test_namedtuple_shaped_class_runs_regression():
-    """Pins the compiled-path target for `collections.namedtuple` (bug:COMPILE_FAIL_collections___init__, Option B): a static struct with
-    `__init__`, the `_replace` method and a `__repr__` that the synthesized
-    class would have to emit. The namedtuple lowering is not built yet; this
-    proves the struct shape it will produce compiles and runs with the
-    right values, so the next step can build on a verified target."""
-    test_gimple_stdout("gimple_namedtuple_shaped_class", """\
-class Point:
-    def __init__(self, x: int, y: int):
-        self.x = x
-        self.y = y
-    def _replace(self, x: int, y: int) -> Point:
-        return Point(x, y)
-    def __repr__(self) -> str:
-        return "Point(x=" + str(self.x) + ", y=" + str(self.y) + ")"
-
-def main():
-    p = Point(1, 2)
-    q = p._replace(3, 4)
-    print(repr(p))
-    print(q.x)
-    print(q.y)
-""", "Point(x=1, y=2)\n3\n4\n")
-
-
 if __name__ == '__main__':
     main()
+

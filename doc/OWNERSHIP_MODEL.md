@@ -131,7 +131,7 @@ exact shape:**
      PASS. `make check-native-dumpfull` FAILS — but confirmed, via a
      from-scratch `git worktree` build of unmodified HEAD, to ALREADY
      fail identically before any of this session's changes (see
-     commit e8a7135b8's
+     `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s
      2026-09-15 entry) — a pre-existing, separately-tracked gap unrelated
      to this work, not a regression this wiring introduced.
    - [x] Two real bugs surfaced and fixed BY the gate, exactly as it's
@@ -256,7 +256,7 @@ exact shape:**
      `make bootstrap` 180/180 byte-identical across 3 stages.
      `make check-native-dumpfull` FAILS but re-confirmed as the SAME
      pre-existing, already-tracked divergence (see
-     commit e8a7135b8's new
+     `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s new
      2026-09-15 "later same day" entry) — same ~20800-21100 first-byte
      window and ~530KB gap as that doc's own same-day baseline, both
      sides up ~28KB from this session's own new code being dumped

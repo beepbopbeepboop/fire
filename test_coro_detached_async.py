@@ -14,7 +14,7 @@ bare function-pointer VALUES). Under MOJO_CORO=stackswitch this exercises:
      coroutine representation), not just the cpp path's `MojoAsync *`.
   2. `GimpleGen.BUILTIN_VALUE_MAP` substituting `_coro_resume_fn`/
      `_coro_destroy_fn` for `__mojo_gen_resume_once`/`__mojo_gen_destroy`
-     (runtime/fire_coro_gen.c) instead of the cpp path's
+     (runtime/mojo_coro_gen.c) instead of the cpp path's
      `mojo_coro_resume_generic`/`destroy_generic`.
   3. A BARE call to a local nested async helper (`var coro = wrapper()`,
      no `create_task`/`asyncio.run` wrapper at all) being rewritten to its
@@ -29,7 +29,7 @@ bare function-pointer VALUES). Under MOJO_CORO=stackswitch this exercises:
 
 This compiles the REAL generated C with `gcc -fgimple`, links against this
 project's own runtime (fire_runtime.c, fire_async_runtime.cpp,
-fire_coro.c/fire_coro_gen.c/fire_async_sched.c/fire_coro_ctx_*), runs the
+mojo_coro.c/mojo_coro_gen.c/mojo_async_sched.c/mojo_coro_ctx_*), runs the
 executable, and asserts on real stdout.
 """
 import os
@@ -47,9 +47,9 @@ RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
                  if platform.machine() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
 
 _PASS = 0
 _FAIL = 0
@@ -68,9 +68,9 @@ def check(name, cond, detail=""):
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
-    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
-    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 
