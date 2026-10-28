@@ -3375,6 +3375,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
     for target in node.targets:
         if isinstance(target, gimple_ctypes.IdentExpr):
             tname = target.name
+            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype)
             # A chained assignment's IdentExpr target(s) can be a real
             # GLOBAL exactly like _gen_stmt_AssignStmt's single-target
             # case (either via an explicit `global x` inside a real

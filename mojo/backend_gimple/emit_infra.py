@@ -3336,6 +3336,15 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
             gen._cstr_key_src[key] = word
             return 'char *', key
         return 'char *', gen._new_val('char *', f'(char *){val}')
+    # A local declared `char *` by a LATER assignment but which earlier held
+    # a known integer (see `_track_pointer_actual_type`'s carry): consult the
+    # provenance before bit-casting, since the integer's bits are not a pointer.
+    if val in getattr(gen, '_int_word_vals', ()):
+        iv = gen._new_val('int64_t', f'(int64_t){val}')
+        ikey = gen._call_expr('char *', 'mojo_int_str_transient',
+                              [('int64_t', iv)])
+        gen._cstr_key_src[ikey] = val
+        return 'char *', ikey
     return typ, val
 
 
