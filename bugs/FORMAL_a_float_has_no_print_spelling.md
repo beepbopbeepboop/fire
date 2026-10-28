@@ -2,9 +2,7 @@
 
 **Area:** FORMAL, both backends — the refusal is
 `formal/model.py::float_print_refusal`, asked from `model.print_call_spelling`.
-**Status:** OPEN, measured 2026-10-05 on `work/formal65-format-and-repr` at
-`108392fc` (this repository, `/opt/homebrew/bin/python3` 3.14.7, formal arm64 +
-x86-64).
+**Status:** arm64 FIXED 2026-10-28 (helper in `arm64_codegen.py`, all float rows green); x86-64 helper landed but segfaults on the scan-loop `strtod` path — partial, needs the SysV variadic/XMM fix verified end-to-end.
 
 ## What I ran, what I saw, what I expected
 
