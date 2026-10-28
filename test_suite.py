@@ -2660,38 +2660,52 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The same property on the real registry entry rather than a synthetic one,
-    # where the class is the one the job will actually be given back.
-    real = suite.REGISTRY['ab-native']
-    check('disabled: the registry\'s own disabled job reserves 0, not its class',
-          suite.is_disabled(real) and suite.reserved_gb(real) == 0
-          and suite.memlimit(suite.memclass_for(real)) > 0,
-          f'reserved {suite.reserved_gb(real)} GB; its class is '
-          f'{suite.memclass_for(real)} '
-          f'({suite.memlimit(suite.memclass_for(real)):g} GB) — a class that is '
-          f'only a record must not be a claim on the machine')
+    # The real-registry half, re-baselined 2026-10-28, gate triage. It used to
+    # run on `ab-native`, the live case: DISABLED since 2026-09-30, 20.5 GB,
+    # the `program` class (55), `excl` — the shape the synthetic half above
+    # reproduces at the same class ceiling, which is why the reserves-0
+    # property is still covered with no live case. `2f75609d` (2026-10-26)
+    # turned it back to `expect=` once the blowup its marker waited on closed
+    # (bugs/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
+    # reason `disabled=` existed in the first place — a known outcome bought
+    # at a machine-sized price — is gone with it. So the state this half pins
+    # is the ABSENCE, stated rather than assumed: a disabled job that appears
+    # in the registry must be named here and its properties re-asserted on it,
+    # or the section above would stop saying anything about the live registry.
+    real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
+    check('disabled: the real registry has no job that is not run',
+          real == [],
+          f'{sorted(real)} — a disabled job in the registry must be named in '
+          f'this section and its reserves-0 / --list / --dry-run properties '
+          f're-asserted on it, the way ab-native was until 2f75609d')
 
     # --list and --dry-run, because a decision a reader cannot see is not a
     # decision: both have to say DISABLED, and the plan has to say the
     # reservation is 0 rather than leaving the reader to infer it from a
-    # missing line.
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        suite.print_list()
-    listing = buf.getvalue()
-    check('disabled: --list shows it, with the doc',
-          re.search(r'^  ab-native\b.*DISABLED', listing, re.M) is not None
-          and suite.MEM_DEBT_DOC in listing
-          and 'bugs/CODEGEN_ab_native_fails.md' in listing,
-          'ab-native is not marked DISABLED in --list, or its doc is not shown')
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        suite.print_plan(['ab-native'], _FakeOpts())
-    plan = buf.getvalue()
-    check('disabled: --dry-run plans it as disabled and reserves 0',
-          'DISABLED: not run' in plan and 'reserves 0 GB' in plan
-          and '0 jobs' in plan,
-          f'expected a disabled line with no jobs and no reservation: {plan!r}')
+    # missing line. On the real registry those paths have nothing to print
+    # right now, which is the state check above; on the synthetic spec the
+    # section is built from, they print the whole decision, so the display
+    # code is exercised every run rather than only while a case is live.
+    with Sandbox(off=dict(cmd=ok_cmd('pass'), mem='program',
+                          disabled=suite.MEM_DEBT_DOC)):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_list()
+        listing = buf.getvalue()
+        check('disabled: --list shows it, with the doc',
+              re.search(r'^  off\b.*DISABLED', listing, re.M) is not None
+              and suite.MEM_DEBT_DOC in listing,
+              f'off is not marked DISABLED in --list, or its doc is not shown: '
+              f'{[l for l in listing.splitlines() if l.startswith("  off")]}')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_plan(['off'], _FakeOpts())
+        plan = buf.getvalue()
+        check('disabled: --dry-run plans it as disabled and reserves 0',
+              'DISABLED: not run' in plan and 'reserves 0 GB' in plan
+              and '0 jobs' in plan,
+              f'expected a disabled line with no jobs and no reservation: '
+              f'{plan!r}')
 
 
 def test_the_disabled_markers_in_the_registry_are_honest():
@@ -2776,8 +2790,23 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    check('disabled markers: ...and it is not vacuous: a job is disabled',
-          len(real) >= 1, f'no registered job is disabled: {sorted(real)}')
+    # The vacuity this used to take from the real registry — at least one job
+    # is disabled, so the section above is saying something about the live
+    # tree — ended with the last disabled job: `ab-native` was the case until
+    # `2f75609d` turned it back to `expect=` on 2026-10-26 (the run is cheap
+    # now, which is the whole reason for the switch). The mechanism is not
+    # vacuous for that: the synthetic cases above run every time against the
+    # real runner code, the per-name loop below re-checks each marker against
+    # the tree the moment a job is disabled, and the guarded exec below
+    # proves the import-time refusal fires on a marker. What this check now
+    # pins is the STATE the section is written for, stated rather than
+    # assumed — the same re-baseline the sibling section above does.
+    check('disabled markers: the state the section is written for is stated, '
+          'not assumed: no registered job is disabled',
+          real == [],
+          f'{sorted(real)} — a disabled job must be named in this section and '
+          f'its marker re-checked against the tree, the way ab-native was '
+          f'until 2f75609d')
     for name in real:
         spec = suite.REGISTRY[name]
         check(f'disabled markers: {name} names a doc that is in the tree',
@@ -2792,22 +2821,32 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # The bug-doc check is the one place in this mechanism where "loudly" is
     # the whole requirement — a warning in a log nobody reads is how a disabled
     # test stays off for years — so the guard is executed, not inspected.
+    #
+    # Self-contained since 2026-10-28, gate triage: the registry no longer
+    # carries a disabled job, so there is no live marker to rewrite. Instead
+    # the guard INJECTS its own registration — spliced in immediately before
+    # the import-time check itself, because the check reads the registry at
+    # one fixed line and a registration appended after it would land past the
+    # subject — and the rewrite then targets the injected line by job name.
+    # The pre-rewrite state names a doc that EXISTS, so a rewrite that silently
+    # fails (n == 0) leaves a registry the import accepts, and the check below
+    # goes red on an unpatched file — the same failure mode the version
+    # anchored on the live ab-native line had, with nothing left to anchor on.
     path = os.path.join(HERE, 'tools', 'suite.py')
     with open(path) as f:
         src = f.read()
-    # Line-anchored on purpose: the module docstring and the section comment
-    # both spell `disabled='bugs/<doc>.md'` as PROSE, and a pattern that
-    # matched those would rewrite a comment and leave the registry alone — the
-    # guard below would then pass on a file whose marker is perfectly fine.
-    # `(?m)^\s*disabled='` matches the registration line and nothing else.
+    anchor = '_disabled_problems = disabled_problems()'
+    injected = ("test('zz_guard_disabled', [PY, 'test_ab_native.py'], "
+                "disabled='bugs/CODEGEN_ab_native_fails.md')\n")
+    spliced = src.replace(anchor, injected + anchor, 1)
     doctored, n = re.subn(
-        r"(?m)^(\s*)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
-        r"\1disabled='bugs/NO_SUCH_DOC_ANYWHERE.md'", src, count=1)
+        r"(?m)^(\s*test\('zz_guard_disabled'.*?)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
+        r"\1disabled='bugs/NO_SUCH_DOC_ANYWHERE.md'", spliced, count=1)
     check('disabled markers: the guard test still recognises the marker it '
-          'rewrites', n == 1
-          and 'disabled=\'bugs/CODEGEN_ab_native_fails.md\'' in src,
-          'tools/suite.py no longer spells the ab-native disabled= the way this '
-          'test rewrites it, so the guard below would pass on an unpatched file')
+          'rewrites', spliced != src and n == 1,
+          f'the import-time anchor is gone (spliced==src: {spliced == src}) '
+          f'or the rewrite hit {n} line(s) — the guard below would pass on an '
+          f'unpatched file, which is the failure this half exists to end')
     ns = {'__name__': 'suite_doctored_disabled', '__file__': path}
     try:
         exec(compile(doctored, 'suite.py(doctored)', 'exec'), ns)
@@ -2816,7 +2855,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         rc, msg = 1, str(e)
     check('disabled markers: a stale marker stops the runner at import',
           rc == 1 and 'NO_SUCH_DOC_ANYWHERE.md' in msg
-          and 'ab-native' in msg,
+          and 'zz_guard_disabled' in msg,
           f'rc={rc} msg={msg!r}')
 
 
