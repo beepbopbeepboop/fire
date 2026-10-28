@@ -491,7 +491,20 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 610),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 615),   # --fix writes the live figure
+    # 610 -> 615 (2026-10-27, gate fixup on the integ batch 08e9229bf):
+    # TWO names, both read off the call at 2cf8a3358 ("Partial fix for dict
+    # slot read root cause") — `mojo_dict_slot_kind` (the MOJO_KIND byte of
+    # one `_DictSlot.kind`, the per-slot-kind read the dict repr now asks
+    # through) and `mojo_dict_repr_slot` (the same slot's rendered value).
+    # The codegen temp-tracking half of that campaign is still open in its
+    # doc, so this is a partial fix's census, not a closure. This rung also
+    # closes a PRE-BATCH drift, measured rather than inferred: the literal
+    # was 610 while the live scan read 613 at the pre-batch tip 6c8aba839 —
+    # the ledger's newest rung above is 594 (2026-10-23), and the names
+    # between 594 and 613 are the unledgered growth this file exists to
+    # surface (rthdrscan was red on 610 vs 613 before the batch; the batch's
+    # two are the 613 -> 615 step).
     # 593 -> 594 (2026-10-23, part 6 family S): `mojo_str_first_codepoint`
     # — the 1/2/3/4-byte lead-byte decode (NUL/empty -> 0) the spelling+
     # arity-gated `Codepoint.ord(<string>)` branch reaches, so `ord` on a
