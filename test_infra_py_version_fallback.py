@@ -1,6 +1,6 @@
 """Regression for INFRA: bare python3 <3.12 gives opaque TypeError on import.
 Before fix: TypeError propagated raw; after: clear ImportError with floor msg."""
-import importlib, sys
+import importlib, sys, types
 
 # Import the module-to-test by importing fire.py (it defines _load_formal_build)
 import fire as _fire
