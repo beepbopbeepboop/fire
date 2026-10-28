@@ -3876,6 +3876,16 @@ test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
             'tools/formal_host_import_wall.py',
             'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import wall tool: which readers it asks, not its numbers')
+# The measurement behind `formal-host-import-wall`: the shape that separates
+# each reader, pinned on synthetic sources rather than on the live sweep.
+# 10 s, 0.2 GB peak, `tiny`; in `check` because it is the same area and a
+# red here was the root cause of the dead-import / importlib.util row bugs.
+test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
+     mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
+            'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
+     desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
 # the same reasoning rather than excused: seven assertions that a per-STRUCT
 # predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is

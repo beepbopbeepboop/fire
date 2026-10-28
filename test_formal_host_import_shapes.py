@@ -444,5 +444,53 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
             f"ratchet can make on its own")
 
 
+class TestTheDocRatchet(unittest.TestCase):
+    """Regression pins for TEST_formal_host_import_shapes_is_red_and_in_no_bucket.
+
+    Both rows were red before 2026-10-08. This class pins the correct state
+    so a later regression lands here rather than surfacing only as a red ratchet."""
+    
+    def setUp(self):
+        self.dir = os.path.dirname(os.path.abspath(__file__))
+    
+    def test_no_dead_import_in_formal_doc_index(self):
+        """Row 1: dead host import in tools/formal_doc_index.py should be absent.
+
+        Before 2026-10-08 the file carried an unused `import subprocess` that
+        the dead‑import ratchet counted as blocking the file — exactly as if the
+        module were absent. It was removed in commit 73e03459a."""
+        found = S.dead_host_imports(self.dir)
+        doc_index = {p: n for p, n in found if p == "tools/formal_doc_index.py"}
+        self.assertEqual(doc_index, {},
+                         "a dead host import blocks its file for exactly the reason "
+                         "an absent module does; this is an unused `import subprocess`")
+    
+    def test_importlib_util_row_names_include_find_spec(self):
+        """Row 2: importlib.util row should be pinned to three names including find_spec.
+
+        Before 2026-10-08 the row only listed two names (`module_from_spec`,
+        `spec_from_file_location`). The `find_spec` name was added and pinned
+        because it asks an embedded CPython to resolve a module at build time,
+        which differs from the runtime‑by‑path capability the row actually cares
+        about. The test was updated in commit 73e03459a."""
+        sweep = S.default_sweep()
+        if not sweep or not os.path.isfile(sweep):
+            self.skipTest("no sweep log in this checkout")
+        rows = S.rows_for(sweep)[0]  # S.rows_for returns (rows_list, missed, total)
+        row = next((r for r in rows if r["name"] == "importlib.util"), None)
+        if row is None:
+            self.skipTest("the importlib.util row has left the corpus")
+        self.assertTrue(row["live"] > 0,
+                        "importlib.util has left the corpus; delete this case")
+        self.assertEqual(sorted(row["names"]),
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
+                          "importlib.util.spec_from_file_location"],
+                         "the importlib.util row is blocked on the names that ask the "
+                         "embedded CPython to place a module — by search, by path, or "
+                         "from a spec — which is why the row is tiered unreachable and "
+                         "not modelled")
+
+
 if __name__ == "__main__":
     unittest.main()
