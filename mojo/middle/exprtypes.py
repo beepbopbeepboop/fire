@@ -1398,18 +1398,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             if not target_name:
                 continue
             iterable = n.iterable
-            # `generator_api` is None when this walker is reused for an ASYNC
-            # unit (cpp_async.py's _gen_cpp_async_unit calls it to infer the
-            # function's value ctype; an async function has no generator
-            # delegates, so there is nothing to overlay) — and an async body
-            # is exactly where `async for x in f():` lives, so the unguarded
-            # `in generator_api` below is a TypeError there. dd35f41cc added
-            # this pre-pass for the generator case (test_regress_nested_gen_
-            # yield_direct.py) and the async call site went red with it
-            # (test_gimple's async-generator cpp-path cases, 2026-10-28 gate
-            # triage); the None case has nothing to bind, so skip the overlay.
             if (isinstance(iterable, CallExpr) and isinstance(iterable.func, IdentExpr)
-                    and generator_api is not None
                     and iterable.func.name in generator_api):
                 _vct = generator_api[iterable.func.name].get('value_ctype')
                 if _vct is not None:

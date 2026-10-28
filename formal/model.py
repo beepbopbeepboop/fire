@@ -24227,7 +24227,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 719 entry
+# a list that rots, and the shape answers the same question for all 718 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24397,7 +24397,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 719 entry points for that reason looks
+    scalar — and a rule that refuses all 718 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -25695,50 +25695,6 @@ def bool_print_operand(e):
                          col=getattr(e, "col", 0))
 
 
-# The label of the one helper function each backend appends to its image:
-# CPython's shortest-round-trip `repr()` of the `double` whose bit pattern it is
-# handed, written into the caller's buffer. It is a label and not a C symbol on
-# purpose: the image links only the C library, and the whole point of the helper
-# is that the conversion CPython prints is NOT any of that library's, so it has
-# to live in the image's own `__text`. `print` of a float is the only caller,
-# and the name is published here rather than spelled in each backend because the
-# two must emit the same label the same way, and a second spelling is how the
-# call lands on a label nothing defines.
-FLOAT_REPR_SYMBOL = "__fire_float_repr"
-
-
-class FloatPrintOperand:
-    """A `print` operand that is a `double`, rendered by the float helper.
-
-    Not an expression the emitter dispatches on its own: it is a marker the
-    operand slot of `print_call_spelling`'s answer carries, and the emitter's
-    one arm for it evaluates `expr` (the double's bit pattern into the value
-    register) and branches to `FLOAT_REPR_SYMBOL` with a buffer, so the slot
-    the printf's `%s` reads holds the address of CPython's spelling of the
-    value rather than the value's own word. The wrapper exists so that both
-    halves of the decision — which operand is a fragment and which is a value,
-    and that this value is a double whose text is computed, not interned — are
-    made in `print_call_spelling` once, and each backend supplies only the
-    branch and the buffer it can spell on its own machine.
-
-    `index` is the ordinal of this float AMONG THE FLOATS of one print, and
-    `position` its index in the print's OPERAND list (the literals are
-    fragments and not operands, so the two counts differ). They are the
-    machine half of the address of the helper's buffer, which each backend
-    computes from them: the block of buffers is one reservation per print
-    call, `index` picks the 64-byte slot in it, and `position` says how far
-    the call machinery's own argument spills have carried the stack when
-    this operand is evaluated. Both are made here, in the one place that
-    sees the whole operand list, so the two backends cannot number the
-    buffers differently.
-    """
-
-    def __init__(self, expr, index, position):
-        self.expr = expr
-        self.index = index
-        self.position = position
-
-
 # ── `bytes`: the one kind whose CPython rendering is a QUOTED, ESCAPED word ──
 #
 # `print(b)` writes `repr(b)` for a `bytes`, never its text: `b'ab'`, not `ab`,
@@ -25813,28 +25769,64 @@ def bytes_repr_body(value: str) -> str:
     return quote + "".join(out) + quote
 
 
-# ── what a `print` of a FLOAT and of a CONTAINER now gets ──────────────────
+# ── the two refusals a `print` of a FLOAT and of a CONTAINER now gets ───────
 #
-# The FLOAT is RENDERED. Its old refusal ("print() of a float is refused …")
-# was a sentence whose reason was still right — CPython's `str()` of a float is
-# `repr()` of it, the SHORTEST decimal that parses back to the same 64 bits, and
-# no libc conversion is that function: `%g` drops the `.0` CPython writes
-# (`100000` where CPython writes `100000.0`), `%f` is six digits after the
-# point (`1.500000`), `%e` is a fixed scientific spelling CPython uses only
-# outside `[1e-4, 1e16)`, `%.17g` round-trips without being what CPython
-# PRINTS (`0.10000000000000001` where CPython writes `0.1`), and `-0.0` survives
-# only through the round-trip rule's own spelling. The rendering that replaced
-# the refusal is each backend's `FLOAT_REPR_SYMBOL` helper, which computes that
-# shortest decimal over the value's own bits — `%.*g` at the smallest precision
-# that parses back, laid out in CPython's notation, with `inf`/`-inf`/`nan` and
-# `-0.0` from the same reader — and `print_call_spelling`'s `FLOAT_KIND` arm
-# hands the value to it through `FloatPrintOperand`.
+# Both replace a message that was FALSE about the source, which is the defect
+# `FORMAL sweep work map 2026-10-05 b14` §4.2 names for the `rf`/`fr`
+# f-strings ("every one is refused with a sentence that is FALSE about the
+# source").  `print(1.5)` was refused with "print() cannot tell whether
+# FloatLiteral is a string or a number … guessing would print an address as if
+# it were text" — and this path knows perfectly well that `1.5` is neither: the
+# model's own `FLOAT_KIND` says it is a `double`, and `is_number_kind` says
+# no.  The refusal was right and its REASON was a lie about a value the model
+# had already classified, which sends the reader to annotate a literal.
 #
-# The CONTAINER is still refused, for the shape `container_print_refusal`
-# names: a count this build does not know, a loop rather than a conversion.
-# Its message replaced the generic one that was FALSE about the source in the
-# same way the float's was, and the two sentences are the difference between
+# A refusal whose reason names the real absence is the whole difference between
 # "this path cannot do it" and "you wrote something wrong".
+
+
+def float_print_refusal(backend: str) -> str:
+    """Why `print` of a `double` is refused rather than rendered.
+
+    NOT "there is no float here" — there is one 64-bit word holding the
+    IEEE-754 binary64 pattern, and `model.FLOAT_KIND` is the row that says so.
+    The absence is the RENDERING, and it is a specific one: CPython's `str()` of
+    a float is `repr()` of it, which is the SHORTEST decimal string that parses
+    back to the same bits (David Gay / Grisu), and libc's conversions are not
+    that function:
+
+      * `%g` is six significant digits by default and drops the `.0` CPython
+        writes: `repr(100000.0)` is `100000.0` where `%g` writes `100000`;
+      * `%f` is six digits after the point: `1.5` becomes `1.500000`;
+      * `%e` is never CPython's spelling — CPython uses scientific notation only
+        outside `[1e-4, 1e16)`;
+      * `%.17g` round-trips but is not what CPython PRINTS: `repr(0.1)` is `0.1`
+        and `%.17g` writes `0.10000000000000001`;
+      * `-0.0` needs the round-trip rule's own spelling: CPython writes `-0.0`,
+        `%f` writes `-0.000000` and `%g` writes `-0`.
+
+    (`inf`, `-inf` and `nan` are NOT part of this: measured on this target's
+    libc, all four conversions write them the way CPython spells them. An earlier
+    draft of this text claimed otherwise and the measurement corrected it — see
+    `bugs/FORMAL_a_float_has_no_print_spelling.md` §3 for the whole table.)
+
+    So every conversion libc offers is either a wrong number or a wrong
+    SPELLING, and this path's whole rule about output is that what lands on
+    stdout is what the source says.
+    """
+    return (
+        f"print() of a float is refused on the formal {backend} path, and the "
+        f"missing thing is its SPELLING rather than its storage: the value is "
+        f"one 64-bit word holding an IEEE-754 binary64, but CPython's `str()` "
+        f"of a float is the shortest decimal that parses back to the same bits "
+        f"(`repr(0.1)` is `0.1`, `repr(100000.0)` is `100000.0`), which is not "
+        f"any libc conversion — `%f` writes six digits after the point, `%g` drops the "
+        f"`.0`, `%e` is a fixed scientific spelling CPython only uses outside "
+        f"`[1e-4, 1e16)`, and `%.17g` round-trips without being what CPython "
+        f"prints. Refused rather than emitted, because a float printed in a "
+        f"spelling the source never wrote is a wrong answer that looks right. "
+        f"Print an integer if you meant one"
+    )
 
 
 def container_print_refusal(backend: str, kind, node_name: str) -> str:
@@ -25915,16 +25907,10 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
     printf for fewer arguments than it was handed and everything after the first
     literal would be read one slot late.
 
-    Raises `CodegenError` for the shapes this path cannot render, each with
+    Raises `CodegenError` for the five shapes this path cannot render, each with
     a message that says what CPython prints and what is missing here.
     """
     frags, operands = [], []
-    # The ordinal of a float AMONG THE FLOATS of this print — `index` on the
-    # `FloatPrintOperand` — and the operand list's own length, which is its
-    # `position`. Both are needed by the backends' buffer arithmetic (see the
-    # class's docstring), and the operand list is the one this loop builds, so
-    # this loop is the one place both are known together.
-    float_index = 0
     for a in args:
         if isinstance(a, F.StringLiteral):
             # `print_literal` renders a `str` literal's text and a `bytes`
@@ -25977,18 +25963,12 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
         if string_operand_is_string(kind):
             frags.append("%s")
         elif kind == FLOAT_KIND:
-            # Its own arm, and it comes BEFORE the generic refusal below for
-            # the reason that refusal was FALSE about a float: the model
-            # classifies one as `FLOAT_KIND` and `is_number_kind` says no. The
-            # answer is CPython's `repr()` of the value, computed at run time
-            # by the backend's `FLOAT_REPR_SYMBOL` helper — the shortest
-            # decimal that parses back to the same 64 bits, in CPython's
-            # own notation — and the slot the `%s` reads is that helper's
-            # buffer, not the double's own word.
-            frags.append("%s")
-            operands.append(FloatPrintOperand(a, float_index, len(operands)))
-            float_index += 1
-            continue
+            # Its own arm, and it comes BEFORE the generic refusal below
+            # because the generic one is FALSE about a float: the model
+            # classifies one as `FLOAT_KIND` and `is_number_kind` says no, so
+            # "cannot tell whether this is a string or a number" describes a
+            # value the model has already classified.
+            raise CodegenError(float_print_refusal(backend))
         elif is_number_kind(kind):
             # `is_number_kind` and not `== INT_KIND`: a type TAG is a word, so
             # `print(t)` for `t = bool` prints the tag, which is what it
@@ -54401,8 +54381,7 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list,
-                        mappings=None) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -54465,7 +54444,7 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list,
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()", mappings)
+        list(args or []), list(kwargs or []), f"call {name}()")
     if spread_refusal is not None:
         return None, [], spread_refusal
     slots: list = list(args or [])

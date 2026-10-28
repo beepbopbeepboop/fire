@@ -111,3 +111,9 @@ CLAUDE.md's rule about type-resolution refusals.
 `cmp_to_key` shape (a nested class whose method reads the enclosing
 PARAMETER), asserted against CPython's exact text. A compile-only assertion
 is worthless here: this compiles, links and exits 0.
+
+## 2026-10-28 update (work/bug-codegen-nested-class-method-cannot-r-2810)
+- Confirmed still OPEN / unfixed.
+- Added regression test `test_gimple_runner.py::test_nested_class_method_reads_enclosing_local_regression` (expects `11\n`, currently produces `1\n` — failure verified by inspection of emitted C fallback to `/* ct param or undeclared: n */`).
+- Full fix requires per-class env struct, capture list over `sd.methods`, and ownership/freeing rules; beyond light-worker scope (needs `discover_closures` extension + env struct minting before `_gmi_hoist_nested_structs`, plus `emit_methods.py` / call-site parameter threading). Not attempted.
+- No doc removal; not fully fixed.
