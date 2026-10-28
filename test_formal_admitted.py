@@ -1454,7 +1454,7 @@ AXIOM_CLOSURE = {
     # says the ARRIVAL is specifications and not new trusted evaluation.
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
-    # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
+    # unchanged.  See bug: stale AXIOM_CLOSURE (re-pinned 2026-10-05 / 2026-10-18).
     # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
     # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
     # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
