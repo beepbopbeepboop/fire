@@ -36,8 +36,36 @@ Run: `python3 fire.py build gs2.mojo -o gs2 && ./gs2`
 
 A variant that calls `x.byte_length()` before the return builds and then fails at **link**: `Undefined symbols: "_Span_byte_length", referenced from: _get_sign_… `. That is the imported-generic "calls nothing defines" class: see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`. The repro above avoids it on purpose.
 
+## Root cause (found 2026-10-28)
+
+The crash is at the CALL SITE, not in the tuple. The `get_sign` body is fine
+(`MojoList` with a `double` slot and a `Span *` slot). In `main`, the argument
+is not converted to a `StringSlice`:
+
+```c
+/* gs3.mojo: var text = String("-abc"); var s = get_sign(text) */
+text = _t1;                    /* a bare char * (the String lowered to its data) */
+_t3 = (int64_t)text;
+_t4 = (Span *)_t3;             /* the char * cast to Span *: no Span is built */
+_t2 = get_sign_fa3cf4 (_t4);
+```
+
+`get_sign` then reads `x->_data` through that pointer. lldb on `gs3-master`:
+`EXC_BAD_ACCESS (address=0xa)` at `get_sign_fa3cf4(x=…)`, the first `x->_data`.
+
+Real Mojo performs the `String` -> `StringSlice` conversion (and the literal
+one) at the call. Our codegen has no such conversion for a `Span *` parameter:
+it casts the argument's value to the pointer type.
+
+Measured: `String("-abc")` argument → real Mojo `-1.0`; ours segfault (exit 139).
+
 ## Next step
 
-1. Read the `get_sign` C in the build directory (`fire.py build --dump` / the generated `.c`) and check the tuple slot types at the `return` sites: the `x[byte=1:]` slot should be `Span *`, the `Float64` slot `double`.
-2. Check whether the `print(s[0])` read goes through `mojo_list_get_int` (an int accessor on a `double` slot), which is the mis-read the cas-py doc describes.
-3. Once the segfault site is named, fix it at the root and add a test that compiles and runs this program (not a text check of the source).
+1. Find where a call argument is coerced to a parameter's declared type
+   (`Span *`), and add the `String`/`char *` -> `Span` conversion there (build
+   the `Span` with `_alloc_Span`, `_data` = the bytes, `_len` = the length), as
+   the codegen already does for other value-to-struct coercions.
+2. Add a test that compiles and RUNS `gs3.mojo` and checks `-1.0` (not a text
+   check of the source). Then re-check `gs2.mojo` (the literal-argument form).
+3. The `Span_byte_length` link error is the separate imported-generic class
+   (see the Related section).
