@@ -2100,6 +2100,11 @@ STALE_PER_CHILD_BUDGETS = {
     'test_async_runtime_scaffold.py': 1,
             'test_closure_capture_comptime_func_params.py': 2,
     'test_comptime_bracket_params.py': 1,
+    'test_container_constructor_arg_um.py': 1,  # +1 2026-10-27: the pinning
+        # file's own `fire.py run` of the .mojo it writes (3e4501a42, the
+        # container-constructor pin) — a per-child wall on a run of a program
+        # the case wrote itself, which is what a residue row is for; the file
+        # does not import exec_budget, so it is residue, not subject.
     'test_container_equality.py': 3,
     'test_container_membership.py': 3,
     'test_container_ordering.py': 3,
@@ -2108,7 +2113,11 @@ STALE_PER_CHILD_BUDGETS = {
         'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
-    'test_formal_admitted.py': 5,  # 5 remain as data-table examples; 7 child budgets converted
+    # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
+    # data-table examples") is dropped 2026-10-27: the conversion landed, and
+    # the walk now finds 0 real literals — the "data-table examples" are
+    # string contents (the driver-text table at the file's bottom), which the
+    # ast walk correctly does not count as call sites.
     # +1 on 2026-10-05: `work/formal40-4-r2`'s
     # `TestTheDivisionExamplesHaveNoProofToCheck::test_the_image_itself_is_fine_`
     # `without_the_prove` — a `subprocess.run` of the `floordiv`/`udivmod`
