@@ -1430,6 +1430,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _bm:
                 _canon = _as_str(_bm)
 
+        # Imported-module comptime constants (e.g., stat.S_IFREG, import stat)
+        if (module_name in gen.imported_symbols
+                and hasattr(gen, '_import_module_comptime_vals')):
+            _imc = gen._import_module_comptime_vals
+            # Try both local alias and canonical module qualifier
+            for _qual in (module_name, _canon):
+                if _qual in _imc and node.member in _imc[_qual]:
+                    _val = _imc[_qual][node.member]
+                    if isinstance(_val, str):
+                        gen._comptime_str_names.add(node.member)
+                    # Return as int64_t literal for numbers
+                    return 'int64_t', gen._new_val('int64_t', str(_val))
+
         # `cls.CLASSATTR` inside a classmethod: `cls` is a PARAM (so the
         # bare-type-name `ClassName.ATTR` branch further down is skipped —
         # `cls` is in var_types), but `.member` is a real class attribute of

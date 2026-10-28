@@ -3307,7 +3307,9 @@ def gen_module_impl(self, stmts):
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
     self._toplevel_dep_init_modules: list[str] = []
+    self._import_module_comptime_vals = {}  # module qualifier → {name: comptime value} for import X
     _gmi_prefold_toplevel_comptime(self, stmts)
+    # Handle FromImportStmt (from X import NAME)
     for _fis in stmts:
         if not isinstance(_fis, FromImportStmt):
             continue
@@ -3329,6 +3331,24 @@ def gen_module_impl(self, stmts):
                 if isinstance(_found['v'], str):
                     self._comptime_str_names.add(_as_str(_isym))
                 self._comptime_vals[_isym] = _found['v']
+    # Handle ImportStmt (import X; later X.NAME) - populate per-module comptime table
+    for _fis in stmts:
+        if isinstance(_fis, ImportStmt):
+            try:
+                _imp_path, _imp_src, _imp_stmts = self._parsed_import(_fis.module)
+            except Exception:
+                continue
+            if not _imp_stmts:
+                continue
+            # _fis.module is the name X in "import X"
+            module_qualifier = _fis.module
+            self._import_module_comptime_vals[module_qualifier] = {}
+            # Scan all ComptimeVarStmt at module level in the imported module
+            for _cn in _imp_stmts:
+                if isinstance(_cn, ComptimeVarStmt):
+                    _cv = self._eval_const(_cn.value)
+                    if _cv is not None:
+                        self._import_module_comptime_vals[module_qualifier][_cn.target] = _cv
     self._import_scope_stack.append({})
     _generator_fns: dict[int, FunctionDef] = {}
     _async_fns: dict[int, FunctionDef] = {}
