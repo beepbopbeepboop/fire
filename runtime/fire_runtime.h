@@ -1256,6 +1256,26 @@ typedef struct {
                      * or the string "5", so the two remain one key as before
                      * but a lookup by int needs no formatting at all. */
     int64_t  ikey;    /* the integer, for keykind == 2; otherwise unused */
+    int64_t  key_from_str; /* keykind == 2 ONLY, and orthogonal to the key
+                     * DOMAIN above: 1 when the LAST key write to this slot
+                     * came in through a STR-domain key, 0 when it came in as
+                     * an integer. CPython stores the key OBJECT, and int and
+                     * str hash-equal keys are one entry whose repr follows
+                     * whichever key object was inserted LAST (`d[5] = 1;
+                     * d["5"] = 2` prints `{'5': 2}`) — but keykind == 2
+                     * alone cannot say which spelling was last, because
+                     * `_canon_int` canonicalises a STR key into an integer
+                     * slot deliberately, so `d["5"]` and `d[5]` stay the one
+                     * entry they always were. The generated dict repr reads
+                     * this to decide quoted-vs-unquoted; lookup, hashing,
+                     * order and pop never do. Maintained by the two setters
+                     * (the str-domain path sets 1, `_dict_set_ik` sets 0)
+                     * and carried whole by grow/copy/merge like every other
+                     * slot field. The quoted spelling itself is not stored:
+                     * `_canon_int` accepts only the canonical decimal, which
+                     * `mojo_dict_slot_key` already formats from `ikey`.
+                     * Zero-defaulted: an integer slot freshly made in this
+                     * table prints unquoted, as before. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -1924,6 +1944,12 @@ char *mojo_cstr_or_int_str(int64_t v);
    Transient block, same ownership and same release rule as the entry above. */
 char *mojo_int_str_transient(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
+/* The dict-STORE twin of the release above: same ownership protocol, plus
+   the key's SPELLING — a pooled canonical decimal reached the store as an
+   INTEGER, so the slot the store just wrote prints its key unquoted, while
+   a str key of the same characters prints quoted (one slot, last key object
+   wins; see mojo_dict_key_release's comment in the .c). */
+void mojo_dict_key_release(MojoDict *d, int64_t orig, char *s);
 void *mojo_sorted(void *iterable);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse);

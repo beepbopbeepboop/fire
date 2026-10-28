@@ -5407,6 +5407,14 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     sl->kind = kind;   /* a value re-set under an existing key replaces the
                         * old value AND its type, like real Python's
                         * dict.__setitem__ */
+    sl->key_from_str = (keykind == 0);   /* the SPelling rides the key domain:
+                        * this is the str-domain setter (a re-insert of an
+                        * integer slot is normalised to it at the top), so a
+                        * write through here — first or over an existing slot,
+                        * which CPython's last-key-object-wins repr rule makes
+                        * quote the key — records the str spelling. keykind 1
+                        * (bytes) never touches a keykind-2 slot, so its value
+                        * is inert there. */
 }
 
 static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t seq, int64_t kind)
@@ -10004,16 +10012,20 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
      * `{'00': 1, '01': 1}`. `d.update(other)` merges in the source's order for
      * the same reason. Each pair keeps its own `keykind`/`kind`, so an
      * integer-keyed pair stays integer-keyed and a string value stays a
-     * string. */
+     * string; and its `key_from_str`, so a pair whose key was a STR
+     * canonical decimal (keykind 2, str spelling) re-enters through the
+     * str-domain setter — with its key materialised, since a lazy integer
+     * slot's `key` is the `_ikey_lazy` sentinel, not text — instead of as
+     * the bare integer, which would have re-spelled the key unquoted. */
     int64_t *order = mojo_dict_order_indices(src);
     int64_t n = order ? src->used : 0;
     for (int64_t oi = 0; oi < n; oi++) {
         _DictSlot *s = &src->slots[order[oi]];
         if (!s->key) continue;
-        if (s->keykind == 2)
+        if (s->keykind == 2 && !s->key_from_str)
             _dict_set_ik(dst, s->ikey, s->val, s->kind);
         else
-            _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
+            _dict_set_raw_seq_kind_k(dst, _slot_key(s), s->val, -1, s->kind, s->keykind);
     }
     free(order);
     /* The struct REPR travels with the pairs it renders, on the same terms:
@@ -11544,6 +11556,38 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
     _int_str_pool = s;
 }
 
+/* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
+ * protocol — a borrowed boxed string is left alone, a content key is freed
+ * outright, everything else is a block from `_int_str_block` (int decimals,
+ * float decimals) back to the pool — plus the one thing only a store needs,
+ * which is the key's SPELLING. When `s` is a pooled canonical decimal, the
+ * key reached the store AS AN INTEGER, and CPython's repr prints integer
+ * keys unquoted while quoting the canonical-decimal STRINGS that take the
+ * very same slot (`{5: 1}` prints `1`, `{"5": 1}` prints `'5'` — one slot,
+ * two spellings, the last key object written wins). The str-domain setter
+ * records the str spelling (`key_from_str = 1`); this walks it back to 0 for
+ * the slot the store just wrote — exactly when that slot exists and the next
+ * key write (which would record its own spelling) is still to come, because
+ * the codegen emits this call right after the one `mojo_dict_set_*` that
+ * consumed the key. A pooled float decimal can never match: `%.17g` of a
+ * double always keeps its point, so `_canon_int` fails and nothing is
+ * marked. The `_kw` twin's integer arm needs no call at all — `_dict_set_ik`
+ * records the integer spelling itself. */
+void mojo_dict_key_release(MojoDict *d, int64_t orig, char *s)
+{
+    if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
+    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
+    if (d) {
+        int64_t iv;
+        if (_canon_int(s, &iv)) {
+            _DictSlot *sl = _dict_lookup_ik(d, iv);
+            if (sl) sl->key_from_str = 0;
+        }
+    }
+    *(char **)s = _int_str_pool;
+    _int_str_pool = s;
+}
+
 /* ── A CONTAINER used as a dict key: a CONTENT key, not its address ──────────
  *
  * `d[(p, mtime)]` used to be keyed by the tuple OBJECT'S ADDRESS: the codegen's
@@ -11804,6 +11848,12 @@ static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
     }
     sl->val = val;
     sl->kind = kind;
+    sl->key_from_str = 0;   /* the integer-domain setter, twin of the
+                        * str-domain one in `_dict_set_raw_seq_kind_k`: a key
+                        * written as an integer prints unquoted, and an
+                        * overwrite of a str-spelled slot takes the int
+                        * spelling, exactly as CPython's last-key-object-wins
+                        * repr rule says. */
 }
 
 /* The three kinds a key WORD can be, and the ONE place that decides which.

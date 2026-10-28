@@ -6384,9 +6384,17 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         kt, kv = gen._char_to_cstr(kt, kv, True, False)
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
-        # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
-        # of C-casting the int to char* which produces NULL for 0.
-        kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
+        # to strings (e.g. Int key 0 → "0") instead of C-casting the int
+        # to char* which produces NULL for 0. The pooled TRANSIENT decimal
+        # (`mojo_int_str_transient`), not `mojo_str_from_int`'s kept heap
+        # string: the store copies the key and the release returned here
+        # hands the block back to the pool (the old shape leaked one
+        # malloc'd string per literal key), and the release is also where
+        # the store tells the runtime the key's SPELLING — an integer, so
+        # the slot's repr prints the key unquoted.
+        _orig = kv
+        kv = gen._new_val('char *', f"mojo_int_str_transient({_orig})")
+        gen._cstr_key_src[kv] = _orig
         kt = 'char *'
     elif kt == 'MojoBytes *':
         # A bytes key must keep the MojoBytes pointer — the generic
