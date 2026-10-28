@@ -8281,15 +8281,12 @@ main()
         boxed dict's keys come back as their own addresses for the second
         (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
 
-        A STRING argument is not asserted either, and that is a real defect
-        rather than a fixture convenience: `list(ident([1, 2, 3]))` in the
-        same function as `list(ident("abc"))` reads the first list's slots
-        with `mojo_list_get_str`, because one function's return ELEMENT type
-        is inferred once for the whole program and the string call site wins.
-        Measured, both pipelines: `["\\x18", "\\x1a", "�", "\\x02",
-        "\\x01"]` where CPython printed `[1, 2, 3]` — a five-element list of
-        bytes read out of a three-element int list. Recorded in
-        bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        The STRING argument is also asserted: `list(ident("abc"))` beside
+        `list(ident([1, 2, 3]))` must read the int list with `int64_t`
+        access and the string list with `char *` access, not a single
+        program-wide answer.  The fix is `gen._passthrough_param_idx`
+        (its parameter's position), giving each call site the parameter's
+        OWN recorded element type (`_passthrough_param_idx`, per-call-site).
         """
         global _PASS, _FAIL
         name = "ctor_of_a_container_reaches_the_comprehension"
@@ -8304,6 +8301,7 @@ def main():
     print(all(ident([1, 2, 3])))
     print(",".join(ident(["a", "b"])))
     print(len(list(enumerate(ident(["x", "y"])))))
+    print(list(ident("abc")))
 main()
 '''
         want = _cpython_stdout(src)

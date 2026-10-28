@@ -1593,8 +1593,7 @@ class GimpleGen:
         # 1, 2]))` handed `[3, 1, 2]` to the string comparator, which saw
         # three values below the pointer window, called them equal, and
         # returned the list UNSORTED. Keyed by function name, value is the
-        # parameter index. See
-        # bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        # parameter index (per-call-site element type, `_passthrough_param_idx`).
         self._passthrough_param_idx: dict[str, int] = {}
         # Functions whose `return` statements produce containers of MORE THAN
         # ONE kind (`if k: return names` / `return {x for x in names}`). Such
