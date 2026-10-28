@@ -40,7 +40,7 @@
 # refusal rule). `test_zip` / `test_product` (multi-container and variadic
 # factories) and closure factories (`test_map` / `test_take_while` /
 # `test_drop_while`) are deliberately outside it — see
-# `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`.
+# `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered`.
 # `monomorphize` is deliberately NOT imported here: it imports `GimpleGen`
 # from `gimple_codegen` at module level, and this module loads in the MIDDLE
 # of `gimple_codegen`'s own import (via `module_gen` -> `elab_intu`). The

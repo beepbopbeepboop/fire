@@ -677,21 +677,12 @@ def _defined_symbols(gcc: str, obj: str) -> set:
     Used to drop modules whose symbols collide with an already-included one."""
     nm = 'nm'  # llvm/bsd nm on the PATH; gcc toolchains ship a compatible one
     try:
-        # -m names a Mach-O weak definition as "weak external"; plain nm reports it as an ordinary `T`.
-        out = subprocess.run([nm, '-g', '-m', obj], capture_output=True, text=True).stdout
+        out = subprocess.run([nm, '-g', obj], capture_output=True, text=True).stdout
     except Exception:
         return set()
     syms = set()
     for line in out.splitlines():
-        if 'weak' in line:
-            # A WEAK definition is merged by the linker, not a clash: every module that carries the same weak
-            # copy (the empty GPU sidecar's introspection stubs, in ~every stdlib module) links fine.
-            continue
         parts = line.split()
-        # -m lines: "<addr> (<section>) external <name>"; plain: "<addr> <TYPE> <name>".
-        if 'external' in parts and len(parts) >= 3:
-            syms.add(parts[-1])
-            continue
         # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U> <name>".
         # Uppercase type letter (T/D/S/B/C/I/R) = external & defined.
         if len(parts) >= 3 and parts[1] in ('T', 'D', 'S', 'B', 'C', 'I', 'R'):
@@ -1082,13 +1073,12 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                 if edited:
                     ofile = edited
                     defs = defs - clash   # clashing syms no longer exported here
-                    # routine (not an error): the dedup log, not the screen
-                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
-                        _dl.write(f"localize {len(clash)} dup symbol(s) in {name} (e.g. {sorted(clash)[0]})\n")
+                    print(f"  localize {len(clash)} dup symbol(s) in {name} "
+                          f"(e.g. {sorted(clash)[0]})", file=sys.stderr)
                 else:
                     one = sorted(clash)[0]
-                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
-                        _dl.write(f"exclude {name} from dylib: symbol already defined ({one})\n")
+                    print(f"  exclude {name} from dylib: symbol already defined ({one})",
+                          file=sys.stderr)
                     excluded += 1
                     continue
             seen_syms |= defs
@@ -1520,7 +1510,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 616
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 615
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

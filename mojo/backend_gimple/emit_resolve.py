@@ -458,10 +458,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
     """
-    # If this module already failed in this root compile, skip re-compile
-    # (rollback-recompile path is the root cause of the quadratic walk).
-    if module_name in getattr(gen, '_failed_modules', set()):
-        return (None, [])
     mojo_paths = gen._module_candidate_paths(module_name)
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
@@ -529,8 +525,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             #       "__mojo_middle_offload_toplevel", ...
             #
             # Four modules blamed for one module's bug, which is also how
-            # the self-host link failure (undefined toplevel symbols from a
-            # module-level _lens name collision) read
+            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
             # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
             # the visible symptom is 5") before its own counts came off an
             # artifact that never finished generating.
@@ -877,8 +872,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see the `_walk_ast` re-scan bug,
-                # Phase 1) — same sharing
+                # _module_stmts' union (see PERF_nested_module_compile_
+                # walk_ast_quadratic_rescan.md Phase 1) — same sharing
                 # pattern as _module_stmts itself, just above.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
@@ -1099,14 +1094,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                # The importers' call sites (`gen._closure_call_stmts`) are
-                # handed in so `<module_name>.<gen>(...)` types this module's
-                # generator slots; the module's own statements are appended
-                # for ITS imports, so a generator reached through a chain of
-                # imports sees every call site compiled before it.
-                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
-                    stmts, gen._closure_call_stmts, module_name)
-                temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
                     publish_a3_generators(temp_gen, _ss_meta)
@@ -1188,7 +1176,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # Store parsed stmts for this module so parent gens can access them
                 gen._module_stmts[module_name] = stmts
                 # Incrementally extend the flat, pre-deduped mirror (see
-                # the `_walk_ast` re-scan bug
+                # PERF_nested_module_compile_walk_ast_quadratic_rescan.md
                 # Phase 1) — O(this module's own stmt count), done once
                 # per module ever, instead of leaving every ancestor
                 # level to re-flatten the whole (growing) _module_stmts
@@ -1312,10 +1300,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 gen._scope_live = []
                 gen._scope_live_depth = []
                 gen._scope_live_fn = []
-                # Remember this module failed for this root compile so the
-                # next parent that imports it doesn't redo the failed compile.
-                if hasattr(gen, '_failed_modules'):
-                    gen._failed_modules.add(module_name)
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the
@@ -1460,8 +1444,7 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are
-    in the same commit).)"""
+    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):
@@ -3244,7 +3227,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     # '<name>'` — a definition with this codegen's real parameter types next
     # to a declaration with the elaborator's erased ones — which is the
     # regression that made the first in-TU attempt be reverted
-    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    # (CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered).
     # Keyed on `(base, args)` and NOT on "is this name already a struct here":
     # the second test would also fire for a struct this module defines itself,
     # which is a different situation with a different (unrelated) answer.

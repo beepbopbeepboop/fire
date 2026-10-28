@@ -50,41 +50,7 @@ from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARENT = os.path.dirname(MAIN)
-POOL_FILE = os.environ.get("CONTROL_POOL_FILE", os.path.join(MAIN, "tools", "pool.json"))
-
-
-def load_pool():
-    """The worker pool (tools/pool.json): named slots, each pinned to ONE model with a fixed count. There is no
-    fallback between slots: a task belongs to the slot it was queued for and waits there if that slot is full or banned."""
-    return json.load(open(POOL_FILE))
-
-
-def pool_slot(name):
-    for sl in load_pool()["slots"]:
-        if sl["name"] == name:
-            return sl
-    sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
-
-
-GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
-
-
-def gates_cfg():
-    """tools/gates.json: what a landing must pass, how often the full gate runs, and which gates are OFF for a backlog.
-    An OFF gate is a regex over test names; it is skipped by every gate run, and it must name the doc and the worker
-    working the backlog (`control.py gate off`), so no gate is ever dropped silently."""
-    return json.load(open(GATES_FILE))
-
-
-def gate_skip_args():
-    out = []
-    for pat in gates_cfg().get("off", {}):
-        out += ["--skip", pat]
-    return out
-
-
-def pool_total():
-    return sum(sl["count"] for sl in load_pool()["slots"])
+MODEL = os.environ.get("CONTROL_MODEL", "opencode-go/deepseek-v4.1-flash")
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -203,13 +169,7 @@ def next_slot():
 
 
 def cmd_spawn(a):
-    """Start a worker. A task runs on a POOL SLOT (tools/pool.json): its model and runner come from the slot, and it
-    never moves to another model. `--model` (a bare model, no slot) is for hand-run experiments only."""
-    if getattr(a, "pool", None) is None and getattr(a, "model", None) is None:
-        a.pool = load_pool()["default_slot"]          # callers that build a Namespace by hand (autointegrate) pass None
-    sl = pool_slot(a.pool) if getattr(a, "pool", None) else None
-    a.model = sl["model"] if sl else a.model
-    kind = sl["kind"] if sl else "opencode"
+    a.model = a.model or MODEL            # callers that build a Namespace by hand (autointegrate) pass None
     task = a.task if a.task is not None else open(a.task_file).read()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.name):
         sys.exit("NAME must be lowercase-kebab")
@@ -236,15 +196,8 @@ def cmd_spawn(a):
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)
-        instr = "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt
-        if kind == "claude":
-            # Claude Code, headless: the paid Claude tokens. Edits and the shell are allowed inside the worker's own
-            # worktree (the prompt confines it there); there is no interactive permission prompt to answer.
-            cmd = ["claude", "-p", instr, "--model", a.model, "--permission-mode", "acceptEdits",
-                   "--allowedTools", "Read Edit Write Grep Glob Bash"]
-        else:
-            # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
-            cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
+        cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name,   # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
+               "Your complete instructions are in %s/TASK.md. Read it now and follow it exactly." % wt]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
             sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
@@ -253,8 +206,7 @@ def cmd_spawn(a):
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # a pipe to the caller must not outlive spawn
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
-                             model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
-                             started=time.strftime("%F %T"),
+                             model=a.model, pid=p.pid, started=time.strftime("%F %T"),
                              base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
@@ -366,7 +318,7 @@ def external():
 
 
 def norm_claim(c):
-    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
+    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
     if ":" in c:
         return c
     m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
@@ -448,15 +400,15 @@ def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
-    # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None))
+                added=time.time(), model=a.model)
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
                        r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+FREE_BUCKET = re.compile(r"Free usage limit", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -471,63 +423,66 @@ def breaker_until():
         return 0
 
 
-# A usage limit is per MODEL: it bans that model for the slot's recovery time (tools/pool.json). A second limit within a
-# day means the next block is the long one (the paid plan's 30-day window), so the ban escalates to long_recover_days.
-LEDGER = "dead_models.json"
+# A usage limit is per MODEL and long: the paid "Go" plan takes a month to recover, a free model about a day. So a limit
+# is not a reason to wait 30 minutes and retry the same model (that is what minted 2,000 empty branches): it marks the
+# model dead for its recovery time and the work moves to the next model that is not.
+FALLBACKS = os.environ.get("CONTROL_FALLBACKS", "openrouter/openrouter/free,opencode/deepseek-v4.1-flash-free").split(",")
+# Free tiers cap requests per day, and a swarm of 20 burns a day's quota in minutes (2026-10-26: 29 workers died on
+# OpenRouter's free-models-per-day, 33 on OpenCode's free limit). So each model has a slot cap: refill never runs more
+# than this many workers on it at once. A model not listed is uncapped.
+MODEL_CAPS = {"openrouter/openrouter/free": 1, "opencode/deepseek-v4.1-flash-free": 1}
+MODEL_CAPS.update({k: int(v) for k, v in (kv.split("=") for kv in os.environ.get("CONTROL_CAPS", "").split(",") if "=" in kv)})
 
 
-def _ledger():
-    try:
-        raw = json.load(open(os.path.join(ctl_dir(), LEDGER)))
-    except (OSError, ValueError):
-        return {}
-    # the older format stored a bare `until` timestamp per model
-    return {m: (e if isinstance(e, dict) else {"until": e, "strikes": 1, "last": 0}) for m, e in raw.items()}
+def recovery_days(model):
+    return 1 if "free" in model else 15   # Go: the owner measured ~15 days to the next window (2026-10-24)
+
+
+def provider(model):
+    return model.split("/")[0] if "/" in model else model
 
 
 def dead_models():
-    """{model: until} for every model whose ban has not expired."""
-    return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
+    try:
+        d = json.load(open(os.path.join(ctl_dir(), "dead_models.json")))
+    except (OSError, ValueError):
+        return {}
+    return {m: u for m, u in d.items() if u > time.time()}
 
 
-def mark_dead(model, sl):
-    """Ban MODEL for the slot SL's recovery time; the second limit inside a day uses the long window."""
-    d, now = _ledger(), time.time()
-    prev = d.get(model, {})
-    strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-    d[model] = {"until": now + hours * 3600, "strikes": strikes, "last": now}
-    json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
-    return hours
+def mark_dead(model):
+    d = dead_models()
+    d[model] = time.time() + recovery_days(model) * 86400
+    json.dump(d, open(os.path.join(ctl_dir(), "dead_models.json"), "w"), indent=1)
 
 
-def running_by_slot(tasks=None):
-    """Running workers per pool slot. A worker started before slots existed has no `pool`: it is counted against the
-    slot that owns its model, so a slot is never over-filled by workers it does not know about."""
-    by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
+def running_by_model(tasks=None):
     n = {}
     for t in (tasks or load()).values():
         if state_of(t) == "running":
-            slot = t.get("pool") or by_model.get(t.get("model"))
-            n[slot] = n.get(slot, 0) + 1
+            n[t.get("model")] = n.get(t.get("model"), 0) + 1
     return n
 
 
-def slot_free(sl, busy):
-    """A slot takes a task when it has room (count) and its model is not banned."""
-    return busy.get(sl["name"], 0) < sl["count"] and sl["model"] not in dead_models()
+def pick_model(preferred, busy=None):
+    """The first of PREFERRED then FALLBACKS whose limit has not been hit and whose slot cap (MODEL_CAPS) has room given
+    BUSY (running workers per model), or None when every one is out or full."""
+    dead = dead_models()
+    busy = busy or {}
+    dead_providers = {provider(m) for m in dead if "free" not in m}   # a paid plan's limit covers all its models
+    for m in [preferred] + FALLBACKS:
+        if not m or m in dead or (provider(m) in dead_providers and "free" not in m):
+            continue
+        if busy.get(m, 0) >= MODEL_CAPS.get(m, 1 << 30):
+            continue
+        return m
+    return None
 
 
 def limit_hit(t):
-    """True only when the worker's own error lines say so: an `Error:` line from the model/provider. A worker that
-    READ a file mentioning a rate limit or a quota is not limited (2026-10-28: a read of coro.py marked OpenRouter's
-    free router dead for a day)."""
     lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return False
-    lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
-    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)]
-    return any(LIMIT_ERR.search(l) for l in errs)
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]) if os.path.exists(lp) else ""
+    return bool(LIMIT_ERR.search(tail))
 
 
 def dead_on_arrival(t):
@@ -554,28 +509,25 @@ def bounce(name, t):
     extra = [l[3:] for l in st.splitlines() if not (l[3:] in mine or l[3:].startswith(".tmp/"))]
     if extra:
         return False
-    if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]))   # the task stays on its slot; refill waits for the ban to lift
+    model = t.get("model")
+    if model and limit_hit(t):
+        mark_dead(model)
+        if "free" in model and FREE_BUCKET.search(open(os.path.join(wt, "work.log"), errors="replace").read()[-3000:]):
+            for m in FALLBACKS:   # "Free usage limit reached" is ONE bucket for every free model, not this model's
+                mark_dead(m)
+        model = pick_model(None)   # None (all out) -> refill's own pick decides when one recovers
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
-                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"))
+                files=t.get("files", []), needs=[], added=time.time(), model=model)
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
     return True
 
 
-def pick_slot(item, busy):
-    """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
-    pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
-    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
-    return next((x for x in order if slot_free(x, busy)), None)
-
-
 def cmd_refill(a):
-    """Fill the pool: each slot in tools/pool.json takes queued tasks, oldest first, up to its own count, and a slot
-    whose model is banned takes nothing. --target caps the total across slots (default: the pool's total).
+    """Keep --target workers running: start queued tasks, oldest first, while slots are free.
     A task is skipped (stays queued) if a task it needs is not integrated yet, or its claims conflict.
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
@@ -587,22 +539,19 @@ def cmd_refill(a):
                   open(breaker_path(), "w"))
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
-    items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
-    if items_all and not any(slot_free(sl, running_by_slot()) for sl in load_pool()["slots"]):
-        print("%s refill: every slot with queued work is full or banned (%s), starting nothing" % (
-            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u)))
-                                           for m, u in dead_models().items()) or "no bans"), flush=True)
+    if not any(pick_model(i["model"] or MODEL) for i in (json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json"))):
+        print("%s refill: every queued task's model is out of quota (%s), starting nothing" % (
+            time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u))) for m, u in dead_models().items())), flush=True)
         return
     if time.time() < breaker_until():
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
     tasks = load()
-    if a.target is None:
-        a.target = pool_total()
-    busy = running_by_slot(tasks)
+    busy = running_by_model(tasks)
     live = sum(busy.values())
-    items = sorted(items_all, key=lambda i: i["added"])
+    items = sorted((json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")),
+                   key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     for it in items:
@@ -610,14 +559,11 @@ def cmd_refill(a):
             continue                      # a red master is repaired at once, whatever the slot count
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
-        # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
-        # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
-        sl = pick_slot(it, busy)
-        if sl is None:
-            continue                      # every slot is full or banned: the task waits
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
-        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
+                                file=it["files"], base=it["base"], model=pick_model(it["model"] or MODEL, busy))
+        if not ns.model:
+            continue                      # this task's model (and every fallback) is out of quota or full; others may not be
+        busy[ns.model] = busy.get(ns.model, 0) + 1
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -628,28 +574,6 @@ def cmd_refill(a):
     waiting = len(items) - started
     print("%s refill: %d running, started %d, %d still queued (target %d)" % (
         time.strftime("%T"), live, started, waiting, a.target), flush=True)
-
-
-def cmd_gate(a):
-    """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
-    cfg = gates_cfg()
-    if a.action == "list":
-        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
-        for pat, e in cfg.get("off", {}).items():
-            print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
-        return
-    if a.action == "off":
-        if not (a.reason and a.doc and a.worker):
-            sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
-        if not os.path.exists(os.path.join(MAIN, a.doc)):
-            sys.exit("no such doc: %s" % a.doc)
-        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
-                                                  since=time.strftime("%F %T"))
-    else:
-        if cfg.get("off", {}).pop(a.pattern, None) is None:
-            sys.exit("no OFF gate %r" % a.pattern)
-    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
-    print("gate %s %s" % (a.action, a.pattern))
 
 
 def priority_list():
@@ -973,8 +897,7 @@ def restart(name, why, model=None):
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
-    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"],
-                            model=None, pool=t.get("pool"))
+    ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"], model=model or t["model"])
     cmd_spawn(ns)
     return new
 
@@ -1083,14 +1006,9 @@ def main():
     g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[], help="copy into the worker's .tmp/ (workers cannot read outside their tree)")
     s.add_argument("--base", default="master", help="branch to start from (a fix task starts from the failed task's branch)")
-    s.add_argument("--pool", default=None, help="the pool slot to run on (default: the pool's default_slot)")
-    s.add_argument("--model", default=None, help="a bare model, outside the pool (hand-run experiments only)")
-    s.set_defaults(f=cmd_spawn)
+    s.add_argument("--model", default=MODEL); s.set_defaults(f=cmd_spawn)
     s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
-    s = sub.add_parser("gate"); s.add_argument("action", choices=["list", "off", "on"]); s.add_argument("pattern", nargs="?", default="")
-    s.add_argument("--reason", default=""); s.add_argument("--doc", default=""); s.add_argument("--worker", default="")
-    s.set_defaults(f=cmd_gate)
     s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
     s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)
@@ -1113,9 +1031,8 @@ def main():
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
-    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task must run on")
-    s.set_defaults(f=cmd_enqueue)
-    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
+    s.add_argument("--needs", nargs="*"); s.add_argument("--model", default=None); s.set_defaults(f=cmd_enqueue)
+    s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8)
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
     sub.add_parser("queue").set_defaults(f=cmd_queue)

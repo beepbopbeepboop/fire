@@ -2087,15 +2087,8 @@ def _launch_sites(source: str, path: str = "<snippet>"):
                 return True
             if isinstance(sub, ast.Attribute) and "lean" in sub.attr.lower():
                 return True
-            # A string literal names Lean as a WORD — a `.lean` file, a path
-            # segment, the bare word — not as a substring of an English word:
-            # `clean`/`cleanup` contain "lean" but name nothing Lean, and
-            # tools/swarm.py's `control.py cleanup` call read as a launch of the
-            # toolchain under a substring match. Identifiers above keep the
-            # substring: a name or attribute `lean_*`/`*_lean` is a genuine
-            # signal, and no common English identifier is a `lean` substring.
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                    and re.search(r"\blean\b", sub.value.lower()):
+                    and "lean" in sub.value.lower():
                 return True
         return False
 

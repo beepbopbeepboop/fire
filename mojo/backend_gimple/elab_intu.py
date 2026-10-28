@@ -608,7 +608,7 @@ def _protocol_only_overloads(gen, base) -> bool:
     Those are REFUSED here — the `.o` route runs for them exactly as before —
     rather than materialized with a second definition or an arity the call site
     cannot satisfy. See
-    `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md` for
+    `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered` for
     the measurement of what widening this costs."""
     if base in _OVERLOAD_CACHE:
         return _OVERLOAD_CACHE[base]

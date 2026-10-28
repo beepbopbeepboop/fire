@@ -56,22 +56,18 @@ typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
                MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
-               MOJO_CLEANUP_CLOSURE,  /* a bound method plus the env it owns */
-               MOJO_CLEANUP_CATTR     /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_CLOSURE   /* a bound method plus the env it owns */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
 static void                *_mojo_cleanup_ptr[MOJO_CLEANUP_STACK_MAX];
-/* Second word of an entry, used only by MOJO_CLEANUP_CATTR (the value to
- * restore into the slot `ptr` names). Every other kind leaves it unread. */
-static void                *_mojo_cleanup_aux[MOJO_CLEANUP_STACK_MAX];
 int _mojo_cleanup_top = -1;
 /* Indexed by _mojo_exc_top (the try/except LEVEL, not a stack of its own):
  * the cleanup-stack depth that level's own exception path should unwind
  * back down to. */
 static int _mojo_cleanup_checkpoint[MOJO_EXC_STACK_MAX];
 
-static int _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
+static void _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
 {
     if (_mojo_cleanup_top + 1 >= MOJO_CLEANUP_STACK_MAX) {
         /* Degrade to today's pre-existing "leaks on an exception path"
@@ -80,12 +76,11 @@ static int _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
          * correctness requirement for programs that never raise. */
         fprintf(stderr, "mojo_cleanup_push: cleanup stack overflow (>%d live owned locals)\n",
                 MOJO_CLEANUP_STACK_MAX);
-        return 0;
+        return;
     }
     ++_mojo_cleanup_top;
     _mojo_cleanup_kind[_mojo_cleanup_top] = kind;
     _mojo_cleanup_ptr[_mojo_cleanup_top] = ptr;
-    return 1;
 }
 
 void mojo_cleanup_push_dict(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT, p); }
@@ -97,12 +92,6 @@ void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
 void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
 void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLOSURE, p); }
-
-void mojo_cleanup_push_cattr(void **slot, void *saved)
-{
-    if (_mojo_cleanup_push(MOJO_CLEANUP_CATTR, slot))
-        _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
-}
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -139,7 +128,6 @@ static void _mojo_cleanup_unwind_to(int chk)
     while (_mojo_cleanup_top > chk) {
         mojo_cleanup_kind_t kind = _mojo_cleanup_kind[_mojo_cleanup_top];
         void *ptr = _mojo_cleanup_ptr[_mojo_cleanup_top];
-        void *aux = _mojo_cleanup_aux[_mojo_cleanup_top];
         --_mojo_cleanup_top;
         switch (kind) {
             case MOJO_CLEANUP_DICT: mojo_dict_free((MojoDict *)ptr); break;
@@ -151,7 +139,6 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
             case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
-            case MOJO_CLEANUP_CATTR:      *(void **)ptr = aux;               break;
         }
     }
 }
@@ -206,7 +193,6 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 #define _MOJO_EXC_TAG_VALUEERROR 663468903
 #define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
 #define _MOJO_EXC_TAG_OSERROR 2131477727
-#define _MOJO_EXC_TAG_ZERODIVISIONERROR 1715583614
 
 int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
@@ -884,28 +870,6 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     if (fresh && !kinds) _kinds_forget(addr);
 }
 
-void mojo_list_set_kinds_uniform(MojoList *l, char kind)
-{
-    if (!l || l->len <= 0) return;
-    char *k = (char *)malloc(l->len + 1);
-    if (!k) return;
-    memset(k, kind, l->len);
-    k[l->len] = '\0';
-    mojo_list_set_kinds(l, k);
-    /* Set owned so future frees can reclaim this buffer when the list is
-     * dropped: with owned == 1, _kinds_forget keeps the kinds string alive
-     * forever for now — callers of this uniform helper pass only a static
-     * or interned kind byte, and the bounded leak from an ambiguous
-     * container branch (set keys / values is also all char*) is negligible
-     * compared to the dynamic-branching lists that never pay this cost. The
-     * broader safety check is that _kinds_forget does NOT free kinds rows,
-     * so owned=1 here just means "this row may be the unique owner if we
-     * later expand _kinds_forget to free it" — no existing read path changes. */
-    uint64_t addr = (uint64_t)(uintptr_t)l;
-    _KindRow *r = _kinds_row(addr);
-    if (r) r->owned = 1;
-}
-
 /* The kind of one slot, 'i' for anything this table does not describe. */
 char mojo_list_slot_kind(MojoList *l, int64_t i)
 {
@@ -1137,35 +1101,6 @@ double mojo_box_double(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind != 'd') return (double)bx->bits;
     return mojo_double_from_bits(bx->bits);
-}
-
-/* A double passed where an unannotated parameter's call sites ALSO pass an
- * integer: the slot is an int64_t, so the double travels as a fresh box (kind
- * 'd') rather than as its bits, which a bare word cannot tell from an integer.
- * Not cached: there is no (list, slot) to key it on. Each call site boxes its
- * own argument once, and the box is never freed, the same lifetime a list's
- * cached box has. */
-int64_t mojo_box_from_double(double v)
-{
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return mojo_double_to_bits(v);
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = mojo_double_to_bits(v);
-    bx->kind = 'd';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
-/* The answer of `a OP b` for an arithmetic operator whose operands may be
- * float boxes: the double answer as a fresh box when either operand IS a
- * double box, else the integer answer. Both answers are computed by the
- * caller, so this only chooses — and a choice that never reaches
- * mojo_box_from_double allocates nothing. */
-int64_t mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres)
-{
-    if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return mojo_box_from_double(dres);
-    if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return mojo_box_from_double(dres);
-    return ires;
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
@@ -5472,14 +5407,6 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     sl->kind = kind;   /* a value re-set under an existing key replaces the
                         * old value AND its type, like real Python's
                         * dict.__setitem__ */
-    sl->key_from_str = (keykind == 0);   /* the SPelling rides the key domain:
-                        * this is the str-domain setter (a re-insert of an
-                        * integer slot is normalised to it at the top), so a
-                        * write through here — first or over an existing slot,
-                        * which CPython's last-key-object-wins repr rule makes
-                        * quote the key — records the str spelling. keykind 1
-                        * (bytes) never touches a keykind-2 slot, so its value
-                        * is inert there. */
 }
 
 static void _dict_set_raw_seq_kind(MojoDict *d, char *key, int64_t val, int64_t seq, int64_t kind)
@@ -9357,17 +9284,6 @@ void mojo_raise_type_error(char *detail) {
     mojo_raise();
 }
 
-/* `ZeroDivisionError: division by zero` — the raiser behind mojo_int_divisor
- * (fire_runtime.h) and the boxed `/ // %` answers below. Same sequence and tag
- * derivation as the siblings here. */
-void mojo_raise_zero_division(void) {
-    char *heap_msg = strdup("ZeroDivisionError: division by zero");
-    mojo_exc_type_set(_MOJO_EXC_TAG_ZERODIVISIONERROR);
-    mojo_exc_msg_set(heap_msg);
-    mojo_exc_obj_set(heap_msg);
-    mojo_raise();
-}
-
 /* `ValueError: <detail>` — same sequence, same tag derivation, next to its
  * three siblings above. Needed because an operation that REJECTS ITS
  * ARGUMENT is not one of those three: mojo_bytes_partition on an empty
@@ -10088,20 +10004,16 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
      * `{'00': 1, '01': 1}`. `d.update(other)` merges in the source's order for
      * the same reason. Each pair keeps its own `keykind`/`kind`, so an
      * integer-keyed pair stays integer-keyed and a string value stays a
-     * string; and its `key_from_str`, so a pair whose key was a STR
-     * canonical decimal (keykind 2, str spelling) re-enters through the
-     * str-domain setter — with its key materialised, since a lazy integer
-     * slot's `key` is the `_ikey_lazy` sentinel, not text — instead of as
-     * the bare integer, which would have re-spelled the key unquoted. */
+     * string. */
     int64_t *order = mojo_dict_order_indices(src);
     int64_t n = order ? src->used : 0;
     for (int64_t oi = 0; oi < n; oi++) {
         _DictSlot *s = &src->slots[order[oi]];
         if (!s->key) continue;
-        if (s->keykind == 2 && !s->key_from_str)
+        if (s->keykind == 2)
             _dict_set_ik(dst, s->ikey, s->val, s->kind);
         else
-            _dict_set_raw_seq_kind_k(dst, _slot_key(s), s->val, -1, s->kind, s->keykind);
+            _dict_set_raw_seq_kind_k(dst, s->key, s->val, -1, s->kind, s->keykind);
     }
     free(order);
     /* The struct REPR travels with the pairs it renders, on the same terms:
@@ -11632,38 +11544,6 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
     _int_str_pool = s;
 }
 
-/* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
- * protocol — a borrowed boxed string is left alone, a content key is freed
- * outright, everything else is a block from `_int_str_block` (int decimals,
- * float decimals) back to the pool — plus the one thing only a store needs,
- * which is the key's SPELLING. When `s` is a pooled canonical decimal, the
- * key reached the store AS AN INTEGER, and CPython's repr prints integer
- * keys unquoted while quoting the canonical-decimal STRINGS that take the
- * very same slot (`{5: 1}` prints `1`, `{"5": 1}` prints `'5'` — one slot,
- * two spellings, the last key object written wins). The str-domain setter
- * records the str spelling (`key_from_str = 1`); this walks it back to 0 for
- * the slot the store just wrote — exactly when that slot exists and the next
- * key write (which would record its own spelling) is still to come, because
- * the codegen emits this call right after the one `mojo_dict_set_*` that
- * consumed the key. A pooled float decimal can never match: `%.17g` of a
- * double always keeps its point, so `_canon_int` fails and nothing is
- * marked. The `_kw` twin's integer arm needs no call at all — `_dict_set_ik`
- * records the integer spelling itself. */
-void mojo_dict_key_release(MojoDict *d, int64_t orig, char *s)
-{
-    if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
-    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
-    if (d) {
-        int64_t iv;
-        if (_canon_int(s, &iv)) {
-            _DictSlot *sl = _dict_lookup_ik(d, iv);
-            if (sl) sl->key_from_str = 0;
-        }
-    }
-    *(char **)s = _int_str_pool;
-    _int_str_pool = s;
-}
-
 /* ── A CONTAINER used as a dict key: a CONTENT key, not its address ──────────
  *
  * `d[(p, mtime)]` used to be keyed by the tuple OBJECT'S ADDRESS: the codegen's
@@ -11924,12 +11804,6 @@ static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
     }
     sl->val = val;
     sl->kind = kind;
-    sl->key_from_str = 0;   /* the integer-domain setter, twin of the
-                        * str-domain one in `_dict_set_raw_seq_kind_k`: a key
-                        * written as an integer prints unquoted, and an
-                        * overwrite of a str-spelled slot takes the int
-                        * spelling, exactly as CPython's last-key-object-wins
-                        * repr rule says. */
 }
 
 /* The three kinds a key WORD can be, and the ONE place that decides which.
@@ -12639,8 +12513,8 @@ void *mojo_map(void *func, void *iterable) { (void)func; return iterable; }
    division operation appears inside a __GIMPLE function body. We emit a call
    to these normal-C helpers instead; the division is expanded here, in a
    regularly-compiled translation unit, where it works correctly. */
-double mojo_div_double(double a, double b) { if (b == 0.0) mojo_raise_zero_division(); return a / b; }
-float  mojo_div_float(float a, float b)    { if (b == 0.0f) mojo_raise_zero_division(); return a / b; }
+double mojo_div_double(double a, double b) { return a / b; }
+float  mojo_div_float(float a, float b)    { return a / b; }
 
 /* Decimal string of an integer (heap-allocated). Used when a string is
    concatenated with a numeric operand (String + Int) so codegen never has
@@ -13450,7 +13324,9 @@ static void _pyobj_raise_mixed(const char *op, int64_t a, int64_t b) {
     mojo_raise_type_error(msg);
 }
 static void _pyobj_raise_zero_div(void) {
-    mojo_raise_zero_division();
+    char msg[64];
+    snprintf(msg, sizeof msg, "division by zero");
+    mojo_raise_type_error(msg);
 }
 /* `+ - * %` on boxes (the `/ // **` shapes have their own functions below).
  * The `a_dbl`/`b_dbl` flags are the codegen's STATIC knowledge that a box
@@ -13589,48 +13465,4 @@ int mojo_pyobject_cmp(char op, int64_t a, int64_t b) {
     }
     return op == '<' ? a < b : op == 'L' ? a <= b
          : op == '>' ? a > b : a >= b;
-}
-
-/* Length-aware variants: when the caller already has the string's length
- * (e.g. a MojoStr ->len, or a statically-known length), the scan from
- * byte 0 is unnecessary — "is start inside the string?" becomes
- * `start < slen`, and read at `start` is sound because `start < slen`
- * was just confirmed.  Fixes the quadratic loop that calls
- * mojo_cstr_slice / mojo_cstr_region_eq once per position. */
-char *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop)
-{
-    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
-    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
-        if (start < 0) start += slen;
-        if (stop  < 0) stop  += slen;
-        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
-    }
-    if (start < 0) start = 0;
-    if (stop > slen) stop = slen;
-    if (start >= stop) {
-        char *e = malloc(1); e[0] = '\0'; return e;
-    }
-    int64_t len = stop - start;
-    char *r = malloc(len + 1);
-    memcpy(r, s + start, len);
-    r[len] = '\0';
-    return r;
-}
-
-int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
-                          char *needle)
-{
-    if (!s || !needle) return s == needle;
-    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
-        if (start < 0) start += slen;
-        if (stop  < 0) stop  += slen;
-        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
-    }
-    if (start < 0) start = 0;
-    if (stop > slen) stop = slen;
-    if (start >= stop) return needle[0] == '\0';
-    int64_t region_len = stop - start;
-    size_t needle_len = strlen(needle);
-    if ((size_t)region_len != needle_len) return 0;
-    return memcmp(s + start, needle, needle_len) == 0;
 }

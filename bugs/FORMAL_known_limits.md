@@ -1,41 +1,5 @@
 # FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
-**Last audited: 2026-10-28 (master 8c19a643f, the closing-gate adjudication —
-§0 added: the sqliteruntime cold-worktree budget, measured; plus the
-owner-WIP red status pointer).**
-
-## 0. (2026-10-28) sqliteruntime: the cold-worktree budget shortfall, measured
-
-Not a code defect. The job's registered budget (`tools/suite.py:2493`,
-`timeout=600`; the suite-wide default is 3600 s) is below the measured
-quiet-cold duration in a fresh worktree, so ANY fresh-worktree gate run
-exceeds it under load:
-
-| scenario (8c19a643f, uncached) | wall | result |
-|---|---|---|
-| warm main checkout, quiet | 71.9 s | PASS 66/66 |
-| main checkout, 1st solo, quiet | 517.1 s | PASS |
-| fresh worktree, fully cold, quiet | 484 s | PASS 66/66 |
-| fresh worktree, -j18 gate load | > 600 s | TIMEOUT |
-
-Contributors: the self-host bootstrap's double-compile fallback (see
-`CODEGEN_selfhost_closure_set_kind_refusal_double_compiles_the_module.md`)
-+ the shared dylib lock (in the closing gate another job held it
-10:47-10:59, finishing 7 min after the kill) + -j18 contention. Calibration
-levers (both backed by measured termination — not masking): warm the gate
-worktree's cache before gating, or relax the registered budget to ~1200 s.
-Also recorded same window: `formal-os` is load-sensitive — 3/3 quiet solo
-runs PASS ~90 s; under the gate's -j18 stretch the two 84-case string
-binaries crossed the 60 s per-binary `RUN_TIMEOUT` (test_formal_os.py:59),
-CPU starvation, no defect (f620e1096 + 3d58c18ce exonerated).
-
-**Owner-WIP red status pointer (NOT limits, do not schedule as new bugs):**
-as of the 8c19a643f closing gate, `gimplegenerators` / `gimplerunner` /
-`formal-sweep-truth` are red — byte-identical failure signatures at
-pre-batch 6c8aba839 (`T/opencode/prebatch_*.log`); the integ batch did not
-move them. They are the owner's in-flight work; resume from those logs.
-`selfhost` is the owner's bootstrap campaign (FAIL 193 s recorded).
-
 **Last audited: 2026-09-27 (the five-agent round 1, agent [5] — §6 added).**
 Sections 1–5 are wave 5's audit and are **not** re-measured here; §6 is a
 separate, later measurement of the same sweep on a tree four other agents were
@@ -953,7 +917,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 719
+standing in for a shape, and the shape answers the same question for all 718
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -964,17 +928,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 719 |
+| entry points declared | 718 |
 | every type crossing the boundary is one word | **297** |
-| a box in an argument or the return | 422 |
+| a box in an argument or the return | 421 |
 | of the 297, refused only for want of a linked library | 297 |
 
-**297 of 719 is what a link line converts into working code with no backend
+**297 of 718 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 719
-entry points, 297 word-shaped, 422 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 718
+entry points, 297 word-shaped, 421 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -990,7 +954,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 719 / 544 / 175 by return type alone, and 297
+1. **455 / 352 / 101.** I measure 718 / 543 / 175 by return type alone, and 297
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —

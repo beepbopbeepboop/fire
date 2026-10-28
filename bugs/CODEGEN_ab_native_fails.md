@@ -123,7 +123,7 @@ Two independent conditions, and the cheap one is worth doing first:
    corpus expensive, is where the next step belongs.
 
 Lowering the pre-pass cost is worth doing on its own account (it is
-`doc/POLICY_memory_over_4gb.md`'s headline), but note the honest
+`bugs/PERF_memory_over_4gb_is_a_bug.md`'s headline), but note the honest
 dependency direction: **fixing the memory does not by itself make this test
 pass**, and it must not be treated as if it did. What it does is make running
 the test cheap enough to stop guessing about it.
@@ -156,7 +156,7 @@ can afford to run is a test nobody will notice regressing.
 `bootstrap-stage2-dumps` fail for the same upstream reason and are the owner's
 call; the table is here so the choice is one line each rather than a fresh
 investigation. Read it with the threshold from CLAUDE.md: over ~4 GB (the
-`doc/POLICY_memory_over_4gb.md` line) or over a few minutes, an
+`bugs/PERF_memory_over_4gb_is_a_bug.md` line) or over a few minutes, an
 `expect=` job is spending the machine to learn something already written down.
 
 | job | measured peak | reserved | in a bucket? | wall time | recommendation |
