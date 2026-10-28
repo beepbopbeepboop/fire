@@ -117,26 +117,6 @@ def encode_strb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
     return struct.pack('<I', insn)
 
 
-def encode_strb_wd_wn_xm(wd: int, wn: int, xm: int) -> bytes:
-    """STRB Wd, [Xn, Xm] — unsigned offset REGISTER form, byte store.
-
-    The register-offset escape from `encode_strb_wd_wn`'s 12-bit immediate,
-    for the one store whose destination index is a VALUE: the float repr
-    helper writes its output one byte at a time at a running cursor, and a
-    cursor is a register. `Rn = 31` is SP in this form (the 32-bit base has
-    the SP encoding `encode_add_xd_xn_imm` has); the offset is zero-extended,
-    which is the whole of what a byte index can be.
-
-    Verified against `as`: strb w0,[x1,x2] = 0x38226820,
-    strb w2,[x3,x4] = 0x38246862, strb w8,[x16,x19] = 0x38336a08.
-    """
-    assert 0 <= wd <= 30
-    assert 0 <= wn <= 31
-    assert 0 <= xm <= 30
-    insn = 0x38206800 | (xm << 16) | (wn << 5) | wd
-    return struct.pack('<I', insn)
-
-
 def encode_str_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
     """STR Wt, [Xn, #imm] — store 32 bits.
 

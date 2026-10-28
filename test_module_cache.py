@@ -373,7 +373,7 @@ def test_elaboration_generic_call(wd):
         # `len(objects) == 1` and the call names a concrete instantiation.
         # NOTE (2026-10-02): an in-TU instantiation route was built and
         # measured for this shape — see
-        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md
+        # bugs/imported-generic-elaboration-defect
         # — which would make `objects` 0 and the definition in-TU. It is NOT
         # landed: it regressed five currently-compiling files, because
         # `monomorphize.mangle` keys only on the sorted bracket-parameter
@@ -1725,7 +1725,7 @@ def test_type_param_markers_and_simd_unification(wd):
     defines it. Measured over the stdlib sweep, the `//` marker alone accounted
     for 383 of 1254 elaborator declines — every template in the numeric library
     is written with it (`def ceildiv[T: CeilDivable, //](...)`). See
-    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md."""
+    bugs/imported-generic-elaboration-defect."""
     import elaborate as el
 
     check("marker#1: `//` is a separator, not a type param",
