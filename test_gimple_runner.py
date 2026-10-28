@@ -10584,6 +10584,22 @@ def main():
 main()
 """)
 
+    # Regression for CODEGEN_nested_list_param_two_element_kinds_segfaults:
+    # a parameter called with BOTH int and str nested lists must not drop
+    # the container evidence and fall to the int64_t default.
+    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds", """\
+def show(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show([[1, 2], [3, 4]])
+    show([["a", "bb"], ["c"]])
+    show([[1, 2], [3, 4]])
+main()
+""")
+
     # The same contract one hop further out: the argument is not a literal at
     # the call site and not a caller-scanned local, it is ANOTHER FUNCTION'S
     # RETURN VALUE. That is the third shape of the same question, and it was
