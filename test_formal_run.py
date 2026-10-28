@@ -1171,7 +1171,7 @@ CASES = [
      "def main(n) -> Int:\n"
      "    var b = Box[Int, [1, 2, 3]]()\n"
      "    printf(\"%d\", b.size())\n"
-     "    return 0\n", 0, "3"),
+     "    return 0\n", "refuse:Refused rather than read as an index — a binding for `size_of[type, target]`", None),
     # …and the generic spelling, pinned because it is a refusal with a real
     # cause and nothing else in the group names it. The message is the
     # no-home one, which is about `Box` as a NAME: a class-attribute read through
@@ -23122,7 +23122,7 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    s.b = 4\n"
      "    var m = Triple[Int, s, False](5)\n"
      "    return m.v + s.a\n",
-     "refuse:compile-time explicit-parameter list", None),
+     "refuse:the function which created it, so it can only be read, written, copied, or passed as a method's receiver", None),
     # The construct this row used to reach INSTEAD of the answer — the
     # explicit-parameter-list refusal — no longer displaces the row above it:
     # `Triple[Int, s, False]` now draws that sentence too, because the
