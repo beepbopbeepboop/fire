@@ -4840,11 +4840,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a.label("fr_scan")
         lea64(RDI, RBP, -96)
         mi(RSI, 32)
+        mm64(RDX, RBP, -40)     # a_bits → RDX
+        # Load a_bits into XMM0 as a double (movq xmm0, rdx) BEFORE the format
+        # takes RDX — the SysV snprintf hands the double in XMM0 and the format
+        # in RDX, and loading the format first left RDX = the raw bits, so
+        # snprintf dereferenced them and died (the 5-row x86-64 segfault).
+        a.emit(encode_movq_xmm_rm64(0, RDX))
         lea_rip(RDX, self._intern_string("%.*g"))
         m64(RCX, R12)           # n → RCX (4th int arg)
-        mm64(RDX, RBP, -40)     # a_bits → RDX
-        # Load a_bits into XMM0 as a double
-        a.emit(encode_movq_xmm_rm64(0, RDX))
         mi(RAX, 1)              # 1 XMM register used
         self._emit_extern_call("snprintf")
         lea64(RDI, RBP, -96)

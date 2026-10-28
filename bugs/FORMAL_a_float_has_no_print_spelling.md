@@ -2,7 +2,7 @@
 
 **Area:** FORMAL, both backends — the refusal is
 `formal/model.py::float_print_refusal`, asked from `model.print_call_spelling`.
-**Status:** arm64 FIXED 2026-10-28 (helper in `arm64_codegen.py`, all float rows green); x86-64 helper landed but segfaults on the scan-loop `strtod` path — partial, needs the SysV variadic/XMM fix verified end-to-end.
+**Status:** arm64 FIXED 2026-10-28 (helper in `arm64_codegen.py`, all float rows green). x86-64 PARTIAL (2026-10-28): the scan-loop **segfault is fixed** — the snprintf setup loaded the `"%.*g"` format into `RDX` *before* moving the double's bits into `RDX`/`XMM0`, so at the call `RDX` held the raw IEEE-754 bits and snprintf dereferenced them and died; loading the format *after* the `movq xmm0,rdx` fixes it, and 5 of the 6 x86-64 float rows now run and match CPython. The one remaining row is `float_int_val`: `print(123.0)` prints `123`, not `123.0`. Verified under lldb: the round-trip scan *does* produce the buffer `123` at `n=3` and `strtod` *does* return correctly to the compare — but the code after the round-trip `cmpq`/`je` (`fr_found` → parse → the layout that appends `.0`) is never entered, so the `.0` is never written. The round-trip `je`/compare is the suspect; it could not be isolated further (direct breakpoints in this region do not stop, though the addresses are provably live). Structural note: the x86-64 helper is a *simplified* `%.*g`-copy-plus-`.0`-append layout, **not** arm64's full CPython-repr algorithm, so it also mis-spells values where `%g` picks scientific notation (e.g. `100.0` → `1e+02`); a complete fix is to port arm64's full digit/point/scientific layout, not a one-line patch.
 
 ## What I ran, what I saw, what I expected
 
