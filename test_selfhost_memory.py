@@ -18,8 +18,8 @@ Two cases, both measured with the binary's own RUSAGE_CHILDREN peak:
            0.44 GB after. Budget 1.5 GB.
   fire     `mojoc fire.py --dump-full` (the compiler compiling itself, the
            worst case). Measured 37 GB / SIGSEGV before, 12.2 GB after (it
-           still ends with "AttributeError: platform" and writes no .ci:
-           bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md).
+           still ends with "AttributeError: platform" and writes no .ci
+           (the module-attribute read fix, verified at minimal scale).
            Budget 16 GB: a tripwire against the 23 GB-class regressions
            (a per-call dict copy) rather than a claim that 12 GB is acceptable;
            ratchet it down as the remaining sites in
