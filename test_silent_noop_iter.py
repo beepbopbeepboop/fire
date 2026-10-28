@@ -602,6 +602,34 @@ def main():
 '''
 
 
+@case('sorted_two_string_set_pinning')
+def _():
+    # Pinning test for TEST_silentnoop_sorted_two_string_set_flips: a failure
+    # must keep its artifacts in .tmp/silentnoop-failures so a recurrence is
+    # self-diagnosing (the .ci names which runtime sort call was emitted); the
+    # sorted order of a two-string set must agree with CPython.
+    return '''def pick(box, other):
+    if box is None:
+        box = {"a"}
+    elif box == "x":
+        box = {box}
+    else:
+        box = {v for v in box}
+    return sorted(box)
+
+
+def plain(items):
+    return items[0]
+
+
+def main():
+    print(pick(None, None))
+    print(pick("x", None))
+    print(pick({"q", "r"}, None))
+    print(plain(["first", "second"]))
+'''
+
+
 @case('next_iter_over_a_dict_items_expression')
 def _():
     # `next(iter(<expression>))`, where the expression is not a bare name.
