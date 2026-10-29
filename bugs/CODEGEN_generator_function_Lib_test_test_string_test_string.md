@@ -195,7 +195,7 @@ Not confirmed with full certainty in this pass (would need to trace
 class-in-function bodies are skipped, vs. some other reason the debug
 note didn't fire). Single instance in this cluster; not folded into a
 hard-bug doc. If confirmed, this would be a NEW, distinct gap from
-the ensurepip fix (bug:CODEGEN_generator_function_Lib_test_test_ensurepip)'s nested-
+`bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md`'s nested-
 class-INSIDE-a-generator-BODY gap (this is the reverse shape: a
 generator method whose ENCLOSING class is nested inside a function).
 
