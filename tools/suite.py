@@ -3026,8 +3026,21 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # GB), which is a machine-wide reservation for a job whose measured peak is
 # under a third of the cheapest rung.
 #
-# It is RED, and deliberately `expect=`-marked rather than left unregistered:
-# `udivmod` disagrees with the hardware (real 4, model 7905747460161236410).
+# It is RED, and deliberately `expect=`-marked rather than left unregistered.
+# The marker this comment used to carry — `udivmod` disagrees with the
+# hardware (real 4, model 7905747460161236410) — is no longer true, and the
+# marker it described was never attached: a comment that says a job is
+# `expect=`-marked beside a registration that has no marker is a claim about
+# the tree that is not true, and the first thing a reader does with it is
+# trust it. Measured 2026-10-29, the run is `agree 91  WRONG 0  NO-RUN 3
+# (of 93)` with exit 1: `udivmod` is among the 91 that agree, and the red is
+# three runs the model stops before returning — `accum_max` (the plan builds,
+# so the model stops at a byte it accepted), `printf_int` (a `movsxd_r64_r32`
+# step is not wired) and `str_len` (the nine SSE2 scalar binary64 forms have
+# no decoder arm). That is the x86-64 instruction-coverage backlog, and it is
+# zero WRONG rows. The marker states the condition rather than a count,
+# because the harness prints no summary line the runner's drift check can
+# read, and a count here would fail as UNCHECKED on every run (`marker_failures`).
 # A model bug on a file that has been running by nobody for as long as it has
 # existed is exactly what an `expect=` marker is for — it says WHAT is red
 # instead of leaving the file invisible. Fix the model and the marker flips
@@ -3035,6 +3048,14 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
+     expect='red with zero WRONG rows (measured 2026-10-29): agree 91, and 3 '
+            'runs the model stops before returning (NO-RUN) — `accum_max` '
+            '(the plan builds, so the model stops at a byte it accepted), '
+            '`printf_int` (a `movsxd_r64_r32` step is not wired) and '
+            '`str_len` (the nine SSE2 scalar binary64 forms have no decoder '
+            'arm). The former `udivmod` disagreement is gone: it is among the '
+            '91 that agree. The three NO-RUNs are the x86-64 '
+            'instruction-coverage backlog, not a wrong step.',
      desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
