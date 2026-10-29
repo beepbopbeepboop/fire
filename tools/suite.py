@@ -385,7 +385,7 @@ MEMCLASS = {
 # comment is a promise nobody checks, and this one is the difference between a
 # reservation and a wish.
 MEM_DEBT_GB = 4.0
-MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
+MEM_DEBT_DOC = 'doc/POLICY_memory_over_4gb.md'
 
 
 def needs_memwhy(spec) -> bool:
@@ -2432,7 +2432,7 @@ test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='me
             'took the self-hosted compiler compiling fire.py from 34-47 GB to '
             '12.2 GB), so `module` (24) is the smallest class that covers it and '
             '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
-            'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
+            'a fact — see doc/POLICY_memory_over_4gb.md. It is `excl` '
             'because at this size it is alone on the machine by arithmetic, not '
             'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
             '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
@@ -2619,7 +2619,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
+     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2633,7 +2633,7 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
+     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')

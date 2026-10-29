@@ -1000,7 +1000,7 @@ def test_every_job_over_the_debt_line_says_why():
     in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
     and a job handed a class above the default with nothing measured behind it
     (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
-    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
+    to the number and points at `doc/POLICY_memory_over_4gb.md`, which
     is where the next step for each one is written down.
     """
     over = {n: s for n, s in sorted(suite.REGISTRY.items())

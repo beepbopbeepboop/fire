@@ -2,7 +2,7 @@
 """Peak-memory budget for the self-hosted compiler (`./mojoc`), as a number.
 
 The project's standard is that nothing we run needs more than 3-4 GB
-(bugs/PERF_memory_over_4gb_is_a_bug.md). The self-hosted binary has no garbage
+(doc/POLICY_memory_over_4gb.md). The self-hosted binary has no garbage
 collector, so a pass that re-derives a working set per function, per module or
 per call turns into gigabytes without changing a single output byte; such a
 regression is invisible to every correctness check and only shows as RSS. This

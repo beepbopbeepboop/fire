@@ -41,11 +41,7 @@
   ],
   "skip": [
     "FORMAL_",
-    "COMPILE_FAIL_",
-    "MERGE_",
-    "OPEN_WORK",
-    "PERF_memory_over",
-    "DOCS_"
+    "OPEN_WORK"
   ],
   "retry_hours": 12
 }

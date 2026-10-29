@@ -44,7 +44,7 @@ QUICK = ["mojoc", "selfhost", "bootstrap-stage1-transitive", "bootstrap-stage2-c
 # `integ` was cut, a merge commit is safe and the gate's verdict still stands; anything else moving means
 # master changed under the round and the round must be redone, not merged.
 CONTROLLER_FILES = ("tools/control.py", "tools/control_prompt.md", "tools/gatewatch.py", "tools/integrate.py",
-                    "tools/autointegrate.py", "CONTROL.html", "bugs/PERF_memory_over_4gb_is_a_bug.md")
+                    "tools/autointegrate.py", "CONTROL.html", "doc/POLICY_memory_over_4gb.md")
 
 
 # TEST INFRASTRUCTURE: code that only decides how, whether and with how much memory the project is TESTED. A
