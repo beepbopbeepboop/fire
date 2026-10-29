@@ -1,31 +1,15 @@
-# Future `add_done_callback(self.method)` is never invoked
+# Status update 2026-10-29
 
-## Status
+Investigation completed. Root cause located in emitted GIMPLE for bound-method async calls (e.g. `await w.run(f)`), NOT in the done-callback dispatch itself.
 
-OPEN. Found 2026-10-29 while repairing `test_coro_future_await.py`. Now that the
-test links, this case runs and the callback never fires:
+Evidence from emitted C (`test_coro_future_await.py` snippet, compiled via `gimple_codegen.compile_to_gimple`):
+- `main_co` creates future `f` (handle non-zero) and passes it to `w.run(f)`.
+- Call site emits `__mgco_Watcher_run_start (_t5, _t7);` but `_t7 = (int64_t)0;` (hardcoded zero).
+- Inside `Watcher.run` body (`__mgco_Watcher_run_body`), `f = _t1` where `_t1 = __mojo_gen_arg(__c, _t2)` with `_t2 = 1` — so the receiver (`self`) is correct but the second argument (the future handle) is missing; `add_done_callback(0, ...)` and `set_result(0, 9)` become no-ops because `!f`.
+- Consequently `future_fire_callbacks` never fires and output is just `0\n`.
 
-    FAIL  bound-method done-callback invoked with self  detail='0\n'
+The done-callback tag-1 lowering (`self.on_done` -> `MojoBoundMethod*`) and runtime dispatch (`__mojo_future_invoke_callback`) are correct; the failure is upstream in argument lowering for bound async method calls. Fix requires correcting the call-site emission for `await w.run(f)` (likely in `emit_methods.py` / `cpp_async.py` argument list construction for `MojoGenerator *` starts).
 
-Expected stdout `bound-method callback\n0\n`; got `0\n`. The callback
-`Watcher.on_done` is registered with `f.add_done_callback(self.on_done)` and
-`f.set_result(9)` should call it as `fn(self, fut)` (tag 1 ->
-`mojo_bound_method_call_1`). It prints nothing.
+Quick regression test: `test_future_done_callback_bound_method` (line ~608) — already fails before fix, passes only when argument passing is repaired.
 
-## Reproduce
-
-    python3 tools/memslot.py --gb 8 --label repro -- python3 test_coro_future_await.py
-
-The case is `test_future_done_callback_bound_method` (line ~608). The sibling
-cases (plain function, closure, `set_exception` callback) pass, so the
-bound-method tag-1 dispatch is the suspect.
-
-## Next step
-
-1. Dump the generated C for the test program and check how the bound method
-   value `self.on_done` is lowered at the `add_done_callback` call site: it must
-   produce a `MojoBoundMethod*` with tag 1, not a bare function pointer.
-2. Check the done-callback dispatch in `runtime/fire_async_runtime.cpp` /
-   `fire_async_sched.c` for tag 1, and whether the callback is dropped on
-   `set_result`.
-3. Fix the tag or lowering, keep the test case, then delete this doc.
+NOT FIXED in this session; requires emission fix in codegen, not runtime.
