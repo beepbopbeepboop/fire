@@ -93,10 +93,21 @@ What this session measured:
   `async def __aenter__`, `__aexit__(*exc_details)`, and `async def f(*args)`
   all called) pulled in the stdlib dylib build, which fails on unrelated
   `mojo_raise_zero_division` goto errors in `std/benchmark/*.mojo`
-  (`benchmark.mojo:218`, `_progress.mojo:85`, `span.mojo:916`). That build did
-  not reach a verdict in this session, so the trigger is still unknown.
+  (`benchmark.mojo:218`, `_progress.mojo:85`, `span.mojo:916`). That build finished with exit 1 and
+  NO `cannot compile module` line, so the module_gen refusal was not hit. Its
+  real error is a C arity mismatch at the call site: `.tmp/repro/called.mojo:510:9:
+  error: too many arguments to function '__mgco_Box___aexit___start'; expected 2,
+  have 3` -- a call `await b.__aexit__(1, 2, 3)` to a `*exc_details` async method
+  is lowered with the caller's three arguments against a 2-parameter start
+  function. This is a separate defect, filed here because it is on the same
+  variadic-async path: a call site to a variadic coroutine must pack the extra
+  arguments the same way the callee's frame does. Start by reading the
+  `__mgco_..._start` emission in `cpp_async.py` and the call lowering that
+  supplies its argument list.
 
 Next step (exact, in order):
+0. Minimal reproducer for the arity defect above is `Box` with
+   `async def __aexit__(self, *exc_details)` called as `await b.__aexit__(1, 2, 3)`.
 1. Find the minimal refused shape through the `module_gen.py` path: call the
    module generator directly on the source (not `fire.py build`, which drags in
    the stdlib dylib), on a copy of `Lib/contextlib.py` reduced one function at a
