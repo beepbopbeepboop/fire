@@ -1,5 +1,46 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-10-29 — the lambda-call-result return type is fixed for plain functions; one generator-yield residue and one nested-def silent miscompile remain)
+
+### Landed
+
+- **`r = f()` where `f` is a lambda, bound to a local, now keeps the lambda's
+  return type.** The local-variable pre-pass (`resolve_shared._infer_local_var_types`)
+  typed the call through `_quick_type`, which knows no lambda-bound callee, so
+  `r` was `int64_t` and printed `0` for `lambda: False`. The pre-pass now reads
+  the same `_lambda_call_ret_types` table return inference reads, built by the
+  one helper `infra_infer._lambda_call_ret_table`.
+- **A `*args, **kwargs` lambda's value records its return type** in
+  `emit_calls._lower_LambdaExpr`'s variadic arm, as its sibling arms do. Before
+  this, `print(f())` for `f = lambda *args, **kwargs: False` printed `0`.
+
+Pinned by `gimple_lambda_call_result_bound_to_a_local_keeps_its_type` in
+`test_gimple_runner.py` (CPython-compared). Before the fix the first two rows
+printed `0` and the variadic row printed `0`; after, all three match CPython.
+
+### Residue found this round (all still open)
+
+| shape | compiled | CPython | where |
+|---|---|---|---|
+| `def gen(): f = lambda: False; r = f(); yield r` — the generator's YIELD value | `0` | `False` | the A3 yield ctype is inferred from `known`, which is built without the lambda-call table. `_Bool r` IS declared correctly in the body lambda, so only the yield's value slot (`int64_t`) is wrong. Next step: give the generator's yield-type scan the same `_lambda_call_ret_table` the pre-pass now uses (`exprtypes._generator_yield_ctype`'s `known`). A plain `r = h()` for a named `def h` already works. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | **new doc**: `bugs/hard/CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md`. Not generator-specific. |
+| `sorted(key=<user function>)` | not re-measured this round | | |
+
+### Two corrections to the entries below
+
+- The named tests this doc cites as pinning the 2026-10-02 work —
+  `generator_every_admitted_lambda_shape`, `generator_lambda_default_before_star_args`,
+  `generator_lambda_with_two_defaults`, `generator_lambda_rebound_per_branch` —
+  **do not exist** in `test_gimple_generator_runner.py` (grep finds none of
+  these names). The shapes they name are re-measured correct in a generator
+  body, so the behaviour holds, but nothing pins it under those names.
+  `gimple_lambda_*` / `cpp_coroutine_*lambda*` in that file cover the same
+  ground under other names. Re-pin before deleting this doc.
+- The `CODEGEN_lambda_bool_return_prints_as_int` doc this doc's table cites is
+  deleted (not in `bugs/`), and its bool row is the first residue row above:
+  the plain-function forms of that row are now fixed, the generator-yield form
+  is not.
+
 ## Status (2026-10-02, this pass — the VARIADIC shape is now admitted inside a compiled generator body, so occurrence #2 is closed)
 
 ### What landed
