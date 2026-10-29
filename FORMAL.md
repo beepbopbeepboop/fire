@@ -1339,6 +1339,15 @@ unanimity rule in `mojo/middle/infra_infer.py`
 - **Do not add an `expect=` marker to make something green.** That is silencing
   a test, and `tools/suite.py` is set up to report an `expect`-marked test that
   *passes* as a failure precisely so a stale marker cannot survive.
+- **Structure first, soundness later (user directive, 2026-10-29).** Land the
+  full STRUCTURE of a proof mechanism — the theorems, their statements, the
+  induction shape, the wiring in the generators — even with `sorry`/`admit` at
+  the leaves; the sorries are the holes to close, and they are closed only once
+  the structure is in place. A named `sorry` surrounded by pinned, type-checking
+  structure is forward progress, not a silencing: the goal is the whole machine,
+  and a discharge that lands before its structure has nowhere to sit. This
+  orders the work, it does not waive the discharge: every landed `sorry` stays
+  named and tracked until a later round closes it.
 - **Take the 80/20 and leave a note.** A precise "this costs weeks, and here is
   why" is a **deliverable**; a half-finished attempt is not.
   `bugs/FORMAL_known_limits.md` has the table shape for that — measured count,
