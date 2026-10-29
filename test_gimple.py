@@ -3800,6 +3800,23 @@ def main():
         print(x)
         """, "Unsupported shape(s): outer: a call to unresolved callee 'helper(...)'")
 
+    # A STR-KEYED subscript in a generator body whose subject is not a
+    # declared container (an untyped parameter here) is a mapping lookup on
+    # a value this scalar model cannot represent. It must refuse honestly.
+    # It must NOT emit `mojo_char_at_str((char *)(d), "k")`: a `const char *`
+    # where the char-at helper takes an int64_t index, a hard g++ error for
+    # every such subscript. Real shape: libpython.py's
+    # items_from_keys_and_values, `ep['me_key']` on a gdb.Value entry.
+    with _force_cpp_coro():
+        test_raises("generator_str_key_subscript_honest_refusal", """\
+def gen(d):
+    yield d['k']
+
+def main():
+    for x in gen({}):
+        print(x)
+        """, "Unsupported shape(s): gen: a str-keyed subscript")
+
     # A nested NON-capturing sync `def` referenced as a callee inside a
     # generator body IS compiled — as a standalone `static` C++ function
     # emitted ahead of the coroutine `{impl}` — and the whole module
