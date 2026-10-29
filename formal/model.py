@@ -30392,6 +30392,41 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
     return by_name.get(callee)
 
 
+def _respell_aliased_module_qualifier(name: str, aliases: dict) -> str:
+    """A dotted call rooted at an import alias, re-spelled at the module.
+
+    `import lib2 as L` spells the call `L.answer`, but every export table is
+    filed under the module the alias stands for — `lib2` — so the qualifier
+    `L` has to be translated to `lib2` before the table is asked. This is the
+    ONE re-spelling both readers of a dotted callee use, `dylib_extern_symbol`
+    (which SYMBOL the call binds) and `dylib_callee_export` (whose DECLARATION
+    its arguments bind against), so the two cannot answer about different
+    modules for the same call.
+
+    Only a MODULE binding is re-spelled, and the discriminator is the
+    `imported_bindings` value's own shape: a module import's DEFINING name is
+    the module itself (`L -> (lib2, lib2)`), while a `from m import f as g`
+    alias's defining name is the FUNCTION (`g -> (m, f)`) and a `g.…` chain is
+    a read through a value, not a library qualifier — `defining == module` is
+    what tells the two apart. A non-aliased import spells the qualifier as the
+    module already (`os -> (os, os)`), so `module != qualifier` excludes it and
+    every existing dotted call passes through unchanged. A bare name is
+    returned as it came in: the alias for one of those is a BARE local and the
+    flat map answers it through `dylib_aliased_export`, not this.
+    """
+    if not aliases or "." not in name:
+        return name
+    qualifier, dot, leaf = name.rpartition(".")
+    pair = aliases.get(qualifier)
+    if pair is None:
+        return name
+    module_spelling, defining = pair[0], pair[1]
+    if (module_spelling and defining == module_spelling
+            and module_spelling != qualifier):
+        return module_spelling + dot + leaf
+    return name
+
+
 def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
                         aliases: dict, callee: str):
     """The manifest export entry the call to `callee` binds, or None.
@@ -30430,6 +30465,12 @@ def dylib_callee_export(by_name: dict, by_module: dict, forwarded: dict,
     `None` means nothing on this link line publishes the name, which is the
     caller's cue to keep whatever answer it has for a callee it cannot resolve
     (`dylib_extern_symbol` is the one that turns it into a refusal)."""
+    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
+    # with the local name, and BOTH lookups below are filed under the module
+    # the alias stands for. Re-spelled once, here, so the declaration reader
+    # and the symbol reader (`dylib_extern_symbol`) cannot answer about two
+    # different modules for the same call.
+    callee = _respell_aliased_module_qualifier(callee, aliases)
     entry = dylib_aliased_export(by_name, by_module, callee, aliases)
     if entry is not None:
         return entry
@@ -30678,6 +30719,12 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             raise CodegenError(dylib_aliased_export_refusal(
                 name, aliases, by_module))
         return (syms or {}).get(name, name)
+    # A module-aliased callee (`L.answer` under `import lib2 as L`) is spelled
+    # with the local name, and the export table is filed under the module the
+    # alias stands for. Re-spelled through the SAME helper the declaration
+    # reader uses, so the symbol and the declaration the arguments bind against
+    # reach the same library.
+    name = _respell_aliased_module_qualifier(name, aliases)
     entry = dylib_export_lookup(by_name, by_module, name, forwarded)
     if entry is not None:
         return entry.get("symbol") or name
@@ -49143,8 +49190,10 @@ def import_bindings(stmt) -> list:
                 continue
             out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
-            # owns; the alias `as` form binds the alias.
-            alias = getattr(stmt, "asname", None)
+            # owns; the alias `as` form binds the alias. The parser records the
+            # `as` name in `alias` (there is no `asname`), and it is None when
+            # the import has no `as`, so the guard keeps the base binding alone.
+            alias = getattr(stmt, "alias", None)
             if alias:
                 out.append((alias, part, part))
         return out

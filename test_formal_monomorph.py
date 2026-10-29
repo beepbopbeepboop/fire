@@ -3821,9 +3821,10 @@ def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
 # fix that read one spelling's callee as the other's, or that dropped the field
 # read, prints a number neither program computes on one of the two.
 #
-# The module-qualified spelling is the UNALIASED `import pairlib`: `import
-# pairlib as L; L.make(…)` is a separate, pre-existing refusal ("'L' has no
-# home") that this change does not address and that is not what it is about.
+# The module-qualified spelling is the UNALIASED `import pairlib`. Its `as`
+# half — `import pairlib as L; L.make(…)` — is a distinct route (the call
+# roots at the alias, not the module name) and is pinned by its own row below,
+# `test_a_module_called_through_its_import_alias_loweres_to_that_module`.
 
 CP_LIB = """\
 struct CP:
@@ -3896,6 +3897,52 @@ def test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field
         got = run_pair_case(tmpdir, arch, "mm_cpqual", CP_LIB, CP_QUAL_PROG,
                             CP_CPYTHON_QUAL)
         check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
+# ── A MODULE CALLED THROUGH ITS `import … as` ALIAS ─────────────────────────
+#
+# `import lib2 as L; L.answer(…)` used to be refused as "'L' has no home": the
+# module-reference recogniser (`model.dylib_module_reference`) was handed the
+# modules on the link line (`lib2`) and so read the chain's root `L` as a value.
+# The recogniser is now handed the LOCAL names the file binds for its module
+# imports (`formal/imports.py::imported_module_bindings`), and the emitter
+# re-spells the aliased qualifier back to the module its export table is filed
+# under (`model._respell_aliased_module_qualifier`), so the call binds the same
+# symbol the unaliased `import lib2` spelling does. 7/9 above are the two
+# answers the one-field rows print, so 42 here is the answer neither of those
+# computes: a fix that resolved `L` to the wrong library, or that bound the
+# call to the alias name itself, would print something else or refuse.
+#
+# The unaliased `import pairlib` spelling of the same call is pinned by the
+# row above; this row is its `as` half, which reaches the callee by the alias
+# the call site actually spells.
+
+ALIAS_LIB = """\
+def answer() -> Int:
+    return 42
+"""
+
+ALIAS_PROG = """\
+import lib2 as L
+
+def main():
+    print(L.answer())
+"""
+
+ALIAS_CPYTHON = """\
+def answer():
+    return 42
+
+def main():
+    print(answer())
+"""
+
+
+def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir):
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_aliasmod", ALIAS_LIB, ALIAS_PROG,
+                            ALIAS_CPYTHON, libname="lib2.mojo")
+        check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
 TESTS = [
@@ -4003,6 +4050,8 @@ TESTS = [
      test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field),
     ("a one-field struct from a module-qualified call reads through its field",
      test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field),
+    ("a module called through its `import … as` alias loweres to that module",
+     test_a_module_called_through_its_import_alias_loweres_to_that_module),
 ]
 
 EXPECTED_FAILURES: dict = {}
