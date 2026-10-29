@@ -4738,6 +4738,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rv_str = rv if rt == 'char *' else (gen._new_val('char *', f'(char *){rv}') if rt == 'int64_t' else gen._stringify_value(rt, rv))
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_str)])
         return 'char *', t
+    # Integer `/` and `%` by a zero divisor RAISE ZeroDivisionError: the
+    # divisor goes through the runtime's checked-divisor helper, which
+    # longjmps out before the C division can answer. The helper is int64_t,
+    # so a narrower integer result type is cast back (the value is unchanged
+    # — a divisor is already of res_type). Gated on the scalar integer ctypes:
+    # a floating-point `/` or `%` never reaches here (its lowering returned
+    # above), and a pointer operand is not an arithmetic divisor.
+    if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
+        _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
+        rv = _chk if res_type == 'int64_t' else gen._new_val(res_type, f'({res_type}){_chk}')
     t = gen._new_temp(res_type)
     gen._emit(f"  {t} = {lv} {c_op} {rv};")
     # `lv {c_op} rv` on two values already PROVEN to be integers is another

@@ -776,14 +776,6 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             resolve(s)
 
 
-_HELPERS = """\
-static int64_t __mojo_floordiv (int64_t a, int64_t b)
-{
-  int64_t q = a / b;
-  return q - (a % b != 0 && (a ^ b) < 0);
-}
-"""
-
 # Byte size of each scalar ctype this codegen's `{mut}`-capture-spec
 # heap-boxing (see GimpleGen._seed_mut_captured_local_types) can encounter
 # as a captured local's ctype -- `-fgimple` rejects `sizeof(int64_t)` as an

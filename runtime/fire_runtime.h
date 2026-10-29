@@ -1505,6 +1505,11 @@ void        mojo_raise_index_error(char *detail);
 /* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
  * raiser, same mechanism and same tag derivation as the five above. */
 void        mojo_raise_not_implemented(char *detail);
+/* Raises a real, catchable ZeroDivisionError ("ZeroDivisionError: division by
+ * zero") — the same mechanism and tag derivation as the raisers above. Reached
+ * only through mojo_int_divisor below, which every integer `/`, `%` and `//`
+ * lowering routes its divisor through. */
+void        mojo_raise_zero_division(void);
 /* The codegen's half of that decision, for the ONE case where a silent answer
  * is the wrong one: a call on a module this compile never compiled
  * (`import argparse` + `argparse.ArgumentParser(...)`). That used to answer
@@ -2146,8 +2151,19 @@ static inline int64_t _Bool_select(int64_t cond, int64_t a, int64_t b) {
 }
 
 /* ── Integer arithmetic helpers ──────────────────────────────────────────
- * Lowered floor-division for use in __GIMPLE code.                      */
+ * Every integer `/`, `%` and `//` divides by the value this returns for its
+ * divisor: a zero divisor RAISES ZeroDivisionError (catchable, like Python)
+ * instead of reaching the C division, which on arm64 silently answers 0. The
+ * raise longjmps out, so the nonzero return is the only value that reaches
+ * the division. */
+static inline int64_t mojo_int_divisor(int64_t b) {
+    if (b == 0) mojo_raise_zero_division();
+    return b;
+}
+
+/* Lowered floor-division for use in __GIMPLE code. */
 static inline int64_t __mojo_floordiv(int64_t a, int64_t b) {
+    b = mojo_int_divisor(b);
     int64_t q = a / b;
     return q - (a % b != 0 && (a ^ b) < 0);
 }

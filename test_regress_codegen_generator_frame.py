@@ -8,16 +8,12 @@ still refuses all three per the 2026-09-07 doc verification.
 """
 
 def test_regression_g_bare_binaryop_in_generator():
-    # This test demonstrates the failure; full fix requires runtime
-    # int-div-by-zero trapping in compiled arithmetic lowering.
-    def g():
-        try:
-            1/0
-        except ZeroDivisionError:
-            pass
-    # Bare expression statement 1/0 should compile to a runtime division check
-    # + mojo_raise(ZeroDivisionError) — currently absent everywhere.
-    pass  # FAILS before fix; passes after full feature implementation
+    # g's bare `1/0` statement: the divisor is a runtime mojo_int_divisor
+    # check (raises ZeroDivisionError), and a bare expression statement is
+    # lowered in the coroutine body. The real assertion lives beside the
+    # integer-division tests.
+    from test_codegen_int_div_zero import test_bare_zero_division_statement_in_generator
+    test_bare_zero_division_statement_in_generator()
 
 def test_regression_gen_nested_def_yield():
     # yield nested() where nested is a sibling nested def inside t0.
