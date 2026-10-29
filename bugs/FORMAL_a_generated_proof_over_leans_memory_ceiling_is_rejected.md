@@ -22,6 +22,55 @@ invisible — is FIXED (2026-10-04): a replayed verdict now says so in the
 ledger, on the screen and in the summary, so a `wall_s: 0.1` row cannot be read
 as coverage again.**
 
+**Status 2026-10-28 (re-measured on the current tree, 82 commits on top of
+§0b's measurement base): the four proofs are still red, but the REASON has
+changed, and the front half of the new reason was a GENERATOR defect —
+FIXED.** The memory-ceiling error no longer fires: a fresh `either` proof
+measured through `formal/lean.py::run_lean` peaks at 5.82 GB, under the
+`-M 6144` bound. The named quick test (`python3 tools/memslot.py --gb 8
+--label scc -- python3 test_formal_short_circuit_cond.py`, now 15 tests on
+this tree) reported, pre-fix, TWO things at once for `either`/`both`/
+`short_and`/`short_or` (`Ran 15 tests … FAILED (failures=4)`, peak 5.7 GB):
+
+* `Unknown identifier f_sr_144` / `f_sr_148` at `:5939`/`:5946` in each file —
+  a generator defect, not a kernel bound. The float-repr helper
+  (`formal/arm64_codegen.py::_emit_float_repr_helper`, emitted once per image
+  after every body for `FORMAL_a_float_has_no_print_spelling.md`) ends in a
+  `RET` that is the image's LAST one, and its general path — the
+  `snprintf`/`strtod` `BL`s at code indices 144/148 — follows it. So
+  `_exec_code_limit` ends at the helper's MIDDLE, those two call sites sit
+  PAST the executable region, and no `sr` lemma was ever emitted for them —
+  while `extern_{sym}_step`'s closer applies `…_sr_{(bl - base) // 4}` at
+  exactly those indices. The helper is unconditional, so EVERY arm64 proof on
+  this tree failed at the two identifiers before the wall below ever ran
+  (arm64-only: `x86_64_proof_gen.py` has no `sr` family and is unaffected).
+* `(deterministic) timeout at whnf`/`elaborator, maximum number of heartbeats
+  (20000000)` at the block-runs declaration (`either_b8_self1`'s `rw
+  [runs_cons_seq …]`, `:7948` in the pre-fix file) — the wall §0b tracks, now
+  wearing the heartbeat bound instead of the memory one.
+
+The identifier half is FIXED in `formal/arm64_proof_gen.py`: the step-RESULT
+plan now reaches the recorded extern call sites that sit PAST the executable
+region — `_gen_step_result_lemmas` gained `extra_idx`, and `generate_arm64_
+proof` passes the call indices the plan does not already cover, so
+`either_sr_144`/`either_sr_148` are emitted and the closer applies a lemma
+that exists in both cases. The generated output is strictly additive: for
+`either`, +154 lines, exactly the two new theorems in the `sr` family's
+sorted position, every other byte identical; an image whose recorded calls
+all sit inside the region emits an empty `extra_idx` and is byte-identical
+to before. Post-fix, the same file measures `rc 1 wall 641.1s peak 5.82 GB` —
+the two `Unknown identifier` errors GONE, the timeout at the same
+declaration, line shifted `:7948` → `:8102` by the 154 lines — and the quick
+test re-runs to `Ran 15 tests in 2512.4s, FAILED (failures=4)`, the four
+programs failing with ONLY the heartbeat timeout left in each (`both`/
+`either`/`short_and`/`short_or`, all at `:8102`/`:8103`), peak 5.8 GB across
+the run, no ceiling error. So the four proofs remain red, on the wall §0b
+measures wearing its other bound, and the next step is still the one §0b
+points at — `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
+md`'s HOIST / §6's predicate: the cost is what the runs/walk declarations
+cost to elaborate, and a per-block fact of §6's shape does not reach a
+`whnf` timeout in `runs_cons_seq`. This stays open.
+
 ## 0b. Re-measured 2026-10-06 (`work/formal40-2`): §3's branch-condition lemma is
 ## the WRONG next step, and there is no hot spot to aim a lemma at
 
