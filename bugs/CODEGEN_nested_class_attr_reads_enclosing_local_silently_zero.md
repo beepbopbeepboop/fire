@@ -64,11 +64,88 @@ Still open (step 3 below, not done):
   `nested_class_local_attr_refused` in `test_gimple_generator_runner.py`).
   Lifting that refusal needs the same store in the stack-switch body.
 
-## Next step
+## Status (2026-10-29, planning round: per-execution semantics)
 
-Decide the per-execution semantics above (step 3), then either lift the
-generator refusal by emitting the same store in the coroutine body, or leave
-the refusal as the documented limit for generators.
+Measured on this branch (`python3 tools/memslot.py --gb 8 -- python3
+.tmp/measure_classattr.py`, which compiles and runs):
+
+```python
+def make(version: int):
+    class Tag():
+        __version__ = version
+    return Tag()
+
+def main():
+    a = make(5)
+    b = make(7)
+    print(a.__version__)
+    print(b.__version__)
+    print(make(9).__version__)
+    print(a.__version__)
+```
+
+Got `7 7 9 9`, exit 0. CPython gives `5 7 9 5`. This is still a silent wrong
+answer. The single-call case (`tag(5)`, `tag(7)` in
+`test_nested_class_attr_reads_enclosing_local_regression`) is correct.
+
+The instance read `a.__version__` resolves to the `_classattr_Tag__version__`
+GLOBAL (it printed the latest call's value, not the value seeded when `a` was
+built), so the instance path is not reading a per-instance copy today.
+
+Decision, with the readings:
+
+- **Reading A: refuse.** Cannot be narrowed statically: any function may be
+  called twice, and `return Tag()` escapes an instance whose attribute is then
+  read after a later call. Refusing every function-hoisted class with a
+  non-literal class attribute would also revoke the working single-call fix
+  landed above. Honest, but it trades a silent error for a regression.
+- **Reading B (recommended): per-instance seeding for function-hoisted
+  classes.** Each instance carries its own copy of the non-literal class
+  attribute, seeded at allocation from the execution that built it.
+
+Plan for B, exact sites:
+
+1. Find the instance-typed MemberExpr read path (where a struct-typed value's
+   `.attr` lowers). It is NOT the bare-type-name path at
+   `mojo/backend_gimple/emit_exprs.py` ~1818 (`ClassName.attr`) nor the `cls.`
+   path at ~1473. Confirm it targets the `_classattr_` global; that is the
+   measured behaviour above.
+2. For a class whose name was hoisted out of a function (the
+   `_gmi_nested_struct_defs` set, `mojo/middle/exprtypes.py`), seed the field
+   at allocation in the `_alloc_<Cls>` emitter, `mojo/backend_gimple/module_gen.py`
+   ~14878 (the `class_attrs` loop). The value is the one the class statement
+   just stored (`_gen_stmt_StructDef`), which is the construction-time value in
+   the common case (`return Tag()` in the same call).
+3. Make the instance-typed read go to the instance field for those classes.
+
+Residuals that B does NOT fix, to be written down rather than hidden:
+
+- `Tag.__version__` on the CLASS object still reads the last execution's
+  value.
+- A class object returned out of its function and constructed in a LATER call
+  still seeds from that later global. Closing this needs a per-execution class
+  object as a runtime value: a separate, larger project. Until then, refuse it
+  the way `mojo/middle/coro.py` `_nested_class_nonliteral_attr` refuses
+  generators, keyed on the class name escaping the function (returned or
+  stored).
+
+Check before implementing B: a rebound class attribute on an existing instance
+(`Tag.__version__ = 3` after `t = Tag()`, then `t.__version__`) must keep
+Python's answer (3). Module-scope classes already seed per-instance
+(`module_gen.py` ~14878), so first confirm what THEIR read path does and make
+hoisted classes match it, not diverge from it.
+
+Tests (land each with its fix, never red on the tree):
+
+- `test_gimple_runner.py`: a new case beside
+  `test_nested_class_attr_reads_enclosing_local_regression` using the program
+  above, expected `"5\n7\n9\n5\n"`. Currently fails with `7 7 9 9`.
+- The existing single-call regression must keep passing (`5\n7\n`).
+- A rebound-after-construction case pinning the module-scope answer.
+
+Generator path: unchanged. `_nested_class_nonliteral_attr` still refuses it
+(`nested_class_local_attr_refused` in `test_gimple_generator_runner.py`).
+Lifting that refusal needs the same store in the stack-switch body, after B.
 
 See also `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`: the
 same family (a nested class cannot see the enclosing function's locals).
