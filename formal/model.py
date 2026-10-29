@@ -8252,20 +8252,34 @@ def float_unary_refusal(op: str, operand_kind, spelled: str,
 def float_int_conversion_note() -> str:
     """The one documented divergence from CPython in a double→int conversion.
 
-    `FCVTZS` and `CVTTSD2SI` SATURATE: a NaN or an infinity converts to
-    `INT64_MIN` (`0x8000000000000000`) rather than trapping, and CPython raises
-    (`ValueError` for a NaN, `OverflowError` for an infinity).  This path has no
-    exception machinery a conversion can raise through, and refusing the
-    conversion in general would refuse the 99.99% of it that is finite — so the
-    finite answers are exact and the two special inputs get the hardware's
-    saturation.  The inputs are not visible to the build: whether a name holds a
-    NaN is a run-time fact, so no static check can separate them, and this is a
-    divergence on an input rather than an approximation of one.
+    A double whose truncated value does not fit in an `Int64`, and an infinity
+    (which is one: CPython raises `OverflowError` for both), is a trap —
+    refused at build time when the source spelled it (`float_to_int_refusal`),
+    checked at run time when it cannot be read (`float_to_int_trap_message`),
+    and stopped with `INT_OVERFLOW_TRAP_STATUS`, which is the one answer this
+    path gives for a program CPython raised.
+
+    The remaining divergence is a NaN. `FCVTZS` and `CVTTSD2SI` SATURATE one,
+    and each answers ITS OWN saturation — measured on both: `FCVTZS` converts
+    a NaN to 0, `CVTTSD2SI` to `INT64_MIN` (`0x8000000000000000`) — while
+    CPython raises `ValueError` for it, so the one input the range test
+    cannot separate is also the one the two machines still part company on.
+    The range test cannot take a NaN — it has no value to check, and both
+    comparisons it is built from are false (unordered) for one — so neither
+    the build's refusal nor the emitters' trap fires for it, and the trap
+    must not be spent on it: this trap is the OverflowError trap, and
+    attributing a stop to a range a NaN does not have would be a false
+    message. That is a divergence on an input rather than an approximation of
+    one, and this note is the record of it.
     """
-    return ("a NaN or an infinity converts to INT64_MIN (the hardware's "
-            "saturating answer) where CPython raises ValueError / "
-            "OverflowError; this path has no exception to raise through, and "
-            "every finite value is exact")
+    return ("a NaN is the one input the range test cannot separate, and each "
+            "hardware answers its own saturation for it — 0 on arm64 "
+            "(FCVTZS), INT64_MIN on x86-64 (CVTTSD2SI) — where CPython "
+            "raises ValueError; a double whose truncated value does not fit "
+            "in an Int64, and an infinity, are refused at build time when the "
+            "source spells them and trapped at run time with the integer "
+            "overflow's status, which is what CPython's OverflowError is on "
+            "this path; every other value is exact")
 
 
 #: Type constructors whose VALUE is an IEEE double — `float(x)`, `Float64(x)`.
@@ -8287,7 +8301,8 @@ FLOAT_TO_INT = "from-float"
 FLOAT_FROM_INT = "to-float"
 
 
-def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
+def float_conversion_lowering(callee_name: str, operand_kind, spelled: str,
+                              value: float = None):
     """`("from-float" | "to-float" | None, refusal)` for a conversion call.
 
     Two directions, and the asymmetry between them is the whole answer:
@@ -8303,9 +8318,21 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
     `None` with no refusal means "this is not a float conversion", which is the
     answer for every ordinary `Int(x)` over an integer and lets the integer path
     run untouched.
+
+    `value` is the operand's value when the build can read it (a float literal,
+    or one with a unary minus — `float_literal_value`), and it is asked ONLY of
+    the `from-float` direction, where a double the build can read and that does
+    not fit in an `Int64` is refused instead of lowered: CPython raises
+    `OverflowError` for it, and the hardware would answer a saturation instead
+    — `INT64_MAX` on one architecture and `INT64_MIN` on the other, which is a
+    divergence the two machines used to disagree with each other on. A value
+    the build cannot read is not refused here: the emitters check the same
+    range at run time and stop with `INT_OVERFLOW_TRAP_STATUS`.
     """
     if callee_name in INT_TYPE_CTORS:
         if operand_kind == FLOAT_KIND:
+            if value is not None and float_to_int_out_of_range(value):
+                return (None, float_to_int_refusal(spelled))
             return (FLOAT_TO_INT, None)
         return (None, None)
     if callee_name not in FLOAT_TYPE_CTORS:
@@ -8319,6 +8346,113 @@ def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
             f"there is no conversion from that kind to one on this path: the "
             f"only two are an integer (SCVTF) and a double (the identity). "
             f"Convert to an integer first, or say what the value is.")
+
+
+#: The two doubles a double→int conversion must check against, and the reason
+#: the lower one is not the smaller side of the `Int64` range itself.
+#:
+#: `FCVTZS`/`CVTTSD2SI` truncate toward zero, and the truncated value must fit
+#: in an `Int64`: `INT64_MIN .. INT64_MAX`. The UPPER boundary is the range
+#: edge — `2**63` is representable, truncates to itself, and does not fit, so
+#: `x >= 2**63` is the whole upper test. The LOWER edge is not: `-2**63`
+#: truncates to `INT64_MIN` and FITS, so the range's own minimum is not the
+#: constant. But a double cannot name the trap: the spacing of binary64 above
+#: `2**63` is 2048, so there is no double between `-2**63 - 2048` and
+#: `-2**63`, and "the value does not fit below the range" over doubles is
+#: exactly `x <= -2**63 - 2048`. Both boundaries are doubles, both are the
+#: extreme members of the trap, and a Python `float` read of either is exact,
+#: so the build-time and run-time halves compare the same two values.
+FLOAT_TO_INT_HI = 2.0 ** 63
+FLOAT_TO_INT_LO = -(2.0 ** 63) - 2048
+
+
+def float_to_int_out_of_range(value: float) -> bool:
+    """Whether a double's truncated value does not fit in an `Int64`.
+
+    The ONE test both halves of the double→int decision mean: the build's
+    refusal asks it of a literal the source spelled, and the emitters' range
+    test is the same inequality over the run-time word. CPython is the
+    oracle: `int()` truncates toward zero and raises `OverflowError` when
+    the truncated value is past `Int64`'s range, and over the set of doubles
+    that is exactly `x >= FLOAT_TO_INT_HI` or `x <= FLOAT_TO_INT_LO` (the
+    boundary arithmetic is the comment on the constants above).
+
+    An infinity answers `True`, which is right: CPython raises `OverflowError`
+    for it, and the hardware would saturate. A NaN answers `False`, because
+    neither comparison holds for one, and a NaN is the one input the trap
+    must NOT take: it has no value to check, `FCVTZS`/`CVTTSD2SI` give it the
+    hardware's saturation, and `float_int_conversion_note` records that
+    divergence rather than a comparison settling it.
+    """
+    return value >= FLOAT_TO_INT_HI or value <= FLOAT_TO_INT_LO
+
+
+def float_literal_value(e):
+    """The value of a float literal, or of one with a unary `+`/`-`, else None.
+
+    The one reader of "can the build read a double", for both backends, for
+    the reason `integer_literal_value` exists: a rule that read the literal
+    with one backend's private spelling is a rule that misses the other
+    spelling. `Int(1e300)` and `Int(-1e300)` are the two shapes the parser
+    keeps — the minus is a node (`UnaryOp('-', FloatLiteral)`) rather than a
+    sign on the literal — and a `0 - 1e300` is a `BinaryOp`, which no build
+    can fold here, so it is None and the run-time range test answers it.
+    """
+    if isinstance(e, F.FloatLiteral):
+        return e.value
+    if isinstance(e, F.UnaryOp) and e.op in ("-", "+"):
+        v = float_literal_value(e.operand)
+        if v is not None:
+            return -v if e.op == "-" else v
+    return None
+
+
+def float_to_int_refusal(spelled: str) -> str:
+    """The build-time half of the double→int range decision.
+
+    Asked from `float_conversion_lowering` when the build can read the operand
+    and `float_to_int_out_of_range` says it does not fit: the source spelled a
+    value, so the answer CPython gives — an `OverflowError`, the program's own
+    next line never reached — is knowable at build time, and the honest move
+    is to say so rather than lower a conversion the hardware would answer with
+    a saturation. The saturation is not one wrong answer: `FCVTZS` clamps at
+    `INT64_MAX` and `CVTTSD2SI` at `INT64_MIN`, so the two architectures used
+    to answer the same source with two different programs, which is the
+    divergence this refusal closes at the place it is decidable. A value the
+    build cannot read is not refused and is checked at run time instead —
+    `float_to_int_trap_message` is that half, and `INT_OVERFLOW_TRAP_STATUS`
+    is the one status both leave behind.
+    """
+    return (f"{spelled} converts a double whose value the build can read, and "
+            f"it does not fit in an Int64: CPython raises OverflowError for "
+            f"an `int()` past the 64-bit range, and the hardware's "
+            f"FCVTZS/CVTTSD2SI would answer a saturation instead — "
+            f"{INT64_MAX} on one architecture and {INT64_MIN} on the other — "
+            f"so this build refuses rather than emit the answer the hardware "
+            f"would give. A value the build cannot read (a name, a parameter, "
+            f"a field) is not refused here: it is checked at run time, and an "
+            f"out-of-range one stops the program with the integer overflow's "
+            f"status.")
+
+
+def float_to_int_trap_message() -> str:
+    """The ONE text a double→int conversion past the range writes to fd 2.
+
+    For BOTH backends, in the shape of `int_overflow_trap_message`: the three
+    things a reader needs and no more — what the target cannot do, what
+    CPython would have said, and that this is a stop rather than an answer.
+    The status it is written for is `INT_OVERFLOW_TRAP_STATUS`, because "this
+    program could not be answered on this target" is one answer on this path,
+    and a reader who has seen an overflow stop should not have to learn that a
+    conversion stops differently.
+    """
+    return ("OverflowError: this program converted a double to an integer, "
+            f"and the double's truncated value does not fit in the signed "
+            f"64-bit range this target has for an integer ({INT64_MIN} .. "
+            f"{INT64_MAX}). CPython raises OverflowError for that program; "
+            "this formal image has no way to raise, so it stops here rather "
+            "than answer the hardware's saturation (which is a different "
+            "number on each architecture).\n")
 
 
 def float_literal_bits(value) -> int:

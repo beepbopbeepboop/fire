@@ -8960,6 +8960,57 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self.asm.emit(encode_or_r8_r8(Reg.RAX, Reg.RCX))
         self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
+    def _emit_float_to_int_range_trap(self) -> None:
+        """Trap if the double in XMM0 does not fit in an `Int64` after truncation.
+
+        The run-time twin of the build's `float_to_int_refusal`, and the
+        instruction-level twin of arm64's `_emit_float_to_int_range_trap`: the
+        same two constants (`model.FLOAT_TO_INT_HI` / `FLOAT_TO_INT_LO`), the
+        same inequality, and the same status as the integer overflow trap, so
+        a reader who has seen an overflow stop does not learn a second way a
+        program with no answer leaves. The caller has already moved the word
+        into XMM0 (the CVTTSD2SI that follows does the same thing), so the
+        tests compare against the constants in XMM1; R11 carries each
+        constant's bits there. Nothing is preserved: no call happens in the
+        sequence, and the only live value at this point in the type-constructor
+        path is the double being converted.
+
+        **Both tests read `jae` (CF=0) in a form an UNORDERED compare cannot
+        set.** UCOMISD leaves a NaN at `CF=ZF=PF=1`, and `jae` is taken only
+        on CF=0, so a NaN falls through to CVTTSD2SI and gets the saturation
+        `model.float_int_conversion_note` records rather than a trap — the one
+        input CPython raises ValueError for and the range test cannot take. The upper test is the straight `x >= 2^63` CPython's
+        OverflowError is: `UCOMISD x, HI ; JAE`. The lower test — `x <= LO`,
+        LO being `-2^63 - 2048`, the largest double whose truncation does not
+        fit below the range — is written with the operand order reversed,
+        `UCOMISD LO, x ; JAE`, which reads `LO >= x`; the forward spelling has
+        no NaN-safe flag form, because `x < LO` and the unordered case both
+        leave CF=1.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_dovf{sid}_t"
+        ok = f"{fn}_dovf{sid}_k"
+        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_HI))
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+        self.asm.emit(encode_ucomisd_xmm(0, 1))
+        self._record_cond_branch()
+        self._emit_jcc(COND_AE, trap)
+        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_LO))
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+        self.asm.emit(encode_ucomisd_xmm(1, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_AE, trap)
+        # In range: skip the block — without it an in-range value falls into
+        # the trap, which is how the first measurement of the arm64 twin
+        # answered `OverflowError` for 3.9.
+        self._emit_jmp(ok)
+        self.asm.label(trap)
+        self._emit_stop_diagnostic(M.float_to_int_trap_message())
+        self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+        self.asm.label(ok)
+
     def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
         """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
         self._emit_expr(l)
@@ -12639,7 +12690,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
             direction, why = M.float_conversion_lowering(
                 name, self._expr_str_kind(operands[0]),
-                f"{name}({M.spelled(operands[0])})")
+                f"{name}({M.spelled(operands[0])})",
+                value=M.float_literal_value(operands[0]))
             if why is not None:
                 raise CodegenError(why)
             if direction is not None:
@@ -12700,12 +12752,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             # The `T` matters: `CVTSD2SI` consults MXCSR's rounding mode, which
             # this backend cannot read or write, so it is the only form whose
             # answer does not depend on state nothing here can see.  A plain
-            # `MOV` of the bits would be the exponent field as an integer;
-            # `model.float_int_conversion_note` records the one input where this
-            # differs from CPython — a NaN or an infinity, where the hardware
-            # saturates and CPython raises — and why no static check can tell
-            # them apart.
+            # `MOV` of the bits would be the exponent field as an integer.
+            # The range the truncation must fit is checked BEFORE the
+            # conversion — `_emit_float_to_int_range_trap` stops with
+            # `INT_OVERFLOW_TRAP_STATUS` where CPython raises `OverflowError`,
+            # and the build already refused the literals for the same reason;
+            # `model.float_int_conversion_note` records the one input the
+            # check cannot take (a NaN) and what happens to it.
             self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+            self._emit_float_to_int_range_trap()
             self.asm.emit(encode_cvttsd2si_r64_xmm(Reg.RAX, 0))
             info = M.INT_TYPE_CTORS[name]
         width, signed = info
