@@ -2182,8 +2182,12 @@ test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
           'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
-     expect='17 failing: `await` on a Future in the coroutine runtime',
-     desc='17 failing: `await` on a Future in the coroutine runtime')
+     expect='2 failing: async struct-method queue segfaults '
+            '(bugs/RUNTIME_async_struct_method_queue_segfaults.md) and a '
+            'bound-method done-callback never invoked '
+            '(bugs/RUNTIME_future_bound_method_done_callback_not_invoked.md)',
+     desc='2 failing: async struct-method queue segfaults and a bound-method '
+          'done-callback never invoked')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
      expect='3 failing: an async function with no return value',
@@ -4525,7 +4529,7 @@ BUCKETS = {
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
     #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
-    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
+    #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
     #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
