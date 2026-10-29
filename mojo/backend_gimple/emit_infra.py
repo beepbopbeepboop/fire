@@ -6324,6 +6324,22 @@ def _is_may_hold_float_param(gen, node) -> bool:
     return False
 
 
+def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, str]:
+    """A VALUE read of a float-possible parameter used as an operand: the
+    word may be a float box, so an operator sees `mojo_box_int` of it. For a
+    double box that is the truncated integer (the answer every operator gave
+    before the box existed, so no operation is made worse); for an integer it
+    is the word itself.
+
+    Only the operand positions of a binary operator come through here.
+    `print` keeps the raw word (it asks `mojo_repr_boxed`), and a call
+    argument keeps it so a forwarded float still reaches its callee as a box.
+    Reading the box as a double is the next step, not this one."""
+    if ctype == 'int64_t' and _is_may_hold_float_param(gen, node):
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', val)])
+    return ctype, val
+
+
 def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     """Box each `double` argument bound for a float-possible parameter of
     `callee` (`_int64_may_hold_float`), so the int64_t slot receives a box
