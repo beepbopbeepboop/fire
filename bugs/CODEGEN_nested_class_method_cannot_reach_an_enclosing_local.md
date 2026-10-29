@@ -103,13 +103,13 @@ number into a build failure — but it will refuse real code, including
 `functools`, so it wants `compile_stdlib.py`'s `U` count measured first, per
 CLAUDE.md's rule about type-resolution refusals.
 
-## Regression test (when it lands)
+## Regression test (when the full fix lands)
 
-`test_gimple_runner.py`, `test_gimple_matches_cpython` or
-`test_gimple_stdout`, next to `gimple_nested_class_methods` /
+`test_gimple_runner.py`, `run_tests`, next to `gimple_nested_class_methods` /
 `gimple_nested_class_in_every_body` — the fixture above plus the
 `cmp_to_key` shape (a nested class whose method reads the enclosing
-PARAMETER), asserted against CPython's exact text. A compile-only assertion
+PARAMETER), asserted against CPython's exact text. The full fix restores the
+`11\n` assertion in place of the refusal below. A compile-only assertion
 is worthless here: this compiles, links and exits 0.
 
 ## 2026-10-28 update (work/bug-codegen-nested-class-method-cannot-r-2810)
@@ -206,3 +206,27 @@ that only the gate can measure.
 
 Status after this round: planning guide landed; no code changed; the doc stays
 (not fixed).
+
+## 2026-10-29 partial fix (work/bug-codegen-nested-class-method-cannot-r): the refusal interim, B
+
+What landed (the doc's own named stopgap; the silent 0 is now a build failure):
+
+- `mojo/backend_gimple/module_gen.py::_gmi_refuse_nested_class_enclosing_reads`,
+  called once from `gen_module_impl` after the hoist. A method of a class
+  declared in a function body that reads a parameter or binding of that
+  function raises `ValueError` naming the method, the class, the name and the
+  function. Method-own names, `self` and module-level names are not refused.
+- Measurement behind choosing B: the Mojo stdlib (`modular/mojo/stdlib`) has
+  no real nested-class-in-def. Its 57 indented `struct`/`class` hits are
+  docstring examples, so the refusal changes no stdlib compile. Gate
+  `stdlib-syntax` `U` should therefore stay flat; the integrator confirms.
+- `test_gimple_runner.py` (`run_tests`): two refusal cases (the `cmp_to_key`
+  parameter shape, and a local read) and one no-regression case (a method
+  reading a module global, expecting `12`). The old regression test that pinned
+  `11` was a function defined after the file's `if __name__` guard, so it never
+  ran; it is replaced by the refusal cases above.
+
+What is still missing: the full fix (per-class env, capture list, env param on
+every method, call-site threading, ownership rule), plan steps 2-8 above. Until
+it lands, a nested-class method that reads an enclosing local is refused, not
+answered.

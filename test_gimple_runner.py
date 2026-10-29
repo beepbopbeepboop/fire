@@ -2087,6 +2087,53 @@ main()
     # had no layout of its own. The hoist APPENDS rather than moves for
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
+    # A method of a class declared inside a function cannot reach that
+    # function's frame yet (bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md).
+    # The full fix threads the environment; until then the
+    # build refuses the read instead of answering 0. The first is the
+    # `functools.cmp_to_key` shape, the second a parameter read, the third a
+    # local read.
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_param_is_refused", """\
+def cmp_to_key(mycmp):
+    class K(object):
+        def __lt__(self, other):
+            return mycmp(self.obj, other.obj) < 0
+    return K
+
+def main():
+    return 0
+""", "cannot reach its enclosing function's frame")
+
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_local_is_refused", """\
+def mk(n: int):
+    t = n + 1
+    class C:
+        def get(self):
+            return t
+    return C().get()
+
+def main():
+    print(mk(10))
+""", "cannot reach its enclosing function's frame")
+
+    # A method that reads only its own names and a module-level global is not
+    # refused: the refusal is for enclosing-function scope and nothing wider.
+    test_gimple_stdout("gimple_nested_class_method_reads_module_global", """\
+SCALE = 3
+
+def mk(n: int):
+    class C:
+        def get(self, k: int):
+            t = k * SCALE
+            return t
+    return C().get(n)
+
+def main():
+    print(mk(4))
+""", "12\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7
@@ -12438,24 +12485,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-def test_nested_class_method_reads_enclosing_local_regression():
-    """Regression for bugs/CODEGEN_nested_class_method_cannot_reach_an_ enclosing_local.md.
-    A nested class method that reads an enclosing function parameter currently
-    produces a silent 0 instead of the correct value (no env threading)."""
-    test_gimple_stdout("gimple_nested_class_method_reads_local", """\
-def mk(n: int):
-    class C:
-        def __init__(self, k: int):
-            self.v = n + k
-        def get(self):
-            return self.v
-    return C(1).get()
-
-def main():
-    print(mk(10))
-""", "11\n")
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
