@@ -1465,6 +1465,52 @@ def _expr_bool_go(e, param: str, env: dict, vtypes: dict = None,
     return f"({_expr_go(e, param, env, vtypes, call_types, scope)} ≠ 0)"
 
 
+def _loop_refusal_tail() -> str:
+    """The shared end of the loop-contract refusals.
+
+    Every refusal in `_stmts_go`'s `WhileStmt` arm ends by naming the loop
+    shapes the model CAN state, so a refusal states the boundary of the
+    contract rather than a limit of the fold, and the one sentence cannot
+    drift between the three refusal sites that carry it.
+    """
+    return (", so the fold would emit a model that is not this program's "
+            "arithmetic. Refusing rather than emitting one: "
+            "`_dec_while_pattern` (a counter that IS the parameter), a "
+            "straight-line body whose state is the induction variable plus "
+            "at most one accumulator, and `_range_loop_pattern` (a range "
+            "loop with one accumulator) are the loop shapes the model can "
+            "state today")
+
+
+def _helper_outer_refs(helper_body: str, env: dict) -> list:
+    """The entry names the loop helper's body references by outer spelling.
+
+    The helper is a top-level `def` that precedes the entry's own `go`
+    definition, so its body may name its own arguments and nothing else of
+    the entry's: a read of a name the loop does not thread as a state word
+    splices the name's ENTRY term into the body, and a term over the entry's
+    names then references a binder that is not in scope at the helper's
+    definition — Lean rejects the file at a line that does not name the
+    loop. Every source name that can appear in the body is a key of `env`
+    (a state word's reads render under its argument spelling, never its
+    source spelling, so no key is skipped), and a key whose entry term is a
+    literal appears only as a literal and names nothing.
+    """
+    return sorted(name for name in env
+                  if re.search(r"\b" + re.escape(name) + r"\b", helper_body))
+
+
+def _loop_leak_message(leaks: list) -> str:
+    """The refusal for a loop helper that would read the entry by name."""
+    return ("model: this `while` loop reads "
+            + ", ".join(f"`{n}`" for n in leaks)
+            + ", which the loop does not change, inside the loop; the loop "
+            "helper is a function of the loop's state alone, so the read "
+            "would carry the entry's names into the helper's body, where "
+            "they are not in scope; refusing rather than emitting a helper "
+            "that does not elaborate")
+
+
 def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
               helpers: list, vtypes: dict = None, call_types: dict = None,
               scope=None) -> str:
@@ -1541,14 +1587,19 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         for b in st.body:
             body_env = _bind_one(body_env, b, param, _expr_go, vtypes,
                                  call_types, scope)
-        # **The loop's state is ONE word, and this fold says so.** The helper
-        # below takes the recursion's single argument, so the only name whose
-        # value can cross an iteration is the one that argument carries. A body
-        # that changes any OTHER name has a loop the model cannot state: the
-        # update is dropped, so the term is not the source's arithmetic.
+        # **The loop's state is at most TWO words, and this fold says so.**
+        # The helper below takes the recursion's arguments — the induction
+        # variable, the word whose updates the loop's condition counts down to
+        # its exit, and, when the body changes a second word, that word, the
+        # accumulator — threaded the way the one-word helper threaded `n_0`:
+        # the entry's value at the call, the body's updated value at the
+        # recursion. So the only values that can cross an iteration are the
+        # ones the arguments carry. A body that changes a THIRD word has a
+        # loop the model cannot state: the update is dropped, so the term is
+        # not the source's arithmetic.
         #
-        # What that used to cost is measured, and it is worse than a lost
-        # update. `formal/examples/accum_max.mojo`:
+        # What the one-word half of that rule used to cost is measured, and it
+        # is worse than a lost update. `formal/examples/accum_max.mojo`:
         #
         #     i = 0
         #     best = 0
@@ -1581,41 +1632,150 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         # this tree: 7+ minutes with no verdict, against 25 s for the same
         # proof's siblings.
         #
-        # So the rule is the honest one: a loop whose state is not one word, or
-        # whose body is not a straight-line run of bindings, is REFUSED here
-        # rather than modelled as something that is not the program. On x86-64
-        # the refusal reaches the generator's own placeholder path
+        # The rule is the honest one, with the state widened to the shape the
+        # census's seven `while` programs all write — `total += i` beside
+        # `i = i + 1` — and the shapes it still cannot state are refused by
+        # name rather than modelled as something that is not the program:
+        #
+        #   * a body that is not a straight-line run of bindings (an `if`, a
+        #     `break`, a `return`) — `accum_max`, `ret_in_loop`,
+        #     `loop_break`; the fold cannot compute a next value of the state
+        #     for a branch it does not follow;
+        #   * a state of MORE than the two words — `var_typed_loop` changes
+        #     three (`step`, `total`, `i`), `nested_loop` has a loop in the
+        #     body at all;
+        #   * a condition that does not test exactly one of the words the body
+        #     changes, so the fold cannot tell which word drives the exit.
+        #
+        # On x86-64 a refusal reaches the generator's own placeholder path
         # (`_placeholder_model`), which emits the gap as a gap and omits the
         # run tests instead of stating a false one — see
         # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_
         # no_contract.md`.
-        dropped = sorted(name for name, term in body_env.items()
-                         if name != param and term != helper_env.get(name))
+        changed = sorted(name for name, term in body_env.items()
+                         if term != helper_env.get(name))
+        dropped = [n for n in changed if n != param]
         shaped = [type(b).__name__ for b in st.body
                   if not isinstance(b, (Assign, AugAssign, VarDecl))]
-        if dropped or shaped:
+        if shaped:
             raise NotImplementedError(
-                "model: this `while` loop's state is more than the one word "
-                "the model carries"
-                + (f" — the body changes {', '.join(dropped)}, and the loop "
-                   f"helper's single argument can carry only the induction "
-                   f"variable" if dropped else "")
-                + (f", and its body is not a straight-line run of bindings "
-                   f"({', '.join(shaped)})" if shaped else "")
-                + f", so the fold would emit a model that is not this "
-                f"program's arithmetic. Refusing rather than emitting one: "
-                f"`_dec_while_pattern` (a counter that IS the parameter) and "
-                f"`_range_loop_pattern` (a range loop with one accumulator) "
-                f"are the shapes the model can state today")
-        updated = body_env.get(param, p)
-        rest_term = (_stmts_go(rest, param, helper_env, fname, loop_counter,
+                "model: this `while` loop's body is not a straight-line run "
+                f"of bindings ({', '.join(shaped)}), so the fold cannot "
+                "compute the next value of the loop's state"
+                + (f" — the body changes {', '.join(changed)}" if changed
+                   else "")
+                + _loop_refusal_tail())
+        if not dropped:
+            # The one-word shape, byte-for-byte the shape this arm has always
+            # emitted: the recursion's single argument tracks the entry
+            # parameter, and the loop the fold states in one word is the one
+            # whose body changes nothing else.
+            updated = body_env.get(param, p)
+            rest_term = (_stmts_go(rest, param, helper_env, fname,
+                                   loop_counter, helpers, vtypes, call_types,
+                                   scope) if rest else p)
+            helper_def = (
+                f"partial def {helper} ({p} : UInt64) : UInt64 :=\n"
+                f"  (if {cond} then {helper} ({updated}) else {rest_term})")
+            leaks = _helper_outer_refs(helper_def, env)
+            if leaks:
+                raise NotImplementedError(
+                    _loop_leak_message(leaks))
+            helpers.append(helper_def)
+            return f"({helper} {env.get(param, '(0 : UInt64)')})"
+        # Two words: the induction variable and, when the body changes a
+        # second word, that word, the accumulator. The induction variable is
+        # the word the CONDITION counts down — the loop has exactly one exit,
+        # so the fold can tell it apart, or it refuses to guess.
+        cond_names = set()
+
+        def _cond_name_walk(node, out):
+            # A state word in a condition, through the forms the condition
+            # can take. A `Call`'s arguments are walked but not its callee
+            # (a call's name is not a state word), and the forms the model
+            # has no value for (a subscript, a field) are not read here:
+            # they refuse in `_cmp_go` above, which already rendered the
+            # condition once, before this walk.
+            if isinstance(node, Var):
+                out.add(node.name)
+            elif isinstance(node, Unary):
+                _cond_name_walk(node.operand, out)
+            elif isinstance(node, BinOp):
+                _cond_name_walk(node.left, out)
+                _cond_name_walk(node.right, out)
+            elif isinstance(node, F.TernaryExpr):
+                _cond_name_walk(node.condition, out)
+                _cond_name_walk(node.then_val, out)
+                _cond_name_walk(node.else_val, out)
+            elif isinstance(node, Call):
+                for _a in node.args:
+                    _cond_name_walk(_a, out)
+        _cond_name_walk(st.condition, cond_names)
+        cands = [n for n in changed if n in cond_names]
+        if len(cands) != 1:
+            if not cands:
+                raise NotImplementedError(
+                    "model: this `while` loop's condition tests no word the "
+                    f"body changes ({', '.join(changed)}), so no word of the "
+                    "loop's state drives its exit; the fold cannot tell when "
+                    "the loop stops, and threading a guess would model a "
+                    "different program")
+            raise NotImplementedError(
+                "model: this `while` loop's condition tests more than one of "
+                "the words the body changes"
+                f" ({', '.join(cands)}), so the fold cannot tell which word "
+                "drives the loop's exit; choosing one would model a "
+                "different program")
+        iv = cands[0]
+        extra = [n for n in changed if n != iv]
+        if len(extra) > 1:
+            raise NotImplementedError(
+                "model: this `while` loop's state is more than the two words "
+                f"the model carries — the body changes {', '.join(changed)}, "
+                "and the loop helper's two arguments can carry only the "
+                "induction variable and one accumulator"
+                + _loop_refusal_tail())
+        # The helper's environment binds the STATE WORDS to the helper's own
+        # arguments, not to their values at entry: at the back edge, `total`
+        # is the folded `total + i` and `i` the decremented counter, and the
+        # condition, the recursion and the exit all read the values at THIS
+        # iteration, which is what the arguments are. A name the body does not
+        # change keeps its entry term: it is the same value at every
+        # iteration, so its constant reading is the right one.
+        henv = dict(env)
+        henv[iv] = p
+        pa = None
+        if extra:
+            pa = f"a_{i}"
+            henv[extra[0]] = pa
+        cond = _cmp_go(st.condition, param, henv, vtypes, call_types, scope)
+        hbody = henv
+        for b in st.body:
+            hbody = _bind_one(hbody, b, param, _expr_go, vtypes, call_types,
+                              scope)
+        rest_term = (_stmts_go(rest, param, henv, fname, loop_counter,
                                helpers, vtypes, call_types, scope)
                      if rest else p)
-        helpers.append(
+        if pa is not None:
+            helper_def = (
+                f"partial def {helper} ({pa} : UInt64) ({p} : UInt64) : "
+                f"UInt64 :=\n"
+                f"  (if {cond} then {helper} ({hbody[extra[0]]}) ({hbody[iv]}) "
+                f"else {rest_term})")
+            leaks = _helper_outer_refs(helper_def, env)
+            if leaks:
+                raise NotImplementedError(_loop_leak_message(leaks))
+            helpers.append(helper_def)
+            return (f"({helper} {env.get(extra[0], '(0 : UInt64)')} "
+                    f"{env.get(iv, '(0 : UInt64)')})")
+        helper_def = (
             f"partial def {helper} ({p} : UInt64) : UInt64 :=\n"
-            f"  (if {cond} then {helper} ({updated}) else {rest_term})"
-        )
-        return f"({helper} {env.get(param, '(0 : UInt64)')})"
+            f"  (if {cond} then {helper} ({hbody[iv]}) else {rest_term})")
+        leaks = _helper_outer_refs(helper_def, env)
+        if leaks:
+            raise NotImplementedError(_loop_leak_message(leaks))
+        helpers.append(helper_def)
+        return f"({helper} {env.get(iv, '(0 : UInt64)')})"
     raise NotImplementedError(
         f"model: a {type(st).__name__} has no translation in the semantic "
         f"model (a `UInt64 → UInt64` function over the source's statements); "
