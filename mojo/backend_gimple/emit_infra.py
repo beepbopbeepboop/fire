@@ -437,6 +437,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # C-shape divergence only — which is the other reason not to leave it: a
     # divergence nobody can see is one nobody looks for.
     gen._maybe_kinds_vals: set = set()
+    # Names whose elements are inner lists of MIXED kinds, as seeded from the
+    # cross-call contract (`_param_nested_mixed`) for this function's params.
+    # Per function for the same reason `_maybe_kinds_vals` is: a param's
+    # kind-mixing is a fact about this function's own binding.
+    gen._nested_mixed_names: set = set()
     # Values that are a BOX — a heap cell a float had to be written into,
     # because a float has no int64_t spelling — read out of a heterogeneous
     # container at a slot index that is not a compile-time constant (see
@@ -877,6 +882,7 @@ class FuncState:
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
         self.fs_maybe_kinds_vals: set = set()
+        self.fs_nested_mixed_names: set = set()
         self.fsloop_stack: list = []
         self.fsexc_depth: int = 0
         self.fs_try_loop_protect: list = []
@@ -973,6 +979,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
+    st.fs_nested_mixed_names = gen._nested_mixed_names
     st.fsloop_stack = gen.loop_stack
     st.fsexc_depth = gen.exc_depth
     st.fs_try_loop_protect = gen._try_loop_protect
@@ -1078,6 +1085,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
+    gen._nested_mixed_names = st.fs_nested_mixed_names
     gen.loop_stack = st.fsloop_stack
     gen.exc_depth = st.fsexc_depth
     gen._try_loop_protect = st.fs_try_loop_protect

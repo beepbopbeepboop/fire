@@ -10604,7 +10604,8 @@ def main():
 main()
 """)
 
-    # Regression for CODEGEN_nested_list_param_two_element_kinds_segfaults:
+    # Regression for the list-of-lists parameter whose int and str call sites
+    # made every row print as a pointer decimal (and the nested loop SIGSEGV):
     # a parameter called with BOTH int and str nested lists must not drop
     # the container evidence and fall to the int64_t default.
     test_gimple_matches_cpython("gimple_nested_list_param_two_kinds", """\
@@ -10617,6 +10618,22 @@ def main():
     show([[1, 2], [3, 4]])
     show([["a", "bb"], ["c"]])
     show([[1, 2], [3, 4]])
+main()
+""")
+
+    # The REPR half of the same join: `print(row)` on each inner list, from
+    # the same two call sites. Before the fix the joined element type made
+    # every row print as its own `MojoList *` decimal.
+    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds_print_row", """\
+def show(rows):
+    for row in rows:
+        print(row)
+        for cell in row:
+            print(cell)
+
+def main():
+    show([[1, 2], [3, 4]])
+    show([["a", "bb"], ["c"]])
 main()
 """)
 
