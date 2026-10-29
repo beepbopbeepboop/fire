@@ -5,6 +5,32 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-29 — partial fix (a) landed: the scalar-decorator refusal; defects 1-3 still open)
+
+Landed the refusal from the plan below, step (a). It changes behaviour: a
+scalar-returning same-module decorator on a top-level `def` now stops the
+compile with `decorator 'deco' on 'step' returns int64_t (not callable)`
+instead of building a binary that silently calls the undecorated function.
+
+- Code: `mojo/backend_gimple/module_gen.py` `_gmi_refuse_scalar_decorator_rebind`,
+  called from `gen_module_impl` beside the nested-class refusal. It inspects
+  only a bare-name decorator that names a top-level `def` in the same module,
+  and only when that decorator's inferred return is `int64_t`/`double`/
+  `_Bool`/`char *`. A decorator that returns its own parameter (`return f`)
+  is exempt: the undecorated answer is correct for it. The exemption is
+  needed because an untyped parameter infers as `int64_t`.
+- Tests: `test_gimple.py` `scalar_decorator_rebind_is_refused` (raises,
+  message `returns int64_t (not callable)`) and
+  `pass_through_decorator_on_a_def_still_compiles`. Both were run in
+  isolation and pass. The full `test_gimple.py` run cannot reach them: it
+  aborts earlier, see `bugs/CODEGEN_test_gimple_halts_on_fire_compiler_assert_raises.md`.
+- NOT covered by the refusal, so still silently wrong: a factory decorator
+  (`@deco(x)`), a decorator imported from another module, and a decorator
+  whose scalar return is hidden behind a nested call.
+
+Defects 1-3 and the rebinding model are unchanged. The next step is still
+step (b) of the plan below. Doc kept open.
+
 ## Status (2026-10-29 — planning round: re-measured, sites located, guide for the next round; no code change)
 
 **Re-measured on this tree**, from the minimal repro (`.tmp`-scratch copy of the
