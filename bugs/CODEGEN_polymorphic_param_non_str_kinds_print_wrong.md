@@ -1,107 +1,5 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
-## Status 2026-10-29 (sixth round) — true division `/` beside the parameter
-
-Landed: the fifth round's first open item, `/`, for a float-possible parameter
-as either operand. Python's true division is a float whatever its operands are,
-so `_float_param_arith` (`mojo/backend_gimple/emit_infra.py`) now answers `/`
-with a double box outright: `mojo_div_double` computes the quotient (it raises
-`ZeroDivisionError` on a zero divisor, and gcc `-fgimple` ICEs on an inline
-double `/`), and `mojo_box_from_double` boxes it. No integer quotient is
-computed, so the integer divide that traps never runs. `_FLOAT_PARAM_OPS`
-(`+`, `-`, `*`, `/`) gates both the operand route and the print route
-(`_is_float_param_arith` → `mojo_repr_boxed`). `//` and `%` are still on the
-truncating path.
-
-Measured before the change (the four new cases, `test_link_mode.py`):
-`x / 2` with `f(2.5)`/`f(1)` printed `1`/`0` (CPython `1.25`/`0.5`), the
-reverse order `0`/`1` (CPython `0.5`/`1.25`), and `2 / x` printed `1`/`2`
-(CPython `0.8`/`2.0`). After: all three match CPython in both call orders.
-`x / 0` inside `try: ... except ZeroDivisionError:` prints `zde` before and
-after (it was already caught; this is a guard, not a fix).
-
-Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`.
-
-Still NOT covered, and the next step for each:
-
-- `//` and `%`: still on the truncating path. Each needs its own arm
-  (`//` is floor of the double quotient for a double operand; `%` is the
-  floor-based double modulo, as `_lower_binary_tail` already does for doubles).
-- The result bound to a name first (`y = x / 2; print(y)`), nested
-  (`(x / 2) + 1`), or returned: the result is a box word that nothing records
-  as possibly-boxed. Same open item as the fifth round.
-- The plain (non-parameter) integer `/` still truncates (`7 / 2` prints `3`):
-  `bugs/CODEGEN_int_true_division_truncates.md`, a separate defect.
-
-## Status 2026-10-29 (fifth round) — a double operand beside the parameter
-
-Landed: the fourth round's first open item, the double operand (`x * 2.5`,
-`2.5 * x`, `x + 0.5`) for `+`, `-` and `*`. Before this, a double operand
-fell outside `_float_param_arith_applies`, so the parameter's word was
-truncated by `mojo_box_int` and `f(2.5)` printed `5.0` for `x * 2.5`
-(CPython `6.25`) and `2.5` for `x + 0.5` (CPython `3.0`).
-
-Now `_float_param_arith` (`mojo/backend_gimple/emit_infra.py`) reads each
-operand as a double through `_float_operand_as_double` (a float-possible
-parameter via `mojo_box_double`, a `double` operand as itself, any other
-integer converted), and because the answer beside a double is always a double,
-it boxes that result outright with `mojo_box_from_double`. No select is needed
-on that path. The integer-beside-parameter path is unchanged apart from sharing
-the same per-operand conversion. `_lower_binary` (`mojo/backend_gimple/emit_exprs.py`)
-passes the operand C types through. The print of the result already goes through
-`mojo_repr_boxed` (`_is_float_param_arith`).
-
-Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
-(the `arithmetic` list, four new cases, both call orders, against CPython):
-`x * 2.5` gives `6.25`/`2.5`, `2.5 * x` gives `6.25`/`2.5`, `x + 0.5` gives
-`3.0`/`1.5`. The pre-fix output for the same programs was `5.0`/`2.5` and `2.5`/`1.5`.
-
-Still NOT covered, and the next step for each:
-
-- `/`, `//`, `%`, `**`: still on the truncating path (see `_FLOAT_ARITH_OPS`).
-  Measured: `x / 2` prints `1` / `0` for `f(2.5)`/`f(1)` where CPython gives
-  `1.25` / `0.5`. The integer-divide side is `CODEGEN_int_true_division_truncates`'s
-  territory too; `/` needs its own arm (a zero divisor traps before any select).
-- A result bound to a name first (`y = x * 2; print(y)`), or nested
-  (`(x * 2) + 1`), or returned: the result is an int64_t word, and nothing
-  records that it may be a box. Needs the same float-possible set extended to
-  locals and return values (`_ret_may_hold_str`'s analogue).
-- Float beside `str`/`list`/`bytes`/`None`, the bytes/list tags, `None`, and box
-  lifetime (a box is still never freed; `mojo_float_arith_select` and
-  `mojo_box_from_double` allocate one per double-valued operation).
-
-## Status 2026-10-29 (fourth round) — the real double read for `+`, `-`, `*`
-
-Landed: the second round's open item 1, for `+`, `-` and `*` whose one operand
-is a float-possible parameter and whose other operand is an integer. `_lower_binary`
-(`mojo/backend_gimple/emit_exprs.py`) hands that pair to
-`emit_infra._float_param_arith`, which computes the integer answer (as before)
-AND the double answer, and `mojo_float_arith_select` (`runtime/fire_runtime.c`)
-picks at run time: a fresh double box when either raw operand word is a double
-box, the integer otherwise. The result is printed through `mojo_repr_boxed`
-(`_is_float_param_arith` in the `print` arm), so `x * 2` with `f(2.5)` prints
-`5.0` and with `f(1)` prints `2`.
-
-Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
-(the `arithmetic` list), against CPython's own output: `x * 2` gives `5.0`/`2`
-and `x + 1` gives `3.5`/`2`, in both call orders, and `x - 1` gives `1.5`/`0`.
-The previous pinned values (`4`, `3`) were the known-wrong truncation and are gone.
-
-Still NOT covered by this arm, and the next step for each:
-
-- `/`, `//`, `%`, `**`: left on the truncating path on purpose (see
-  `_FLOAT_ARITH_OPS`). `/` needs its own arm because its integer form can trap
-  on a zero divisor before the select runs.
-- A double operand beside the parameter (`x * 2.5`): the other operand has no
-  `mojo_box_double` spelling. Needs a double-typed branch of the same select.
-- A result bound to a name first (`y = x * 2; print(y)`), or nested
-  (`(x * 2) + 1`), or returned: the result is an int64_t word, and nothing
-  records that it may be a box. Needs the same float-possible set extended to
-  locals and return values (`_ret_may_hold_float`, the analogue of `_ret_may_hold_str`).
-- Float beside `str`/`list`/`bytes`/`None`, the bytes/list tags, `None`, and box
-  lifetime (a box is still never freed; `mojo_float_arith_select` allocates one
-  per double-valued operation).
-
 ## Status 2026-10-29 — float beside an integer at one parameter is FIXED
 
 Landed (partial, the doc's own "next step 2", float first):
@@ -126,30 +24,7 @@ The pre-fix output was `2` for `2.5` and the test failed; post-fix the whole
 function passes. The generated C was checked by hand: the call site emits
 `mojo_box_from_double (2.5)`, and the print emits `mojo_repr_boxed (x)`.
 
-#### Status 2026-10-29 (third round) — a float forwarded into another call keeps its box
-
-Landed: the second round's open item 2, the forwarding hop. `_int64_may_hold_float`
-now propagates like `_int64_may_hold_str` (`mojo/backend_gimple/module_gen.py`,
-the float fixed point after the str one): a float-possible name flows along an
-identifier call argument and along a copy into the callee's parameter, when
-that slot is still a plain `int64_t` (unannotated, no container observation,
-not str-owned, not resolved by Pass 1.3d). A slot that ends up both str- and
-float-possible is removed from the float set, so the str row keeps its answer.
-Nested defs are not reached (Pass 1.3d never records them either).
-
-Measured, `def g(x): print(x)` / `def f(x): g(x)` / `f(2.5)` + `f(1)` through
-`driver.compile_program`: before, `4353676016` / `1` and `1` / `4345221872`
-(box addresses); after, `2.5` / `1` and `1` / `2.5`. Pinned in
-`test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`, both
-orders.
-
-Still open: item 1 of the second round (the real double read: `x * 2` must print
-`5.0`), item 2's float beside str/list/bytes/None, the bytes/list tags, None, and
-box lifetime. Also not reached: a float-possible parameter RETURNED from a
-function (`return x` then `print(f(2.5))`), which needs a float-possible
-return set consumed by `_gen_print`'s call-result path.
-
-## Status 2026-10-29 (second round) — arithmetic operands no longer read the address
+### Status 2026-10-29 (second round) — arithmetic operands no longer read the address
 
 Landed: the doc's own next step 1, for the operand positions of a binary
 operator only. `_lower_binary` (`mojo/backend_gimple/emit_exprs.py`) passes
@@ -177,8 +52,10 @@ Still open, and NOT measured on this change:
    prints a box address (`fwd` probe: `4312044272` for `f(2.5)`, where
    `f(1)` prints `1`). `g`'s slot never observed a double (its only call site
    passes an IdentExpr), so `_int64_may_hold_float` never names it, and the
-   raw box word reaches a print that asks no box. LANDED in the third round
-   below (the float fixed point in `module_gen.py`).
+   raw box word reaches a print that asks no box. The fix is in Pass 1.3d
+   (`mojo/backend_gimple/module_gen.py`): propagate float-possibility through
+   a call argument that is a float-possible parameter of the caller, the same
+   way `_int64_may_hold_str` propagates a string. Not done here.
 2. **Float beside `str` / `list` / `bytes` / `None`.** Excluded from the float
    set on purpose: a `char *` or container observation keeps the existing rows
    in charge. These pairs are not re-measured here.

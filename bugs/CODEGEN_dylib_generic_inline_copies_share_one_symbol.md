@@ -56,19 +56,6 @@ Next round can start on step 1 once A is confirmed.
 Separately found while scoping: a bare call to a generic function binds the weak stub in link mode (fixed by
 `test_same_module_call_to_generic_with_default_binds_instantiation`, the defaulted-bracket-parameter inference).
 
-### 2026-10-29 repro round (regression test landed, red)
-
-Landed: `test_link_mode.py::test_two_modules_specialize_one_generic_differently` (in `CASES`). Two modules call one
-generic with different specializations (`scale[2]` in `a`, `scale[3]` in `b`, body `x * k`). Expected stdout `20`/`30`.
-
-**Measured (red, before any fix):** `python3 test_link_mode.py`-equivalent run through `driver.compile_program`
-prints `0` / `0`, rc 0. This is a silent miscompile. The bare symbol `_scale` is shared, so both callers run one body
-(`k` erased). It is the same mechanism as `_dlsym`, with a smaller case.
-
-Option A (the recommended design above) is still the next step, not yet implemented. It needs the full gate, so the
-integrator should gate it. The test stays red until step 1 lands. Do not add an `expect=` marker for it, because that
-would hide the miscompile.
-
 ## Measured
 
 `python3 build_stdlib_dylib.py -o …` with `MOJO_DEDUP_LOG` set (the dedup log is now kept, see the commit that added it):

@@ -13144,6 +13144,12 @@ def integer_text_width(bits: int) -> int:
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
 
+#: Export-rule answers `_export_rule_for` in `build.py` returns when the
+#: defining module declares a name but no exclusion applies (DECLARED), or
+#: never names it at all (ABSENT). Both are `reflect.EXCL_*`-shaped strings.
+EXPORT_RULE_DECLARED = "declared"
+EXPORT_RULE_ABSENT = "absent"
+
 # What an f-string's FIELD has to be for a buffer's bound to be known before
 # the program runs. Read out of the corpus by
 # `test_formal_run.py::check_interpolated_literal_bound_census`, which is where
