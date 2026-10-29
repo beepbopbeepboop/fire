@@ -987,7 +987,7 @@ main()
     # plain list, an `enumerate` pair, and a `dict.items()` pair. `zip` is NOT
     # here — `list(zip([1, 2], [3, 4]))` prints decimals for a DIFFERENT reason
     # (a `mojo_zip` result read as plain ints, the element-type half) and is
-    # filed as `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # filed as `CODEGEN_materialized_container_has_no_element_type (fixed)`.
     # The dict key here is a STRING on purpose: an INTEGER key is quoted by
     # this repr (where CPython does not quote it) because a `keykind == 2`
     # slot has to remember whether the source wrote `1` or `"1"` and does
@@ -2087,6 +2087,53 @@ main()
     # had no layout of its own. The hoist APPENDS rather than moves for
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
+    # A method of a class declared inside a function cannot reach that
+    # function's frame yet (bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md).
+    # The full fix threads the environment; until then the
+    # build refuses the read instead of answering 0. The first is the
+    # `functools.cmp_to_key` shape, the second a parameter read, the third a
+    # local read.
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_param_is_refused", """\
+def cmp_to_key(mycmp):
+    class K(object):
+        def __lt__(self, other):
+            return mycmp(self.obj, other.obj) < 0
+    return K
+
+def main():
+    return 0
+""", "cannot reach its enclosing function's frame")
+
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_local_is_refused", """\
+def mk(n: int):
+    t = n + 1
+    class C:
+        def get(self):
+            return t
+    return C().get()
+
+def main():
+    print(mk(10))
+""", "cannot reach its enclosing function's frame")
+
+    # A method that reads only its own names and a module-level global is not
+    # refused: the refusal is for enclosing-function scope and nothing wider.
+    test_gimple_stdout("gimple_nested_class_method_reads_module_global", """\
+SCALE = 3
+
+def mk(n: int):
+    class C:
+        def get(self, k: int):
+            t = k * SCALE
+            return t
+    return C().get(n)
+
+def main():
+    print(mk(4))
+""", "12\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7
@@ -2161,6 +2208,27 @@ def main():
     print(plain())
 main()
 """, "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
+
+    # The RESULT of calling a lambda-bound local, bound to a local of its own.
+    # `r = f()` takes its declared type from `_quick_type` of the call, and a
+    # call through a local lambda was an unknown callee there, so `r` came out
+    # `int64_t` and printed its box (`0`) where CPython prints `False`. The
+    # return-type table the emitter already keeps for that callee was not
+    # visible to the local-variable pre-pass. The `*args, **kwargs` lambda is
+    # the same answer through the variadic value, whose record was missing
+    # from its own arm of `_lower_LambdaExpr`.
+    test_gimple_matches_cpython("gimple_lambda_call_result_bound_to_a_local_keeps_its_type", """\
+def main():
+    f = lambda: False
+    r = f()
+    print(r)
+    h = lambda: True
+    s = h()
+    print(s)
+    g = lambda *args, **kwargs: False
+    print(g())
+main()
+""")
 
     # The MODULE-LEVEL spelling of the test above, and the one that was broken.
     # `gimple_callable_value_keeps_its_return_type` puts its lambdas inside
@@ -2603,9 +2671,8 @@ print(k())
     #
     # Two branches named this same program — the rows below it and the
     # materialized-lambda env family — and only one name survived, because
-    # `bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md` and the
-    # bound-method-in-a-module-global report (since fixed) both CITED it by
-    # name. The name those docs carried is the one kept.
+    # `CODEGEN_lambda_call_boundary_loses_the_return_type` was fixed. The name
+    # those docs carried is the one kept.
     test_gimple_matches_cpython("gimple_materialized_lambda_keeps_a_double_capture", """\
 def m():
     q = 2.5
@@ -9979,7 +10046,7 @@ bytes_keyed()
     # same evidence. `list(d.items())` is separately broken — it reads each pair
     # pointer as an integer, which is the element-type half of
     # `list(<a boxed container>)` and is filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # `CODEGEN_materialized_container_has_no_element_type (fixed)`.
     #
     # `%(s)s` at the end is the SUBSCRIPT store's half: `d['s'] = 'q'` reached a
     # dict through a container global, which reads back as a boxed `int64_t`, so
@@ -10581,6 +10648,39 @@ def main():
     show_str([["a", "bb"], ["c"]])
     print(collect_str([["x", "y"], ["z"]]))
     show_int([[1, 2], [3, 4]])
+main()
+""")
+
+    # Regression for the list-of-lists parameter whose int and str call sites
+    # made every row print as a pointer decimal (and the nested loop SIGSEGV):
+    # a parameter called with BOTH int and str nested lists must not drop
+    # the container evidence and fall to the int64_t default.
+    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds", """\
+def show(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show([[1, 2], [3, 4]])
+    show([["a", "bb"], ["c"]])
+    show([[1, 2], [3, 4]])
+main()
+""")
+
+    # The REPR half of the same join: `print(row)` on each inner list, from
+    # the same two call sites. Before the fix the joined element type made
+    # every row print as its own `MojoList *` decimal.
+    test_gimple_matches_cpython("gimple_nested_list_param_two_kinds_print_row", """\
+def show(rows):
+    for row in rows:
+        print(row)
+        for cell in row:
+            print(cell)
+
+def main():
+    show([[1, 2], [3, 4]])
+    show([["a", "bb"], ["c"]])
 main()
 """)
 
@@ -12350,6 +12450,17 @@ print(list_str('ab'))
 print([*'ab'])
 """, "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
 
+    test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
+import sys
+import sys as s
+import os as o
+import signal as g
+print(sys.platform == 'linux' or sys.platform == 'darwin')
+print(s.platform == sys.platform)
+print(o.sep == '/' or o.sep == '\\\\')
+print(g.SIGTERM > 0)
+""", "True\nTrue\nTrue\nTrue\n")
+
     _parser_struct_and_symbols()
 
 
@@ -12375,3 +12486,21 @@ def main():
 if __name__ == '__main__':
     main()
 
+
+def test_nested_class_attr_reads_enclosing_local_regression():
+    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+    A class-level attribute whose value names an enclosing function's local
+    was lowered as a `class` statement no-op, so the attribute stayed 0 at
+    exit 0. The class statement must store the value when it executes. Each
+    call reads its own value right after its `class` statement, so the two
+    calls must each print their own argument."""
+    test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
+def tag(version: int):
+    class Tag():
+        __version__ = version
+    return Tag().__version__
+
+def main():
+    print(tag(5))
+    print(tag(7))
+""", "5\n7\n")

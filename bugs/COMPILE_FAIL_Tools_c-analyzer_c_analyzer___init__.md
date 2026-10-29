@@ -4,6 +4,10 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 — refusal naming verified; structural blockers remain (worker's scope)
+
+Quick verification run (`python3 -c "import test_regress_check_all; test_regress_check_all.test_check_all_refusal_named()"` — PASS). The `check_all` refusal is now correctly named (`callable-valued local/parameter 'check(...)'`) rather than a flat `CallExpr`; that naming was landed by `c89f69f3c`. The file's own blocker (`for data, failure in check(analysis)`) is a structural gap — the callable's return type depends on which callable the caller passes — which requires shared callable-return-type-inference machinery (see `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step"). The imported-module floor (`c_common/iterutil.py` `next(...)` and `c_parser/info.py` `next(...)` on CallExpr) is owned by other workers (`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` / `c_parser_parser___init__`). No change to compiler code is possible without affecting those shared paths; tree stays clean with existing regression test.
+
 ## Status 2026-10-04 — same blocker (`check_all`), and the imported-module floor is the two `next(...)` shapes
 
 Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/__init__.py`,
@@ -35,7 +39,7 @@ are all past:
 list-iterator local, which the compiler already supports elsewhere and which
 `bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about), so it is the one to
 take first, after reading that doc. Both this file and
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` now name the same two, which makes
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` (deleted — fixed) now name the same two, which makes
 them the shortest path to a smaller closure for three of these files at once.
 
 ## Status 2026-10-02 — the imported-module floor is down to TWO, and `check_all` is still the one own-file blocker

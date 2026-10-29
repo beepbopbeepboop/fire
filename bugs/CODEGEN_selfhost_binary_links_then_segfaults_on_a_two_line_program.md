@@ -17,8 +17,8 @@ links…` is this one, `CODEGEN_selfhost_closure_compiles_and_the_binary_
 segfaults`, `CODEGEN_selfhost_actual_types_identifier_field_key`,
 `CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform`,
 `CODEGEN_selfhost_tokenize_region_eq_quadratic`, and the module-level
-`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`
-— read off `ls bugs/CODEGEN_selfhost*` rather than from a list carried in
+`CODEGEN_cas_py_never_compiles…` / the `CODEGEN_module_toplevel_undefined_in_selfhost`
+self-host link failure — read off `ls bugs/CODEGEN_selfhost*` rather than from a list carried in
 prose, so it is a census and not an inventory. There is no doc anywhere in
 `bugs/` whose subject is the state the job is in NOW, which is that the
 generated C compiles, links, and produces a binary that **crashes on the first

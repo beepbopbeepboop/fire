@@ -1,5 +1,121 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, planning round — `gen` and `t3` are both frame-introspection features; pinned, not fixed)
+
+Measured on this branch, by compiling the real file through
+`gimple_codegen.compile_to_gimple_with_cpp(src, do_imports=False)`
+(8 GB memslot). The file's only remaining refusal set is:
+
+- `gen`: `a call to unresolved callee 'nested(...)'` — `yield nested()`
+  where `nested` is a sibling nested def returning
+  `sys._getframe().f_generator`.
+- `t3`: `every return must carry a scalar value ... agree on one
+  consistent type` — `async def t3()` returning `sys._getframe().f_generator`.
+
+Facts that decide the plan:
+
+- The compiler has NO representation for `sys._getframe()` or frame
+  objects. `grep -rn _getframe` hits only tests and the regression file;
+  there is no shim, no runtime symbol, no lowering. So `f_generator`
+  has no type the return-type inference can unify, and `nested()` has no
+  value to hold.
+- `gen` minimal repro (the callable-value gap, independent of frames):
+  ```
+  def t0():
+      def nested():
+          return 1
+      def gen():
+          yield nested()
+      g = gen()
+      return next(g)
+  ```
+  still refuses with `unresolved callee 'nested(...)'`. This shape is
+  cluster A (a sibling nested def called from a generator body, which
+  the emitter treats as an unresolved callee). It IS narrow enough to be
+  its own partial fix, but it is shared with `glob`/`os`/`pickletools`
+  and not with frames; the frame part of `gen` still needs the frame
+  model. Recommended as the NEXT step.
+- `t3` minimal repro: a class-method-nested `async def` returning a
+  `sys._getframe()`-derived value refuses; the same `async def` at
+  module or plain-function level (with an identical body) does NOT
+  refuse (checked: `nocls_selfless_use`, `nocls_no_getframe_nonscalar`
+  in `.tmp/bisect3.py`). That is an inconsistency between the two
+  emission paths for one async shape, not just a missing feature: either
+  the module-level compile is silently emitting an unchecked return, or
+  the class-method refusal is over-broad. NOT yet verified which; the
+  module-level one is not confirmed to be correct at run time.
+
+Decision needed (for the next round, not made here):
+
+1. `t3`/`gen` frame model. Options: (a) keep `sys._getframe()` refused
+   and accept that `test_f_generator` stays red for good (honest, no work);
+   (b) model `f_generator` as a typed `object`-like value with a null/self
+   pointer and lower the `is None` / `assertIs(g, ...)` checks (a real
+   feature project: a frame shim plus generator self-identity). Recommend
+   (a) for this file; it is one frame test in CPython's suite.
+2. `t3` inconsistency: run the module-level `nocls_selfless_use` shape
+   and check its generated C. If it returns a garbage/unchecked value,
+   the fix is to make the async return check fire in that path too (the
+   refusal is the honest answer). If the module-level path is correct,
+   the class-method refusal is over-broad and the fix is in
+   `mojo/backend_gimple/cpp_async.py` where `value_ctype` is decided.
+
+Implementation plan (exact files, for the next round):
+
+- `mojo/backend_gimple/cpp_async.py` ~1860-1921: the `value_ctype is None`
+  branch is where a non-scalar async return is refused. The class-method
+  vs module difference must be traced there (which `gen` state —
+  `_cpp_func_scope_decls`, `_cpp_list_local_elem_types` — differs).
+- For `gen`: the callable-value / sibling-nested-def resolution lives in
+  the generator-body call lowering in `mojo/backend_gimple/cpp_core.py`
+  (`unresolved callee` message). Cluster A's fix, if pursued, belongs
+  there and is shared with `glob`/`os`/`pickletools`.
+
+Tests (already landed on this branch):
+
+- `test_regress_codegen_generator_frame.py`: the two `pass` placeholders
+  are replaced with real pins. `test_regression_gen_nested_def_yield`
+  asserts the `unresolved callee 'nested(...)'` refusal;
+  `test_regression_t3_async_non_scalar_return` asserts the class-method
+  scalar-return refusal. Both FAIL the moment the shape compiles, which
+  is the signal to drop the pin and this doc entry together. They are
+  pins, not fixes: neither one turns red->green in this round.
+
+Still open: `gen`, `t3`. `g` is fixed (see below).
+
+## Status (2026-10-29 — partial fix: integer division by zero now raises; `g` lowers)
+
+Landed (root cause of `g`): integer `/`, `%` and `//` by a zero divisor
+silently produced 0 on the compiled path (arm64 SDIV). Every integer division
+now routes its divisor through `mojo_int_divisor` (runtime/fire_runtime.h),
+which raises a catchable `ZeroDivisionError`:
+
+- plain GIMPLE: the arithmetic tail in `mojo/backend_gimple/emit_exprs.py`
+  guards integer `/` and `%`; `//` goes through `__mojo_floordiv`, which now
+  checks too. The dead `_HELPERS` copy of `__mojo_floordiv` in
+  `gimple_codegen.py` is removed.
+- coroutine C++: `mojo/backend_gimple/cpp_core.py` guards integer `/` and `%`
+  (a float divisor is never wrapped), and a bare expression statement in a
+  generator body lowers to `(void)(expr);` instead of being refused. The
+  divisor check is what keeps `1/0` out of C++'s constant-expression error.
+- the boxed `/ // %` helpers now raise `ZeroDivisionError` (they raised
+  `TypeError: division by zero`).
+
+Pinned by `test_codegen_int_div_zero.py` (plain `//`/`/`/`%`, nonzero
+unchanged, and the generator `1/0` shape). `test_gimple.py`: 402 pass, the
+same 2 pre-existing failures as untouched HEAD. The file itself was NOT
+re-run end to end (heavy); the gate integrator should.
+
+NOT done — this file still cannot compile as a whole:
+
+- `gen`: `yield nested()` where `nested` is `sys._getframe().f_generator`
+  (callable-value / frame introspection; the cluster-A blocker above).
+- `t3`: async `return` of a non-scalar (`frame.f_generator`), cross-path
+  return-type unification.
+
+Separate defect found on the way, since fixed: integer `%` truncated toward zero
+(`-7 % 2` gave `-1`; Python gives `1`). Pinned by `test_codegen_int_div_zero.py`.
+
 ## Status (2026-09-07 — "cluster A" premise re-examined; `gen` is not a callable-value gap)
 
 Investigated in a batch aimed at wiring `mojo_maybe_bound_call_N` into the

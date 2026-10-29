@@ -1,8 +1,8 @@
 """test_coro_future_await.py -- real behavioral tests for the A3
 stack-switch backend's Awaitable protocol: heap-allocatable Future/Event
 handles with a waiter list and cross-coroutine wakeup (runtime/
-mojo_coro_gen.c: __mojo_future_* / __mojo_event_* / __mojo_async_await_
-future / __mojo_async_await_event_wait; MOJO_WD_FUTURE in mojo_async_sched.c).
+fire_coro_gen.c: __mojo_future_* / __mojo_event_* / __mojo_async_await_
+future / __mojo_async_await_event_wait; MOJO_WD_FUTURE in fire_async_sched.c).
 
 Compiles the REAL generated C with gcc -fgimple, links this project's own
 runtime, runs the executable, asserts on real stdout. Mirrors
@@ -23,16 +23,16 @@ RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
                  if platform.machine() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
 
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
+    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 
@@ -99,7 +99,7 @@ def test_await_resolved_future_value():
     """`await <future handle>` in a nested coroutine returns the future's
     result box. (The future is resolved before it is awaited -- v0's
     create_task has no eager scheduling, so genuine cross-coroutine wakeup
-    through the scheduler is covered by runtime/test_mojo_future.c at the C
+    through the scheduler is covered by runtime/test_fire_future.c at the C
     level; see COMPILE_FAIL_asyncio_queues.md for the eager-task gap.)"""
     src = """\
 import asyncio

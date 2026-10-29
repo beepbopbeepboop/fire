@@ -776,14 +776,6 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
             resolve(s)
 
 
-_HELPERS = """\
-static int64_t __mojo_floordiv (int64_t a, int64_t b)
-{
-  int64_t q = a / b;
-  return q - (a % b != 0 && (a ^ b) < 0);
-}
-"""
-
 # Byte size of each scalar ctype this codegen's `{mut}`-capture-spec
 # heap-boxing (see GimpleGen._seed_mut_captured_local_types) can encounter
 # as a captured local's ctype -- `-fgimple` rejects `sizeof(int64_t)` as an
@@ -1593,8 +1585,7 @@ class GimpleGen:
         # 1, 2]))` handed `[3, 1, 2]` to the string comparator, which saw
         # three values below the pointer window, called them equal, and
         # returned the list UNSORTED. Keyed by function name, value is the
-        # parameter index. See
-        # bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        # parameter index (per-call-site element type, `_passthrough_param_idx`).
         self._passthrough_param_idx: dict[str, int] = {}
         # Functions whose `return` statements produce containers of MORE THAN
         # ONE kind (`if k: return names` / `return {x for x in names}`). Such
@@ -2090,6 +2081,13 @@ class GimpleGen:
         # accessor plumbing for a `.py` sibling), and raised AttributeError.
         self._emitted_singletons: set = set()
         self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
+        # Statement lists of the modules already in this compilation's import
+        # closure, importers first (the root's, then each imported module's as
+        # it is compiled). A child module's coroutine lowering reads its call
+        # sites from here, so `<child>.<gen>(...)` in an importer can type the
+        # child generator's yield slot (see coro.lower). Shared down the chain
+        # the same way `_compiled_modules` is.
+        self._closure_call_stmts: list = []
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
         # module), keyed by PATH rather than module NAME — a real self-
@@ -2150,8 +2148,8 @@ class GimpleGen:
         self._asdict_dispatch_needed: set = set()
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         # Flattened, incrementally-maintained mirror of the UNION of every
-        # list ever stored into `self._module_stmts` (see bugs/hard/
-        # PERF_nested_module_compile_walk_ast_quadratic_rescan.md, Phase 1)
+        # list ever stored into `self._module_stmts` (see the `_walk_ast` re-scan
+        # bug, Phase 1)
         # — shared by reference into every nested temp_gen exactly like
         # `_module_stmts` itself (see `_compile_imported_module`'s sharing
         # block). Appended to ONCE per statement, ever, right where
@@ -2254,6 +2252,9 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # callee -> {pname}: a list-of-lists param whose call sites disagree on
+        # the inner element kind (see module_gen's _record_param_elem).
+        self._param_nested_mixed: dict = {}
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
@@ -2321,6 +2322,9 @@ class GimpleGen:
         # `mojo_list_get_int` it always did — the cost of the mechanism is
         # confined to the lists that can actually need it.
         self._maybe_kinds_vals: set = set()
+        # Container names whose elements are inner lists of mixed kinds (see
+        # emit_infra._reset_func); reset per function.
+        self._nested_mixed_names: set = set()
         # C values produced by `mojo_list_get_boxed`, and so may be a BOX
         # (a heap cell carrying a float that has no int64_t spelling) rather
         # than the value itself. Consulted by the two places that stringify
@@ -3299,6 +3303,7 @@ class GimpleGen:
         'mojo_box_word':             ('int64_t',   ['int64_t']),
         'mojo_truthy_word':          ('int',       ['int64_t']),
         'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
+        'mojo_list_set_kinds_uniform': ('void',     ['MojoList *', 'char']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -3343,6 +3348,7 @@ class GimpleGen:
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
         'mojo_strlen':           ('int64_t',    ['char *']),
+        'mojo_str_codepoint_len': ('int64_t',   ['char *']),
         'mojo_utf8_codepoint_index': ('int64_t', ['char *', 'int64_t']),
         'mojo_platform_machine': ('char *',     []),
         'mojo_subprocess_run':        ('MojoCompletedProcess *', ['MojoList *', 'int64_t']),
@@ -4977,6 +4983,8 @@ class GimpleGen:
         return gst._gen_stmt_IfStmt(self, node)
     def _gen_stmt_DelStmt(self, node):
         return gst._gen_stmt_DelStmt(self, node)
+    def _gen_stmt_StructDef(self, node):
+        return gst._gen_stmt_StructDef(self, node)
     def _gen_stmt_MatchStmt(self, node):
         return gst._gen_stmt_MatchStmt(self, node)
     def _gen_stmt_WhileStmt(self, node):
@@ -6097,6 +6105,9 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
                     auto_gpu=auto_gpu)
+    # The root's own call sites are what an imported module's generators are
+    # typed by (see GimpleGen._closure_call_stmts).
+    gen._closure_call_stmts = [stmts]
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)

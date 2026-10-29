@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 — regression test added; structural blocker untouched (PARTIAL)
+
+Added `cpp_for_callable_param_read_table_like` regression in
+`test_gimple_generator_runner.py` (passes: refusal names `_get_reader(...)`
+honestly, not silently wrong). The root cause — `_cpp_for_stmt` has no
+path for `for <target> in <call through callable-valued param>` — is still
+missing three pieces together (typed loop target from callable return,
+element access, `fix_row` typing). Shared with `c_analyzer/__init__.py`
+and `c_common/fsutil.py`. No code change to `cpp_core.py`; the refusal
+is correctly named per `ad7ffd96` but the loop cannot yet compile.
+
 ## Status 2026-10-04 — the refusal names the callee and still will not answer; `read_table` is the module-level blocker
 
 Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/tables.py`,

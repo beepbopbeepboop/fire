@@ -402,6 +402,18 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # actually round-trip correctly, not just type-check.
     param_ctypes: list[tuple[str, str]] = []
     fn_params = list(fn.params or [])
+    # A nested SYNC generator that reads an enclosing def's parameter or
+    # local (see _nested_generator_captures). This emitter has no capture
+    # model for generator frames, so the body would name that variable at
+    # file scope and g++ would reject the .cpp. Refuse honestly instead.
+    _captured = getattr(gen, '_nested_gen_captures', {}).get(id(fn))
+    if _captured:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "is a nested generator that reads enclosing-scope "
+            f"variable(s) {', '.join(_captured)}; the coroutine path has no "
+            "capture model for a generator defined inside another function "
+            "(threading the enclosing variables into the generator frame is "
+            "the remaining work)")
     # Increment D guard: a nested async GENERATOR that captures enclosing
     # locals in a shape the A3 capture-box threading cannot reach (driven
     # from a further-nested `async def` sibling's `async for`/await loop).
@@ -1178,6 +1190,68 @@ def _helper_bound_names(body: list) -> set:
     return bound
 
 
+_FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
+_FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
+
+
+def _fstring_field_names(node_list) -> set[str]:
+    """Identifiers an f-string in `node_list` reads from its `{...}` fields.
+
+    The parser keeps an f-string as one raw `StringLiteral` (see
+    fire_compiler.is_fstring_literal), so `_used_idents_deep` never sees
+    the names interpolated into it. Those names are real reads: a nested
+    generator that prints `f'{name}:'` reads `name`. Quoted substrings
+    inside a field (`d['key']`) and attribute names after a dot (`x.attr`)
+    are not variable reads and are skipped.
+    """
+    out: set[str] = set()
+    for n in gimple_exprtypes._walk_ast(node_list):
+        if not (isinstance(n, N.StringLiteral) and N.is_fstring_literal(n)):
+            continue
+        for field in _FSTRING_FIELD_RE.findall(str(n.value)):
+            field = _FSTRING_QUOTED_RE.sub('', field)
+            out.update(_FSTRING_NAME_RE.findall(field))
+    return out
+
+
+def _nested_generator_captures(stmts) -> dict[int, list[str]]:
+    """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
+    `g` reads, for every generator `g` that is defined inside another `def`
+    in `stmts` and reads a parameter or local of that enclosing `def`.
+
+    Such a generator has no capture model on the coroutine path: its body
+    would name the enclosing variable at file scope, which g++ rejects with
+    "'name' was not declared in this scope" blaming the generated .cpp.
+    `g` is lifted into the module's generator set by `_walk_ast`, so the
+    emitter would otherwise see it as an ordinary free generator. Only
+    names that an enclosing `def` binds (its parameters and its own
+    locals, via `_helper_bound_names`) count — a name that is a module
+    global or a builtin is not a capture, and a name the generator rebinds
+    itself is not either.
+    """
+    enclosing: dict[int, set] = {}
+    nested: dict[int, gimple_ctypes.FunctionDef] = {}
+    for f in gimple_exprtypes._walk_ast(stmts):
+        if not isinstance(f, gimple_ctypes.FunctionDef):
+            continue
+        scope = {pn for pn, _ in (f.params or [])} | _helper_bound_names(f.body)
+        for g in gimple_exprtypes._walk_ast(f.body):
+            if (isinstance(g, gimple_ctypes.FunctionDef) and g is not f
+                    and g.is_generator):
+                enclosing.setdefault(id(g), set()).update(scope)
+                nested[id(g)] = g
+    out: dict[int, list[str]] = {}
+    for gid, g in nested.items():
+        own = {pn for pn, _ in (g.params or [])} | _helper_bound_names(g.body)
+        reads = (gimple_exprtypes._used_idents_deep(g.body)
+                 | _fstring_field_names(g.body))
+        caps = (reads & enclosing[gid]) - own
+        if caps:
+            out[gid] = sorted(caps)
+    return out
+
+
 def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                                      base: str, declared: dict,
                                      self_fields, struct_name) -> list:
@@ -1456,7 +1530,7 @@ def _compute_nested_closure_captures(gen, inner: gimple_ctypes.FunctionDef, oute
     # Plain unpack loop, NOT `{pn.lstrip('*') for pn, _ in ...}` — a
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted. See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    # identifier-field-key identity.
     inner_params = set()
     for _pn, _pt in (inner.params or []):
         inner_params.add(_pn.lstrip('*'))

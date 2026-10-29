@@ -2334,6 +2334,16 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # BEFORE the body is generated below, so a loop over `var` INSIDE the
         # body sees the inner element type. The doc's placement note.
         _carry_nested_elem_type(gen, var, it_val, _fl_ctype)
+        # A loop over a kind-MIXED list of lists (`_nested_mixed_names`, seeded
+        # from the call sites that disagree): each inner list may hold a
+        # string or an int, so the target is a kinds-varying value. Marking it
+        # makes the loop over the target read through `mojo_list_get_boxed`
+        # (the `_maybe_kinds_vals` arm above and below), which answers each
+        # slot by the kind the inner list recorded -- where the join used to
+        # answer the int64_t default for all of them.
+        if (not share_var_with_sibling_arm
+                and _as_str(it_val) in gen._nested_mixed_names):
+            gen._maybe_kinds_vals.add(_as_str(var))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -2948,7 +2958,8 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # ...and the reverse: a name an Int-keyed loop declared int64_t must
         # become a string again, not box the string pointer into an integer.
         gen._declare_var(var, 'char *', force=(var == shadow_name)
-                         or var in gen._int_key_loop_vars)
+                         or var in gen._int_key_loop_vars
+                         or gen.var_types.get(var, 'char *') != 'char *')
         gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':

@@ -192,12 +192,11 @@ the CPython-wrong answer, so the suite actively protects the bug; (b) a
 regression test file in no `tools/suite.py` bucket, so nothing runs it; and
 (c) a doc closed on a narrower *spelling* than the one still broken.
 
-`PERF_nested_module_compile_walk_ast_quadratic_rescan.md` is **not** in that
-list despite still being listed here historically: the AST-node rescan it is
-named for is genuinely fixed and linear, but a fresh 2026-09-26 measurement
-found the remaining per-level rescan over generated C text is still
-superlinear (`_dedup_variadic_externs`, halved and cached in Phase 7 but
-still ~n^1.7), so the doc stays OPEN.
+The `_walk_ast` re-scan doc was closed 2026-10-29: its AST-node rescan is
+fixed and pinned by four
+`test_gimple.py` tests, and the two costs it still carried (the uncached
+`_collect_self_assigns`/`_collect_self_reads` scan, and wall clock's per-level
+generated-C text join) are carried in `PERF_struct_self_assign_scan_uncached.md`.
 
 ### A ninth removal, and what it cost (2026-09-29)
 

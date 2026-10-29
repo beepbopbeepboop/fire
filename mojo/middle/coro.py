@@ -63,7 +63,7 @@ def _cm_as_str(x) -> str:
 # `_await_drive_stmts` needs anyway) fixes the collision at the root
 # instead of just renaming around it, per this project's own "consolidate
 # duplicates" convention.
-from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate
+from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 _ENV = 'MOJO_CORO'
@@ -320,7 +320,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             if k is None:
                 k = _literal_kind(val)
             if k is None and val is not None:
-                k = _yield_kind(val)          # BinaryOp / literal fallthrough
+                k = _yield_kind(val, env)     # BinaryOp / literal / str-method fallthrough
                 # A bare call to a same-module `def` that states its return
                 # type (`var v = compute()`), via the shared
                 # `_callee_return_kind` -- see that function for why this
@@ -499,6 +499,15 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     # are not.
     if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
         return _callee_return_kind(expr)
+    # A str METHOD CALL on a string receiver (`'ab'.upper()`, `t.lower()`,
+    # `s.replace(a, b).upper()`) is a string. The method set is the shared
+    # `_STR_RETURNING_METHODS` (the same table `module_shared` and
+    # `module_gen` consult), and the receiver must itself be a string kind,
+    # so `x.upper()` on an int or a user struct is not claimed here.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member in gimple_ctypes._STR_RETURNING_METHODS
+            and _yield_kind(expr.func.obj, env) == 'p'):
+        return 'p'
     if isinstance(expr, N.TernaryExpr):
         tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
         if tk == ek:
@@ -1141,6 +1150,37 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     return _bad
 
 
+def _nested_class_nonliteral_attr(fn: N.FunctionDef):
+    """`(class name, attribute name)` for the first class-level attribute of a
+    class DEFINED INSIDE `fn`'s body whose value is not a literal, else None.
+
+    Why this refuses rather than lowers: the nested class is hoisted to module
+    scope with the rest of the struct pipeline, and its class-level attributes
+    are seeded from module-level `_classattr_` globals at allocation. A value
+    that names a local of the generator (`__version__ = version`) is never
+    assigned to that global, and the stack-switch body lowers the `class`
+    statement itself to a no-op, so the attribute silently reads 0 at exit 0.
+    A literal IS assigned (`_classattr_X__a = 7`), which is why only the
+    literal shapes are admitted here. Refusing is the honest path: the
+    generator falls back, and the module is interpreted from source.
+    """
+    _found: list = []
+    _gmi_nested_struct_defs(fn.body, '', _found, False)
+    for _ni in range(len(_found)):
+        _sd = _found[_ni][0]
+        for _f in (_sd.fields or []):
+            if isinstance(_f, N.AssignStmt) and isinstance(_f.target, N.IdentExpr):
+                _aname, _v = _f.target.name, _f.value
+            elif isinstance(_f, N.VarDecl) and _f.name and _f.value is not None:
+                _aname, _v = _f.name, _f.value
+            else:
+                continue
+            if not isinstance(_v, (N.IntLiteral, N.FloatLiteral, N.StringLiteral,
+                                   N.BoolLiteral, N.NoneLiteral)):
+                return _cm_as_str(_sd.name), _cm_as_str(_aname)
+    return None
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
@@ -1251,6 +1291,12 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         _kwbad = _unrepresentable_kwonly(fn)
         if _kwbad:
             return False, f'kwonly params (v0): {_kwbad}'
+    _nc_attr = _nested_class_nonliteral_attr(fn)
+    if _nc_attr is not None:
+        return False, (f'nested class {_nc_attr[0]!r} has a non-literal class '
+                       f'attribute {_nc_attr[1]!r} (v0: only literal class '
+                       f'attributes are seeded; a value naming a generator '
+                       f'local is never assigned)')
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
                                    _delegated_yield_kind)
     if kind is None:
@@ -1302,13 +1348,41 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     if struct_name is not None and params and params[0][0] in ('self', 'cls'):
         params = params[1:]
     names = {p[0] for p in params}
+    # A `for` loop over a conflicted parameter yields that parameter's
+    # ELEMENTS: `for x in xs: yield x` reads `xs` through the loop target `x`,
+    # so a yield of `x` is a yield of `xs` for this rule. Without this the
+    # target was invisible, the conflict on `xs` never reached the yield slot,
+    # and `gen(["p"])` beside `gen([1])` printed the str as its address
+    # (mixed str/int call sites of one generator). `enumerate(xs)` is the one
+    # loop whose target is not all element: its FIRST slot is the index, so
+    # only the second slot aliases `xs`.
+    via: dict = {}
+    for n in _walk(fn):
+        if not isinstance(n, N.ForStmt):
+            continue
+        it = n.iterable
+        if (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name == 'enumerate' and len(it.args) == 1):
+            it = it.args[0]
+            tnames = for_target_names(n.target)
+            if len(tnames) == 2:
+                tnames = tnames[1:]
+        else:
+            tnames = for_target_names(n.target)
+        if isinstance(it, N.IdentExpr) and it.name in bad and it.name in names:
+            for t in tnames:
+                via[t] = it.name
     out = set()
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
         for ident in _walk(n.value):
-            if isinstance(ident, N.IdentExpr) and ident.name in bad and ident.name in names:
+            if not isinstance(ident, N.IdentExpr):
+                continue
+            if ident.name in bad and ident.name in names:
                 out.add(ident.name)
+            elif ident.name in via:
+                out.add(via[ident.name])
     return out
 
 
@@ -3085,6 +3159,41 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             # context variable. See `_declares_its_own_scope`.
             out.append(s)
             continue
+        if isinstance(s, N.IfStmt):
+            # Guard recognition: `if asyncio.iscoroutine(x): ...` means `x`
+            # is a live coroutine handle inside the `then` body (and any
+            # `elif` body whose own condition is the same guard). The
+            # predicate is real (`__mojo_async_iscoroutine` answers from the
+            # registry), so inside the then-branch `asyncio.run(x)` needs no
+            # static inference about where `x` came from.
+            guard_name = None
+            if _is_asyncio_awaitable_pred_call(s.condition):
+                arg = s.condition.args[0]
+                if isinstance(arg, N.IdentExpr):
+                    guard_name = arg.name
+            then_hv = (hv | {guard_name}) if guard_name else hv
+            # Rewrite condition expression (may contain inner coroutine refs)
+            cond_nv, cond_pre = _rewrite_asyncio_run(s.condition, cvar, tv, lm,
+                                                     handle_vars=hv)
+            out.extend(cond_pre)
+            s.condition = cond_nv
+            s.then_body = _rewrite_asyncio_run_stmts(s.then_body, cvar, tv, lm,
+                                                     lmaps, then_hv)
+            # Elifs: treat each as a nested IfStmt; guard from parent does NOT
+            # propagate into elif conditions, but if an elif's own condition
+            # is the guard, its then-body gets it (handled by recursion).
+            new_elifs = []
+            for elif_ in (s.elifs or []):
+                elif_nv, elif_pre = _rewrite_asyncio_run(elif_, cvar, tv, lm,
+                                                        handle_vars=hv)
+                out.extend(elif_pre)
+                new_elifs.append(elif_nv)
+            s.elifs = new_elifs
+            if s.else_body is not None:
+                s.else_body = _rewrite_asyncio_run_stmts(s.else_body, cvar, tv, lm,
+                                                        lmaps, hv)
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3348,6 +3457,19 @@ def _declares_its_own_scope(s) -> bool:
 
 # ── lowering ───────────────────────────────────────────────────────────
 
+def _dotted_name(expr) -> str | None:
+    """`a.b.c` as the string 'a.b.c' for a plain name or attribute chain, or
+    None for anything else (a call, a subscript, ...)."""
+    if isinstance(expr, N.IdentExpr):
+        return _cm_as_str(expr.name)
+    if isinstance(expr, N.MemberExpr):
+        _base = _dotted_name(expr.obj)
+        if _base is None:
+            return None
+        return _base + '.' + _cm_as_str(expr.member)
+    return None
+
+
 def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     """Static yield-C-kind of a call ARGUMENT expression, or None when it
     can't be told purely syntactically. Literals, a unary +/- of a literal,
@@ -3398,7 +3520,8 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _scan_callsite_param_kinds(stmts: list) -> None:
+def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
+                               module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
     `_CALLSITE_PARAM_CONFLICTS` (the same, minus the resolvable cases) and
     `_PLAIN_CALLSITE_PARAM_KINDS` (ordinary `def`s) from a whole-module scan
@@ -3578,8 +3701,49 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
             seen[_n] = {}
         _collect()
 
-    def _collect():
-        for s in stmts:
+    # The bare names that the closure module currently being walked binds to
+    # THIS module's generators with an un-aliased `from <module_name> import g`.
+    # A bare `g(...)` counts only when the walk's own module made that import,
+    # so a same-named `g` from any other module is never mistaken for it.
+    _bound_here: set = set()
+
+    def _visit_closure_call(node, caller_env):
+        # A call from ANOTHER module of the import closure, counted in two
+        # spellings only: `<this module>.<generator>(...)` and a bare
+        # `<generator>(...)` bound by `from <this module> import <generator>`.
+        # Both name this module's generator without any other table, so they
+        # cannot collide with a same-named generator elsewhere. An aliased
+        # import is not counted, and neither is a call through a value; those
+        # stay holes, as they always were.
+        fn = node.func
+        if isinstance(fn, N.MemberExpr):
+            _hit = (fn.member in gen_names and module_name is not None
+                    and _dotted_name(fn.obj) == module_name)
+        elif isinstance(fn, N.IdentExpr):
+            _hit = _cm_as_str(fn.name) in _bound_here
+        else:
+            _hit = False
+        if _hit:
+            _visit_call(node, caller_env)
+
+    def _from_bound_names(src):
+        names = set()
+        if module_name is None:
+            return names
+        for s in src:
+            if not isinstance(s, N.FromImportStmt) or getattr(s, 'wildcard', False):
+                continue
+            if _cm_as_str(s.module) != module_name:
+                continue
+            for _fp in (getattr(s, 'name_alias_strs', None) or []):
+                _rn = gimple_ctypes._fi_name(_fp)
+                _ra = gimple_ctypes._fi_alias(_fp)
+                if not _ra and _rn in gen_names:
+                    names.add(_rn)
+        return names
+
+    def _collect_from(src, visit):
+        for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
                 fns.append((s, None))
@@ -3603,12 +3767,19 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
                 cenv = _static_env(fn, sdef)
                 for n in _walk(fn):
                     if isinstance(n, N.CallExpr):
-                        _visit_call(n, cenv)
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
                 for n in _walk(s):
                     if isinstance(n, N.CallExpr):
-                        _visit_call(n, None)
+                        visit(n, None)
+
+    def _collect():
+        _collect_from(stmts, _visit_call)
+        for _cs in closure_stmts:
+            _bound_here.clear()
+            _bound_here.update(_from_bound_names(_cs))
+            _collect_from(_cs, _visit_closure_call)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must
@@ -3695,10 +3866,18 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
     _classify()
 
 
-def lower(stmts: list) -> tuple[list, list]:
+def lower(stmts: list, closure_stmts=(),
+          module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
         {'name', 'base', 'params' (list of C types), 'value_ctype',
          'body_name', 'nargs'}
+
+    `closure_stmts` is the statement list of every OTHER module already in
+    the import closure (its importers, in compile order), and `module_name`
+    is this module's name as the importers spell it. Together they let a
+    `<module_name>.<gen>(args)` call made from there type the generator's
+    parameters, and so its yield slot -- see `_scan_callsite_param_kinds`.
+    Without them an imported generator only ever sees its own module's calls.
     """
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
@@ -3753,7 +3932,7 @@ def lower(stmts: list) -> tuple[list, list]:
     # Before `_scan_callsite_param_kinds`, which reaches the table through
     # `_argkind` to type a call argument that is itself a call.
     _scan_func_ret_kinds(stmts)
-    _scan_callsite_param_kinds(stmts)
+    _scan_callsite_param_kinds(stmts, closure_stmts, module_name)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _scan_unthreadable_nested_async_gens(stmts)
     _prop_names = _seed_prop_names(stmts)
@@ -4249,7 +4428,7 @@ def _nested_async_free_vars(inner: N.FunctionDef, outer: N.FunctionDef) -> set:
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted (this codebase's original,
     # longest-documented instance of this trap class). See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    # identifier-field-key identity.
     _inner_pnames = set()
     for _pn, _pa in inner.params:
         _inner_pnames.add(_pn)

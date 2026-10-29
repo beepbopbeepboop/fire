@@ -719,6 +719,26 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     return trusted
 
 
+def _cpp_is_int_operand(gen, node) -> bool:
+    """True when a coroutine-body expression is a plain integer, the only
+    kind of divisor `_cpp_expr`'s `/`/`%` lowering must check for zero. An
+    int literal is always one; anything else is judged by the same static
+    inference the string checks above use, and an unknown type is NOT
+    treated as an integer (a float divisor must never be truncated)."""
+    if isinstance(node, gimple_ctypes.IntLiteral):
+        return True
+    try:
+        _ct = gimple_exprtypes._infer_simple_expr_ctype(
+            node, gen._cpp_declared,
+            getattr(gen, '_cpp_gen_self_fields', None),
+            gen._async_api,
+            fn_return_types=_cpp_trusted_fn_return_types(gen),
+        )
+    except Exception:
+        return False
+    return _ct in gimple_ctypes._SCALAR_INT_TYPES and _ct != '_Bool'
+
+
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
     """`_cpp_expr` counterpart of `gimple_gen_infra.py`'s
     `_apply_fstring_spec` — same fill/align/width parsing (mirrors
@@ -2317,6 +2337,19 @@ def _cpp_expr(gen, e) -> str:
         op = gimple_ctypes._GD_BIN_OPS.get(e.op, e.op)
         _bl = gen._cpp_expr(e.left)
         _br = gen._cpp_expr(e.right)
+        # Integer `/` and `%` by a zero divisor RAISE ZeroDivisionError,
+        # exactly as the plain GIMPLE path's tail does (emit_exprs.py): the
+        # divisor goes through the runtime's checked-divisor helper. Only an
+        # INTEGER divisor is wrapped — a floating-point `/` by zero is inf
+        # in C++, and wrapping it would truncate the double to int64_t.
+        # Integer `%` on two integers floors toward the divisor's sign as
+        # Python's does (C's truncates): the same `__mojo_floormod` the plain
+        # GIMPLE tail uses (emit_exprs.py), which also does the zero check.
+        if (op == '%' and _cpp_is_int_operand(gen, e.left)
+                and _cpp_is_int_operand(gen, e.right)):
+            return f"__mojo_floormod((int64_t)({_bl}), (int64_t)({_br}))"
+        if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
+            _br = f"mojo_int_divisor((int64_t)({_br}))"
         if op in ('==', '!=', '<', '<=', '>', '>='):
             # Mixed-pointerness guard — identical rationale to the
             # CompareChain branch's own copy above (this emitter's
@@ -2337,6 +2370,8 @@ def _cpp_expr(gen, e) -> str:
                     _br = f"((char *)({_br}))"
                 else:
                     _bl = f"((char *)({_bl}))"
+        if op == '/' and _cpp_is_int_operand(gen, e.left) and _cpp_is_int_operand(gen, e.right):
+            return f"((double)({_bl}) / (double)({_br}))"
         return f"({_bl} {op} {_br})"
     if isinstance(e, gimple_ctypes.CompareChain):
         links = []
@@ -4885,9 +4920,13 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # Bare CallExpr as statement: func(args)
         if isinstance(s.value, gimple_ctypes.CallExpr):
             return [f"{indent}{gen._cpp_expr(s.value)};"]
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "unsupported expression statement in generator body "
-            f"({type(s.value).__name__})")
+        # Any other expression statement (`1/0`, test_frame's `g`): Python
+        # evaluates it for its side effects and discards the value, so the
+        # statement is its expression evaluated and cast to void. A bare
+        # `1/0` is what raises ZeroDivisionError here — its divisor is a
+        # runtime mojo_int_divisor call, not a constant the C++ compiler
+        # rejects as a constant-expression division by zero.
+        return [f"{indent}(void)({gen._cpp_expr(s.value)});"]
     if isinstance(s, gimple_ctypes.AssignStmt):
         if isinstance(s.target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
             # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]

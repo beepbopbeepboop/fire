@@ -193,6 +193,7 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 #define _MOJO_EXC_TAG_VALUEERROR 663468903
 #define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
 #define _MOJO_EXC_TAG_OSERROR 2131477727
+#define _MOJO_EXC_TAG_ZERODIVISIONERROR 1715583614
 
 int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
@@ -870,6 +871,28 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     if (fresh && !kinds) _kinds_forget(addr);
 }
 
+void mojo_list_set_kinds_uniform(MojoList *l, char kind)
+{
+    if (!l || l->len <= 0) return;
+    char *k = (char *)malloc(l->len + 1);
+    if (!k) return;
+    memset(k, kind, l->len);
+    k[l->len] = '\0';
+    mojo_list_set_kinds(l, k);
+    /* Set owned so future frees can reclaim this buffer when the list is
+     * dropped: with owned == 1, _kinds_forget keeps the kinds string alive
+     * forever for now — callers of this uniform helper pass only a static
+     * or interned kind byte, and the bounded leak from an ambiguous
+     * container branch (set keys / values is also all char*) is negligible
+     * compared to the dynamic-branching lists that never pay this cost. The
+     * broader safety check is that _kinds_forget does NOT free kinds rows,
+     * so owned=1 here just means "this row may be the unique owner if we
+     * later expand _kinds_forget to free it" — no existing read path changes. */
+    uint64_t addr = (uint64_t)(uintptr_t)l;
+    _KindRow *r = _kinds_row(addr);
+    if (r) r->owned = 1;
+}
+
 /* The kind of one slot, 'i' for anything this table does not describe. */
 char mojo_list_slot_kind(MojoList *l, int64_t i)
 {
@@ -1101,6 +1124,23 @@ double mojo_box_double(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind != 'd') return (double)bx->bits;
     return mojo_double_from_bits(bx->bits);
+}
+
+/* A double passed where an unannotated parameter's call sites ALSO pass an
+ * integer: the slot is an int64_t, so the double travels as a fresh box (kind
+ * 'd') rather than as its bits, which a bare word cannot tell from an integer.
+ * Not cached: there is no (list, slot) to key it on. Each call site boxes its
+ * own argument once, and the box is never freed, the same lifetime a list's
+ * cached box has. */
+int64_t mojo_box_from_double(double v)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return mojo_double_to_bits(v);
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = mojo_double_to_bits(v);
+    bx->kind = 'd';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
@@ -9292,6 +9332,17 @@ void mojo_raise_type_error(char *detail) {
     mojo_raise();
 }
 
+/* `ZeroDivisionError: division by zero` — the raiser behind mojo_int_divisor
+ * (fire_runtime.h) and the boxed `/ // %` answers below. Same sequence and tag
+ * derivation as the siblings here. */
+void mojo_raise_zero_division(void) {
+    char *heap_msg = strdup("ZeroDivisionError: division by zero");
+    mojo_exc_type_set(_MOJO_EXC_TAG_ZERODIVISIONERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
 /* `ValueError: <detail>` — same sequence, same tag derivation, next to its
  * three siblings above. Needed because an operation that REJECTS ITS
  * ARGUMENT is not one of those three: mojo_bytes_partition on an empty
@@ -13374,9 +13425,7 @@ static void _pyobj_raise_mixed(const char *op, int64_t a, int64_t b) {
     mojo_raise_type_error(msg);
 }
 static void _pyobj_raise_zero_div(void) {
-    char msg[64];
-    snprintf(msg, sizeof msg, "division by zero");
-    mojo_raise_type_error(msg);
+    mojo_raise_zero_division();
 }
 /* `+ - * %` on boxes (the `/ // **` shapes have their own functions below).
  * The `a_dbl`/`b_dbl` flags are the codegen's STATIC knowledge that a box
@@ -13515,4 +13564,48 @@ int mojo_pyobject_cmp(char op, int64_t a, int64_t b) {
     }
     return op == '<' ? a < b : op == 'L' ? a <= b
          : op == '>' ? a > b : a >= b;
+}
+
+/* Length-aware variants: when the caller already has the string's length
+ * (e.g. a MojoStr ->len, or a statically-known length), the scan from
+ * byte 0 is unnecessary — "is start inside the string?" becomes
+ * `start < slen`, and read at `start` is sound because `start < slen`
+ * was just confirmed.  Fixes the quadratic loop that calls
+ * mojo_cstr_slice / mojo_cstr_region_eq once per position. */
+char *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        if (start < 0) start += slen;
+        if (stop  < 0) stop  += slen;
+        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
+    }
+    if (start < 0) start = 0;
+    if (stop > slen) stop = slen;
+    if (start >= stop) {
+        char *e = malloc(1); e[0] = '\0'; return e;
+    }
+    int64_t len = stop - start;
+    char *r = malloc(len + 1);
+    memcpy(r, s + start, len);
+    r[len] = '\0';
+    return r;
+}
+
+int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
+                          char *needle)
+{
+    if (!s || !needle) return s == needle;
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        if (start < 0) start += slen;
+        if (stop  < 0) stop  += slen;
+        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
+    }
+    if (start < 0) start = 0;
+    if (stop > slen) stop = slen;
+    if (start >= stop) return needle[0] == '\0';
+    int64_t region_len = stop - start;
+    size_t needle_len = strlen(needle);
+    if ((size_t)region_len != needle_len) return 0;
+    return memcmp(s + start, needle, needle_len) == 0;
 }
