@@ -873,8 +873,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see PERF_nested_module_compile_
-                # walk_ast_quadratic_rescan.md Phase 1) — same sharing
+                # _module_stmts' union (see the `_walk_ast` re-scan bug,
+                # Phase 1) — same sharing
                 # pattern as _module_stmts itself, just above.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
@@ -1177,7 +1177,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # Store parsed stmts for this module so parent gens can access them
                 gen._module_stmts[module_name] = stmts
                 # Incrementally extend the flat, pre-deduped mirror (see
-                # PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+                # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
                 # per module ever, instead of leaving every ancestor
                 # level to re-flatten the whole (growing) _module_stmts
@@ -1445,7 +1445,7 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
+    the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md))."""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):

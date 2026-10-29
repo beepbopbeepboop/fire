@@ -6870,7 +6870,7 @@ def _split_top_level_comma(s: str) -> list[str]:
 # are shared by reference into every `temp_gen`. So without this cache the
 # same parts are re-split and re-parsed at every one of the N levels: O(N^2)
 # in emitted text, which is the same per-level-rescan-the-cumulative-total
-# shape as bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+# shape as the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)
 # documents for the AST-walking consumers, just measured in C fragments
 # instead of AST nodes. That doc ruled this site "out of scope" on 08-18 and
 # 08-25 because it is not an `imported_stmts` AST consumer; a 2026-09-26

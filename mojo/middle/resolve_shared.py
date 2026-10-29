@@ -1250,8 +1250,8 @@ def _infer_return_elem_type(gen, body, func_def=None,
     # element inference depending on module processing order.
     _saved = (gen.var_types, gen._elem_types, gen._dict_val_types,
               gen._actual_types, getattr(gen, '_prepass_struct', None))
-    # Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-    # rescan.md): the per-call seed used to be built by iterating the
+    # Phase 4 (the `_walk_ast` re-scan bug,
+    # closed): the per-call seed used to be built by iterating the
     # ENTIRE tree-shared `func_return_types` dict one setdefault at a
     # time — O(|func_return_types|) interpreted work on EVERY call, and
     # Pass 2c calls this once per function per fixpoint iteration per
@@ -1802,8 +1802,8 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
 def _calls_in_stmts(gen, stmts, out):
     """Collect every CallExpr reachable from a statement list.
 
-    Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-    rescan.md): the traversal is a pure function of each top-level
+    Phase 4 (the `_walk_ast` re-scan bug,
+    closed): the traversal is a pure function of each top-level
     statement's subtree (`_collect_calls` reads no mutable gen state —
     its only gen call, `_fstring_sub_exprs`, re-parses the literal's own
     text from scratch), and every consumer of the collected list only

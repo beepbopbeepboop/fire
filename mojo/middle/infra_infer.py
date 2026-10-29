@@ -1142,8 +1142,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if _has_bytes_destination_param_slice(func.body, pname, _bytes_locals):
                 inferred[pname] = 'MojoBytes *'
                 continue
-            # Phase 3 (bugs/hard/PERF_nested_module_compile_walk_ast_
-            # quadratic_rescan.md): `analyze_param_usage` is an
+            # Phase 3 (the `_walk_ast` re-scan bug,
+            # closed): `analyze_param_usage` is an
             # expensive recursive body scan and a PURE function of
             # (func.body, pname) — no `self.*` state read anywhere in
             # scan_nodes/scan_expr (confirmed by inspection) — so its

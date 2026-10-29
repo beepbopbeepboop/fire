@@ -1344,7 +1344,7 @@ following on from `585879c`/`dba69b8` in session 3), all downstream/gate
 impact confirmed (a real external project, a GCC frontend vendoring this
 compiler, went from 9944 gcc errors to 0), and the remaining gap is now
 tied to a specific, already-tracked, separate deferred project
-(`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
+(`the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`)
 rather than being open-ended or unknown.
 
 ## Status (2026-09-13 — found, NOT fixed, confirmed pre-existing)
@@ -1781,7 +1781,7 @@ each masking the next once the prior one was fixed):
    to check `is_dataclass` FIRST fixes the walker correctly — verified
    via a differential node-count check against the shim — but this
    exposed a SEPARATE, well-documented, actively-tracked cost:
-   `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`'s
+   `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`'s
    O(N²) whole-program rescan, previously tolerated (if slow) via
    CPython but genuinely catastrophic self-hosted once the walker
    actually recurses (confirmed: `MOJO_NO_SHIM=1 ./mojoc gimple_gen_
