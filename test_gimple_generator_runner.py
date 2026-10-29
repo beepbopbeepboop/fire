@@ -861,6 +861,25 @@ def main():
 """, "12\n")
 
 
+def _regression_read_table_callable_reader():
+    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # `_get_reader` is a callable-valued parameter (default csv.reader); the
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
+    # refused honestly (not silently wrong) until callable-local loop typing
+    # lands — this test captures the refusal so a future fix can prove it passes.
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like", """\
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=__import__('csv').reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep or '\\t'):
+        yield row
+
+def main():
+    pass
+""", "callable-valued local/parameter '_get_reader(...)'")
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so
