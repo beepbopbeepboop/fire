@@ -1,97 +1,151 @@
 # CODEGEN: a class-level attribute that reads an enclosing local is silently 0
 
-## Status (2026-10-29, round 8: the catch-in-another-function residual is fixed; the rest remain)
+## Status (2026-10-29)
 
-Round 8 (this commit series):
+Found while fixing `CODEGEN_generator_function_Lib_test_test_ensurepip.md`.
+The generator form of this is now refused honestly (see that doc). The
+PLAIN-FUNCTION form is still silent and is open here.
 
-- **Instance reads of class attributes were broken on master** (regressed by
-  3accbab0f, the instance-write fix). That fix made every instance read go to
-  dynamic storage only, so `class A: x = 9; a = A(); a.x` raised
-  AttributeError, and so did every cell-backed read (`a.__version__`). Now
-  `emit_methods._cattr_instance_dyn_read` probes dynamic storage under the
-  `_mojo_getattr_nothrow` protocol (the 3-arg getattr's), and only a miss falls
-  back to the instance's own cell (`_cattr_instance_read`). An instance write
-  still shadows the class attribute. Test:
-  `gimple_class_attr_instance_read_fallback` (9 4 9).
-- **Residual 1 closed (unwind-time restore).** `_cattr_restore_begin` pushes
-  one unwind record per saved cell at body entry
-  (`mojo_cleanup_push_cattr`, fire_runtime.c's `MOJO_CLEANUP_CATTR`); `mojo_raise`'s
-  unwind writes the saved value back, whichever function catches. Every normal
-  exit (`return`, the reachable fall-through end) pops the records through
-  `_cattr_leave`. Test: `gimple_nested_class_attr_unwind_other_function`
-  (`caught 5`; was `caught 6` before the change).
+Repro (`compile_to_gimple_with_cpp(src, do_imports=False)`):
 
-Round 7 status (2026-10-29: the silent cases are fixed; the residuals below remain)
+```python
+def plain_local(version=5):
+    class A():
+        __version__ = version
+    return A().__version__
+```
 
-The original symptom: a `class` statement inside a function body whose
-non-literal class attribute names a local (`__version__ = version`) lowered
-to nothing, so the attribute read 0 and the program exited 0.
+Observed: the generated C declares `int64_t _classattr_A____version__;` and
+reads it (`_t2 = _classattr_A____version__;`) but NEVER assigns it. The
+`class` statement lowers to `/* TODO: StructDef */` (emit_stmts.gen_stmt's
+"unknown statement dropped" fallback), so the attribute is 0 and the program
+exits 0 with the wrong answer. Expected: `5`, the value of `version` at the
+moment the `class` statement runs.
 
-Landed (plain-function and struct-method bodies; generators unchanged):
+Why: `module_gen.py`'s class-attribute registration (`self._class_attrs[
+s.name][aname] = mangled`) seeds each `_classattr_` global from the class-body
+value at MODULE scope, but a class hoisted out of a function body (the
+2026-10-02 hoist, `_gmi_nested_struct_defs` now in `mojo/middle/exprtypes.py`)
+has a value that names a function-LOCAL. Nothing evaluates that value at the
+point the `class` statement executes.
 
-- **Value is stored at the `class` statement** (`emit_stmts.py`
-  `_gen_stmt_StructDef`).
-- **Per-execution storage** (commit dc7643036 on this branch). Each
-  execution of the `class` statement allocates a fresh cell for each
-  non-constant attribute; instances keep the cell they were built under
-  (hidden `_clscell_<attr>` field). `a = make(5); b = make(7); a.__version__`
-  prints `5`, as CPython does.
-- **Save/restore of the current cell** (this round, `emit_methods.py`
-  `_cattr_restore_begin` / `_cattr_snapshot` / `_cattr_restore_emit` /
-  `_cattr_restore_fallthrough` / `_cattr_restore_end`, wired in
-  `emit_funcs.py` (both body paths), `emit_stmts.py` (`return`, and the
-  `try`/`assert_raises` exception edges)). The cell global is shared by every
-  execution of its function, so a nested or recursive call that runs the same
-  `class` statement used to leave the caller reading the callee's cell.
-  Measured before this round: `f(5, 1)` with a recursive `f` printed `6 6 6 6`
-  (CPython `6 6 5 5`). Now it prints `6 6 5 5`. The function restores its
-  entry values at every `return` and at a reachable fall-through end; a caught
-  exception restores the values the `try` started with (its own cell), since
-  the entry value is the caller's.
-- Functions with no such class emit nothing new, so their C is unchanged.
+What it is NOT: a literal (`__version__ = 7`) works, the same in a generator
+and in a plain function. Only a non-literal value that reads a local is broken.
 
-Regression tests (`test_nested_class_attr_cross_execution_regression.py`,
-all PASS; each of the three new ones fails with its fix disabled):
+Generator bodies are guarded already: `mojo/middle/coro.py`
+`_nested_class_nonliteral_attr` refuses a generator whose nested class has a
+non-literal class attribute, so the stack-switch path no longer compiles it
+silently. The plain-function path has no such guard.
 
-- `gimple_nested_class_attr_cross_exec`: `5 7 9 5` (per-execution cells).
-- `gimple_nested_class_container_attr_cross_exec`: `1 2`.
-- `gimple_nested_class_attr_recursive`: `6 5 7` (save/restore, fall-through and bare return).
-- `gimple_nested_class_attr_recursive_return`: `5 9` (restore before `return <value>`).
-- `gimple_nested_class_attr_exception_unwind`: `caught 5` (the handler restores its own cell; fails with `6` when that restore is disabled).
-- `test_gimple_runner.py` nested-class cases (`5 7`, `3`): still green. The
-  file's total is 477 passed, 4 failed; the four failures are unrelated
-  programs with no class statement, and they fail the same way without this
-  change (`gimple_struct_mixed_reads_survive_a_derivation`,
-  `gimple_heterogeneous_list_literal_keeps_each_slot`,
-  `gimple_struct_mixed_reads_survive_a_function_boundary`,
-  `gimple_ctor_param_polymorphic_slot_reads_receiver`).
+## Status (2026-10-29, partial fix landed)
 
-Still open:
+Landed (plain-function path):
 
-1. **CLOSED in round 8** (was: a catch in a different function left the cell
-   wrong; see the round 8 entry above).
-2. **Same name in two functions.** Two classes both called `T`, in different
-   functions, make class-name attribute reads resolve to the first one. That
-   is separate from the cell work and reproduces with literal attributes
-   (fixed: the class-name read and write now resolve through the enclosing
-   function's rename, `emit_methods._resolve_fn_scoped_struct_name`).
-3. **A class OBJECT that escapes its function** (`return Tag`, then used
-   later). Measured: `def mk(v): class Tag: __version__ = v; return Tag`,
-   `A = mk(5); B = mk(7); print(A.__version__)`, and `A().__version__` both
-   fail LOUDLY today (`Unhandled exception: AttributeError: __version__`,
-   exit 1), not with a wrong number. Closing it needs the class object as a
-   runtime value: a separate, larger project. Until then the loud failure is
-   the honest behaviour, and a silent answer has not been observed for this shape.
-4. **Leak.** One heap cell per non-constant attribute per execution of the
-   `class` statement, never freed (same class as
-   `CODEGEN_closure_env_and_boxed_local_never_freed.md`). A `class` statement
-   in a hot loop leaks about 8 bytes per attribute per iteration.
-5. **Container defaults with no initializer** (`var xs: List[Int]` in a class
-   body) are still per-class globals seeded by the allocator, not per execution.
-6. **Generators** are unchanged: `mojo/middle/coro.py`
-   `_nested_class_nonliteral_attr` still refuses a generator whose nested class
-   has a non-literal class attribute (`nested_class_local_attr_refused` in
-   `test_gimple_generator_runner.py`). The `cpp_*` readers still use the global.
+- `mojo/backend_gimple/emit_stmts.py` `_gen_stmt_StructDef` (dispatched from
+  `gen_stmt`, delegate in `gimple_codegen.py`): a `class` statement inside a
+  function body now stores each registered class attribute with a value into
+  its `_classattr_` global, as `ClassName.attr = <value>`, via the existing
+  `_resolve_class_attr_write_target` path. The repro now emits
+  `_classattr_A____version__ = version;` before the read.
+- Regression: `test_gimple_runner.py` `test_nested_class_attr_reads_enclosing_
+  local_regression` (two calls, `tag(5)` and `tag(7)`, must print `5` and `7`).
+  Before the fix: `got '0\n0\n'`. After: PASS.
 
-Earlier planning rounds (1-6, 2026-10-29) are in git history on this branch;
-their designs were superseded by the cell design above.
+Still open (step 3 below, not done):
+
+- Per-execution semantics. Python builds a new class object each time the
+  `class` statement runs; here there is one module-global `_classattr_` per
+  class, so an instance built by one call and read AFTER a later call of the
+  same function sees the later value. The single-call and read-right-after
+  cases are correct. Decide: give the class per-call storage, or refuse a
+  function-hoisted class whose non-literal attribute can be re-executed.
+- The generator path is unchanged: `mojo/middle/coro.py`
+  `_nested_class_nonliteral_attr` still refuses it (test
+  `nested_class_local_attr_refused` in `test_gimple_generator_runner.py`).
+  Lifting that refusal needs the same store in the stack-switch body.
+
+## Status (2026-10-29, planning round: per-execution semantics)
+
+Measured on this branch (`python3 tools/memslot.py --gb 8 -- python3
+.tmp/measure_classattr.py`, which compiles and runs):
+
+```python
+def make(version: int):
+    class Tag():
+        __version__ = version
+    return Tag()
+
+def main():
+    a = make(5)
+    b = make(7)
+    print(a.__version__)
+    print(b.__version__)
+    print(make(9).__version__)
+    print(a.__version__)
+```
+
+Got `7 7 9 9`, exit 0. CPython gives `5 7 9 5`. This is still a silent wrong
+answer. The single-call case (`tag(5)`, `tag(7)` in
+`test_nested_class_attr_reads_enclosing_local_regression`) is correct.
+
+The instance read `a.__version__` resolves to the `_classattr_Tag__version__`
+GLOBAL (it printed the latest call's value, not the value seeded when `a` was
+built), so the instance path is not reading a per-instance copy today.
+
+Decision, with the readings:
+
+- **Reading A: refuse.** Cannot be narrowed statically: any function may be
+  called twice, and `return Tag()` escapes an instance whose attribute is then
+  read after a later call. Refusing every function-hoisted class with a
+  non-literal class attribute would also revoke the working single-call fix
+  landed above. Honest, but it trades a silent error for a regression.
+- **Reading B (recommended): per-instance seeding for function-hoisted
+  classes.** Each instance carries its own copy of the non-literal class
+  attribute, seeded at allocation from the execution that built it.
+
+Plan for B, exact sites:
+
+1. Find the instance-typed MemberExpr read path (where a struct-typed value's
+   `.attr` lowers). It is NOT the bare-type-name path at
+   `mojo/backend_gimple/emit_exprs.py` ~1818 (`ClassName.attr`) nor the `cls.`
+   path at ~1473. Confirm it targets the `_classattr_` global; that is the
+   measured behaviour above.
+2. For a class whose name was hoisted out of a function (the
+   `_gmi_nested_struct_defs` set, `mojo/middle/exprtypes.py`), seed the field
+   at allocation in the `_alloc_<Cls>` emitter, `mojo/backend_gimple/module_gen.py`
+   ~14878 (the `class_attrs` loop). The value is the one the class statement
+   just stored (`_gen_stmt_StructDef`), which is the construction-time value in
+   the common case (`return Tag()` in the same call).
+3. Make the instance-typed read go to the instance field for those classes.
+
+Residuals that B does NOT fix, to be written down rather than hidden:
+
+- `Tag.__version__` on the CLASS object still reads the last execution's
+  value.
+- A class object returned out of its function and constructed in a LATER call
+  still seeds from that later global. Closing this needs a per-execution class
+  object as a runtime value: a separate, larger project. Until then, refuse it
+  the way `mojo/middle/coro.py` `_nested_class_nonliteral_attr` refuses
+  generators, keyed on the class name escaping the function (returned or
+  stored).
+
+Check before implementing B: a rebound class attribute on an existing instance
+(`Tag.__version__ = 3` after `t = Tag()`, then `t.__version__`) must keep
+Python's answer (3). Module-scope classes already seed per-instance
+(`module_gen.py` ~14878), so first confirm what THEIR read path does and make
+hoisted classes match it, not diverge from it.
+
+Tests (land each with its fix, never red on the tree):
+
+- `test_gimple_runner.py`: a new case beside
+  `test_nested_class_attr_reads_enclosing_local_regression` using the program
+  above, expected `"5\n7\n9\n5\n"`. Currently fails with `7 7 9 9`.
+- The existing single-call regression must keep passing (`5\n7\n`).
+- A rebound-after-construction case pinning the module-scope answer.
+
+Generator path: unchanged. `_nested_class_nonliteral_attr` still refuses it
+(`nested_class_local_attr_refused` in `test_gimple_generator_runner.py`).
+Lifting that refusal needs the same store in the stack-switch body, after B.
+
+See also `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`: the
+same family (a nested class cannot see the enclosing function's locals).

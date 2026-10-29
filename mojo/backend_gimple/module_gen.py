@@ -8,7 +8,6 @@ statements); returns the generated C source string.
 """
 from __future__ import annotations
 
-import copy
 import os
 import re
 import sys
@@ -74,7 +73,6 @@ import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_calls as _gmi_emit_calls
-import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.funcs_shared import param_default_pairs
@@ -2604,21 +2602,11 @@ def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
-    _key = (id(body), str(_method_names) if isinstance(_method_names, set) else str(_method_names))
-    _hit = getattr(__import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO']), '_SELF_ASSIGN_MEMO', {}).get((_key, 'reads'))
-    if _hit is not None:
-        for fn in _hit:
-            if fn not in found and fn not in _method_names and fn not in _PSEUDO_DUNDER_ATTRS:
-                found[fn] = _UNKNOWN_FIELD_CTYPE
-        return
-    _reads = []
     for node in _walk_ast(body):
         fn = _gmi_self_member(node)
         if (fn is not None and fn not in found and fn not in _method_names
                 and fn not in _PSEUDO_DUNDER_ATTRS):
-            _reads.append(fn)
             found[fn] = _UNKNOWN_FIELD_CTYPE
-    __import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO'])._SELF_ASSIGN_MEMO[(_key, 'reads')] = _reads
 
 
 
@@ -2973,58 +2961,6 @@ def _gmi_comprehension_targets(comp, out: set) -> None:
     _gmi_target_leaf_names(getattr(comp, 'key', None), out)
 
 
-def _cattr_value_is_constant(v) -> bool:
-    """True when a class-level attribute's value is a scalar literal (or None):
-    the same in every execution of its `class` statement, so it may live in a
-    plain module global. This is exactly the set `coro._nested_class_nonliteral_attr`
-    admits, so the generator path and the plain-function path agree on which
-    attributes are constants. Anything else (`__version__ = version`, a container)
-    may read the enclosing function's locals and is stored per execution."""
-    return isinstance(v, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
-                          NoneLiteral))
-
-
-def _struct_typedef_fields(gen, sn) -> dict:
-    """The `{field: ctype}` map a struct's `typedef` body is rendered from: its
-    Python-visible fields (`struct_field_types`) plus the hidden per-execution
-    cell pointers of its function-scoped class attributes (`_cell_struct_fields`).
-    Only the typedef sees the hidden ones. Every runtime reflection reader
-    (repr, getattr, fieldnames, asdict) reads `struct_field_types` alone, so an
-    instance never lists or prints its cell."""
-    _fields = dict(gen.struct_field_types.get(sn, {}))
-    _fields.update((getattr(gen, '_cell_struct_fields', None) or {}).get(sn, {}))
-    return _fields
-
-
-def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
-    """Record the annotated C type of each parameter of the function a
-    function-scoped class was declared in, keyed by the class's FINAL name and
-    the parameter name (`_pair_key`).
-
-    A class-level attribute whose value is a bare parameter name
-    (`class C(): name = s` inside `def h(s: str)`) has no literal to type it
-    from, so `_class_attr_ctype` answers None and the registration falls back
-    to `int64_t`, which types a `char *` as a pointer-sized integer. The
-    parameter's annotation is the ground truth for what that name holds, and
-    it is what `_mojo_type` resolves the function's own signature with. An
-    unannotated parameter records nothing and keeps the old fallback.
-    """
-    if not params:
-        return
-    _table = getattr(gen, '_fn_scoped_param_types', None)
-    if _table is None:
-        _table = {}
-        gen._fn_scoped_param_types = _table
-    for _p in params:
-        try:
-            _pname, _pann = _p[0], _p[1]
-        except (TypeError, IndexError):
-            continue
-        if not isinstance(_pann, str) or not _pann:
-            continue
-        _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
-
-
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -3093,16 +3029,6 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     if _nested_names is None:
         _nested_names = {}
         self._nested_struct_names = _nested_names
-    # The FINAL name of every class that was written inside a function body.
-    # A class-level attribute of one of these is per EXECUTION of its `class`
-    # statement (see bugs/CODEGEN_nested_class_attr_reads_enclosing_local_
-    # silently_zero.md), whereas a module-scope class has one value for the
-    # whole program. Recorded here, where the set is known, rather than
-    # inferred later from `_class_attrs`, which both kinds share.
-    _fn_scoped: set = getattr(self, '_fn_scoped_structs', None)
-    if _fn_scoped is None:
-        _fn_scoped = set()
-        self._fn_scoped_structs = _fn_scoped
     out = list(stmts)
     renamed_from: list = []
     renamed_to: list = []
@@ -3114,9 +3040,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             _taken.add(_h_bare)
             renamed_from.append(_h_bare)
             renamed_to.append(_h_bare)
-            _fn_scoped.add(_h_bare)
             out.append(_h_node)
-            _gmi_record_fn_scoped_param_types(self, _h_bare, found[_h_i][2])
             continue
         _h_base = _h_bare + '__' + _h_encl
         _h_new = _h_base
@@ -3127,10 +3051,8 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _taken.add(_h_new)
         renamed_from.append(_h_bare)
         renamed_to.append(_h_new)
-        _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
-        _gmi_record_fn_scoped_param_types(self, _h_new, found[_h_i][2])
     # The alias keys need the FINAL struct names, because a method's enclosing
     # key contains the name of the class it belongs to — so they are computed
     # on a SECOND walk, after the renames above have landed. The two walks
@@ -3216,285 +3138,6 @@ def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
                             f"bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md)")
 
 
-# Return types a decoration can leave behind that are NOT callable. A
-# `@deco def f` rebinds `f` to whatever `deco(f)` returns, so when that is one
-# of these, every later use of `f` is wrong on the compiled path: the
-# decoration is dropped and `f` stays the undecorated function.
-_GMI_NONCALLABLE_DECORATOR_RET = frozenset({'int64_t', 'double', '_Bool', 'char *'})
-
-
-def _gmi_decorator_head(dec):
-    """The name a decorator resolves to, or None when it is not a bare-name or
-    factory-call spelling. `@deco` is stored as the bare string `"deco"`;
-    `@deco(x)` as a CallExpr whose callee is the IdentExpr `deco`."""
-    if isinstance(dec, str):
-        return dec
-    if isinstance(dec, CallExpr) and isinstance(dec.func, IdentExpr):
-        return dec.func.name
-    return None
-
-
-def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) -> list:
-    """Return `stmts` with each `def` decorated by a same-module decorator
-    REBOUND to the decoration's value, in source order, at every depth.
-
-    `@deco def step(x): ...` lowers to the pair CPython evaluates:
-
-        def step__undecorated(x): ...
-        step = deco(step__undecorated)
-
-    so every call to `step` reads the name and calls through it, which is
-    exactly the decorated object. A factory `@deco(x)` becomes
-    `step = deco(x)(step__undecorated)`, and stacked decorators nest
-    innermost-first (`@a @b` -> `a(b(...))`). At module scope the rebinding is
-    a module global, so the compiled path's existing global function-value
-    machinery (the `_root_globals` field and `mojo_fnptr_call`) carries it; a
-    nested `def` is a local bound the same way (`step = twice(step__undecorated)`
-    lowers through the local closure-value path). No call site needs to know a
-    decorator was applied.
-
-    `outer_defs` holds the defs of every enclosing scope, so a decorator may
-    name a module-level def from inside a function body, or a sibling def in
-    the same body. The refusal in `_gmi_refuse_scalar_decorator_rebind` runs
-    over each level first, against the same scope.
-
-    Scope: only a decorator naming a def in scope is applied. A decorator
-    imported from elsewhere, or a name that is a declaration annotation
-    (`staticmethod`, `export`, `doc_hidden`, ...), stays on the `def` as
-    before, because the stdlib uses them that way and they are not callables
-    this module can see. Decorated methods of a class are not rewritten.
-    """
-    _rb_scope = dict(outer_defs)
-    _rb_defs = _gmi_scope_defs(stmts)
-    _rb_scope.update({_rs.name: _rs for _rs in _rb_defs})
-    _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
-    if at_module:
-        # A module global is bound by a top-level statement, and the global
-        # function-value machinery never sees an assignment inside a
-        # module-level `if`/`for`/`with`/`try` block. So a decorated def there
-        # cannot be rebound yet: refuse it, rather than let the compiled path
-        # call the undecorated body (or a stub for the unbound name).
-        for _rb_s in stmts or []:
-            if isinstance(_rb_s, FunctionDef):
-                continue
-            for _rb_d in _gmi_scope_defs([_rb_s]):
-                for _rb_dec in _rb_d.decorators or []:
-                    if _gmi_is_rebindable(_rb_dec, _rb_scope, _rb_d.name):
-                        raise RuntimeError(
-                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
-                            f"module-level block, which the compiled path cannot rebind yet; it would "
-                            f"silently call the undecorated function (see "
-                            f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
-    return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
-
-
-def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
-    """True when decorator `dec` on `def_name` names a def in `scope`, so the
-    decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
-    _head = _gmi_decorator_head(dec)
-    return _head is not None and _head in scope and _head != def_name
-
-
-def _gmi_child_blocks(stmt) -> list:
-    """The statement lists a compound statement owns, in source order: every
-    `if`/`elif`/`else` branch, a loop body and its `else`, a `with` body, each
-    `try` part, and each `match` case. Python has no block scope, so a `def`
-    inside any of these is bound in the enclosing function's scope and is a
-    decorator target like a direct statement. A nested `def`'s own body is
-    NOT listed: it is a scope of its own, entered by `_gmi_rebind_stmt`.
-    `_gmi_with_blocks` consumes the lists in this same order."""
-    if isinstance(stmt, IfStmt):
-        return [stmt.then_body, *[_b for _, _b in stmt.elifs], stmt.else_body]
-    if isinstance(stmt, (WhileStmt, ForStmt)):
-        return [stmt.body, stmt.else_body]
-    if isinstance(stmt, WithStmt):
-        return [stmt.body]
-    if isinstance(stmt, TryStmt):
-        return [stmt.body, *[_h.body for _h in stmt.handlers], stmt.else_body, stmt.finally_body]
-    if isinstance(stmt, MatchStmt):
-        return [_c.body for _c in stmt.cases]
-    return []
-
-
-def _gmi_with_blocks(stmt, blocks):
-    """A copy of compound `stmt` whose child blocks are `blocks`, given in the
-    order `_gmi_child_blocks` lists them."""
-    _it = iter(blocks)
-    new = copy.copy(stmt)
-    if isinstance(stmt, IfStmt):
-        new.then_body = next(_it)
-        new.elifs = [(_cond, next(_it)) for _cond, _ in stmt.elifs]
-        new.else_body = next(_it)
-    elif isinstance(stmt, (WhileStmt, ForStmt)):
-        new.body = next(_it)
-        new.else_body = next(_it)
-    elif isinstance(stmt, WithStmt):
-        new.body = next(_it)
-    elif isinstance(stmt, TryStmt):
-        new.body = next(_it)
-        new.handlers = []
-        for _h in stmt.handlers:
-            _nh = copy.copy(_h)
-            _nh.body = next(_it)
-            new.handlers.append(_nh)
-        new.else_body = next(_it)
-        new.finally_body = next(_it)
-    else:
-        new.cases = []
-        for _c in stmt.cases:
-            _nc = copy.copy(_c)
-            _nc.body = next(_it)
-            new.cases.append(_nc)
-    return new
-
-
-def _gmi_scope_defs(stmts) -> list:
-    """Every `def` bound in this scope: a direct statement, or one inside a
-    compound statement's block at any depth (see `_gmi_child_blocks`)."""
-    out = []
-    for _s in stmts or []:
-        if isinstance(_s, FunctionDef):
-            out.append(_s)
-        for _b in _gmi_child_blocks(_s):
-            out.extend(_gmi_scope_defs(_b))
-    return out
-
-
-def _gmi_rebind_block(self, stmts, scope: dict, at_module: bool):
-    """Rebind the decorated defs of one statement list, in the scope `scope`
-    (every name a decorator may resolve to, see `_gmi_decorator_pass`), and
-    recurse into its compound blocks and function bodies. Returns `stmts`
-    itself when nothing in it changed, so only the nodes that change are
-    copied."""
-    _rb_in = stmts or []
-    _rb_out = []
-    _rb_changed = False
-    for _rb_s in _rb_in:
-        _rb_repl = _gmi_rebind_stmt(self, _rb_s, scope, at_module)
-        if len(_rb_repl) != 1 or _rb_repl[0] is not _rb_s:
-            _rb_changed = True
-        _rb_out.extend(_rb_repl)
-    return _rb_out if _rb_changed else stmts
-
-
-def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
-    """The statements `s` becomes: `[s]` itself when nothing under it changed."""
-    if not isinstance(s, FunctionDef):
-        _rb_blocks = _gmi_child_blocks(s)
-        if not _rb_blocks:
-            return [s]
-        _rb_new = [_gmi_rebind_block(self, _b, scope, at_module) if _b else _b for _b in _rb_blocks]
-        if all(_n is _o for _n, _o in zip(_rb_new, _rb_blocks)):
-            return [s]
-        return [_gmi_with_blocks(s, _rb_new)]
-    _rb_head = s
-    _rb_out = []
-    _rb_applied = []
-    _rb_kept = []
-    for _rb_dec in s.decorators or []:
-        if _gmi_is_rebindable(_rb_dec, scope, s.name):
-            _rb_applied.append(_rb_dec)
-        else:
-            _rb_kept.append(_rb_dec)
-    if _rb_applied:
-        # The undecorated body keeps the annotation decorators and takes a
-        # suffixed name, so it cannot be mistaken for the rebound name.
-        _rb_head = copy.copy(s)
-        _rb_head.name = s.name + '__undecorated'
-        _rb_head.decorators = _rb_kept
-    # A nested function body is a scope of its own, rebound against this one.
-    _rb_body = _gmi_decorator_pass(self, s.body, scope, False)
-    if _rb_body is not s.body:
-        if _rb_head is s:
-            _rb_head = copy.copy(s)
-        _rb_head.body = _rb_body
-    _rb_out.append(_rb_head)
-    if _rb_applied:
-        # Innermost-first: `@a @b def f` is `f = a(b(f_undecorated))`.
-        _rb_value = IdentExpr(_rb_head.name, line=s.line, col=s.col)
-        for _rb_dec in reversed(_rb_applied):
-            _rb_callee = IdentExpr(_rb_dec, line=s.line, col=s.col) if isinstance(_rb_dec, str) else _rb_dec
-            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=s.line, col=s.col)
-        _rb_out.append(AssignStmt(target=IdentExpr(s.name, line=s.line, col=s.col),
-                                  value=_rb_value, line=s.line, col=s.col))
-        if at_module:
-            # The global now holds a function VALUE, so `print(step)` formats
-            # it as one (`_global_func_value_names` is the per-global repr name).
-            self._global_func_value_names[s.name] = s.name
-    return _rb_out
-
-
-def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
-    """Refuse a `def` rebound by a same-module decorator that returns a
-    scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
-
-    `scope` maps each name a decorator may resolve to (the defs of this
-    statement list plus every enclosing scope's defs) to its FunctionDef.
-
-    A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_decorator_pass`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
-    fix). That rebinding is only meaningful for a CALLABLE decorator result:
-    a scalar-returning decorator rebinds `step` to a non-callable, which
-    CPython raises on as `TypeError: 'int' object is not callable`. So that
-    case is refused here, loudly, rather than rebound to a value that cannot
-    be called.
-
-    Scope is deliberately narrow, so this cannot drop real code:
-    - Only a decorator naming a `def` in scope is inspected: a bare name
-      (`@deco`) or a factory call (`@deco(x)`), whose factory is that def.
-      Scope is this statement list's defs and every enclosing one's. Its return type comes from the same inference
-      every function uses, so no second notion of "scalar" is introduced.
-    - An identity or pass-through decorator (`return f`) is not refused: it
-      rebinds `f` to the same object, and the undecorated answer is correct.
-    - An imported decorator is not inspected here. It is unrefused, not
-      proven correct; the doc's remaining work covers it.
-    """
-    _rd_defs = scope
-    for _rd_fn in (_rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)):
-        for _rd_dec in (getattr(_rd_fn, 'decorators', None) or []):
-            # `@deco` is stored as the bare name; `@deco(x)` as a CallExpr
-            # whose callee is the factory. Both name a same-module def, and
-            # both are refused on the same test: what `deco` returns is what
-            # `step` is rebound to.
-            _rd_name = _gmi_decorator_head(_rd_dec)
-            if _rd_name is None:
-                continue
-            _rd_shown = _rd_dec if isinstance(_rd_dec, str) else f"{_rd_name}(...)"
-            _rd_target = _rd_defs.get(_rd_name)
-            if _rd_target is None or _rd_target is _rd_fn:
-                continue
-            _rd_ret = self._infer_return_type(_rd_target.body)
-            if _rd_ret not in _GMI_NONCALLABLE_DECORATOR_RET:
-                continue
-            # An untyped parameter infers as int64_t, so `return f` looks
-            # scalar too. A decorator that hands its own parameter back is
-            # the identity on `f`, and its undecorated answer IS correct. A
-            # factory's argument is not the decorated function, so for a
-            # factory any of its parameters may be the callable that comes
-            # back (`@wrap(helper)` with `return g`): it is exempt for all of
-            # them, and that case is unrefused rather than proven correct.
-            # A decorator that returns a `def` (its own nested `wrap`, or a
-            # module-level one) is a callable, so `_infer_return_type` (which
-            # types a bare def name as int64_t) must not be taken at its word.
-            if isinstance(_rd_dec, CallExpr):
-                _rd_params = {_rp[0] for _rp in (_rd_target.params or [])}
-            else:
-                _rd_params = {_rd_target.params[0][0]} if _rd_target.params else set()
-            _rd_callables = _rd_params | set(_rd_defs) | {
-                _rn.name for _rn in _walk_ast(_rd_target)
-                if isinstance(_rn, FunctionDef)}
-            if not any(isinstance(_rd_n, ReturnStmt)
-                       and isinstance(_rd_n.value, IdentExpr)
-                       and _rd_n.value.name in _rd_callables
-                       for _rd_n in _walk_ast(_rd_target)):
-                raise RuntimeError(
-                    f"decorator {_rd_shown!r} on {_rd_fn.name!r} returns {_rd_ret} "
-                    f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
-                    f"the compiled path does not apply decorators to a def yet and "
-                    f"would silently call the undecorated function (see "
-                    f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
-
-
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3503,7 +3146,6 @@ def gen_module_impl(self, stmts):
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
-    stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
@@ -3708,12 +3350,6 @@ def gen_module_impl(self, stmts):
         if isinstance(n, FunctionDef):
             if n.is_generator: _generator_fns[id(n)] = n
             if n.is_async: _async_fns[id(n)] = n
-    # Nested generators that read an enclosing def's variables: refused by
-    # _gen_cpp_generator_unit (see cpp_async._nested_generator_captures).
-    self._nested_gen_captures = _gca._nested_generator_captures(stmts)
-    # ...and the enclosing def's sibling defs, which a nested generator may
-    # call as non-capturing helpers (see cpp_async._nested_generator_sibling_defs).
-    self._nested_gen_sibling_defs = _gca._nested_generator_sibling_defs(stmts)
     # The node ids of every FunctionDef that is a STRUCT METHOD. The
     # free-function generator loops below iterate `_generator_fns` (built
     # from `_walk_ast`, so it necessarily includes methods) and must not
@@ -5602,7 +5238,7 @@ def gen_module_impl(self, stmts):
     # (allocated by `_alloc_<struct>`); inherited container operations
     # (`d[k]`, `d[k] = v`, `k in d`, `len(d)`) route to it unless the
     # subclass overrides the corresponding dunder. See
-    # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open).
+    # bugs/COMPILE_FAIL_collections___init__.md.
     _BUILTIN_DICT_BASES = ('dict', 'OrderedDict', 'defaultdict', 'Counter')
     _dict_subclass: set = set()
     _dsc_changed = True
@@ -6231,15 +5867,6 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
-                    elif (isinstance(v, IdentExpr)
-                            and _pair_key(s.name, _as_str(v.name))
-                            in (getattr(self, '_fn_scoped_param_types', None) or {})):
-                        # A bare name that is a parameter of the function
-                        # this class is declared in: its annotation is the
-                        # type of the value (see
-                        # `_gmi_record_fn_scoped_param_types`).
-                        ctype = self._fn_scoped_param_types[
-                            _pair_key(s.name, _as_str(v.name))]
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION
@@ -6253,29 +5880,6 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
-                # A NON-constant value of a FUNCTION-SCOPED class is per
-                # EXECUTION of its `class` statement (Python builds a new class
-                # object each time it runs). The `_classattr_` global then holds
-                # the CURRENT execution's cell pointer, and each instance keeps
-                # its own in a hidden field, so `a = make(5); b = make(7);
-                # a.attr` reads 5, not the later call's 7. See
-                # bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
-                # Module-scope classes and constants keep the plain global.
-                if (s.name in getattr(self, '_fn_scoped_structs', ())
-                        and v is not None and not _cattr_value_is_constant(v)):
-                    _cells = getattr(self, '_cell_cattr_types', None)
-                    if _cells is None:
-                        _cells = {}
-                        self._cell_cattr_types = _cells
-                    _cells[mangled] = ctype
-                    # Typedef-only (see `_struct_typedef_fields`): NOT a Python
-                    # field, so the runtime reflection never lists or prints it.
-                    _cell_fields = getattr(self, '_cell_struct_fields', None)
-                    if _cell_fields is None:
-                        _cell_fields = {}
-                        self._cell_struct_fields = _cell_fields
-                    _cell_fields.setdefault(s.name, {})[
-                        gimple_ctypes.cattr_cell_field(aname)] = f'{ctype} *'
                 # A container-valued class attribute keeps its ELEMENT
                 # type on the `_classattr_...` global, the same side-table
                 # a local list uses. Without it a class-level registry of
@@ -10533,76 +10137,6 @@ def gen_module_impl(self, stmts):
                     break
     self._ret_may_hold_str = _ret_maybe
 
-    # The float twin of the fixed point above, for FORWARDING. Pass 1.3d only
-    # records a slot whose own call sites observed a `double` beside an
-    # integer, so `def g(x): print(x)` reached only as `g(x)` from a
-    # float-possible `f` observes nothing for `x` and `print(x)` read the box
-    # word as an integer (`4312044272` for `f(2.5)`). Property propagates
-    # along an identifier argument, and along a copy, exactly as the str set
-    # does, into a slot that is still a plain `int64_t`: no annotation, no
-    # container observation, and no str-possible ownership (`_int_maybe`, which
-    # is final at this point). Nested defs are not reached: Pass 1.3d never
-    # records them either, so there is no annotation or observation to check
-    # the slot against.
-    _fl_maybe = self._int64_may_hold_float
-
-    def _fl_forwardable(callee: str, pname: str) -> bool:
-        if pname in self._param_container_types.get(callee, {}):
-            return False
-        if pname in _int_maybe.get(callee, ()):
-            return False
-        _cfn = _fn_by_name.get(callee)
-        for _an_pn, _an_pt in (_cfn.params or []):
-            if _as_str(_an_pn) == pname and _an_pt is not None:
-                return False
-        _cur = self._inferred_param_types.get(callee, {}).get(pname)
-        return _cur in (None, 'int', 'int64_t')
-
-    _fl_changed = True
-    while _fl_changed:
-        _fl_changed = False
-        for _fname, _pairs in _copies.items():
-            _fnames = _fl_maybe.get(_fname)
-            if not _fnames:
-                continue
-            for _t, _v in _pairs:
-                if _v in _fnames and _t not in _fnames:
-                    _fnames.add(_t)
-                    _fl_changed = True
-        for _fname, _sites in _calls.items():
-            _fnames = _fl_maybe.get(_fname)
-            if not _fnames:
-                continue
-            for _callee, _args in _sites:
-                _pn = _params.get(_callee)
-                if not _pn or _callee not in _fn_by_name:
-                    continue
-                for _i, _a in enumerate(_args):
-                    if _i >= len(_pn):
-                        break
-                    if not (isinstance(_a, IdentExpr)
-                            and _as_str(_a.name) in _fnames):
-                        continue
-                    if not _fl_forwardable(_callee, _pn[_i]):
-                        continue
-                    _cnames = _fl_maybe.setdefault(_callee, set())
-                    if _pn[_i] not in _cnames:
-                        _cnames.add(_pn[_i])
-                        _fl_changed = True
-
-    # A slot that may hold a str belongs to the str row, which is decided
-    # first at every consumer (`_gen_print` asks `mojo_cstr_or_int_str` before
-    # the float route is ever the answer for a plain int64_t). A float
-    # forwarded into such a slot is not printable by either row, so the
-    # float set yields it: the str row keeps the answer it already had.
-    for _fk, _fset in _fl_maybe.items():
-        _sset = _int_maybe.get(_fk)
-        if not _sset:
-            continue
-        for _fn_name in sorted(_fset):
-            if _fn_name in _sset:
-                _fset.discard(_fn_name)
-
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
     for callee in sorted(_struct_obs):
@@ -11470,7 +11004,7 @@ def gen_module_impl(self, stmts):
                 continue
             try:
                 cpp_text, value_ctype, base, param_ctypes = \
-                    self._gen_cpp_generator_unit(m, struct_name=_sd.name, struct_def=_sd)
+                    self._gen_cpp_generator_unit(m, struct_name=_sd.name)
             except _UnsupportedGeneratorShape as e:
                 self._cpp_refusal_reasons.setdefault(m.name, str(e))
                 _debug_note(f'generator method {_sd.name}.{m.name!r} not '
@@ -13577,11 +13111,6 @@ def gen_module_impl(self, stmts):
             'extern void    __mojo_async_await_sleep (int64_t, double);',
             'extern int64_t __mojo_async_await_sock_recv (int64_t, int64_t);',
             'extern int64_t __mojo_gen_retval (int64_t);',
-            'extern double  __mojo_bits_d (int64_t);',
-            'extern _Bool   __mojo_bits_b (int64_t);',
-            'extern char *  __mojo_bits_p (int64_t);',
-            'extern void    __mojo_gen_set_return_d (int64_t, double);',
-            'extern void    __mojo_gen_set_return_p (int64_t, char *);',
             'extern int64_t __mojo_gen_resume (int64_t, int64_t);',
             'extern int64_t __mojo_gen_value (int64_t);',
             'extern double  __mojo_gen_send_d (int64_t);',
@@ -13968,7 +13497,7 @@ def gen_module_impl(self, stmts):
             for struct_name in sorted(self.struct_field_types.keys()):
                 if struct_name in emitted:
                     continue
-                fields = _struct_typedef_fields(self, struct_name)
+                fields = self.struct_field_types[struct_name]
                 dependencies_met = True
                 for field_type in fields.values():
                     base_type = re.sub(r'\[\d+\]$', '', ('' + field_type).rstrip(' *'))
@@ -15136,17 +14665,6 @@ def gen_module_impl(self, stmts):
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]
-                        _cell_t = (getattr(self, '_cell_cattr_types', None) or {}).get(mangled)
-                        if _cell_t is not None:
-                            # Per-execution cell (see the registration above):
-                            # the global is a POINTER to the current execution's
-                            # storage. It starts on a zeroed cell so a read
-                            # before the class statement runs cannot dereference
-                            # NULL; the class statement installs the real one.
-                            class_attr_decls.append(f"{_cell_t} * {mangled};")
-                            class_attr_inits.append(
-                                f"  {mangled} = ({_cell_t} *) calloc (1, sizeof ({_cell_t}));")
-                            break
                         ctype = _class_attr_ctype(v)
                         if ctype is None and v is None:
                             # A no-initializer container field (`var xs:
@@ -15429,16 +14947,10 @@ def gen_module_impl(self, stmts):
         # `mojo_str_cat` (crash-report bt: `mojo_str_cat` ← `gen_module_impl`
         # on a shimless `--dump-full`).
         _ai_parts = []
-        _cell_gnames = getattr(self, '_cell_cattr_types', None) or {}
         for _aname in sorted(class_attrs):
             _aname = _as_str(_aname)
             _gname = _as_str(class_attrs[_aname])
-            if _gname in _cell_gnames:
-                # A per-execution cell attribute (see the registration): this
-                # instance keeps the cell of the execution that builds it.
-                _ai_parts.append(
-                    f"  _p->{_safe_field(gimple_ctypes.cattr_cell_field(_aname))} = {_gname};\n")
-            elif (_aname in field_map
+            if (_aname in field_map
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
                 _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
@@ -16486,9 +15998,9 @@ def gen_module_impl(self, stmts):
                 _cached = self._struct_typedef_texts.get(_sn)
                 if _cached:
                     return _cached
-                if _sn not in self.struct_field_types:
+                _flds = self.struct_field_types.get(_sn)
+                if _flds is None:
                     return None
-                _flds = _struct_typedef_fields(self, _sn)
                 return '\n'.join(_render_struct_typedef_body(
                     _sn, _flds,
                     optional_tags=self._tagged_optional_fields.get(_sn)))
@@ -16585,7 +16097,7 @@ def gen_module_impl(self, stmts):
                         cpp_parts.append(f'struct {_me_sn};')
                     cpp_parts.append('')
                     for _me_sn in sorted(_mirror_extra_structs):
-                        _me_flds = _struct_typedef_fields(self, _me_sn)
+                        _me_flds = self.struct_field_types.get(_me_sn, {})
                         _me_td = '\n'.join(
                             _render_struct_typedef_body(
                                 _me_sn, _me_flds,
