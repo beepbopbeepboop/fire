@@ -250,73 +250,6 @@ def _ml_idents(text: str) -> list[str]:
     return out
 
 
-def _ml_def_logical_lines(content: str) -> list[str]:
-    """`content`'s physical lines, with every `def`/`fn` signature that spans
-    several lines joined back into ONE line (its first line's indentation
-    kept, the continuation lines' stripped text appended with single spaces).
-
-    The export scan reads one line at a time, and a signature split across
-    lines has no `)` on its first line, so it was dropped entirely: a
-    module-level `def compile_to_gimple(mojo_src: str, do_imports: bool =
-    False, filename: str = "",\n    auto_gpu: bool = True) -> str:` produced no
-    export record, so an importer of it got no prototype, no parameter names
-    and no defaults, and its keyword call lowered to a bare one-argument call
-    (`fire_compiler.py`'s `compile_to_gimple(src, do_imports=False,
-    filename=filename)` on master). Parenthesis depth is counted outside
-    string literals; a comment line inside the signature is skipped, since
-    the signature's own text is what the scan reads."""
-    out: list = []
-    lines = content.split('\n')
-    i = 0
-    n = len(lines)
-    while i < n:
-        raw = lines[i]
-        i += 1
-        stripped = raw.strip()
-        if not (stripped.startswith('def ') or stripped.startswith('fn ')):
-            out.append(raw)
-            continue
-        depth = _ml_paren_delta(stripped)
-        joined = raw.rstrip()
-        while depth > 0 and i < n:
-            cont = lines[i].strip()
-            i += 1
-            if not cont or cont.startswith('#'):
-                continue
-            joined = joined + ' ' + cont
-            depth += _ml_paren_delta(cont)
-        out.append(joined)
-    return out
-
-
-def _ml_paren_delta(text: str) -> int:
-    """Count of `(` minus `)` in `text`, ignoring anything inside a
-    '...' or "..." string literal (a `\\`-escaped quote does not end one) and
-    anything after a `#` comment."""
-    delta = 0
-    quote = ''
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if quote:
-            if c == '\\':
-                i += 2
-                continue
-            if c == quote:
-                quote = ''
-        elif c in ('"', "'"):
-            quote = c
-        elif c == '#':
-            break
-        elif c == '(':
-            delta += 1
-        elif c == ')':
-            delta -= 1
-        i += 1
-    return delta
-
-
 def _ml_number_kind(s: str) -> int:
     """2 when `s` STARTS with `-?DIGITS.DIGITS`, 1 when it is entirely
     `-?DIGITS`, else 0 — the two `re.match` shapes the global scan used."""
@@ -740,7 +673,7 @@ class ModuleLoader:
                 # nested-closure note on the skip below for the measured
                 # failure this exists for).
                 _block_stack: list = []
-                for _raw_line in _ml_def_logical_lines(src_content):
+                for _raw_line in src_content.split('\n'):
                     line = _raw_line.strip()
                     if not line or line.startswith('#'):
                         continue

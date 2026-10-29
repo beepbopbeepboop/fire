@@ -789,7 +789,7 @@ _DISPATCH_TABLE_GLOBAL_CTYPES = {
 # nothing reads it.
 #
 # `_uncompiled_module_marker`'s raise (see
-# commit 319ab932c (DELETED)) therefore
+# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md (DELETED)) therefore
 # has to exclude these modules: it answers “is this a marker for a module this
 # compile never compiled”, which is true for `re` and irrelevant, because the
 # compile-time recogniser already holds the answer. Raising there turned
@@ -1614,15 +1614,6 @@ def _module_attr_ctype(module_name, member) -> str:
         return ''
     return _MODULE_ATTR_CTYPES.get((module_name, member), '')
 
-def cattr_cell_field(attr: str) -> str:
-    """Name of the hidden instance field that holds an instance's OWN cell for
-    the function-scoped class attribute `attr` (see module_gen's cell
-    registration and emit_methods' `_cattr_instance_read`). One name, used by
-    the registrar, the allocator seed and the read site, so they cannot drift.
-    """
-    return '_clscell_' + attr
-
-
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
@@ -1666,7 +1657,7 @@ def _replace_first_ident(text: str, old: str, new: str) -> str:
     bare `extern void assert_equal (...)` in the self-hosted output against
     the defining module's real `std_testing___init___assert_equal` — the
     largest single shim-vs-noshim `--dump` divergence class (see
-    commit e8a7135b8).
+    bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md).
 
     Plain `str.find`/slicing is identical on both sides, so callers no
     longer depend on the regex engine at all."""
@@ -2395,51 +2386,7 @@ def _compute_exc_descendants(all_struct_defs):
             if base_name in by_name:
                 descendants.setdefault(base_name, {base_name}).add(name)
                 stack.extend(getattr(by_name[base_name], 'bases', None) or [])
-    # The BUILTIN exception hierarchy: `except OSError:` must catch a raised
-    # `FileNotFoundError` (the runtime raises one for a missing path), and
-    # `except LookupError:` a `KeyError`. Static tags are compared by
-    # equality, so each builtin ancestor's descendant set has to be listed
-    # here -- and a user class deriving from a builtin joins its base's set
-    # and every ancestor's. Plain loops, not comprehensions: this function is
-    # self-compiled.
-    for child in _BUILTIN_EXC_PARENT:
-        anc = _BUILTIN_EXC_PARENT[child]
-        while anc is not None:
-            if anc not in by_name:
-                descendants.setdefault(anc, {anc}).add(child)
-            anc = _BUILTIN_EXC_PARENT.get(anc)
-    for name, s in by_name.items():
-        stack = list(getattr(s, 'bases', None) or [])
-        seen = set()
-        while stack:
-            base_name = stack.pop()
-            if base_name in seen:
-                continue
-            seen.add(base_name)
-            anc = base_name
-            while anc is not None and anc in _BUILTIN_EXC_PARENT_OR_ROOT:
-                if anc not in by_name:
-                    descendants.setdefault(anc, {anc}).add(name)
-                anc = _BUILTIN_EXC_PARENT.get(anc)
     return descendants
-
-# child -> parent for the builtin exceptions whose parent a compiled `except`
-# is likely to name.
-_BUILTIN_EXC_PARENT = {
-    'FileNotFoundError': 'OSError', 'PermissionError': 'OSError',
-    'FileExistsError': 'OSError', 'NotADirectoryError': 'OSError',
-    'IsADirectoryError': 'OSError', 'TimeoutError': 'OSError',
-    'BlockingIOError': 'OSError', 'InterruptedError': 'OSError',
-    'ChildProcessError': 'OSError', 'ProcessLookupError': 'OSError',
-    'ConnectionError': 'OSError', 'BrokenPipeError': 'ConnectionError',
-    'ConnectionAbortedError': 'ConnectionError',
-    'ConnectionRefusedError': 'ConnectionError',
-    'ConnectionResetError': 'ConnectionError',
-    'KeyError': 'LookupError', 'IndexError': 'LookupError',
-    'ZeroDivisionError': 'ArithmeticError', 'OverflowError': 'ArithmeticError',
-    'FloatingPointError': 'ArithmeticError',
-}
-_BUILTIN_EXC_PARENT_OR_ROOT = set(_BUILTIN_EXC_PARENT) | {'OSError', 'LookupError', 'ArithmeticError'}
 
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
@@ -2507,7 +2454,7 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
-# the (since-fixed) c_common/fsutil.py compile failure.
+# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
 _CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
 _CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
 _CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'

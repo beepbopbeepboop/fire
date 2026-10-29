@@ -28,8 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
-    desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
-    DESUGARED_NAMEDTUPLE_NAMES,
+    desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
@@ -917,9 +916,6 @@ class GimpleGen:
         # struct-protocol dispatch this project relies on, and both used to
         # emit a call to a symbol nothing defines.
         self._ambiguous_struct_methods: set = set()
-        # Per-root-compile memo of imported modules whose compilation raised,
-        # so rollback + parent-recompile does not redo the same failed module.
-        self._failed_modules: set = set()
         # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
         # for every top-level generator in THIS module that gen_module's
         # pre-pass found to match the narrow supported shape (see
@@ -1079,7 +1075,6 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
-        self._cpp_last_mixed_slots: bool = False
         # Side channel from _gen_cpp_generator_unit (same stash pattern
         # as _cpp_last_tuple_slot_ctypes): whether THIS unit's body had
         # an eligible value-carrying `return <expr>` — read back into
@@ -1129,8 +1124,6 @@ class GimpleGen:
         # Written by `_note_global_generator_store`, read by `_lower_IdentExpr`'s
         # global-read arm. An entry is a fact only while the name is not in
         # `_global_generator_api_poisoned`.
-        # Keyed by `ginf.global_generator_key(defining module, name)`, not the
-        # bare name: the table is shared across modules of one compile.
         self._global_generator_api: dict[str, dict] = {}
         # Globals whose generator API is not ONE known fact: rebound to a
         # different generator or to a non-generator, stored from inside a
@@ -1238,7 +1231,7 @@ class GimpleGen:
         # LambdaExpr argument, consumed (and cleared) by the LambdaExpr case
         # itself; None everywhere else, giving every other 1-arg lambda
         # (parameter type genuinely unknown/scalar) the safe `int64_t`
-        # default. See the (since-fixed) compiled-generator lambda-expression bug.
+        # default. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
         self._cpp_pending_lambda_param_ctype: str | None = None
         # Per-coroutine (generator/async) list of declarations hoisted to that
         # unit's function scope. Filled by the AssignStmt handler in
@@ -1436,10 +1429,6 @@ class GimpleGen:
         # this up via `(self.current_func_name, name)`.
         self._supported_async_closures: dict[tuple, FunctionDef] = {}
         self._async_closure_api: dict[tuple, dict] = {}
-        # Sync generators nested in an ordinary top-level def that read
-        # enclosing names, compiled by cpp_async._compile_nested_generator_
-        # closures; keyed (enclosing def, generator name) like the async dict.
-        self._nested_generator_api: dict[tuple, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): async
         # functions nested INSIDE an ordinary top-level function's own body
         # (e.g. a local `@parameter async def wrapper(): ...` helper
@@ -1641,12 +1630,6 @@ class GimpleGen:
         # table cannot match it. See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
-        # The same fact for a CAPTURING closure (a `MojoBoundMethod *`
-        # value, recorded in `_bound_method_ret_types`): a factory returning
-        # one is `def mk(p): def inner(x): ...; return inner`, and the
-        # caller's `g = mk(...)` must carry the return type into
-        # `_bound_method_ret_types` for `g(...)` to narrow its box.
-        self._return_bound_method_ret_types: dict[str, str] = {}
         self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
@@ -1674,10 +1657,6 @@ class GimpleGen:
         # a bare int would restart at 0 in each throwaway GimpleGen and
         # reproduce the very collision this fixes. See emit_infra's mint site.
         self._shadow_seq_box = [0]
-        # The open block bodies, innermost last; each frame lists the `var`
-        # shadows made inside it (emit_infra._bind_local_decl), undone when the
-        # block closes (emit_infra._close_block_scope).
-        self._block_scope_frames: list[list] = []
         self._device_kernels: dict[str, bool] = {}
         self._device_parts: list[str] = []
         self._device_launch_args: dict = {}
@@ -1807,7 +1786,7 @@ class GimpleGen:
         # or transitively) — populated by gen_module_impl. Such a struct
         # gets a synthesized `_data: MojoDict *` backing field, and
         # inherited container ops route to it. See
-        # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open).
+        # bugs/COMPILE_FAIL_collections___init__.md.
         self._dict_subclass_structs: set = set()
         # Names of user structs that subclass the builtin `bytes` (directly
         # or transitively) — populated by gen_module_impl. Such a struct
@@ -2109,10 +2088,6 @@ class GimpleGen:
         # child generator's yield slot (see coro.lower). Shared down the chain
         # the same way `_compiled_modules` is.
         self._closure_call_stmts: list = []
-        # Class names of this module's literal namedtuple lowerings (see
-        # fire_compiler.desugar_namedtuples); a tuple operation on a value
-        # of one of these is refused where its static type is known.
-        self._namedtuple_class_names: list = []
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
         # module), keyed by PATH rather than module NAME — a real self-
@@ -2280,9 +2255,6 @@ class GimpleGen:
         # callee -> {pname}: a list-of-lists param whose call sites disagree on
         # the inner element kind (see module_gen's _record_param_elem).
         self._param_nested_mixed: dict = {}
-        self._param_elem_mixed: dict = {}
-        self._param_int_elem_obs: dict = {}
-        self._value_used_funcs: set = set()
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
@@ -2696,10 +2668,6 @@ class GimpleGen:
         # and the next read (`emit_fallthrough_frees`) crashed on garbage/
         # near-null memory (confirmed via lldb: EXC_BAD_ACCESS in
         # `mojo_set_len`, called via `gen._owned_free_candidates`).
-        # The per-execution cell pointers the function being emitted must
-        # write back on exit: `[gname, saved temp]` pairs, set by
-        # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
-        self._cattr_restores: list = []
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
@@ -2901,11 +2869,6 @@ class GimpleGen:
         # placeholder a per-module-independent `fire dylib` compile
         # previously fell through to for this shape.
         self._imported_global_accessors: dict = {}
-        # Imported global name -> the DEFINING module's mangled name (the one
-        # its accessor symbol and its `global_generator_key` both use). The
-        # importer needs it to find the defining module's generator api for a
-        # read through the accessor. Set beside `_imported_global_accessors`.
-        self._imported_global_home: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -3666,8 +3629,6 @@ class GimpleGen:
         'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
         'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
-        'mojo_os_walk':          ('MojoList *',  ['char *']),              # os.walk(top)
-        'mojo_glob':             ('MojoList *',  ['char *']),              # glob.glob/iglob(pattern)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),
@@ -4822,24 +4783,6 @@ class GimpleGen:
                 f'static int64_t {hname} (void) '
                 f'{{ return (int64_t)sizeof({struct_name}); }}')
         return hname
-    def _c_cell_alloc_helper(self, ctype: str) -> str:
-        """Name of a `static` accessor that heap-allocates one zeroed cell of C
-        type `ctype` and returns a pointer to it, registered for emission into
-        the non-GIMPLE prelude.
-
-        The `_c_sizeof_helper` reason, with one more: that helper takes a struct
-        NAME, and a pointer type (`int64_t *`) is neither a name nor a valid
-        `sizeof` operand inside a `__GIMPLE` body. The accessor takes the whole
-        allocation, and its plain-C body does the `sizeof`. Used for the
-        per-execution storage of a function-scoped class attribute (see
-        `_gen_stmt_StructDef`).
-        """
-        hname = '_mojo_cellnew_' + ctype.replace('*', 'P').replace(' ', '_')
-        if hname not in self._c_helpers_needed:
-            self._c_helpers_needed[hname] = (
-                f'static {ctype} * {hname} (void) '
-                f'{{ return ({ctype} *) calloc (1, sizeof ({ctype})); }}')
-        return hname
     def _c_fnaddr_helper(self, func_name: str) -> str:
         """Name of a `static void *` accessor returning `(void *)func_name`,
         registering it for emission into the non-GIMPLE prelude.
@@ -4975,10 +4918,10 @@ class GimpleGen:
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:
         return glo._gen_lifted_closure(self, ci, outer_name)
-    def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None, slot_elems: list | None=None) -> None:
-        return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags, slot_elems)
-    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True, shadow_name: str | None=None):
-        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after, shadow_name)
+    def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None) -> None:
+        return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags)
+    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True):
+        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
         return glo._emit_generator_pending_exc_check(self, gen_val, base, destroy_after, bb_not_pending)
     def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None, node=None):
@@ -5008,10 +4951,8 @@ class GimpleGen:
         return gst._annotation_dict_nested_val_type(self, ann)
     def _gen_stmt_VarDecl(self, node):
         return gst._gen_stmt_VarDecl(self, node)
-    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str,
-                                   rhs_is_none: bool = False) -> None:
-        return gst._track_pointer_actual_type(self, tname, dst, v, vtype,
-                                              rhs_is_none=rhs_is_none)
+    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
+        return gst._track_pointer_actual_type(self, tname, dst, v, vtype)
     def _assign_target(self, tgt, et, ev):
         return gst._assign_target(self, tgt, et, ev)
     def _is_except_as_member_target(self, obj_node) -> bool:
@@ -5115,30 +5056,13 @@ class GimpleGen:
         # differs except this key.
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
             _fname = _as_str(node.func.name)
-            _frt = self._return_ret_for(_fname, (
-                self._return_callable_ret_types,
-                self._return_bound_method_ret_types))
+            _frt = self._return_callable_ret_types.get(_fname)
+            if _frt is None and _fname in getattr(self, '_closure_envs', ()):
+                _frt = self._return_callable_ret_types.get(
+                    f'{self.current_func_name}_{_fname}')
             if _frt:
                 node._callable_ret = _frt
         return _lt, _lv
-    def _return_ret_for(self, fname: str, tables) -> str | None:
-        """The return type a callable returned by `fname` carries, read from
-        whichever of `tables` holds it. `tables` is `_return_callable_ret_types`
-        (a bare function pointer or lifted closure) and/or
-        `_return_bound_method_ret_types` (a capturing closure's
-        `MojoBoundMethod *`). A nested factory's bare name misses, so a name
-        in `_closure_envs` also tries its lifted `<enclosing>_<name>` form.
-        Used by the chained-call stamp here and by emit_infra's carry hop, so
-        the nested-name rule lives in one place."""
-        names = [fname]
-        if fname in getattr(self, '_closure_envs', ()):
-            names.append(f'{self.current_func_name}_{fname}')
-        for _name in names:
-            for _table in tables:
-                _rt = _table.get(_name)
-                if _rt:
-                    return _rt
-        return None
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
         return gex._lower_IntLiteral(self, node)
     def _lower_FloatLiteral(self, node) -> tuple[str, str]:
@@ -5264,10 +5188,8 @@ class GimpleGen:
         return gca._cpp_match_stmt(self, s, declared, indent)
     def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
-    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None,
-                                extra_captures: list | None=None,
-                                struct_def: str | None=None) -> tuple[str, str, str, list]:
-        return gca._gen_cpp_generator_unit(self, fn, struct_name, extra_captures, struct_def)
+    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None) -> tuple[str, str, str, list]:
+        return gca._gen_cpp_generator_unit(self, fn, struct_name)
     def _compute_nested_closure_captures(self, inner: FunctionDef, outer_scope: dict) -> list:
         return gca._compute_nested_closure_captures(self, inner, outer_scope)
     def _enclosing_scope_with_locals(self, outer_fn: FunctionDef) -> dict:
@@ -5286,8 +5208,6 @@ class GimpleGen:
         return gca._inline_single_use_task_composition(self, body)
     def _compile_nested_async_functions(self, outer_fn: FunctionDef, async_fns: dict) -> None:
         return gca._compile_nested_async_functions(self, outer_fn, async_fns)
-    def _compile_nested_generator_closures(self, outer_fn: FunctionDef, generator_fns: dict) -> None:
-        return gca._compile_nested_generator_closures(self, outer_fn, generator_fns)
     def _gen_cpp_async_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         return gca._gen_cpp_async_generator_unit(self, fn)
 
@@ -5447,8 +5367,8 @@ class GimpleGen:
         return ginf._plan_mut_captured_params(self, node, func_name)
     def _seed_addressed_locals(self, body: list):
         return ginf._seed_addressed_locals(self, body)
-    def _emit_mut_local_box_allocs(self, fn=None):
-        return ginf._emit_mut_local_box_allocs(self, fn)
+    def _emit_mut_local_box_allocs(self):
+        return ginf._emit_mut_local_box_allocs(self)
     def _new_jbp_temp(self) -> str:
         return ginf._new_jbp_temp(self)
     def _closure_info_for_ident(self, name: str):
@@ -6177,12 +6097,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # (a name rebound later in the enclosing function, or `self`) it
     # deliberately leaves alone.
     stmts = desugar_genexps(stmts)
-    # Literal `Name = namedtuple('Name', [...])` at module level becomes the
-    # static class it denotes (see fire_compiler.desugar_namedtuples); every
-    # other namedtuple call is refused by name in emit_calls.
-    stmts = desugar_namedtuples(stmts)
     _desugared_names = list(DESUGARED_GENEXP_NAMES)
-    _namedtuple_names = list(DESUGARED_NAMEDTUPLE_NAMES)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
@@ -6193,7 +6108,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # The root's own call sites are what an imported module's generators are
     # typed by (see GimpleGen._closure_call_stmts).
     gen._closure_call_stmts = [stmts]
-    gen._namedtuple_class_names = _namedtuple_names
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
@@ -6333,10 +6247,7 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
     missing = []
     for _vn in names:
         _vname = _as_str(_vn)
-        # The C++20 companion names its generator `_mojogen_<name>_*` (one
-        # leading underscore; see `_has_cpp_bodies` in the runner). Checking
-        # `__mojogen_` refused every genexp that DID lower through that path.
-        if f'__mgco_{_vname}_' not in code and f'_mojogen_{_vname}_' not in cpp:
+        if f'__mgco_{_vname}_' not in code and f'__mojogen_{_vname}_' not in cpp:
             missing.append(_vname)
     if missing:
         raise RuntimeError(
@@ -6529,32 +6440,6 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     # process (e.g. compile_stdlib.py compiling many independent modules),
     # while still deduping correctly *within* one call across every nested
     # GimpleGen instance recursive import-inlining creates.
-    result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
-                                 auto_gpu=auto_gpu)
-    _refuse_dropped_companion(result, _gen)
-    return result
-
-
-def compile_to_gimple_parallel_frozen(mojo_src: str, do_imports: bool = False,
-                                      filename: str = "", auto_gpu: bool = True) -> str:
-    """Parallel parse + frozen-snapshot emission (option a, steps 1-4).
-
-    Phase A (serial): parse all imported modules and build frozen snapshot.
-    Phase B (parallel, deferred C11 queue -> multiprocessing.Pool): one work unit
-    per translation unit over the frozen snapshot.
-    Phase C (serial): assemble sorted results into byte-identical .ci.
-
-    The C11 lock-free mmap queue stays deferred per owner decision 2026-10-30.
-    Ceiling target: 1.1x serial dump-full time (not 1.5x); measured after.
-    Acceptance: cmp-equal .ci against serial path.
-    """
-    # Forward to serial path for byte-identity verification; parallel emission
-    # scaffolding (frozen snapshot, work-unit keying, sorted assembly) is
-    # wired below for when the emission phase is fully independent.
-    import multiprocessing
-    # Parallel parse scaffolding: parse imported modules in pool.
-    # For this light-worker round we establish the structure and fall back to
-    # serial emission so the output is byte-identical (no divergence).
     result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
                                  auto_gpu=auto_gpu)
     _refuse_dropped_companion(result, _gen)

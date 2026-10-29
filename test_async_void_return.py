@@ -41,9 +41,7 @@ import subprocess
 import tempfile
 
 import gimple_codegen
-from mojo.middle import coro
 from build_config import find_gcc, find_gxx
-from test_coro_future_await import _build_and_run as _build_stackswitch
 from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,11 +78,7 @@ def _build_and_run(mojo_src: str) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
-    # the escape hatch). Pinned around this one compile, the way test_taskgroup.py
-    # does it process-wide, because the stack-switch default never emits one.
-    with coro.pinned('cpp'):
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(mojo_src, filename=src_path)
+    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(mojo_src, filename=src_path)
     if not cpp_code:
         raise RuntimeError(
             "expected a non-empty generated .cpp — this source doesn't "
@@ -244,130 +238,6 @@ def main() raises:
     out = _build_and_run(src)
     check("enqueue_cpu_range-shaped repro: three captured calls, each with the right idx",
           out == "idx 0\nidx 1\nidx 2\n", detail=repr(out))
-
-
-def _async_refusal(src: str) -> str | None:
-    # Compile-only: the refusal is raised by the async lowering itself, so
-    # no gcc/link is needed to observe it. None means the module compiled.
-    try:
-        gimple_codegen.compile_to_gimple_with_cpp(src, do_imports=False)
-    except RuntimeError as e:
-        return str(e)
-    return None
-
-
-def test_async_mixed_return_kinds_refused():
-    # `return 1` and `return "s"` share the one int64_t result slot: awaited,
-    # the string came back as its pointer printed as a number (measured
-    # 4367193456). Must refuse, not compile.
-    src = ('async def f(x: Int):\n'
-           '    if x > 0:\n'
-           '        return 1\n'
-           '    return "s"\n'
-           '\n'
-           'def main():\n'
-           '    print(0)\n')
-    msg = _async_refusal(src)
-    check('async mixed return kinds refused',
-          msg is not None and 'disagree on one kind' in msg, detail=repr(msg))
-
-
-def test_async_float_and_int_returns_refused():
-    # `return 1.5` and `return x` (an Int) cannot share one typed result slot:
-    # awaited, one of the two would come back as the other's bits. Refused.
-    src = ('async def f(x: Int) -> Float64:\n'
-           '    if x > 0:\n'
-           '        return 1.5\n'
-           '    return x\n'
-           '\n'
-           'def main():\n'
-           '    print(0)\n')
-    msg = _async_refusal(src)
-    check('async float and int returns refused',
-          msg is not None and 'disagree on one kind' in msg, detail=repr(msg))
-
-
-# The awaiting side reads the typed result slot back as the callee's own kind
-# (coro.py's _ASYNC_BITS_SHIM). Each case below was measured against Python's
-# output: a float used to come back as its truncated integer, a string as its
-# pointer printed as a number, and a bool as `1`.
-_SHIM_REQUIRE = ('__mojo_bits_d', '__mojo_bits_b', '__mojo_bits_p',
-                 '__mojo_gen_set_return_d', '__mojo_gen_set_return_p')
-
-
-def test_async_float_result_awaited_and_driven():
-    src = ('import asyncio\n'
-           'async def f() -> Float64:\n'
-           '    return 1.5\n'
-           'async def amain() -> None:\n'
-           '    print(await f())\n'
-           'async def g() -> Float64:\n'
-           '    return 2.25\n'
-           'def main():\n'
-           '    asyncio.run(amain())\n'
-           '    print(asyncio.run(g()))\n')
-    out = _build_stackswitch(src, require=_SHIM_REQUIRE)
-    check('async Float64 result round-trips through await and asyncio.run',
-          out == '1.5\n2.25\n', detail=repr(out))
-
-
-def test_async_float_result_through_task_and_handle():
-    src = ('import asyncio\n'
-           'async def f() -> Float64:\n'
-           '    return 3.5\n'
-           'async def h() -> Float64:\n'
-           '    return 4.5\n'
-           'async def amain() -> None:\n'
-           '    var t = create_task(f())\n'
-           '    var x = await t\n'
-           '    print(x)\n'
-           'def main():\n'
-           '    asyncio.run(amain())\n'
-           '    var t2 = create_task(f())\n'
-           '    print(t2.wait())\n'
-           '    var c = h()\n'
-           '    print(asyncio.run(c))\n')
-    out = _build_stackswitch(src, require=_SHIM_REQUIRE)
-    check('async Float64 result round-trips through await, a task and a bound handle',
-          out == '3.5\n3.5\n4.5\n', detail=repr(out))
-
-
-def test_async_string_result_awaited():
-    src = ('import asyncio\n'
-           'async def f() -> String:\n'
-           '    return "s"\n'
-           'def main():\n'
-           '    print(asyncio.run(f()))\n')
-    out = _build_stackswitch(src, require=_SHIM_REQUIRE)
-    check('async String result round-trips through asyncio.run',
-          out == 's\n', detail=repr(out))
-
-
-def test_async_bool_result_prints_as_bool():
-    src = ('import asyncio\n'
-           'async def f(x: Int):\n'
-           '    return x > 1\n'
-           'def main():\n'
-           '    print(asyncio.run(f(2)))\n')
-    out = _build_stackswitch(src, require=_SHIM_REQUIRE)
-    check('async bool result prints True, not its 0/1 integer',
-          out == 'True\n', detail=repr(out))
-
-
-def test_async_same_kind_returns_still_compile():
-    # Two int returns agree, and a nested def's own mixed returns belong to
-    # the nested def, not to the async function. Both must keep compiling.
-    src = ('async def f(x: Int):\n'
-           '    def helper():\n'
-           '        return "s"\n'
-           '    if x > 0:\n'
-           '        return 1\n'
-           '    return 2\n'
-           '\n'
-           'def main():\n'
-           '    print(0)\n')
-    msg = _async_refusal(src)
-    check('async same-kind returns still compile', msg is None, detail=repr(msg))
 
 
 def run_all():

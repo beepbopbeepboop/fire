@@ -1,58 +1,5 @@
 # CODEGEN_generator_function: Lib/glob.py
 
-## Status (2026-10-30 — partial fix landed: the os.path.split unpack / str-slice / stale-memo holes are closed; module still refuses)
-
-Measured with `compile_to_gimple_with_cpp(open(Lib/glob.py).read(), do_imports=False)`
-(the generator-capable entry point; `compile_to_gimple` refuses EVERY generator
-module with a different message and is the wrong probe for this doc).
-
-Before this round, the refusal named `_glob2`, `_iglob`, `select_recursive`,
-`select_recursive_step`, `select_wildcard`. Root cause of the first two:
-`_static_env` / `_yield_kind` could not type the tuple-unpacked results of
-`os.path.split` (`dirname, basename = os.path.split(pathname)`), so
-`basename` and `dirname` were untypable call-site args, i.e. HOLES in
-`_scan_callsite_param_kinds`, and every generator fed by them was refused.
-
-Landed (mojo/middle/coro.py, test_gimple_generator_runner.py):
-- `d, b = os.path.split(p)` / `splitext(p)` binds each unpacked name to 'p'
-  (`_os_path_pair_call`, `_OS_PATH_PAIR_FNS`).
-- `pattern[:0]` on a 'p'-kinded local is 'p' (SliceExpr arm of `_yield_kind`).
-- SILENT-MISCOMPILE FIX found while landing the above: `_GEN_VALUE_KINDS`
-  memoized a callee's kind as int64_t during `_scan_callsite_param_kinds`,
-  before the call-site table was filled, and nothing invalidated it. So
-  `def _g(p): yield p` called only as `yield from _g("abc")` printed the
-  string's address at exit 0. This was ALREADY the case on master for the
-  `for x in _g(p): yield x` shape with a literal argument (measured); the new
-  typing would have exposed it on the split path. Fixed by clearing the memo
-  in `_scan_callsite_param_kinds._classify`.
-- Regression tests: `generator_fed_os_path_split_unpacked_str` (fails before:
-  refused; passes after) and `generator_delegate_callsite_typed_param_not_memoized_int`
-  (fails before: prints an address; passes after), in test_gimple_generator_runner.py.
-
-Current refusal on glob.py (measured after the landing above):
-- `_glob2`: now refused with "every `yield` must carry a value, and all values
-  must agree on one scalar type ... one of them's value kind could not be
-  resolved". Not yet identified which yield is unresolved. `yield pattern[:0]`
-  types now; the remaining candidate is the `yield from _rlistdir(...)`
-  delegation. NEXT: probe `_rlistdir` alone (and `_glob2` with `_rlistdir`
-  stubbed) to pin the unresolved yield before changing anything.
-- `_iglob`: `pathname` is still a hole. Its public caller `iglob(pathname, ...)`
-  has NO in-module call site, so `iglob`'s own param is untypable. This is a
-  DECISION, not a bug: (a) refuse all public-API generators with an untyped
-  param and no in-module caller (current, honest), or (b) type an
-  uncalled public function's unannotated param from the stdlib signature
-  (Lib/glob.py's `iglob` is documented to take `str`). (a) keeps every
-  stdlib-shaped refusal honest; (b) needs a documented-signature table. The
-  controller should choose.
-- `select_recursive`, `select_recursive_step`, `select_wildcard`: nested
-  generators reading enclosing-scope variables (`match`, `select_next`, `self`,
-  `dir_only`, `follow_symlinks`). The coroutine path has no capture model for a
-  generator defined inside another function. This is the feature project the
-  2026-09-07 entry describes; unchanged by this round.
-
-So the doc stays open. No glob.py behaviour changes until all three are
-resolved; the landed pieces are general (any module with these shapes).
-
 ## Status (2026-09-07 — "cluster A" premise re-examined; NOT a callable-value-local wiring gap)
 
 Investigated as part of a batch aimed at "extend the callable-value-local

@@ -246,10 +246,8 @@ def cmd_spawn(a):
             # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
             cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
-        # the worker runs under a CPU ceiling (tools/cpu_cap.py): a runaway loop stops itself, and its CPU is recorded
-        capped = [sys.executable, os.path.join(MAIN, "tools", "cpu_cap.py"), "wrap", "--name", a.name, "--"] + cmd
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
-            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, capped)))
+            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
         open(os.path.join(wt, "work.log"), "a").write("=== control: spawned %s on %s at %s ===\n" % (
             a.name, a.model, time.strftime("%F %T")))
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,
@@ -450,9 +448,9 @@ def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
-    # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
+    # a task queued without a slot runs on the pool's default slot (the local Qwen pair, which is never banned)
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)))
+                added=time.time(), pool=getattr(a, "pool", None) or load_pool()["default_slot"])
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -568,15 +566,6 @@ def bounce(name, t):
     return True
 
 
-def pick_slot(item, busy):
-    """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
-    pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
-    if item.get("only"):                       # pinned: its slot or nothing
-        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
-    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
-    return next((x for x in order if slot_free(x, busy)), None)
-
-
 def cmd_refill(a):
     """Fill the pool: each slot in tools/pool.json takes queued tasks, oldest first, up to its own count, and a slot
     whose model is banned takes nothing. --target caps the total across slots (default: the pool's total).
@@ -592,7 +581,7 @@ def cmd_refill(a):
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
     items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
-    if items_all and not any(slot_free(sl, running_by_slot()) for sl in load_pool()["slots"]):
+    if items_all and not any(i.get("pool") and slot_free(pool_slot(i["pool"]), {}) for i in items_all):
         print("%s refill: every slot with queued work is full or banned (%s), starting nothing" % (
             time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u)))
                                            for m, u in dead_models().items()) or "no bans"), flush=True)
@@ -614,16 +603,13 @@ def cmd_refill(a):
             continue                      # a red master is repaired at once, whatever the slot count
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
-        # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
-        # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
-        sl = pick_slot(it, busy)
-        if sl is None:
-            continue                      # every slot is full or banned: the task waits
-        # a queued name can collide with a registry entry from an earlier attempt of the same chain (2026-10-30: two fixers
-        # were skipped on every pass as "already exists"); the task starts under a fresh name instead
-        name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
-        ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
+        if not it.get("pool"):
+            print("skip %s: queued without a pool slot" % it["name"]); continue
+        sl = pool_slot(it["pool"])
+        if not slot_free(sl, busy):
+            continue                      # this slot is full or banned; the task waits for ITS slot, never another model
+        ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
+                                file=it["files"], base=it["base"], model=None, pool=it["pool"])
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
@@ -1120,8 +1106,7 @@ def main():
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
-    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
-    s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
+    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task must run on")
     s.set_defaults(f=cmd_enqueue)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)

@@ -13,8 +13,9 @@ import platform
 import subprocess
 import tempfile
 
+os.environ['MOJO_CORO'] = 'stackswitch'
+
 import gimple_codegen
-from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,25 +50,15 @@ def check(name, cond, detail=""):
         _FAIL += 1
 
 
-# The Awaitable-protocol shims this file's own tests are about. `_build_and_run`
-# refuses a program whose generated C has none of `require`, so a test that
-# exercises a different shim names it instead of silently passing without it.
-_AWAITABLE_SHIMS = ('__mojo_async_await_future', '__mojo_async_await_event_wait')
-
-
-def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
+def _build_and_run(mojo_src: str) -> str:
     wd = tempfile.mkdtemp(prefix='mojo_coro_future_')
     src_path = os.path.join(wd, 'prog.mojo')
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # Pinned per compile, not at import: a module-level MOJO_CORO assignment
-    # here also rewrote the backend for every test file that imports this
-    # harness (test_async_void_return.py's cpp-path tests among them).
-    with coro.pinned('stackswitch'):
-        c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
-    if not any(s in c_code for s in require):
-        raise RuntimeError(f"none of {require!r} in the generated C -- "
+    c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
+    if '__mojo_async_await_future' not in c_code and '__mojo_async_await_event_wait' not in c_code:
+        raise RuntimeError("no Awaitable-protocol shim call in the generated C -- "
                            "this test isn't exercising the path it claims to:\n" + c_code)
 
     c_path = os.path.join(wd, 'prog.c')
@@ -647,36 +638,6 @@ def main():
     out = _build_and_run(src)
     check("bound-method done-callback invoked with self",
           out == "bound-method callback\n0\n", detail=repr(out))
-
-
-def test_await_async_bound_method_passes_receiver_and_args():
-    """`await obj.method(a)` on a compiled struct `async def` must hand the
-    callee its receiver AND its argument. The awaited call is lowered via the
-    generator-method start path, which prepends the receiver only when the
-    method's api entry records receiver='self'; async methods used to record
-    '' and so dropped `self`, shifting every argument down one slot."""
-    src = """\
-import asyncio
-
-struct Box:
-    var base: Int
-
-    fn __init__(out self):
-        self.base = 100
-
-    async def add(self, x: Int) -> Int:
-        return self.base + x
-
-async def main_co() -> Int:
-    var b = Box()
-    return await b.add(5)
-
-def main():
-    print(asyncio.run(main_co()))
-"""
-    out = _build_and_run(src)
-    check("await of a bound async method receives self and its argument",
-          out == "105\n", detail=repr(out))
 
 
 def test_future_done_callback_closure():

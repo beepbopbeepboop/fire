@@ -1,19 +1,5 @@
 # CODEGEN: a nested container as a dict-comprehension key, and as a tuple slot, is not described
 
-## Status — 2026-10-30: nothing new landed; what remains is claimed elsewhere
-
-A leftover resume of this bug (`.git/control/leftover/bug-codegen-nested-container-as-dict-key-9641.patch`)
-was checked and contains no source change: its only entry is a 57 KB compiled
-binary named `t1` at the repo root. Nothing from it was applied. The tuple-slot
-regression `test_runtime_diff.py --case tuple_with_a_nested_container_slot`
-passes on this tree (1 passed, peak 0.3 GB), so the 2026-10-02 closures below
-still hold.
-
-The one symptom still wrong here is the content key's PRINTED form
-(`print({(0, 1): 1})` gives `{'T1100…': 1}`), and that is owned by
-the dict content-key aliasing bug (its doc was deleted when fixed) (§1), which another
-worker has claimed. It is not fixed by any change in this doc's scope.
-
 ## Status — 2026-10-02: two more of the four closed; the content key's REPR
 ## is the one left, and it is not this doc's to take
 
@@ -86,7 +72,7 @@ prints `{(9, 9): 'lit'}`. That is not specific to any one key path — a plain
 subscript store has always shown it, on this tree and on a pristine HEAD —
 and it is the inverse of `mojo_dict_key_for`'s encoding rather than the
 spelling, so it belongs to whoever owns the content key:
-the dict content-key aliasing bug (its doc was deleted when fixed) §1, which currently
+`bugs/CODEGEN_dict_content_key_aliases_a_string_key.md` §1, which currently
 asserts that "a content key IS TEXT — the container's own `repr`". **That
 assertion is stale on this tree** — measured, the content key is
 `mojo_dict_key_for`'s length-delimited encoding, not the repr — and this
@@ -159,7 +145,7 @@ per slot (`_DictSlot.keykind`, `MOJO_KEY_TUPLE` = 3), so a repr can tell a
 content key from a str key; what is missing is the inverse of
 `mojo_dict_key_for`'s encoding. Fixing it changes every container-keyed dict's
 printed form, so it belongs with whoever owns the content-key spelling
-(the dict content-key aliasing bug (its doc was deleted when fixed), §1, which asserts
+(`bugs/CODEGEN_dict_content_key_aliases_a_string_key.md`, §1, which asserts
 the content key IS the repr text — that assertion is stale on this tree, and
 the literal-vs-subscript mismatch below is the same staleness).
 
@@ -179,7 +165,7 @@ print(e[(2, 3)])     # 7 -- the length-delimited spelling
 `_repr_value`, while every subscript routes through `mojo_dict_key_for`. The
 two do not produce the same string, so a literal tuple key is unreachable by
 the lookup that should find it. Same doc, same subject, as above — filed as the
-stale part of the dict content-key aliasing bug (its doc was deleted when fixed), which claims
+stale part of `CODEGEN_dict_content_key_aliases_a_string_key.md`, which claims
 the two were made to agree.
 
 ### Already fixed on this tree, before this work: `[([1, 2], 3)]`
