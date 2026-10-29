@@ -3131,6 +3131,41 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             # context variable. See `_declares_its_own_scope`.
             out.append(s)
             continue
+        if isinstance(s, N.IfStmt):
+            # Guard recognition: `if asyncio.iscoroutine(x): ...` means `x`
+            # is a live coroutine handle inside the `then` body (and any
+            # `elif` body whose own condition is the same guard). The
+            # predicate is real (`__mojo_async_iscoroutine` answers from the
+            # registry), so inside the then-branch `asyncio.run(x)` needs no
+            # static inference about where `x` came from.
+            guard_name = None
+            if _is_asyncio_awaitable_pred_call(s.condition):
+                arg = s.condition.args[0]
+                if isinstance(arg, N.IdentExpr):
+                    guard_name = arg.name
+            then_hv = (hv | {guard_name}) if guard_name else hv
+            # Rewrite condition expression (may contain inner coroutine refs)
+            cond_nv, cond_pre = _rewrite_asyncio_run(s.condition, cvar, tv, lm,
+                                                     handle_vars=hv)
+            out.extend(cond_pre)
+            s.condition = cond_nv
+            s.then_body = _rewrite_asyncio_run_stmts(s.then_body, cvar, tv, lm,
+                                                     lmaps, then_hv)
+            # Elifs: treat each as a nested IfStmt; guard from parent does NOT
+            # propagate into elif conditions, but if an elif's own condition
+            # is the guard, its then-body gets it (handled by recursion).
+            new_elifs = []
+            for elif_ in (s.elifs or []):
+                elif_nv, elif_pre = _rewrite_asyncio_run(elif_, cvar, tv, lm,
+                                                        handle_vars=hv)
+                out.extend(elif_pre)
+                new_elifs.append(elif_nv)
+            s.elifs = new_elifs
+            if s.else_body is not None:
+                s.else_body = _rewrite_asyncio_run_stmts(s.else_body, cvar, tv, lm,
+                                                        lmaps, hv)
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
