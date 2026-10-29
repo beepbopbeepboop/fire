@@ -366,7 +366,7 @@ def external():
 
 
 def norm_claim(c):
-    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
+    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
     if ":" in c:
         return c
     m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
@@ -624,7 +624,7 @@ def cmd_refill(a):
 
 
 def cmd_gate(a):
-    """gate list | gate off PATTERN --reason R --doc bugs/X.md --worker NAME | gate on PATTERN"""
+    """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
     cfg = gates_cfg()
     if a.action == "list":
         print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
