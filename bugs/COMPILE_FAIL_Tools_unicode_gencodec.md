@@ -4,6 +4,150 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29 — items 1 and 2 are on master; items 3 and 4 remain, planning guide below)
+
+Re-read on master at `3d3f61d63`. The doc's three open items, one at a time:
+
+* **Item 1 (pointer digits in the header line) — FIXED on master by `bac12a364`**
+  ("A forwarded string argument keeps its type; a pass-through call
+  answers per call"). The 2026-10-01 entry below filed it as
+  `CODEGEN_string_arg_type_lost_across_forwarding_hop.md`, and that doc was
+  deleted with the fix, so the citation was dangling and is rewritten here.
+  Verified: `gimple_codegen.compile_to_gimple` on the reduced three-function
+  repro (`sink`/`mid`/`go`, `'%s and %s' % (x, y)`) emits
+  `char * sink_… (char *, char *, int64_t);` and `char * mid_… (char *, char *);`
+  — the parameters are `char *`, not `int64_t`. The same fix also covers the
+  test `test_gimple.py::a_forwarded_string_argument_keeps_its_type`
+  (a method of `run_tests`'s nested scope, so it runs only through the full
+  `python3 test_gimple.py`; not run here).
+* **Item 2 (`'0x%0*X' % (precision, t)` entry lines) — FIXED on master** by
+  the 2026-10-02 `*`-width work: `_percent_operands_needed`
+  (`mojo/backend_gimple/emit_exprs.py:5130`) and the test
+  `gimple_percent_format_star_width_and_precision`
+  (`test_gimple_runner.py:9569`). Verified against the interpreter path
+  (`python3 fire.py run` on the same repro): `0x00FF`, `0xFF, 0x0000FF`,
+  byte-identical to CPython. The compiled path was NOT re-run here (see
+  surprises below).
+* **Items 3 and 4 — still open.** Both are unmodelled runtime features, not
+  parser or lowering gaps. Guide below.
+
+### Planning guide for items 3 and 4
+
+**Measured state.** `gencodec.py` calls, from `Tools/unicode/gencodec.py` in
+Python-3.14.6:
+
+* line 271: `codecs.make_encoding_map(map)` — argument is the decoding dict
+  `map` (int codepoint -> `(u, c)` entries, `c` a comment str), result passed
+  to `python_mapdef_code('encoding_map', ...)`.
+* line 369: `marshal.dump(d, f)` in `marshalmap`, with `f` opened `'wb'`.
+* line 412: `marshal.load(f)` in `rewritepythondir` (a different function in
+  the same file; it must compile even though `convertdir` never reaches it).
+
+Today: `codecs.make_encoding_map` returns an empty dict (the `decoding_table`
+never gets built), and `marshal.dump` is an honest stub (the `.mapping` file
+is 0 bytes). Both are confirmed by the 2026-10-01 side-by-side run against
+CPython 3.14.7.
+
+**Reference behaviour (CPython, from `Lib/codecs.py:1091`).**
+`make_encoding_map(decoding_map)` builds `m` by walking
+`decoding_map.items()`: a new target `v` maps to `k`; a target seen
+earlier maps to `None` ("undefined mapping", e.g. `cp875.py` decodes several
+bytes to `\u001a`). So the result is `int -> int | None`, and
+`python_mapdef_code` (gencodec.py:138) already handles `None` values and tuple
+keys/values through `isinstance` and `is None` checks.
+
+**Decision needed (item 3): the value type of `make_encoding_map`'s result.**
+The result is `int` -> (`int` or `None`), with `None` on duplicated targets.
+`MojoDict`'s value-typed setters already exist — `mojo_dict_set_int`,
+`mojo_dict_set_none` (fire_runtime.h:1340, 1389) — but a single dict whose
+values mix int and None has no static type. The two readings:
+
+* (a) Per-value tagged dict, where `m[v] = None` goes through
+  `mojo_dict_set_none` and reads through a tagged getter. Matches CPython and
+  the runtime's existing per-slot API. Cost: `python_mapdef_code`'s `mapvalue`
+  consumer must dispatch on the tag, which is the path already used for
+  `mapvalue` tuples.
+* (b) A narrowed model that treats `None` as a sentinel int (e.g. `-1`) and
+  says so. Cheap, but it is a silent-miscompile trap: a real `-1` codepoint
+  would collide. Not recommended.
+
+Recommend (a). A decision is needed before writing the lowering, since the
+result type feeds `resolve_shared.py`'s return-type table.
+
+**Implementation plan, item 3 (`codecs.make_encoding_map`).** Follow the
+`os.listdir` precedent, which is the one module function already wired end to
+end:
+
+1. `mojo/middle/resolve_shared.py:669` — return type for `(codecs,
+   make_encoding_map)`. This is the `MojoDict *` answer, not `MojoList *`.
+2. `mojo/backend_gimple/emit_methods.py:2648` — a `module_name == 'codecs' and
+   method_name == 'make_encoding_map'` case beside the `os.listdir` case,
+   lowering to a new runtime helper.
+3. `runtime/fire_runtime.c` — `MojoDict *mojo_codecs_make_encoding_map(MojoDict *decoding)`.
+   It walks the decoding dict in insertion order, counts targets, and sets each
+   to the key or to none via the tagged setters. (Needs its own insertion-order
+   check against CPython: CPython's dict iteration is insertion order, and the
+   duplicate rule depends on which key is seen first.)
+4. `gimple_codegen.py:3631` — `_KNOWN_SIGS` entry for the helper, matching the
+   `mojo_listdir` line.
+5. Test: a CPython-oracle regression in `test_gimple_runner.py` next to
+   `gimple_percent_format_star_width_and_precision`. Repro: a decoding dict with
+   two keys mapping to the same target, printing `make_encoding_map(...)`
+   sorted. Compared against CPython stdout.
+
+**Decision needed (item 4): the `.mapping` format.** `marshal.dump` must emit
+CPython's binary marshal format, because `rewritepythondir` reads the files
+back with `marshal.load`. The reference bytes come from the same CPython that
+the doc compares against, not from memory:
+
+    python3 -c "import marshal; print(marshal.version)"   # 6 on this 3.15 host; use the 3.14 reference when comparing
+    python3 -c "import marshal; print(marshal.dumps({1:(2,'x')}))"
+
+Two readings:
+
+* (a) Implement the marshal writer and reader for the subset this file
+  uses: dict, tuple, int, str, None, with CPython's `FLAG_REF` bit and
+  `version` byte. Compare `.mapping` byte-identical against real CPython on a
+  real mapping file. Cost: a real standalone feature, a few hundred lines of
+  C for the writer plus the reader.
+* (b) Keep `marshal.dump` an honest stub and mark the gencodec doc as
+  "`.mapping` unimplemented" with no further work. This is not a fix, only a
+  scope decision.
+
+Recommend (a), but only as its own round, since it is a standalone feature
+with a byte-identical gate, not a gencodec fix.
+
+**Implementation plan, item 4 (`marshal.dump` / `marshal.load`), if (a) is
+chosen.**
+
+1. `runtime/fire_runtime.c` — `marshal_dump_dict` / `marshal_load` emitting
+   and reading CPython version-4-or-later framing, scoped to the types above.
+2. `mojo/backend_gimple/emit_methods.py` — a `module_name == 'marshal'` case
+   for `dump(obj, f)` and `load(f)` beside the `os.listdir` case, writing the
+   bytes to the file object through the existing file-write path.
+3. Tests: a byte-identical comparison of `.mapping` against
+   `python3 gencodec.py` output on a small mapping file, and a round-trip
+   through `marshal.load`.
+
+**What NOT to do.** Do not narrow `make_encoding_map` to a `dict[int, int]`
+that silently stores `-1` for `None`; that is the silent miscompile the 2026-08-09
+entry warned about. Do not implement marshal as a text dump.
+
+### Surprises from this round
+
+* `python3 fire.py build` of a single standalone file (`.tmp/fwd/fwd.py`,
+  imports nothing) pulled the stdlib closure into the compile and failed with
+  `expected goto expression before 'mojo_raise_zero_division'` errors in
+  `stdlib/std/benchmark/*.mojo`, `stdlib/std/collections/span.mojo`, and others,
+  under `/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib`. That is a
+  different tree from this worktree's. It is a heavy run, so it was killed at
+  the first sign of stdlib errors; no bug doc was filed for it yet because it
+  is outside this doc's claim and the cause is not established. The integrator's
+  stdlib gate should settle whether it is real.
+* Running `python3 fire.py run` on the repro works in ~1 s. The interpreter is
+  the cheap oracle here; `gimple_codegen.compile_to_gimple` is the cheap emit
+  check (no gcc, no stdlib).
+
 ## Status (2026-10-02 — item 2, the `0x%0*X` entry lines, is FIXED; two runtime items and one filed defect remain)
 
 The 2026-10-01 entry below recorded the entry lines as `literally
@@ -54,8 +198,8 @@ than left to be found:
   generated `.ci` for `'%s=%r %d %05.2f %x %o %c %%' % ('k','v',7,1.5,255,8,65)`
   plus a `b'%s-%d' % ('bb', 3)` sibling.
 
-Item 1 (the pointer digits) remains root-caused and filed as
-`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`; items 3 and 4
+Item 1 (the pointer digits) was root-caused and fixed by `bac12a364` (see the
+2026-10-29 status above); items 3 and 4
 (`codecs.make_encoding_map` unmodelled, `marshal.dump` unimplemented) are
 untouched and remain real features rather than gaps. So the doc stays open,
 now on three items instead of four.
