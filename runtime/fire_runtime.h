@@ -864,6 +864,8 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+char       *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop);
+int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop, char *needle);
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
  * value, decided by the value itself. See the definition. */
 int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);

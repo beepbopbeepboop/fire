@@ -13539,3 +13539,47 @@ int mojo_pyobject_cmp(char op, int64_t a, int64_t b) {
     return op == '<' ? a < b : op == 'L' ? a <= b
          : op == '>' ? a > b : a >= b;
 }
+
+/* Length-aware variants: when the caller already has the string's length
+ * (e.g. a MojoStr ->len, or a statically-known length), the scan from
+ * byte 0 is unnecessary — "is start inside the string?" becomes
+ * `start < slen`, and read at `start` is sound because `start < slen`
+ * was just confirmed.  Fixes the quadratic loop that calls
+ * mojo_cstr_slice / mojo_cstr_region_eq once per position. */
+char *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        if (start < 0) start += slen;
+        if (stop  < 0) stop  += slen;
+        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
+    }
+    if (start < 0) start = 0;
+    if (stop > slen) stop = slen;
+    if (start >= stop) {
+        char *e = malloc(1); e[0] = '\0'; return e;
+    }
+    int64_t len = stop - start;
+    char *r = malloc(len + 1);
+    memcpy(r, s + start, len);
+    r[len] = '\0';
+    return r;
+}
+
+int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
+                          char *needle)
+{
+    if (!s || !needle) return s == needle;
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        if (start < 0) start += slen;
+        if (stop  < 0) stop  += slen;
+        if (stop == MOJO_SLICE_STOP_OMITTED) stop = slen;
+    }
+    if (start < 0) start = 0;
+    if (stop > slen) stop = slen;
+    if (start >= stop) return needle[0] == '\0';
+    int64_t region_len = stop - start;
+    size_t needle_len = strlen(needle);
+    if ((size_t)region_len != needle_len) return 0;
+    return memcmp(s + start, needle, needle_len) == 0;
+}
