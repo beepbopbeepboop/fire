@@ -4123,6 +4123,14 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
         gen._emit(f"  {result} = {_dk};")
+        # Per-slot runtime typing: dict keys are all char*. The kind byte
+        # marks every slot as 'p' (str) so mojo_list_get_boxed answers
+        # correctly; the _maybe_kinds_vals marker tells loop/accessor
+        # readers to ask the runtime rather than trust one compile-time
+        # element type (the merged temp also carries set/list/box branches).
+        gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                       [('MojoList *', result), ('char', "'p'")])
+        gen._maybe_kinds_vals.add(str(result))
         # NO `gen._elem_types[result]` here, and that is load-bearing rather
         # than an omission. This arm merges FOUR different containers into one
         # temp, and the element type is a property of WHICH ONE, so a record
@@ -4138,7 +4146,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # there is exactly one arm. An element type that is only knowable per
         # runtime branch needs a per-slot runtime read (`mojo_list_get_boxed`
         # + the tagged reader `_tagged_dyn_read` consumes), which is the open
-        # half — bugs/CODEGEN_materialized_container_has_no_element_type.md.
+        # half — CODEGEN_materialized_container_has_no_element_type
+        # (list of a boxed dict reads key addresses instead of strings).
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_dict)
         iss = gen._call_expr('int', 'mojo_is_registered_set', [('int64_t', it64)])
@@ -4147,6 +4156,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _sp = gen._coerce_to_type('int64_t', 'MojoSet *', it64)
         _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', _sp)])
         gen._emit(f"  {result} = {_sl};")
+        gen._maybe_kinds_vals.add(str(result))
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_not_set)
         # The unguarded `(MojoList *)value` this replaces walked `value->len`
@@ -4162,6 +4172,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._emit_label(bb_list)
         _lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
         gen._emit(f"  {result} = {_lp};")
+        gen._maybe_kinds_vals.add(str(result))
         gen._emit(f"  goto {bb_after};")
         gen._emit_label(bb_none)
         # NOT a container at all: a plain int, a bool, a float's bit pattern, a
@@ -4179,6 +4190,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _ne = gen._call_expr('MojoList *', 'mojo_iter_boxed_list',
                              [('int64_t', it64)])
         gen._emit(f"  {result} = {_ne};")
+        gen._maybe_kinds_vals.add(str(result))
         gen._emit_label(bb_after)
         return result
     return gen._coerce_to_type(src_type, 'MojoList *', value)

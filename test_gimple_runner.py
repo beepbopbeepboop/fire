@@ -987,7 +987,7 @@ main()
     # plain list, an `enumerate` pair, and a `dict.items()` pair. `zip` is NOT
     # here — `list(zip([1, 2], [3, 4]))` prints decimals for a DIFFERENT reason
     # (a `mojo_zip` result read as plain ints, the element-type half) and is
-    # filed as `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # filed as `CODEGEN_materialized_container_has_no_element_type (fixed)`.
     # The dict key here is a STRING on purpose: an INTEGER key is quoted by
     # this repr (where CPython does not quote it) because a `keykind == 2`
     # slot has to remember whether the source wrote `1` or `"1"` and does
@@ -10046,7 +10046,7 @@ bytes_keyed()
     # same evidence. `list(d.items())` is separately broken — it reads each pair
     # pointer as an integer, which is the element-type half of
     # `list(<a boxed container>)` and is filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`.
+    # `CODEGEN_materialized_container_has_no_element_type (fixed)`.
     #
     # `%(s)s` at the end is the SUBSCRIPT store's half: `d['s'] = 'q'` reached a
     # dict through a container global, which reads back as a boxed `int64_t`, so

@@ -815,7 +815,7 @@ BUILTIN_PROGRAMS = {
     # `list(d.items())` is deliberately NOT here: that spelling reads each pair
     # pointer as an integer and segfaults, which is the element-type half of
     # `list(<a boxed container>)` and is already filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
+    # `CODEGEN_materialized_container_has_no_element_type (fixed)`. Adding it
     # here would make this case a place where an unrelated red lives.
     "dict_items_reads_each_slot_kind": textwrap.dedent("""\
         def main():

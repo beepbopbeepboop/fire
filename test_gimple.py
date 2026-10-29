@@ -8279,7 +8279,7 @@ main()
         first (a SIGSEGV until this same change's fail-closed arm —
         the `list(<an int>)` arm), and a
         boxed dict's keys come back as their own addresses for the second
-        (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
+        (`CODEGEN_materialized_container_has_no_element_type (fixed)`).
 
         The STRING argument is also asserted: `list(ident("abc"))` beside
         `list(ident([1, 2, 3]))` must read the int list with `int64_t`
