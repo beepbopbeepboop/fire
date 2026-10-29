@@ -3343,6 +3343,7 @@ class GimpleGen:
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
         'mojo_strlen':           ('int64_t',    ['char *']),
+        'mojo_str_codepoint_len': ('int64_t',   ['char *']),
         'mojo_utf8_codepoint_index': ('int64_t', ['char *', 'int64_t']),
         'mojo_platform_machine': ('char *',     []),
         'mojo_subprocess_run':        ('MojoCompletedProcess *', ['MojoList *', 'int64_t']),
