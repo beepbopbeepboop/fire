@@ -728,7 +728,23 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if name in gen._actual_types and gen._actual_types[name].endswith(' *'):
             gen._actual_types[t] = gen._actual_types[name]
         else:
-            gen._actual_types[t] = gtype  # store Mojo type for later dispatch
+            # Multi-kind global read without store-provenance: the module-level
+            # kind has been overwritten by the reassignment's kind, but the
+            # field holds the old value before the reassignment runs. Treat as
+            # boxed container so consumers dispatch through the registries/
+            # mojo_boxed_is_str rather than assuming the stored kind.
+            _mgk = getattr(gen, '_multi_kind_globals', None)
+            _is_mk = False
+            if _mgk is not None:
+                _is_mk = name in _mgk
+            else:
+                _cdecl = gen._global_c_decl_types.get(name, '')
+                _is_mk = (_cdecl == 'int64_t' and gtype.endswith(' *'))
+            if _is_mk and (name not in gen._actual_types
+                           or not gen._actual_types[name].endswith(' *')):
+                gen._boxed_container_vals.add(t)
+            else:
+                gen._actual_types[t] = gtype  # store Mojo type for later dispatch
         # Propagate dict value type even when gtype is int64_t (boxed
         # pointer), so a MojoDict * stored as int64_t in a global still
         # dispatches d["key"] to mojo_dict_get_str — see BUG-2026-044.
