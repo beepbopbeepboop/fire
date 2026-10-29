@@ -193,6 +193,7 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 #define _MOJO_EXC_TAG_VALUEERROR 663468903
 #define _MOJO_EXC_TAG_FILENOTFOUND 1834506930
 #define _MOJO_EXC_TAG_OSERROR 2131477727
+#define _MOJO_EXC_TAG_ZERODIVISIONERROR 1715583614
 
 int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
@@ -9315,6 +9316,17 @@ void mojo_raise_type_error(char *detail) {
     mojo_raise();
 }
 
+/* `ZeroDivisionError: division by zero` — the raiser behind mojo_int_divisor
+ * (fire_runtime.h) and the boxed `/ // %` answers below. Same sequence and tag
+ * derivation as the siblings here. */
+void mojo_raise_zero_division(void) {
+    char *heap_msg = strdup("ZeroDivisionError: division by zero");
+    mojo_exc_type_set(_MOJO_EXC_TAG_ZERODIVISIONERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
 /* `ValueError: <detail>` — same sequence, same tag derivation, next to its
  * three siblings above. Needed because an operation that REJECTS ITS
  * ARGUMENT is not one of those three: mojo_bytes_partition on an empty
@@ -13397,9 +13409,7 @@ static void _pyobj_raise_mixed(const char *op, int64_t a, int64_t b) {
     mojo_raise_type_error(msg);
 }
 static void _pyobj_raise_zero_div(void) {
-    char msg[64];
-    snprintf(msg, sizeof msg, "division by zero");
-    mojo_raise_type_error(msg);
+    mojo_raise_zero_division();
 }
 /* `+ - * %` on boxes (the `/ // **` shapes have their own functions below).
  * The `a_dbl`/`b_dbl` flags are the codegen's STATIC knowledge that a box

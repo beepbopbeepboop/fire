@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29 — partial fix: integer division by zero now raises; `g` lowers)
+
+Landed (root cause of `g`): integer `/`, `%` and `//` by a zero divisor
+silently produced 0 on the compiled path (arm64 SDIV). Every integer division
+now routes its divisor through `mojo_int_divisor` (runtime/fire_runtime.h),
+which raises a catchable `ZeroDivisionError`:
+
+- plain GIMPLE: the arithmetic tail in `mojo/backend_gimple/emit_exprs.py`
+  guards integer `/` and `%`; `//` goes through `__mojo_floordiv`, which now
+  checks too. The dead `_HELPERS` copy of `__mojo_floordiv` in
+  `gimple_codegen.py` is removed.
+- coroutine C++: `mojo/backend_gimple/cpp_core.py` guards integer `/` and `%`
+  (a float divisor is never wrapped), and a bare expression statement in a
+  generator body lowers to `(void)(expr);` instead of being refused. The
+  divisor check is what keeps `1/0` out of C++'s constant-expression error.
+- the boxed `/ // %` helpers now raise `ZeroDivisionError` (they raised
+  `TypeError: division by zero`).
+
+Pinned by `test_codegen_int_div_zero.py` (plain `//`/`/`/`%`, nonzero
+unchanged, and the generator `1/0` shape). `test_gimple.py`: 402 pass, the
+same 2 pre-existing failures as untouched HEAD. The file itself was NOT
+re-run end to end (heavy); the gate integrator should.
+
+NOT done — this file still cannot compile as a whole:
+
+- `gen`: `yield nested()` where `nested` is `sys._getframe().f_generator`
+  (callable-value / frame introspection; the cluster-A blocker above).
+- `t3`: async `return` of a non-scalar (`frame.f_generator`), cross-path
+  return-type unification.
+
+Separate defect found on the way, filed: `bugs/CODEGEN_int_mod_negative_truncates.md`
+(`-7 % 2` gives `-1`; Python gives `1`).
+
 ## Status (2026-09-07 — "cluster A" premise re-examined; `gen` is not a callable-value gap)
 
 Investigated in a batch aimed at wiring `mojo_maybe_bound_call_N` into the
