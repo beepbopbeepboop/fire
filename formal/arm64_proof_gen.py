@@ -10190,10 +10190,35 @@ def _sign_extend_mask(idx: int) -> int:
 
 
 def _gen_step_result_lemmas(name: str, code: bytes, base: int,
-                            limit: int = None) -> str:
-    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>)."""
+                            limit: int = None, extra_idx: list = None) -> str:
+    """Generate per-instruction step-RESULT lemmas (arm64_step s code = <rhs>).
+
+    `extra_idx` is one lemma per instruction index OUTSIDE the `limit` region:
+    `generate_arm64_proof` hands over the recorded extern call sites the region
+    does not reach, because `extern_{sym}_step`'s closer applies
+    `…_sr_{(bl - base) // 4}` at the pre-call state, and one of those sites is
+    the float-repr helper's `snprintf`/`strtod` — the helper is emitted after
+    every body and its epilogue `RET` is the image's LAST one, so
+    `_exec_code_limit` ends at the helper's middle and its general path
+    follows the region. Without the extra lemmas the file names a `…_sr_{idx}`
+    it never declared (`Unknown identifier`), and every arm64 proof on this
+    tree failed there before the kernel's memory ceiling even ran.
+    """
     blocks = []
-    for i, (w, idx, rhs) in sorted(_step_result_plan(code, limit).items()):
+    plan = _step_result_plan(code, limit)
+    for i in extra_idx or ():
+        if i in plan:
+            continue
+        off = i * 4
+        w = int.from_bytes(code[off:off + 4], "little")
+        idx = _step_branch_index(w)
+        if idx is None:
+            continue
+        rhs = _step_rhs(w, idx)
+        if rhs is None:
+            continue
+        plan[i] = (w, idx, rhs)
+    for i, (w, idx, rhs) in sorted(plan.items()):
         pc = base + i * 4
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
@@ -10833,6 +10858,11 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
             # Decidable".  What decides it is the per-instruction step lemma
             # the file already emits for this very instruction
             # (`{name}_sr_{idx}`), applied at the concrete pre-call state.
+            # `generate_arm64_proof` makes that true for a call site PAST the
+            # executable region too (the float-repr helper's `snprintf`/
+            # `strtod` follow the image's last `RET`): it adds the site's
+            # index to the step-RESULT plan via `extra_idx`, so the lemma
+            # exists in both cases rather than in one of them.
             f"  have hpc : ({name}_pre_{i}).pc = {bl} := {name}_pre_pc_is_{i}\n"
             f"  simpa [hpc] using {name}_sr_{(bl - base) // 4} "
             f"{name}_pre_{i} hpc"
@@ -11726,11 +11756,21 @@ def generate_arm64_proof(prog, code, info) -> str:
     # **The step lemmas cover the EXECUTABLE region only, not the string data.**
     # `_exec_code_limit` is that boundary and its docstring carries the
     # measurement; it is shared with the frame and dylib emitters so the three
-    # cannot disagree about where the code ends.
-    step_code = code[:_exec_code_limit(code)]
+    # cannot disagree about where the code ends. The exception is a recorded
+    # extern call site PAST the boundary: `extern_{sym}_step`'s closer applies
+    # `…_sr_{(bl - base) // 4}`, and the float-repr helper's `snprintf`/`strtod`
+    # sit in the helper's general path, which follows the image's last `RET`
+    # (the helper's own epilogue). The plan must reach them or the file names
+    # a `…_sr_{idx}` it never declared; see `_gen_step_result_lemmas`.
+    _code_end = _exec_code_limit(code)
+    step_code = code[:_code_end]
+    _sr_plan = _step_result_plan(code, _code_end)
+    _sr_extra = [i for i in ((c["addr"] - base_addr) // 4 for c in extern_calls)
+                 if i not in _sr_plan]
     # The step-OK lemmas are DERIVED from the step-RESULT lemmas, so the
     # results have to be declared first; see `_gen_step_lemmas`.
-    step_lemmas = (_gen_step_result_lemmas(func_name, step_code, base_addr)
+    step_lemmas = (_gen_step_result_lemmas(func_name, code, base_addr, _code_end,
+                                           extra_idx=_sr_extra)
                    + "\n\n"
                    + _gen_step_lemmas(func_name, step_code, base_addr)
                    + ("\n\n" + step_tests if step_tests else ""))

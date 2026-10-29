@@ -12283,6 +12283,56 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2, 'b': 3}))\n"),
+    # The LOCAL half of the capability, the clause of the doc's "The exact
+    # next step" that landed 2026-10-12: the operand is a NAME whose only
+    # binding is a dict literal, so the keys are as knowable as a literal's.
+    # The evidence is `ValueKinds.dict_inits` — "the local whose every binding
+    # is this same dict literal" — and `_unspread_keyword_mappings` resolves
+    # the name through it before `literal_dict_items` sees it. A name bound
+    # twice, or to a non-dict, is absent from that table and keeps the refusal
+    # pinned in `SPREAD_REFUSALS` below. These rows were dropped when the two
+    # 2026-10-12 lanes merged — with the CALL path's `mappings` plumbing, which
+    # is the half that silently regressed with them — and are restored here
+    # 2026-10-28 under the names the doc carries.
+    ("a_spread_through_a_local_dict_literal_is_answered",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    p = P(a=1, **d)\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # …and on the ordinary CALL, which is the other reader of `args`
+    # (`bind_call_arguments`). It is a separate row because it is the half
+    # that regressed when its `mappings` argument was lost from that reader:
+    # a fix that only taught the construction path leaves the call refusing a
+    # program CPython runs, with the same false sentence the literal rows above
+    # exist to keep out.
+    ("a_spread_through_a_local_dict_literal_is_answered_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **d))\n"),
 ]
 
 SPREAD_REFUSALS = [

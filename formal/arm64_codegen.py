@@ -144,6 +144,22 @@ _ARG_X_REGS = ("X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7")
 # choice.
 _MAX_INCOMING_ARGS = 24
 
+# The labels `Arm64Emitter._emit_float_repr_helper` lays down, named so
+# `compile()` can keep them out of `info["labels"]` the way the per-definition
+# labels are kept out: the helper is the compiler's, not the program's, and a
+# reader of that map asks for one address per program name.
+_FLOAT_REPR_HELPER_LABELS = (
+    "fr_zero_or_general", "fr_inf", "fr_inf_pos", "fr_zero", "fr_zero_pos",
+    "fr_copy", "fr_copy1", "fr_ret", "fr_general", "fr_scan", "fr_found",
+    "fr_parse", "fr_parse_done", "fr_inc_dot", "fr_sig_test", "fr_store",
+    "fr_set_p", "fr_inc_sig", "fr_set_e", "fr_set_dot", "fr_set_q", "fr_exp",
+    "fr_exp_m", "fr_exp_d", "fr_pnxt", "fr_fix_e", "L_e_pos", "L_sci_test",
+    "L_fix_frac", "L_write_sign", "L_nosign", "fr_sci", "L_sci_d", "L_sci_e",
+    "L_exp_neg", "L_ae", "L_ae_ok", "L_exp2", "L_tail", "L_fix_body",
+    "L_fix_neg", "L_fix_pos", "L_fz", "L_fd", "L_fd1", "L_c1", "L_dot",
+    "L_c2", "L_fix_zeros", "L_d", "L_z", "L_zz", "L_dot0",
+)
+
 # The local a frame-returning function keeps the CALLER'S block address in.
 # A name rather than a dedicated register, so the word goes through the same
 # register-or-spill-slot home every other local has; the leading underscores
@@ -1086,6 +1102,15 @@ dylib_exports: list = None, globals_base: int = None,
 
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
+
+        # The float-repr helper, once per image, after every body: a `print`
+        # of a float branches to it from any of them, so it has to be out
+        # before `resolve()` patches those `bl`s, and its label joins
+        # `_internal_labels` the same way the per-definition labels do, so a
+        # reader of `info["labels"]` sees one address per program name only.
+        self._emit_float_repr_helper()
+        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
+        self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # One binding per name, at one place, after every definition — which is
@@ -4050,6 +4075,9 @@ dylib_exports: list = None, globals_base: int = None,
         if isinstance(expr, (M.CtorReceiver, M.CtorField)):
             self._emit_ctor_receiver(expr)
             return
+        if isinstance(expr, M.FloatPrintOperand):
+            self._emit_float_print_operand(expr)
+            return
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm("X0", expr.value)
             return
@@ -6859,11 +6887,555 @@ ctor_field_value=self._ctor_field_value_for(name),
         sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
+        # The float-repr buffers, ONE reservation per print call, made HERE
+        # rather than in the operand: this block sits ABOVE everything
+        # `_emit_call` then does — the 16-byte argument spill each operand
+        # takes, the printf's variadic area, and a nested `print` inside an
+        # operand's own expression, all of which push and pop strictly below
+        # the current SP and so cannot land in it. A buffer the operand
+        # reserved for itself would sit BELOW the next operand's spill, and
+        # the fixed-count pop walk reads a 64-byte reservation as two slots —
+        # measured: the format string's slot came back holding the repr's
+        # ASCII bytes and the printf read a pointer into its own output.
+        # `n_floats` comes off `operands`, the very list the call below
+        # evaluates, and the release after the `printf` (and `fflush`) is
+        # this same count, so the block's lifetime is the call's.
+        n_floats = sum(1 for o in operands if isinstance(o, M.FloatPrintOperand))
+        if n_floats:
+            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 64 * n_floats))
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="printf"),
                                    args=[F.StringLiteral(fmt)] + operands))
         if flush:
             self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
                                        args=[F.IntLiteral(0)]))
+        if n_floats:
+            self.asm.emit(encode_add_xd_xn_imm(31, 31, 64 * n_floats))
+
+    # ── `print` of a float: the backend's half of the shared decision ──────
+    #
+    # `model.print_call_spelling` made the DECISION — a float renders through
+    # a `%s` whose operand is a `FloatPrintOperand`, and the one helper that
+    # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
+    # method pair is the ARM half of the branch and the buffer, the machine
+    # part only this backend can spell. The algorithm is the validated one
+    # (`bugs/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # specials from the bits, then `%.*g` at the smallest precision n that
+    # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
+    # laid out in CPython's own notation — scientific iff E >= 16 or
+    # E <= -5, so `1e16` and `1e-4` are the switch points — with `-0.0`
+    # coming out of the same reader rather than a special case.
+
+    def _emit_float_repr_helper(self) -> None:
+        """Emit the `FLOAT_REPR_SYMBOL` helper, once, after the function bodies.
+
+        `char *f(double_bits X0, char *out X1) -> out`. The frame is 112
+        bytes: the saved FP/LR pair at the top, then the working set —
+        the 32-byte `snprintf` buffer, the 17 significant digits, `strtod`'s
+        end pointer, and the four words that must survive the `snprintf` and
+        `strtod` calls (every caller-saved register the calls clobber is
+        reloaded from here rather than kept live across them):
+
+          [sp+0..15]   saved FP/LR     [sp+16..47]  snprintf buffer
+          [sp+48..64]  significant digits   [sp+64..71] endptr
+          [sp+72..79]  a_bits           [sp+80..87]  out
+          [sp+88..95]  bits             [sp+96..103] sign
+        """
+        a = self.asm
+        a.label(M.FLOAT_REPR_SYMBOL)
+        a.emit(encode_stp_sp_pre(29, 30, 112))
+        a.emit(encode_str_xt_xn_imm(0, 31, 88))      # [sp+88] = bits
+        a.emit(encode_str_xt_xn_imm(1, 31, 80))      # [sp+80] = out
+        a.emit(encode_lsr_xd_xn_imm(12, 0, 63))      # x12 = sign
+        a.emit(encode_lsl_xd_xn_imm(13, 12, 63))
+        a.emit(encode_sub_xd_xn_xm(11, 0, 13))       # x11 = a_bits
+        a.emit(encode_str_xt_xn_imm(11, 31, 72))
+        a.emit(encode_str_xt_xn_imm(12, 31, 96))     # sign
+        # The specials live at the 0x7ff exponent of a_bits (the sign bit out,
+        # so the compare sees the 11-bit field only): one unsigned compare
+        # splits the finite values from the infinities and NaNs, and the
+        # mantissa splits those two — a zero mantissa at the top exponent is
+        # the ±inf the sign decides, a nonzero one is the `nan` CPython
+        # spells with no sign. (Reading the field out of x0, the sign IN,
+        # misclassed every negative finite value: its sign bit sat in the
+        # compare's top bit.)
+        a.emit(encode_lsr_xd_xn_imm(14, 11, 52))   # x14 = exponent
+        a.emit(encode_cmp_xn_imm(14, 0x7ff))
+        a.emit(encode_b_cond("cc", 0))
+        a.emit_label_rel("fr_zero_or_general", -4)
+        a.emit(encode_lsl_xd_xn_imm(15, 14, 52))   # x15 = exponent << 52
+        a.emit(encode_sub_xd_xn_xm(15, 11, 15))    # x15 = mantissa
+        a.emit(encode_cbz_xn(0, 15))
+        a.emit_label_rel("fr_inf", -4)
+        # NaN — CPython spells it `nan`, with no sign.
+        self.asm.emit_adrp_add(16, self._intern_string("nan"))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy", -4)
+        a.label("fr_zero_or_general")
+        a.emit(encode_cmp_xn_imm(11, 0))
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("fr_zero", -4)
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_general", -4)
+        a.label("fr_inf")
+        a.emit(encode_cbz_xn(0, 12))
+        a.emit_label_rel("fr_inf_pos", -4)
+        self.asm.emit_adrp_add(16, self._intern_string("-inf"))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy", -4)
+        a.label("fr_inf_pos")
+        self.asm.emit_adrp_add(16, self._intern_string("inf"))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy", -4)
+        a.label("fr_zero")
+        a.emit(encode_cbz_xn(0, 12))
+        a.emit_label_rel("fr_zero_pos", -4)
+        self.asm.emit_adrp_add(16, self._intern_string("-0.0"))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy", -4)
+        a.label("fr_zero_pos")
+        self.asm.emit_adrp_add(16, self._intern_string("0.0"))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy", -4)
+        # Copy a NUL-terminated string at x16 onto the out buffer. x9 is the
+        # out address and the cursor moves x15, so the copy advances the
+        # cursor rather than the return value.
+        a.label("fr_copy")
+        a.emit(encode_ldr_xt_xn_imm(9, 31, 80))      # x9 = out
+        a.emit(encode_mov_zr_xn(15, 9))              # x15 = cursor
+        a.label("fr_copy1")
+        a.emit(encode_ldr_xt_xn_imm(8, 16, 0))   # byte, in a word
+        a.emit(encode_sxtb_wd_wn(8, 8))
+        a.emit(encode_strb_wd_wn(8, 15, 0))
+        a.emit(encode_cbz_xn(0, 8))
+        a.emit_label_rel("fr_ret", -4)
+        a.emit(encode_add_xd_xn_imm(15, 15, 1))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_copy1", -4)
+        a.label("fr_ret")
+        a.emit(encode_ldr_xt_xn_imm(0, 31, 80))      # x0 = out
+        a.emit(encode_ldp_sp_post(29, 30, 112))
+        a.emit(encode_ret())
+
+        # ── the general path ───────────────────────────────────────────────
+        #
+        # The scan: n = 1..17, `snprintf(buf, 32, "%.*g", n, a)` and then
+        # `strtod` of the same buffer, and the winner is the first n whose
+        # parse comes back to the same 64 bits. The variadic tail is the
+        # Apple arm64 area — unnamed arguments at [SP + 8i] ascending, the
+        # convention `_emit_variadic_area` spells — so `n` is a word there
+        # and `a` the double's bit pattern beside it.
+        a.label("fr_general")
+        a.emit(encode_movz_xd_imm(13, 1))            # x13 = n = 1
+        a.label("fr_scan")
+        a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
+        a.emit(encode_movz_xd_imm(1, 32))            # x1 = size
+        self.asm.emit_adrp_add(2, self._intern_string("%.*g"))
+        a.emit(encode_str_xt_xn_imm(13, 31, 104))    # n, frame slot: x13 is caller-saved and both calls clobber it
+        a.emit(encode_sub_xd_xn_imm(31, 31, 64))     # variadic area
+        a.emit(encode_str_xt_xn_imm(13, 31, 0))      # [area+0] = n
+        a.emit(encode_ldr_xt_xn_imm(11, 31, 136))    # a_bits, frame is +64
+        a.emit(encode_str_xt_xn_imm(11, 31, 8))      # [area+8] = a
+        a.emit_extern_bl("snprintf")
+        a.emit(encode_add_xd_xn_imm(31, 31, 64))
+        a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
+        a.emit(encode_add_xd_xn_imm(1, 31, 64))      # x1 = &endptr
+        a.emit_extern_bl("strtod")
+        a.emit(encode_fmov_v_to_gpr(14, 0))          # x14 = parsed bits
+        a.emit(encode_ldr_xt_xn_imm(11, 31, 72))
+        a.emit(encode_cmp_xn_xm(14, 11))
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("fr_found", -4)
+        a.emit(encode_ldr_xt_xn_imm(13, 31, 104))    # x13 = n, back from the frame
+        a.emit(encode_add_xd_xn_imm(13, 13, 1))
+        a.emit(encode_cmp_xn_imm(13, 18))
+        a.emit(encode_b_cond("ne", 0))
+        a.emit_label_rel("fr_scan", -4)
+        # 17 significant digits always round-trip a binary64, so the fall-
+        # through keeps n=17's spelling rather than looping on.
+
+        # The parse: one pass over the buffer collecting the significant
+        # digits (leading zeros are the exponent, not digits: in `0.00123`
+        # they are after the point, in `123` there are none) and, in the
+        # e-form, the exponent itself. x10 walks the characters; x16 keeps
+        # the base so an index is `cursor - base` when the state needs one.
+        # Every register the parse and layout hold is caller-saved: the helper
+        # saves nothing else, so it must not touch x19-x28 at all.
+        a.label("fr_found")
+        a.emit(encode_add_xd_xn_imm(17, 31, 48))     # x17 = digits
+        a.emit(encode_add_xd_xn_imm(16, 31, 16))     # x16 = buf base
+        a.emit(encode_mov_zr_xn(10, 16))             # x10 = cursor
+        a.emit(encode_movz_xd_imm(13, 0))            # i
+        a.emit(encode_movz_xd_imm(14, 0))            # has_e
+        a.emit(encode_movz_xd_imm(15, 0))            # E10
+        a.emit(encode_movz_xd_imm(3, 0))             # n_sig
+        a.emit(encode_movz_xd_imm(4, 0))             # q, dot index (0: none)
+        a.emit(encode_movz_xd_imm(5, 0))             # p, first sig index
+        a.emit(encode_movz_xd_imm(6, 0))             # sign_e
+        a.emit(encode_movz_xd_imm(18, 0))            # n_dot_before
+        a.emit(encode_movz_xd_imm(7, 10))            # x7 = 10
+        a.label("fr_parse")
+        a.emit(encode_ldr_xt_xn_imm(8, 10, 0))   # c = *cursor
+        a.emit(encode_sxtb_wd_wn(8, 8))
+        a.emit(encode_cmp_xn_imm(8, 0))
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("fr_parse_done", -4)
+        a.emit(encode_cbnz_xn(0, 14))
+        a.emit_label_rel("fr_exp", -4)
+        a.emit(encode_cmp_xn_imm(8, 0x65))           # 'e'
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("fr_set_e", -4)
+        a.emit(encode_cmp_xn_imm(8, 0x2e))           # '.'
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("fr_set_dot", -4)
+        a.emit(encode_cmp_xn_imm(8, 0x30))           # '0'
+        a.emit(encode_b_cond("cc", 0))
+        a.emit_label_rel("fr_pnxt", -4)              # c < '0'
+        a.emit(encode_cmp_xn_imm(8, 0x39))           # '9'
+        a.emit(encode_b_cond("hi", 0))
+        a.emit_label_rel("fr_pnxt", -4)              # c > '9'
+        # A mantissa digit.
+        a.emit(encode_cbz_xn(0, 4))
+        a.emit_label_rel("fr_inc_dot", -4)           # no dot yet
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_sig_test", -4)
+        a.label("fr_inc_dot")
+        a.emit(encode_add_xd_xn_imm(18, 18, 1))
+        a.label("fr_sig_test")
+        a.emit(encode_cmp_xn_imm(8, 0x30))
+        a.emit(encode_b_cond("ne", 0))
+        a.emit_label_rel("fr_store", -4)             # non-zero: a digit
+        a.emit(encode_cbz_xn(0, 3))
+        a.emit_label_rel("fr_pnxt", -4)              # leading zero
+        a.label("fr_store")
+        a.emit(encode_cbz_xn(0, 3))
+        a.emit_label_rel("fr_set_p", -4)
+        a.emit(encode_strb_wd_wn_xm(8, 17, 3))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_inc_sig", -4)
+        a.label("fr_set_p")
+        a.emit(encode_sub_xd_xn_xm(13, 10, 16))      # index = cursor - base
+        a.emit(encode_mov_zr_xn(5, 13))
+        a.emit(encode_strb_wd_wn_xm(8, 17, 3))
+        a.label("fr_inc_sig")
+        a.emit(encode_add_xd_xn_imm(3, 3, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_set_e")
+        a.emit(encode_movz_xd_imm(14, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_set_dot")
+        a.emit(encode_cbz_xn(0, 4))
+        a.emit_label_rel("fr_set_q", -4)             # first dot only
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_set_q")
+        a.emit(encode_sub_xd_xn_xm(13, 10, 16))
+        a.emit(encode_mov_zr_xn(4, 13))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_exp")
+        a.emit(encode_cmp_xn_imm(8, 0x2b))           # '+'
+        a.emit(encode_b_cond("ne", 0))
+        a.emit_label_rel("fr_exp_m", -4)
+        a.emit(encode_movz_xd_imm(6, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_exp_m")
+        a.emit(encode_cmp_xn_imm(8, 0x2d))           # '-'
+        a.emit(encode_b_cond("ne", 0))
+        a.emit_label_rel("fr_exp_d", -4)
+        a.emit(encode_movz_xd_imm(6, 2))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_pnxt", -4)
+        a.label("fr_exp_d")
+        a.emit(encode_sub_xd_xn_imm(8, 8, 0x30))
+        a.emit(encode_mul_xd_xn_xm(15, 15, 7))       # E10 = E10*10 + c
+        a.emit(encode_add_xd_xn_xm(15, 15, 8))
+        a.label("fr_pnxt")
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_parse", -4)
+
+        # The layout. E: the exponent digits in the e-form, or `n_dot_before
+        # - 1` when the first significant digit is in the integer part, or
+        # `q - p` when it is in the fraction (`0.00123`: the point is at 1,
+        # the first digit at 4, so E = -3). CPython's notation is scientific
+        # iff E >= 16 or E <= -5 and fixed otherwise, and the two layouts
+        # below are that rule spelled out byte by byte.
+        a.label("fr_parse_done")
+        a.emit(encode_ldr_xt_xn_imm(16, 31, 80))     # x16 = out cursor
+        a.emit(encode_ldr_xt_xn_imm(12, 31, 96))     # x12 = sign
+        a.emit(encode_cbz_xn(0, 14))
+        a.emit_label_rel("fr_fix_e", -4)             # no 'e'
+        a.emit(encode_cmp_xn_imm(6, 2))
+        a.emit(encode_b_cond("ne", 0))
+        a.emit_label_rel("L_e_pos", -4)
+        a.emit(encode_neg_xd_xn(15, 15))
+        a.label("L_e_pos")
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_sci_test", -4)
+        a.label("fr_fix_e")
+        a.emit(encode_cbz_xn(0, 4))                   # q == 0: no dot
+        a.emit_label_rel("L_no_dot", -4)
+        a.emit(encode_cmp_xn_xm(5, 4))               # p >= q?
+        a.emit(encode_b_cond("hs", 0))
+        a.emit_label_rel("L_fix_frac", -4)
+        a.label("L_no_dot")
+        a.emit(encode_sub_xd_xn_imm(15, 18, 1))      # E = n_dot_before - 1
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_sci_test", -4)
+        a.label("L_fix_frac")
+        a.emit(encode_sub_xd_xn_xm(15, 4, 5))        # E = q - p (negative)
+        a.label("L_sci_test")
+        a.emit(encode_cmp_xn_imm(15, 16))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_write_sign", -4)
+        a.emit(encode_neg_xd_xn(8, 15))
+        a.emit(encode_cmp_xn_imm(8, 5))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_write_sign", -4)
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_write_sign", -4)
+        a.label("L_write_sign")
+        a.emit(encode_cbz_xn(0, 12))
+        a.emit_label_rel("L_nosign", -4)
+        a.emit(encode_movz_xd_imm(8, 0x2d))          # '-'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.label("L_nosign")
+        a.emit(encode_cmp_xn_imm(15, 16))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("fr_sci", -4)
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_fix_body", -4)
+
+        # `d0[.d1..dn]e±XX` — the exponent two digits, three when it is 100
+        # or more, and the magnitude always runs to at most 324.
+        a.label("fr_sci")
+        a.emit(encode_ldr_xt_xn_imm(11, 17, 0))      # d0
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_cmp_xn_imm(3, 1))
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel("L_sci_e", -4)              # one digit: no point
+        a.emit(encode_movz_xd_imm(8, 0x2e))          # '.'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_movz_xd_imm(10, 1))            # k = 1
+        a.label("L_sci_d")
+        a.emit(encode_cmp_xn_xm(10, 3))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_sci_e", -4)
+        a.emit(encode_ldr_xt_xn_xm(11, 17, 10))      # dk
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_sci_d", -4)
+        a.label("L_sci_e")
+        a.emit(encode_movz_xd_imm(8, 0x65))          # 'e'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_cmp_xn_imm(15, 0))
+        a.emit(encode_b_cond("mi", 0))
+        a.emit_label_rel("L_exp_neg", -4)
+        a.emit(encode_movz_xd_imm(8, 0x2b))          # '+'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_ae", -4)
+        a.label("L_exp_neg")
+        a.emit(encode_movz_xd_imm(8, 0x2d))          # '-'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.label("L_ae")
+        a.emit(encode_cmp_xn_imm(15, 0))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_ae_ok", -4)
+        a.emit(encode_neg_xd_xn(15, 15))             # ae = -E
+        a.label("L_ae_ok")
+        a.emit(encode_cmp_xn_imm(15, 100))
+        a.emit(encode_b_cond("lt", 0))
+        a.emit_label_rel("L_exp2", -4)
+        a.emit(encode_movz_xd_imm(18, 100))
+        a.emit(encode_udiv_xd_xn_xm(10, 15, 18))     # q = ae/100
+        a.emit(encode_mul_xd_xn_xm(11, 10, 18))
+        a.emit(encode_sub_xd_xn_xm(11, 15, 11))      # r = ae%100
+        a.emit(encode_add_xd_xn_imm(10, 10, 0x30))
+        a.emit(encode_strb_wd_wn(10, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_movz_xd_imm(18, 10))
+        a.emit(encode_udiv_xd_xn_xm(10, 11, 18))     # q2 = r/10
+        a.emit(encode_mul_xd_xn_xm(9, 10, 18))
+        a.emit(encode_sub_xd_xn_xm(9, 11, 9))        # r2 = r%10
+        a.emit(encode_add_xd_xn_imm(10, 10, 0x30))
+        a.emit(encode_strb_wd_wn(10, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(9, 9, 0x30))
+        a.emit(encode_strb_wd_wn(9, 16, 0))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_tail", -4)
+        a.label("L_exp2")
+        a.emit(encode_movz_xd_imm(18, 10))
+        a.emit(encode_udiv_xd_xn_xm(10, 15, 18))
+        a.emit(encode_mul_xd_xn_xm(9, 10, 18))
+        a.emit(encode_sub_xd_xn_xm(9, 15, 9))
+        a.emit(encode_add_xd_xn_imm(10, 10, 0x30))
+        a.emit(encode_strb_wd_wn(10, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(9, 9, 0x30))
+        a.emit(encode_strb_wd_wn(9, 16, 0))
+        a.label("L_tail")
+        a.emit(encode_movz_xd_imm(8, 0))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_b(0))
+        a.emit_label_rel("fr_ret", -4)
+
+        # The fixed layout: `D` plus zeros plus `.0` when the point falls
+        # past the last digit, `D[:m]` + `.` + `D[m:]` when it falls inside,
+        # and `0.` plus leading zeros plus `D` below one.
+        a.label("L_fix_body")
+        a.emit(encode_cmp_xn_imm(15, 0))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_fix_pos", -4)            # E >= 0
+        a.label("L_fix_neg")
+        a.emit(encode_movz_xd_imm(8, 0x30))          # '0'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_movz_xd_imm(8, 0x2e))          # '.'
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_neg_xd_xn(10, 15))
+        a.emit(encode_sub_xd_xn_imm(10, 10, 1))      # zeros = -E-1
+        a.label("L_fz")
+        a.emit(encode_cbz_xn(0, 10))
+        a.emit_label_rel("L_fd", -4)
+        a.emit(encode_movz_xd_imm(8, 0x30))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_sub_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_fz", -4)
+        a.label("L_fd")
+        a.emit(encode_movz_xd_imm(10, 0))            # k = 0
+        a.label("L_fd1")
+        a.emit(encode_cmp_xn_xm(10, 3))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_tail", -4)
+        a.emit(encode_ldr_xt_xn_xm(11, 17, 10))
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_fd1", -4)
+        a.label("L_fix_pos")
+        a.emit(encode_add_xd_xn_imm(18, 15, 1))      # m = E+1
+        a.emit(encode_cmp_xn_xm(3, 18))              # n <= m?
+        a.emit(encode_b_cond("le", 0))
+        a.emit_label_rel("L_fix_zeros", -4)
+        a.emit(encode_movz_xd_imm(10, 0))
+        a.label("L_c1")
+        a.emit(encode_cmp_xn_xm(10, 18))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_dot", -4)
+        a.emit(encode_ldr_xt_xn_xm(11, 17, 10))
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_c1", -4)
+        a.label("L_dot")
+        a.emit(encode_movz_xd_imm(8, 0x2e))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_mov_zr_xn(10, 18))
+        a.label("L_c2")
+        a.emit(encode_cmp_xn_xm(10, 3))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_tail", -4)
+        a.emit(encode_ldr_xt_xn_xm(11, 17, 10))
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_c2", -4)
+        a.label("L_fix_zeros")
+        a.emit(encode_movz_xd_imm(10, 0))
+        a.label("L_d")
+        a.emit(encode_cmp_xn_xm(10, 3))
+        a.emit(encode_b_cond("ge", 0))
+        a.emit_label_rel("L_z", -4)
+        a.emit(encode_ldr_xt_xn_xm(11, 17, 10))
+        a.emit(encode_sxtb_wd_wn(11, 11))
+        a.emit(encode_strb_wd_wn(11, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_add_xd_xn_imm(10, 10, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_d", -4)
+        a.label("L_z")
+        a.emit(encode_mov_zr_xn(11, 18))
+        a.emit(encode_sub_xd_xn_xm(11, 11, 3))       # zeros = m - n
+        a.label("L_zz")
+        a.emit(encode_cbz_xn(0, 11))
+        a.emit_label_rel("L_dot0", -4)
+        a.emit(encode_movz_xd_imm(8, 0x30))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_sub_xd_xn_imm(11, 11, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_zz", -4)
+        a.label("L_dot0")
+        a.emit(encode_movz_xd_imm(8, 0x2e))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_movz_xd_imm(8, 0x30))
+        a.emit(encode_strb_wd_wn(8, 16, 0))
+        a.emit(encode_add_xd_xn_imm(16, 16, 1))
+        a.emit(encode_b(0))
+        a.emit_label_rel("L_tail", -4)
+
+    def _emit_float_print_operand(self, fp) -> None:
+        """The `FloatPrintOperand` arm: the value's bits to the helper, the
+        helper's buffer back as the `%s`'s argument.
+
+        The buffer is the 64-byte slot this float owns in the block
+        `_emit_print` reserved for this print call, and its address is a
+        fixed offset from the SP this operand starts with. The offset is
+        `16 * (1 + position) + 64 * index`, and every term of it is the call
+        machinery's own arithmetic rather than this method's:
+
+        * the block's base is the SP `_emit_print` held when it reserved it,
+          i.e. the SP `_emit_call` starts with;
+        * the format string is argument 0 and this operand is argument
+          `1 + position` of the call, and the argument loop spills each
+          earlier argument with exactly one 16-byte `STP [SP, #-16]!`, so
+          this operand is evaluated `16 * (1 + position)` below that base
+          (a printf call has no outgoing stack area: more than eight
+          arguments is the variadic-callee refusal above, and the Apple
+          varargs area is reserved at the `bl`, after every spill);
+        * `index` is the slot in the block, `64 * index` into it.
+
+        So the buffer is computed AFTER the value, not reserved before it:
+        the evaluation pushes and pops strictly below this SP and returns
+        to it, the block is above that SP and untouched, and the one
+        `ADD X1, SP, #imm` between the evaluation and the `bl` reads the
+        SP the arithmetic above names. X0 holds the double's bit pattern
+        (the emitter's float contract) and X1 the buffer, so those are the
+        whole of the argument passing — the helper answers with the
+        buffer's address, which is what the `printf`'s `%s` reads as text.
+        """
+        self._emit_expr(fp.expr)
+        self.asm.emit(encode_add_xd_xn_imm(
+            1, 31, 16 * (1 + fp.position) + 64 * fp.index))
+        self.asm.emit(encode_bl(0))
+        self.asm.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
     def _emit_debug_assert(self, e: F.CallExpr) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
@@ -9777,7 +10349,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"keyword arguments are not supported ({names})")
             return list(e.args or []), []
         slots, dropped, err = M.bind_call_arguments(
-            name, fdef, e.args, e.kwargs)
+            name, fdef, e.args, e.kwargs, self._spread_mappings)
         if err is not None:
             raise CodegenError(err)
         return slots, dropped

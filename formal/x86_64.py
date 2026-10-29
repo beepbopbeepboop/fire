@@ -477,6 +477,49 @@ def encode_mov_rm8_r8(base: Reg, disp: int, src: Reg) -> bytes:
     return bytes([rex, 0x88, modrm]) + extra
 
 
+def encode_mov_rm8_r8_idx(base: Reg, index: Reg, src: Reg) -> bytes:
+    """mov [base + index], src8 — 88 /r + SIB, a byte at an un-scaled sum.
+
+    The digits store of the float-repr helper.  Verified:
+    `movb %al, (%rcx, %rdi)` = `88 04 39`.
+    """
+    mod, extra = 0, b""
+    if base.value in (Reg.RBP.value, Reg.R13.value):
+        mod, extra = 1, bytes([0])
+    modrm = _modrm(mod, src.value & 7, 4)
+    sib = ((index.value & 7) << 3) | (base.value & 7)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               x=1 if index.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    out = []
+    if rex != 0x40:
+        out.append(rex)
+    out.extend([0x88, modrm, sib])
+    return bytes(out) + extra
+
+
+def encode_movzx_r64_rm8_idx(dst: Reg, base: Reg, index: Reg) -> bytes:
+    """movzx dst, [base + index] — 0F B6 /r + SIB, a byte zero-extended.
+
+    The digits load of the float-repr helper.  No REX.W: the destination is
+    written as a 32-bit register, which zero-extends.  Verified:
+    `movzbl (%rcx, %rsi), %eax` = `0f b6 04 31`.
+    """
+    mod, extra = 0, b""
+    if base.value in (Reg.RBP.value, Reg.R13.value):
+        mod, extra = 1, bytes([0])
+    modrm = _modrm(mod, dst.value & 7, 4)
+    sib = ((index.value & 7) << 3) | (base.value & 7)
+    rex = _rex(r=1 if dst.value >= 8 else 0,
+               x=1 if index.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    out = []
+    if rex != 0x40:
+        out.append(rex)
+    out.extend([0x0F, 0xB6, modrm, sib])
+    return bytes(out) + extra
+
+
 def encode_mov_r32_r32(dst: Reg, src: Reg) -> bytes:
     """mov dst32, src32 (zero-extends into the full 64-bit register)."""
     rex = _rex(r=1 if src.value >= 8 else 0, b=1 if dst.value >= 8 else 0)
