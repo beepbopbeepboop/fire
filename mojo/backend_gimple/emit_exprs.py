@@ -3132,7 +3132,9 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             return fast
 
     lt, lv = gen.lower_expr(node.left)
+    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = gen.lower_expr(node.right)
+    rt, rv = ginf._unbox_float_param_operand(gen, node.right, rt, rv)
 
     # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
     # property/method accessed without call syntax lowers to a
