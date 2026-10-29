@@ -201,3 +201,127 @@ Two things about that are worth carrying into this doc's step 1:
 The other half of step 1 is unchanged and still the real work: teaching the
 `_scalar_obs` walk to accept a module-qualified callee at all, which this doc's
 "Shape 1" section locates precisely.
+
+## Status (2026-10-29) — PLANNING ROUND; Shape 1 no longer reproduces, Shape 2 is live
+
+Measured on master at 5c238ac76, one `compile_to_gimple(..., do_imports=True)` +
+`gcc -fgimple` + run per row (the probes are in `test_module_boundary_regression.py`):
+
+| program | CPython | master |
+|---|---|---|
+| `m.f('abcd')` then `m.f('xy')`, `def f(s): return len(s)` | `4` `2` | `4` `2` — **correct** |
+| `m.gen(['p','q'])`, `def gen(xs): for x in xs: yield x` | `p` `q` | `4370836896` `4370836904` — **wrong** |
+
+So Shape 1 (the `int64_t s` / `mojo_list_len` read) is no longer a wrong answer on
+this tree. The emitted parameter may still be untyped; the runtime dispatch
+(`mojo_is_registered_dict` and friends) now answers `len` correctly for the
+string. I have NOT established why it stopped reproducing, so do not treat that
+as the fix for the mechanism — pin it (done, see below) and move on.
+
+**Correction to the 2026-10-28 Status above.** Its "Point 1 fixed" claim does not
+hold for the case it names. The `_g2m` branch in `module_gen.py` (the
+`MemberExpr` arm of the `_scalar_obs`/`_calls_in_stmts` walk, ~line 9075) only
+keys a module-qualified callee when `member_name in _free_params`, and
+`_free_params` is built from the IMPORTER's own top-level `FunctionDef`s
+(~line 8571). So `m.f(...)` with `f` defined only in `m` is never recorded. The
+branch fires only for a homonym (the importer also defines `f`), where it
+contributes evidence for the wrong function. The branch is inert for the doc's
+own shape.
+
+### Shape 2 — the mechanism, located
+
+Emitted C for the importer (`u.c`, probe in `.tmp/probe2/`):
+
+```c
+bb_4:  /* count(guessed_local(10)) */
+  _t9 = __mgco_gen_value (_t5);
+  v = _t9;                       /* v: int64_t, from the generator's value slot */
+  ...
+  sprintf (_t10, _t12, v);       /* "%ld" */
+```
+
+The loop variable `v` is typed from the callee's yield element type. For
+`m.gen(...)` nothing supplies that type to the importer:
+
+1. The importer's element evidence for the argument `['p','q']` is recorded by
+   `_static_arg_elems` / `_record_param_elem` only for callees in `_free_params`
+   (the loop at ~line 9085–9089), and `m.gen` is not in it (Point above).
+2. The imported module's `gen` is compiled by `_compile_imported_module`
+   (`module_gen.py:4212`, inside the importer's `gen_module_impl`), which runs
+   BEFORE the importer's observation pass (`_free_params` at 8571, `_scalar_obs`
+   and the `_param_elem_types` application at ~9630). So even a collected
+   observation would reach the child too late: the child's `xs` element type and
+   its `yield` slot type are already final in its C when the importer looks at
+   its call sites. This is the ordering wall the doc names as step 2; it is real,
+   and it is the reason the 2026-10-28 collection fix could not work.
+3. Within ONE module the same program is correct because the producer and the
+   consumer share one `_elem_types`/yield table. That is the value model working
+   as designed, one module deep.
+
+### Decision for the next round (recommendation: A-full)
+
+- **A-full (recommended):** a whole-closure, pre-emission observation pass,
+  per compilation unit. Before the root's import loop (`module_gen.py` ~4190,
+  before the `for _mc_iter in sorted(modules_to_compile)` loop), parse every
+  module in the import closure once (the loader already does this in
+  `_compile_imported_module`; hoist it), and collect, for each
+  `(defining_module, callee)` pair, the per-parameter element/scalar/container
+  observations from EVERY call site in the closure — both `f(...)` in the
+  defining module and `alias.f(...)` / `from m import f` in any importer. Store
+  the result on the root gen as `_closure_param_obs[(module, callee)]`, keyed by
+  the defining module so two modules' same-named functions cannot merge (the
+  homonym class `_module_global_field_type`'s docstring argues about). The child's
+  `gen_module_impl` consults that table for its OWN `_free_params` when it
+  applies `_param_elem_types` / `_scalar_obs` / the yield element type, and the
+  unanimity rule is over the whole closure, which is what the vacuous-unanimity
+  class (a silent call site counted as agreement) requires. An
+  unseen call site (a dynamic `getattr`, a call through a value) must count as
+  disagreement, not silence.
+- **B (rejected):** defer emission of imported modules' functions until the
+  importer's pass is done. Changes the emission order of every stdlib module, and
+  the whole-closure gate would need to be rerun on a reordering. Not a
+  single-round change.
+- **C (rejected for now):** the root-cause fix is the element type of the
+  generator's `xs`, so annotate it. The sibling workaround
+  (`def gen(xs: list) -> list:`) changes the symptom and links against
+  `__mojogen_m_gen_*`, per the original doc. Not a fix.
+
+### Implementation plan for A-full (exact places)
+
+1. `module_gen.py`, before the import loop at ~4190: collect the closure's parsed
+   statements (reuse `_compile_imported_module`'s parse, hoisted into a helper so
+   the closure is parsed once and both passes share it).
+2. New `mojo/middle/module_shared.py` helper `_gmi_scan_closure_call_sites(gen,
+   closure_stmts)`: a single walk over every module's `_calls_in_stmts` output.
+   For `IdentExpr` callees, resolve to the defining module via the importer's
+   `_own_imported_func_home` / `_global_to_module`; for `MemberExpr` callees
+   (`alias.f`), resolve via the importer's import alias table. Record into
+   `_closure_param_obs[(module, callee)][pname]` the same observation kinds
+   `_scalar_obs`, `_param_elem_types` and `_param_container_obs` already collect
+   (reuse their collectors — do not write a second one, per CLAUDE.md).
+3. `module_gen.py` `gen_module_impl`, at the point where `_free_params` is built
+   (~8571): when this module is a compiled import, merge
+   `_closure_param_obs[(this_module, name)]` into the local observation maps
+   before the application loops at ~9630 and at the `_param_elem_types` apply.
+4. Yield element type: the consumer's `for v in m.gen(...)` loop var must take
+   the callee's yield element type. Find where `for`-over-generator types its
+   target (grep `__mgco_gen_value` / `guessed_local` in `emit_stmts.py`), and feed
+   it from the same closure table, keyed by the defining module.
+5. Tests: `test_module_boundary_regression.py` (already in place) — the
+   `imported_generator_yields_str` case must PASS after; `module_qualified_str_param`
+   must keep passing. Add a homonym case (importer and `m` both define `f`,
+   different element types at each site) and a case where an unseen dynamic call
+   (`getattr`) makes the result int64.
+6. Gate, for the integrator (NOT run here): `compile_stdlib.py` `U` must not rise;
+   `build_stdlib_dylib.py` `skip` count must not rise; byte-identical C on a
+   large succeeding case before vs after, per the CLAUDE.md standard for a
+   behaviour-changing fix. Changes to `module_gen.py` and `emit_stmts.py` owe a
+   full `make gate` (CLAUDE.md "Before considering a compiled-path change done").
+
+### Evidence for this round
+
+- `test_module_boundary_regression.py` rewritten from a print-only probe (it
+  asserted nothing) to a real CPython-comparison test. Run:
+  `python3 test_module_boundary_regression.py` → `1/2 passed`, the failing case is
+  `imported_generator_yields_str`.
+- Probe sources: `.tmp/probe2/{m.py,u.py}` (scratch, not committed).
