@@ -2474,8 +2474,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # you not to let grow. If the next gate shows this step at a much higher peak,
 # the measurement changed and the class follows it (test_suite.py fails the
 # moment a recorded peak stops fitting its class).
-test('stdlib-dylib', [PY, '-c',
-                      'import build_stdlib_dylib as b; b.build_stdlib()'],
+test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],

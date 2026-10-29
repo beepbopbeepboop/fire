@@ -12614,8 +12614,8 @@ void *mojo_map(void *func, void *iterable) { (void)func; return iterable; }
    division operation appears inside a __GIMPLE function body. We emit a call
    to these normal-C helpers instead; the division is expanded here, in a
    regularly-compiled translation unit, where it works correctly. */
-double mojo_div_double(double a, double b) { return a / b; }
-float  mojo_div_float(float a, float b)    { return a / b; }
+double mojo_div_double(double a, double b) { if (b == 0.0) mojo_raise_zero_division(); return a / b; }
+float  mojo_div_float(float a, float b)    { if (b == 0.0f) mojo_raise_zero_division(); return a / b; }
 
 /* Decimal string of an integer (heap-allocated). Used when a string is
    concatenated with a numeric operand (String + Int) so codegen never has
