@@ -255,8 +255,11 @@ def main():
             print(subprocess.run("sed -n '/^FAILED:/,/^suite:/p' quick.log | head -12", shell=True, cwd=INTEG,
                                  capture_output=True, text=True).stdout)
             sys.exit(1)
+    # A landing runs the cheap landing gate (tools/gates.json `landing`) minus every gate that is OFF for a backlog.
+    # The full suite is NOT run here: tools/verify_landed.py runs it once per interval, under this same lock.
     gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
-                else ["python3", "tools/suite.py", "stdlib-syntax"] if a.stdlib else ["make", "gate"])
+                else ["python3", "tools/suite.py"] + C.gates_cfg()["landing"] + C.gate_skip_args() if a.stdlib
+                else ["python3", "tools/suite.py", "gate"] + C.gate_skip_args())
     print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
     rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
     if a.jobs:

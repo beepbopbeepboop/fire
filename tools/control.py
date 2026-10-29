@@ -66,6 +66,23 @@ def pool_slot(name):
     sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
 
 
+GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
+
+
+def gates_cfg():
+    """tools/gates.json: what a landing must pass, how often the full gate runs, and which gates are OFF for a backlog.
+    An OFF gate is a regex over test names; it is skipped by every gate run, and it must name the doc and the worker
+    working the backlog (`control.py gate off`), so no gate is ever dropped silently."""
+    return json.load(open(GATES_FILE))
+
+
+def gate_skip_args():
+    out = []
+    for pat in gates_cfg().get("off", {}):
+        out += ["--skip", pat]
+    return out
+
+
 def pool_total():
     return sum(sl["count"] for sl in load_pool()["slots"])
 TERMINAL = {"integrated", "abandoned", "superseded"}
@@ -606,6 +623,28 @@ def cmd_refill(a):
         time.strftime("%T"), live, started, waiting, a.target), flush=True)
 
 
+def cmd_gate(a):
+    """gate list | gate off PATTERN --reason R --doc bugs/X.md --worker NAME | gate on PATTERN"""
+    cfg = gates_cfg()
+    if a.action == "list":
+        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
+        for pat, e in cfg.get("off", {}).items():
+            print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
+        return
+    if a.action == "off":
+        if not (a.reason and a.doc and a.worker):
+            sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
+        if not os.path.exists(os.path.join(MAIN, a.doc)):
+            sys.exit("no such doc: %s" % a.doc)
+        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
+                                                  since=time.strftime("%F %T"))
+    else:
+        if cfg.get("off", {}).pop(a.pattern, None) is None:
+            sys.exit("no OFF gate %r" % a.pattern)
+    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
+    print("gate %s %s" % (a.action, a.pattern))
+
+
 def priority_list():
     try:
         return json.load(open(os.path.join(ctl_dir(), "priority.json")))
@@ -1042,6 +1081,9 @@ def main():
     s.set_defaults(f=cmd_spawn)
     s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
+    s = sub.add_parser("gate"); s.add_argument("action", choices=["list", "off", "on"]); s.add_argument("pattern", nargs="?", default="")
+    s.add_argument("--reason", default=""); s.add_argument("--doc", default=""); s.add_argument("--worker", default="")
+    s.set_defaults(f=cmd_gate)
     s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
     s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)

@@ -5200,6 +5200,8 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
+    for pat in getattr(opts, 'skip', None) or []:
+        chosen = [n for n in chosen if not re.search(pat, n)]
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -6108,6 +6110,8 @@ def main(argv=None):
     ap.add_argument('--no-cache', action='store_true',
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
+    ap.add_argument('--skip', action='append', metavar='RE', default=[],
+                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')
