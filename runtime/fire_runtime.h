@@ -757,6 +757,10 @@ int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
+/* A double that must travel in an int64_t slot beside integers (see
+ * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
+ * is the word. mojo_repr_boxed / mojo_box_double read it back. */
+int64_t     mojo_box_from_double(double v);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float

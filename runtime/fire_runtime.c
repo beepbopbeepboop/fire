@@ -1127,6 +1127,23 @@ double mojo_box_double(int64_t v)
     return mojo_double_from_bits(bx->bits);
 }
 
+/* A double passed where an unannotated parameter's call sites ALSO pass an
+ * integer: the slot is an int64_t, so the double travels as a fresh box (kind
+ * 'd') rather than as its bits, which a bare word cannot tell from an integer.
+ * Not cached: there is no (list, slot) to key it on. Each call site boxes its
+ * own argument once, and the box is never freed, the same lifetime a list's
+ * cached box has. */
+int64_t mojo_box_from_double(double v)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return mojo_double_to_bits(v);
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = mojo_double_to_bits(v);
+    bx->kind = 'd';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
 /* The box read as an integer: Python's own conversion (truncation toward
  * zero) of a DOUBLE box, and the raw word for anything else — including a
  * non-double box, whose slot is not a number at all and whose word is what
