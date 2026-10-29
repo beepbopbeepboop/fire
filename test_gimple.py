@@ -3330,8 +3330,8 @@ def f():
     # 'char*'" (a hard, unreadable .cpp compile failure) instead of an
     # honest refusal. Real instance: randdec.py's un_incr_digits_tuple
     # (scalar from_triple(...) yields mixed with 3-tuple yields). See
-    # bugs/COMPILE_FAIL_Modules__decimal_tests_randdec.md's 2026-08-25
-    # entry for the full mechanism and repros.
+    # generator tuple-yield honesty fix (see randdec root cause: scalar/tuple
+    # mixed yields must refuse honestly rather than emit broken C++).
     test_raises("generator_mixed_str_and_tuple_yield_honest_fallback", """\
 def f():
     yield 'abc'
