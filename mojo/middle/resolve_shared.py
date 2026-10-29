@@ -1437,6 +1437,23 @@ def _is_confident_scalar(gen, value) -> bool:
 
 
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
+    # A call through a local lambda is answered from the same table the
+    # return-type inference reads (see `_lambda_call_ret_table`): `r = f()`
+    # with `f = lambda: False` is `_Bool`, not the `int64_t` an unknown callee
+    # defaults to. Scoped to this one body, and the table it replaces is put
+    # back when it is done.
+    from mojo.middle.infra_infer import _lambda_call_ret_table
+    _scratch_mark: int = gen._scan_scratch_top
+    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
+    gen._lambda_call_ret_types = _lambda_call_ret_table(gen, func.body or [])
+    try:
+        return _infer_local_var_types_core(gen, func)
+    finally:
+        gen._lambda_call_ret_types = _saved_lr
+        gen._scan_scratch_top = _scratch_mark
+
+
+def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
     """Infer local variable types from all assignments in function body.
 
     Scans all assignments to determine the variable's actual type needs.

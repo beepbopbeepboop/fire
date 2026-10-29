@@ -2162,6 +2162,27 @@ def main():
 main()
 """, "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
 
+    # The RESULT of calling a lambda-bound local, bound to a local of its own.
+    # `r = f()` takes its declared type from `_quick_type` of the call, and a
+    # call through a local lambda was an unknown callee there, so `r` came out
+    # `int64_t` and printed its box (`0`) where CPython prints `False`. The
+    # return-type table the emitter already keeps for that callee was not
+    # visible to the local-variable pre-pass. The `*args, **kwargs` lambda is
+    # the same answer through the variadic value, whose record was missing
+    # from its own arm of `_lower_LambdaExpr`.
+    test_gimple_matches_cpython("gimple_lambda_call_result_bound_to_a_local_keeps_its_type", """\
+def main():
+    f = lambda: False
+    r = f()
+    print(r)
+    h = lambda: True
+    s = h()
+    print(s)
+    g = lambda *args, **kwargs: False
+    print(g())
+main()
+""")
+
     # The MODULE-LEVEL spelling of the test above, and the one that was broken.
     # `gimple_callable_value_keeps_its_return_type` puts its lambdas inside
     # `main()`, where a read of the local returns the variable's own C name and
