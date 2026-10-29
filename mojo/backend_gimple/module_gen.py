@@ -8515,6 +8515,12 @@ def gen_module_impl(self, stmts):
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, False)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
+    # callee -> {pname} for a list-of-lists parameter whose call sites hold
+    # DIFFERENT inner element kinds (`show([[1, 2]])` and `show([['a']])`).
+    # `_param_elem_types` can only say "nested kind unknown" for those, and
+    # unknown reads as the int64_t default; this set says the inner lists
+    # are kind-mixed, which the element loop answers with the runtime route.
+    self._param_nested_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
@@ -8617,10 +8623,16 @@ def gen_module_impl(self, stmts):
             old_e, old_ne = d[pname]
             if old_e == e and old_e is not None and e is not None and old_ne != ne:
                 # Same container element type but nested kind disagrees:
-                # keep the container (honest) and drop the nested kind (ambiguous),
-                # so consumers can take the boxed/heterogeneous route instead
-                # of falling through to the int64_t default.
+                # keep the container (honest) and drop the nested kind (ambiguous).
+                # The nested kind is NOT then "int64_t, no evidence": the
+                # callee's inner lists genuinely hold different kinds per call
+                # site, so the param is recorded as KIND-MIXED. The loop over
+                # it routes each inner list through the runtime boxed reader
+                # (see `_nested_mixed_names`) instead of the int64_t default.
                 d[pname] = (e, None)
+                if e == 'MojoList *':
+                    _mx_inner = self._param_nested_mixed.setdefault(callee, set())
+                    _mx_inner.add(pname)
             else:
                 d[pname] = (None, None)   # conflicting call sites → unknown
         else:

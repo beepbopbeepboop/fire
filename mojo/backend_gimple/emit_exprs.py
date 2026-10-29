@@ -6017,6 +6017,19 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A list-of-lists literal whose INNER literal holds strings: the inner list
+    # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
+    # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
+    # as 'i', so a consumer that must answer per slot at run time -- a
+    # kind-mixed parameter's loop (`_nested_mixed_names`), which reads through
+    # `mojo_list_get_boxed` -- would otherwise see a `char *` as an int. Only
+    # an inner LITERAL is marked: a list bound to a name keeps its own row
+    # policy, because nothing there says it reaches a mixed parameter.
+    for _nl_el, _nl_et, _nl_ev in lowered:
+        if (isinstance(_nl_el, ListExpr)
+                and _as_str(gen._elem_types.get(_as_str(_nl_ev))) == 'char *'):
+            gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                           [('MojoList *', _as_str(_nl_ev)), ('char', "'p'")])
     # A literal that contains a spread must record its statically-known
     # prefix so the runtime can append the spread's tail kinds to it; the
     # usual `_literal_needs_kinds` gate keys off the joined element type,

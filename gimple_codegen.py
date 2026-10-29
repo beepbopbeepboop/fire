@@ -2245,6 +2245,9 @@ class GimpleGen:
         self._global_literal_slot_ctypes: dict = {}
         self._local_def_param_types: dict = {}
         self._param_elem_types: dict = {}
+        # callee -> {pname}: a list-of-lists param whose call sites disagree on
+        # the inner element kind (see module_gen's _record_param_elem).
+        self._param_nested_mixed: dict = {}
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
@@ -2312,6 +2315,9 @@ class GimpleGen:
         # `mojo_list_get_int` it always did — the cost of the mechanism is
         # confined to the lists that can actually need it.
         self._maybe_kinds_vals: set = set()
+        # Container names whose elements are inner lists of mixed kinds (see
+        # emit_infra._reset_func); reset per function.
+        self._nested_mixed_names: set = set()
         # C values produced by `mojo_list_get_boxed`, and so may be a BOX
         # (a heap cell carrying a float that has no int64_t spelling) rather
         # than the value itself. Consulted by the two places that stringify

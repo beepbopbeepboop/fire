@@ -2916,6 +2916,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # the stored pointer's own bits, printed as a decimal, exit 0 (measured:
     # `f({"x": "1"})` printed an address where CPython prints `1`, while the
     # same call with the literal bound to a local first was already correct).
+    # ...and the kind-MIXED list-of-lists params: their inner lists disagree
+    # on kind across call sites, so the loops over them must not trust the
+    # joined (int64_t) answer. See module_gen's _record_param_elem.
+    _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
+    for _pmx_bare in _pmx:
+        gen._nested_mixed_names.add(_as_str(_pmx_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
@@ -4064,6 +4070,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                 gen._nested_elem_types[_mbare] = _mne
     # ...and the dict-VALUE half, same reason, same qualified key. Without it a
     # method handed a `{'k': 'v'}` reads that slot back as an integer.
+    _mpmx = getattr(gen, '_param_nested_mixed', {}).get(_mkey, ())
+    for _mpmx_bare in _mpmx:
+        gen._nested_mixed_names.add(_as_str(_mpmx_bare))
     _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
     for _mbare2 in _mpdv:
         _mpdv_v = _as_str(_mpdv[_mbare2])
