@@ -12374,3 +12374,20 @@ def main():
 if __name__ == '__main__':
     main()
 
+
+def test_nested_class_method_reads_enclosing_local_regression():
+    """Regression for bugs/CODEGEN_nested_class_method_cannot_reach_an_ enclosing_local.md.
+    A nested class method that reads an enclosing function parameter currently
+    produces a silent 0 instead of the correct value (no env threading)."""
+    test_gimple_stdout("gimple_nested_class_method_reads_local", """\
+def mk(n: int):
+    class C:
+        def __init__(self, k: int):
+            self.v = n + k
+        def get(self):
+            return self.v
+    return C(1).get()
+
+def main():
+    print(mk(10))
+""", "11\n")
