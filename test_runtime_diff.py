@@ -1506,6 +1506,23 @@ BUILTIN_PROGRAMS = {
             # side fail on a warning rather than on the predicate.
             print(asyncio.run(c))
     """),
+    # Regression for bug:COMPILE_FAIL_Android_android — the guard
+    # `if asyncio.iscoroutine(result): asyncio.run(result)` where `result`
+    # comes from a dynamic callee (dict subscript) must compile: inside the
+    # then-branch the predicate proves `result` is a live handle.
+    "asyncio_iscoroutine_guard_run": textwrap.dedent("""\
+        import asyncio
+
+        async def work(n):
+            await asyncio.sleep(0)
+            return n
+
+        def main():
+            dispatch = {"a": work}
+            result = dispatch["a"](5)
+            if asyncio.iscoroutine(result):
+                print(asyncio.run(result))
+    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):
