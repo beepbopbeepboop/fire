@@ -1540,6 +1540,38 @@ def main():
         print(v)
 """, "7\n")
 
+    # The two other halves of test_ensurepip.py's `fake_pip` shape, with a
+    # LITERAL class attribute so the captured-local refusal above does not
+    # fire: a no-`__init__` class constructed from inside a generator body,
+    # and that generator used as a `@contextmanager` in a `with`. Both
+    # already lower correctly; these pin that, so a later change to the
+    # generator-body constructor or the `with` branch cannot silently lose it.
+    test_generator_stdout("nested_class_noinit_ctor_in_generator_compiles", """\
+def g():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+    test_generator_stdout("nested_class_literal_attr_contextmanager_compiles", """\
+from contextlib import contextmanager
+
+@contextmanager
+def fake_pip():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    with fake_pip() as v:
+        print(v)
+""", "7\n")
+
     # The eligibility gate replaced a blanket `kwonly params (v0)` refusal
     # with "is every keyword-only default faithfully lowerable?". These two
     # are the answers it must still give NO on, because admitting either
