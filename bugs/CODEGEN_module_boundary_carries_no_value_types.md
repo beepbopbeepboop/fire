@@ -149,13 +149,26 @@ where a plain-C link can find them.
   probes with the pre-fix pool emission emulated (every gen given an empty
   `_str_pool_declared`) returns byte-identical wrong answers.
 
-## Status (2026-10-02, `work/bugs4-3-c`) — one wall of this doc's step 2 now has a named precedent
+## Status (2026-10-28, work/bug-codegen-module-boundary-carries-no-v-9328) — PARTIAL
 
-Neither shape is fixed and neither regressed: `m.f('abcd')` still prints
-`6581285`-shaped garbage where CPython prints `4`, and
-`for v in m.gen(['p','q'])` still prints two addresses. What this branch added
-is a second instance of the SAME wall this doc names, and the way it was
-solved is the precedent for step 2 here.
+Point 1 (collection gap) fixed: `_scalar_obs` walk now accepts
+`MemberExpr` whose base resolves to an imported module (`m.f(...)`) and
+keys by the member's bare name (`f`). Verified by `DEBUG` prints that the
+call is recognized.
+
+Point 2 (provenance outliving the collector) NOT fixed: when compiling
+`u.py` with `do_imports=True`, `_free_params` holds only `['main']` — the
+imported `m.f` is not visible to the importer's loop, so `_scalar_obs`
+remains empty and `int64_t s` stays emitted for `f`. The mechanism needed
+is the same per-module-scan / per-compilation-unit provenance wall described
+in step 2 of this doc (precedent: `_gmi_scan_imported_global_homes` for
+globals). Next step for a full close: make imported free-function params
+visible to the importer's observation pass (either by including them in
+`_free_params` via `imported_stmts` or by sharing `_scalar_obs` across the
+nested `gen_module_impl` call that emits `m`).
+
+Regression test: `test_module_boundary_regression.py` (fails before/after on
+full behavior, because step 2 is missing; passes for the collection fix).
 
 The wall: "the observation must outlive the function that learned it". For a
 `from b import K` global read as a BARE name, the importing module has to load

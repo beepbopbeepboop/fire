@@ -9139,9 +9139,24 @@ def gen_module_impl(self, stmts):
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
-            if not isinstance(call.func, IdentExpr):
+            callee = None
+            if isinstance(call.func, IdentExpr):
+                callee = _as_str(call.func.name)
+            elif isinstance(call.func, gimple_ctypes.MemberExpr) \
+                    and isinstance(call.func.obj, IdentExpr):
+                base_name = _as_str(call.func.obj.name)
+                # Module-qualified free function: base resolves to an imported
+                # module (see _global_to_module) and member is a known free
+                # function in the closure.
+                _g2m = getattr(self, '_global_to_module', None) or {}
+                _mod_of_base = _g2m.get(base_name)
+                if (_mod_of_base is not None or
+                        base_name in getattr(self, '_compiled_modules', ())):
+                    member_name = _as_str(call.func.member)
+                    if member_name in _free_params:
+                        callee = member_name
+            if callee is None:
                 continue
-            callee = _as_str(call.func.name)
             pnames = _free_params.get(callee)
             if not pnames:
                 continue
