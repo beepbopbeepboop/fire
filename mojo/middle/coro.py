@@ -388,6 +388,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             v = env.get(it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
+            elif v == 'p':
+                # Iterating a string yields its 1-character strings, which
+                # are string values ('p'). Without this a `for it in s:`
+                # over a str parameter left `it` untyped, so `yield it`
+                # fell back to the int64_t slot and printed the char*
+                # address (test: generator_iterating_a_string_parameter_
+                # yields_nothing).
+                ek = 'p'
         elif isinstance(it, N.CallExpr):
             # A sibling generator's call — the consuming twin of `yield
             # from`. See `_sibling_gen_kind`, which is where the recursion
@@ -400,6 +408,8 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             lk = _literal_kind(it)
             if isinstance(lk, tuple) and lk[0] == 'list':
                 ek = lk[1]
+            elif lk == 'p':
+                ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
     if struct_def is not None:

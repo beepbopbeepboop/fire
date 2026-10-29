@@ -5547,9 +5547,8 @@ def main():
     # `yield len(r)` is the assertion: the callable's `char *` result used to
     # come back as the homogenized `int64_t` box, so `len` of it was 0.
     # `yield r` itself is NOT here — a generator that yields a STRING
-    # obtained by iterating a string is a different defect
-    # (bugs/CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md),
-    # and it was already broken before this change.
+    # obtained by iterating a string is a different defect, covered by
+    # `generator_iterating_a_string_parameter_yields_nothing` below.
     test_generator_stdout("generator_callable_param_result_keeps_its_type", """\
 def upper(s):
     return s.upper()
@@ -5565,6 +5564,10 @@ def main():
 main()
 """, "2\n2\n")
 
+    # A `for <c> in <str>:` loop whose element is yielded. The loop target
+    # is a 1-character string ('p'), and `_static_env` used to record it only
+    # for LIST iterables, so `yield it` fell back to the int64_t slot and the
+    # consumer printed the char* address (4371202938) instead of `a`.
     test_generator_stdout("generator_iterating_a_string_parameter_yields_nothing", """\
 def apply_to(items):
     for it in items:
@@ -5577,11 +5580,39 @@ def go():
 go()
 """, "a\nb\n")
 
-    test_generator_stdout("generator_iterating_a_string_parameter_control", """\
+    # The same loop over a string LITERAL and over a string LOCAL, inside the
+    # generator. Both reach `_static_env` through a different branch from the
+    # parameter case (`_literal_kind` and the local's own kind), so each gets
+    # its own pin: the parameter fix must not be the only one that works.
+    test_generator_stdout("generator_iterating_a_string_literal_yields_characters", """\
+def g():
+    for c in 'xy':
+        yield c
+
 def go():
-    s = 'ab'.upper()
+    for v in g():
+        print(v)
+
+go()
+""", "x\ny\n")
+
+    # Control: the same loop and yield with the string held in a LOCAL and not
+    # a parameter. It passes with or without the parameter fix, so a change
+    # that made the parameter case pass by broadening something unrelated
+    # would show up here as the one that goes red. (It was previously written
+    # as an ordinary non-generator program, which the generator harness can
+    # never run: `_build_generator_program` refuses a source with no
+    # generator in it.)
+    test_generator_stdout("generator_iterating_a_string_parameter_control", """\
+def gen():
+    s = 'AB'
     for it in s:
-        print(it)
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
 go()
 """, "A\nB\n")
 
