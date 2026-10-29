@@ -2948,7 +2948,8 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # ...and the reverse: a name an Int-keyed loop declared int64_t must
         # become a string again, not box the string pointer into an integer.
         gen._declare_var(var, 'char *', force=(var == shadow_name)
-                         or var in gen._int_key_loop_vars)
+                         or var in gen._int_key_loop_vars
+                         or gen.var_types.get(var, 'char *') != 'char *')
         gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
