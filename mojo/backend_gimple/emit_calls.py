@@ -6969,6 +6969,11 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
         _vft = gen._new_val('void *', f'(void *){_vf}')
+        # The same return-type record the static and closing arms make just
+        # below: the variadic value is a different carrier, not a different
+        # callee, so a call through it must narrow its box back the same way
+        # (`e = lambda *a: False; print(e())` printed `0`).
+        gen._callable_ret_types[_vft] = ret_type
         gen._func_value_names[_vft] = '<lambda>'
         return 'void *', _vft
 

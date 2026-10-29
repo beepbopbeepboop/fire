@@ -2316,6 +2316,24 @@ def _lambda_call_ret_locals(gen, body: list) -> dict:
     return out
 
 
+def _lambda_call_ret_table(gen, body: list) -> dict:
+    """The `_lambda_call_ret_types` table in force while `body` is inferred:
+    the enclosing table's entries plus this body's own `_lambda_call_ret_locals`.
+    Additive, so a name already in the outer table keeps its entry. The
+    caller saves the table it replaces and restores it when done.
+
+    One helper for both readers of the table: return-type inference, and the
+    local-variable pre-pass (`resolve_shared._infer_local_var_types`), which
+    types `r = f()` from the same call and must answer the same question."""
+    _lambda_rets = _lambda_call_ret_locals(gen, body)
+    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
+    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
+    for _n, _t in _lambda_rets.items():
+        if _n not in _merged_lr:
+            _merged_lr[_n] = _t
+    return _merged_lr
+
+
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own pointer-valued locals
     visible to it (see `_prebound_local_ctypes`).
@@ -2386,13 +2404,8 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     # Third table, same window: what CALLING a lambda-bound local produces
     # (`_lambda_call_ret_locals`). Additive for the same reason — a name
     # already carrying a real return type keeps it.
-    _lambda_rets = _lambda_call_ret_locals(gen, body)
     _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
-    _merged_lr: dict = gen._scratch_dict_copy(_saved_lr if _saved_lr else {})
-    for _n, _t in _lambda_rets.items():
-        if _n not in _merged_lr:
-            _merged_lr[_n] = _t
-    gen._lambda_call_ret_types = _merged_lr
+    gen._lambda_call_ret_types = _lambda_call_ret_table(gen, body)
     try:
         return _infer_return_type_core(gen, body)
     finally:
