@@ -891,6 +891,15 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # in both orders.
         ('def f(x):\n    print(x)\n\n\nf("s")\nf([1, 2])\n', 's\n[1, 2]\n'),
         ('def f(x):\n    print(x)\n\n\nf([1, 2])\nf("s")\n', '[1, 2]\ns\n'),
+        # A FLOAT beside an INTEGER at the same parameter. The slot stays an
+        # int64_t (a double and an int have no common C type), so the float
+        # used to be truncated to the integer its bits name: `f(2.5)` printed
+        # `2`. The float is now boxed at its call site and the print asks the
+        # box, while the plain integer beside it still prints as itself. Both
+        # orders, because the slot's answer must not depend on which call
+        # comes first.
+        ('def f(x):\n    print(x)\n\n\nf(2.5)\nf(1)\n', '2.5\n1\n'),
+        ('def f(x):\n    print(x)\n\n\nf(1)\nf(2.5)\n', '1\n2.5\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #
@@ -905,9 +914,9 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     # two single-kind programs are what prove it did not disturb either.
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
-    # two print are still wrong (`2` for `2.5`, a pointer decimal for the
-    # list), which is the separate float-boxing and runtime-tag rows of
-    # bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md. Asserting
+    # print are still wrong (a pointer decimal for the list), which is the
+    # runtime-tag row of bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md
+    # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
     builds_only = [

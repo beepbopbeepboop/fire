@@ -6303,6 +6303,47 @@ def _is_may_hold_str_param(gen, node) -> bool:
     return False
 
 
+def _is_may_hold_float_param(gen, node) -> bool:
+    """Is `node` a PARAMETER of the enclosing function that may hold a float
+    in an `int64_t` — one whose call sites observed a `double` beside an
+    integer (`_int64_may_hold_float`, recorded by Pass 1.3d)?
+
+    Only the name form is answered. Every call site that passes a `double` to
+    such a slot passes a box (`_box_float_call_args`), so the slot's word is a
+    box address or a plain integer, and `mojo_repr_boxed` tells them apart."""
+    _names = getattr(gen, '_int64_may_hold_float', {})
+    if isinstance(node, IdentExpr):
+        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+        _in = _names.get(_cf)
+        return bool(_in) and _as_str(node.name) in _in
+    return False
+
+
+def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
+    """Box each `double` argument bound for a float-possible parameter of
+    `callee` (`_int64_may_hold_float`), so the int64_t slot receives a box
+    rather than the float's bits truncated to the integer they happen to name
+    (`f(2.5)` printed `2`).
+
+    `arg_pairs` is POSITIONAL and already padded to the callee's arity, so
+    position `i` is parameter `_func_param_names[callee][i]`. Every other pair
+    passes through unchanged, and a callee with no such slot returns the list
+    as it came in."""
+    _names = getattr(gen, '_int64_may_hold_float', {}).get(_as_str(callee))
+    if not _names:
+        return arg_pairs
+    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
+    out = []
+    for _i, (_at, _av) in enumerate(arg_pairs):
+        _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
+        if _pn is not None and _pn in _names and _as_str(_at) == 'double':
+            out.append(('int64_t', gen._new_val(
+                'int64_t', f'mojo_box_from_double ({_as_str(_av)})')))
+        else:
+            out.append((_at, _av))
+    return out
+
+
 def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     """A callable (or a dict of callables) stored into a MODULE GLOBAL keeps
     its return type for a later call through that global's name.
@@ -6381,7 +6422,7 @@ _OWNED_REPR_FNS = frozenset({
     '_mojo_repr_pair', '_mojo_repr_intlists', '_mojo_repr_pairlist',
     '_mojo_generic_elem_repr',
     # the scalar formatters that malloc unconditionally
-    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str',
+    'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_boxed',
     'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr',
 })
 
@@ -6583,6 +6624,18 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # possible. An arbitrary int64_t is not a sound input — a value in
             # `[2^31, 2^47)` is pointer-SHAPED, so `print(2**40)` would hand a
             # bare integer to strlen and trade this for a worse failure.
+            # A PARAMETER whose call sites observed a float beside an integer
+            # (`_int64_may_hold_float`): the word is a box or a plain integer,
+            # and `mojo_repr_boxed` is the one call that answers both — the
+            # same answer the `_boxed_vals` arm below gives a heterogeneous
+            # list slot. Routed through `_own_repr` because the box's
+            # `mojo_repr_boxed` result is a fresh buffer on every path.
+            if _pi < len(args) and _is_may_hold_float_param(gen, args[_pi]):
+                _rv = _own_repr(gen, 'mojo_repr_boxed',
+                                gen._call_expr('char *', 'mojo_repr_boxed',
+                                               [('int64_t', aval)]), _owned_reprs)
+                resolved_parts.append(('char *', _rv))
+                continue
             if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])

@@ -1,5 +1,52 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
+## Status 2026-10-29 — float beside an integer at one parameter is FIXED
+
+Landed (partial, the doc's own "next step 2", float first):
+
+- Pass 1.3d (`mojo/backend_gimple/module_gen.py`) records a parameter whose
+  call sites observed a `double` AND an integer, and whose slot stays at the
+  `int64_t` default, in `_int64_may_hold_float`. It excludes any slot that also
+  observed a `char *` or a container (`void *`), because those rows own it.
+- A `double` argument bound for such a slot is passed as a fresh box
+  (`mojo_box_from_double`, kind `'d'`, `runtime/fire_runtime.c`) instead of
+  being truncated to the integer its bits name. Applied in
+  `emit_infra._box_float_call_args`, called from both free-function lowerings
+  (`emit_calls.py`'s call path and `emit_stmts.py`'s statement-level twin,
+  which duplicates the padding logic).
+- A `print` of such a parameter routes through `mojo_repr_boxed` (the same
+  answer the `_boxed_vals` arm gives a heterogeneous list slot), so `2.5`
+  prints `2.5` and the plain integer beside it prints `1`.
+
+Verified: `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
+gained two cases (`f(2.5)`+`f(1)` and `f(1)`+`f(2.5)`, both `driver.compile_program`).
+The pre-fix output was `2` for `2.5` and the test failed; post-fix the whole
+function passes. The generated C was checked by hand: the call site emits
+`mojo_box_from_double (2.5)`, and the print emits `mojo_repr_boxed (x)`.
+
+Still open, and NOT measured on this change:
+
+1. **Arithmetic on the float-possible parameter.** Only `print` unboxes. A read
+   such as `return x * 2` in the same function sees the box's address as an
+   integer. Before this change the same read saw `2` (the truncated float), so
+   both answers are wrong, but the new one is an address. The next step is to
+   route value reads of `_int64_may_hold_float` parameters through
+   `mojo_box_int` (which yields `bx->bits` for a non-double box and the
+   truncated value for a double box, i.e. exactly the old `2`), keeping the
+   print path on the raw word. That makes the arithmetic answer no worse than
+   before, then the real `mojo_box_double` read is the fix.
+2. **Float beside `str` / `list` / `bytes` / `None`.** Excluded from the float
+   set on purpose: a `char *` or container observation keeps the existing rows
+   in charge. These pairs are not re-measured here.
+3. **bytes / list tags** and **None** — as the sections below describe.
+4. **Box lifetime.** `mojo_box_from_double` is not cached and never freed, one
+   16-byte box per call site execution. A loop calling such a function leaks
+   a box per call. A per-call-site cache, or a box owned by the caller, is the
+   fix; the list-box cache in `mojo_list_get_boxed` is the model.
+
+The 36-pair matrix below is the 2026-10-02 baseline and is stale for this
+tree; re-measure before quoting it.
+
 ## Status 2026-10-02 — the 2 hard GCC errors are GONE and 2 more pairs are
 ## right; 29 of 36 remain wrong, and they are the three rows below
 

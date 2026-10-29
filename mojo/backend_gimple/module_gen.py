@@ -7630,6 +7630,17 @@ def gen_module_impl(self, stmts):
     # function name for the same reason `_container_param_kinds` is — a
     # forwarding chain's second hop is a DIFFERENT slot with the same shape.
     self._int64_may_hold_str: dict[str, set] = {}
+    # Function name -> the NAMES of its parameters left at the `int64_t`
+    # default whose call sites observed a `double` AND an integer. The float
+    # twin of the set above, with the same provenance rule: a slot is in it
+    # only because a float literal was really observed at one of its call
+    # sites. Its arguments are passed as a `MojoBox` (see
+    # `mojo_box_from_double`) rather than truncated to the integer their bits
+    # happen to name, and a print of the slot asks `mojo_repr_boxed`, which
+    # answers `2.5` for the box and `1` for the plain integer beside it.
+    # Excluded: a slot that also observed a `char *` or a container, which
+    # the string and pointer rows own.
+    self._int64_may_hold_float: dict[str, set] = {}
     # Functions whose RETURN VALUE may hold a string, by the same route (a
     # `return` of a name in `_int64_may_hold_str`, or of another such
     # function's result). The other half of the same property: the sets above
@@ -9666,6 +9677,14 @@ def gen_module_impl(self, stmts):
                 # actually left at `int64_t` is recorded.
                 if _has_cs and ann.get(pname) is None:
                     self._int64_may_hold_str.setdefault(callee, set()).add(pname)
+                # The float twin: a double was observed beside an integer, so
+                # the slot holds a float at one site and an int at another.
+                # `_has_cs` and a container (`void *`) are excluded here
+                # because those rows own the slot, and a box would hand the
+                # string or list a MojoBox where it expects its own pointer.
+                if (_has_dbl and len(types) > 1 and not _has_cs
+                        and 'void *' not in types and ann.get(pname) is None):
+                    self._int64_may_hold_float.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
