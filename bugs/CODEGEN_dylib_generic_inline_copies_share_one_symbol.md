@@ -46,15 +46,15 @@ generic-function call site, so it needs the full gate.
 **Tests that prove it:**
 - `test_link_mode.py`: two modules, each calling `dlsym`-shaped generic (a type parameter that changes the return type
   through `type_of(result)`), with different specializations; `fire build` and run; assert each caller gets its own
-  specialization's value and the program matches CPython. Also the cross-module weak-stub repro in
-  `bugs/CODEGEN_cross_module_call_to_generic_function_binds_weak_stub.md`.
+  specialization's value and the program matches CPython. Also the same-module weak-stub repro (a bare call
+  `pick(10)` to a generic with a defaulted bracket parameter, printing "unavailable in compiled mode").
 - `build_stdlib_dylib.py` re-run (integrator, full gate): `dedup.log` has no `exclude` lines; module count 379, not 249.
 
 **Blocking the next round:** Option A is not a quick round. It needs the controller's choice (A vs B) and the full gate.
 Next round can start on step 1 once A is confirmed.
 
-Separately found while scoping: `bugs/CODEGEN_cross_module_call_to_generic_function_binds_weak_stub.md` (a bare call to a
-generic function binds the weak stub in link mode).
+Separately found while scoping: a bare call to a generic function binds the weak stub in link mode (fixed by
+`test_same_module_call_to_generic_with_default_binds_instantiation`, the defaulted-bracket-parameter inference).
 
 ## Measured
 

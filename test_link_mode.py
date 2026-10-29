@@ -1631,6 +1631,53 @@ def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
     return ok
 
 
+def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
+    """A same-module call to a module-level generic function, in a link-mode
+    build, must bind the instantiation — not the weak "unavailable in compiled
+    mode" extern stub (CODEGEN: cross-module call to a generic binds the stub).
+
+    `use_a` in `gen.mojo` calls its OWN module's generic `pick` with the
+    bracket parameter omitted: `pick(10)`, where `result_type` has the default
+    `NoneType` and no argument can bind it. The link-mode build compiles
+    `gen.mojo` as a module, which strips generic functions out of the emitted
+    text and instantiates them per call site. The inferred elaboration declined
+    (`infer_type_args` left `result_type` unbound although the template defaults
+    it), so the call fell through to a bare `pick (10)` with no definition. The
+    weak extern stub then answered, printing `pick: unavailable in compiled
+    mode` into the program's stdout and returning 0 — a silent wrong answer
+    with exit 0.
+
+    Asserting the exact stdout pins both halves: `use_a()` must be 11 (the
+    instantiated body), and the stub's diagnostic must not appear anywhere.
+    `pick[Int](5)` from `main` already worked and stays pinned at 6.
+    """
+    pkg = {
+        'gen.mojo': (
+            '@inline(.always)\n'
+            'def pick[result_type: AnyType = NoneType](x: Int) -> Int:\n'
+            '    return x + 1\n'
+            '\n'
+            'def use_a() -> Int:\n'
+            '    return pick(10)\n'
+        ),
+        'main.mojo': (
+            'from gen import use_a, pick\n'
+            '\n'
+            'def main():\n'
+            '    print(use_a())\n'
+            '    print(pick[Int](5))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.mojo', td)
+    ok = (rc == 0 and stdout == '11\n6\n'
+          and 'unavailable in compiled mode' not in stdout)
+    if not ok:
+        print(f"  ✗ same_module_call_to_generic_with_default_binds_instantiation: "
+              f"rc={rc} stdout={stdout!r}")
+    return ok
+
+
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
@@ -1656,6 +1703,7 @@ CASES = [
     test_unannotated_param_with_disagreeing_call_sites,
     test_failed_import_attempt_does_not_poison_later_spelling,
     test_imported_function_trailing_default_argument_is_padded,
+    test_same_module_call_to_generic_with_default_binds_instantiation,
 ]
 
 
