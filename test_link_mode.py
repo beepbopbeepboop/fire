@@ -1525,6 +1525,47 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     return ok
 
 
+def test_imported_function_trailing_default_argument_is_padded() -> bool:
+    """Regression for `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`.
+
+    `from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`,
+    not the pre-fix "too few arguments to function 'lib_f' expected 2 have 1"
+    GCC error. Root cause: `module_loader`'s text scan of the defining module
+    built its `exports[name]` record from the C parameter list only, and the
+    C list strips default values (`'String = ""'` -> `'String'`), so the
+    record carried no defaults at all. The cross-module call padding in
+    `_lower_named_call` consults `gen._func_param_defaults` for trailing
+    defaults, and that table is populated by the DEFINING module's own
+    `gen_module` pass — which never runs for an imported module compiled
+    through the link-mode/inline path, so the pad site saw an empty list and
+    emitted a 3-arg call against a 4-parameter prototype (the exact
+    `compile_to_gimple(src, do_imports=False, filename=filename)` arity
+    error that blocks `mojoc`).
+
+    The fix is to record the defaulted parameter names in the export record
+    at the scan site (the same AST-derived shape `module_spec_gen.py` and
+    `gen_module`'s Pass 10 already use), so the importer's pad site has the
+    defaults to pad from. Asserting CPython's real answer (8) pins the value;
+    pre-fix the build itself fails at gcc, so `rc == 0` is part of the pin.
+    """
+    pkg = {
+        'lib.py': 'def f(a, b=7):\n    return a + b\n',
+        'main.py': (
+            'from lib import f\n'
+            'print(f(1))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '8')
+    if not ok:
+        print(f"  ✗ imported_function_trailing_default_argument_is_padded: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
     """A String passed to a `StringSlice` parameter must reach the callee as a Span
     (the {_data, _len} fat pointer the callee reads), not as the bare char * that
@@ -1584,6 +1625,7 @@ CASES = [
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
     test_unannotated_param_with_disagreeing_call_sites,
     test_failed_import_attempt_does_not_poison_later_spelling,
+    test_imported_function_trailing_default_argument_is_padded,
 ]
 
 
