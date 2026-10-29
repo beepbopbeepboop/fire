@@ -159,3 +159,29 @@ with `_build_foreign_package_run`'s helper) and the `_coro.close()` idiom in
 the entry; it must compile and run with output matching CPython. Then the
 four row reject censuses (56/48/62/66) must drop or stay equal, and every
 moved module's value behaviour is checked against CPython.
+
+### Round 2026-10-29b — light-worker narrowing (no fix; no heavy run)
+
+Measured with `compile_to_gimple_with_cpp(src, do_imports=True, filename=entry)`
+under `tools/memslot.py --gb 8`, each entry in a fresh temp dir. **Every shape
+compiled; none refuses `_coro.close()`:**
+
+- Idiom in the entry with a sibling `a.py` holding the idiom, and a sibling
+  `b.py` writing `_coro` three ways: top-level `_coro = 5`, a `global _coro`
+  store in a function, and `_coro = _g()` from a generator. Both import orders
+  (`import b; import a` and the reverse) — 6 cases, all OK. This RULES OUT
+  the cross-module poison shape (item 3) for a plain second-module write to
+  the same name.
+- `from sib import _coro` where `sib.py` exports `_coro = 5`, with the idiom
+  in the entry. OK. This does not exercise the item-2 early return on its own
+  (the read is shadowed by the local rebind), so item 2 stays open.
+- The REAL `Lib/_collections_abc.py` (Python 3.14 copy, 32 KB) copied beside
+  the entry and `import _collections_abc` plus the idiom in the entry. OK
+  (792 KB of C). The file itself does not reproduce; the refusal needs the
+  other closure members.
+
+Scratch scripts were in the worker's `.tmp/repro/` (git-ignored, not
+committed). The mechanism is still unnamed. The owed step is unchanged: the
+mailbox full-closure probe with the `_lower_IdentExpr` dump (see the
+2026-10-29 round above). Nothing in this round changes behaviour, so no code
+or test lands.
