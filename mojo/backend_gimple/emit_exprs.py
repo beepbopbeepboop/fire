@@ -4593,6 +4593,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
+    # Int / Int is true division -> Float64
+    if op == '/' and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool' and not res_type.startswith('uint'):
+        res_type = 'double'
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
     # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
@@ -4667,7 +4670,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
     # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
-    arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
+    arith_type = 'double' if (op == '/' and res_type == 'double') else gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
@@ -4704,6 +4707,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # TODO(gimple-fp-div): drop this indirection once the gcc -fgimple
     # float/double division ICE is fixed upstream.
     if c_op == '/' and res_type in ('double', 'float'):
+        # Division by zero must still raise ZeroDivisionError (same as int path)
+        gen._emit(f"  if ({rv} == 0.0) mojo_raise_zero_division();")
         fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
         return res_type, gen._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
     # Floating-point modulo: plain GIMPLE `%` (trunc_mod_expr) is an
