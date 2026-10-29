@@ -1588,7 +1588,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # (a boxed `_misc.Labeled`) versus `c_common/tables.py`'s unrelated
         # `UNKNOWN = '???'` (`char *`) — a bare `UNKNOWN` and a qualified
         # `tables.UNKNOWN` reading the SAME name as two different things
-        # (bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md). The bare
+        # (c_analyzer info UNKNOWN pair bug). The bare
         # half of that pair is `_own_overlay_global_ctype`; this is the
         # qualified half.
         _field_types = gen._module_global_field_type(_bound_mod, node.member) \
