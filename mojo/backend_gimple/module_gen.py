@@ -3195,8 +3195,9 @@ def gen_module_impl(self, stmts):
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
     # The self-hosted binary has no auto-offload: `mojo/middle/offload.py` is
-    # not part of the closure `stage2/mojo` is built from (see
-    # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md), so
+    # not part of the closure `stage2/mojo` is built from (see the
+    # `CODEGEN_module_toplevel_undefined_in_selfhost` self-host link failure,
+    # fixed by renaming the colliding `_lens` locals in module_gen.py), so
     # `offload_module` there is a weak "unavailable in compiled mode" stub that
     # returns a bare 0 -- and the tuple-unpack below then walked that 0 and
     # raised "object is not iterable". `__file__` is the uniform `<bootstrap>`
@@ -3271,9 +3272,9 @@ def gen_module_impl(self, stmts):
             # kernel. A NamedTuple._replace keeps every other field, so this
             # cannot silently drop `writable` -- which is the field whose loss
             # would skip a copy-back and leave the output list untouched.
-            _lens = self._device_launch_lengths.get(_nm) or {}
-            if _lens:
-                _tys = [_a._replace(length=_lens[_a.name]) if _a.name in _lens
+            _len_dict = self._device_launch_lengths.get(_nm) or {}
+            if _len_dict:
+                _tys = [_a._replace(length=_len_dict[_a.name]) if _a.name in _len_dict
                         else _a for _a in _tys]
             # Fail here, at the classification pass, rather than at the first
             # call site: an un-marshallable kernel is a build error either

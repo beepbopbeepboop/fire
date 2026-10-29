@@ -525,7 +525,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             #       "__mojo_middle_offload_toplevel", ...
             #
             # Four modules blamed for one module's bug, which is also how
-            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
+            # the self-host link failure (undefined toplevel symbols from a
+            # module-level _lens name collision) read
             # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
             # the visible symptom is 5") before its own counts came off an
             # artifact that never finished generating.
