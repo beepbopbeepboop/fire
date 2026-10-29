@@ -18244,6 +18244,25 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the missing buffer.
     M.fold_constant_interpolated_literals(stmts)
     M.refuse_interpolated_literals(stmts)
+    # A default EXPRESSION lives in a FunctionDef's `param_defaults` DICT, and
+    # `iter_nodes` does not descend a dict's values (it recurses through
+    # `list`/`tuple` and dataclass fields and nothing else): the two passes above
+    # never reach it, so a field-less `f"n=7"` default is never folded and a
+    # field-bearing one never reaches the refusal. The emitter then materializes
+    # the whole token the parser kept, so `def f(x=f"n=7")` printed `f"n=7"` and
+    # `def f(x=f"n={5}")` also built, on both backends, where CPython prints
+    # `n=7` and refuses the field. Reach exactly that set here — every
+    # FunctionDef in the tree, including nested ones — with the same
+    # fold-then-refuse order, rather than a second pass the shared walker cannot
+    # see. A wider change teaching `iter_nodes` itself to descend the dict would
+    # also let every other walk (the frame layout, the constant-read census) into
+    # the same values and change what they reserve, which is not this defect.
+    for _node in M.iter_nodes(stmts):
+        _defaults = getattr(_node, "param_defaults", None)
+        if isinstance(_defaults, dict) and _defaults:
+            _values = list(_defaults.values())
+            M.fold_constant_interpolated_literals(_values)
+            M.refuse_interpolated_literals(_values)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
     # inside a backend and a refusal asked before any emitter runs, and neither

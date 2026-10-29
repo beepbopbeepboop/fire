@@ -9127,6 +9127,35 @@ BOTH_ARCH_CASES = [
      "    var q = Two(4, 9)\n"
      "    printf(\"%d\", p.v * 100 + q.a * 10 + q.b)\n"
      "    return 0\n", 0, "349"),
+    # ── a default EXPRESSION, and the f-string the walker never reached it ──
+    #
+    # A parameter default sits in a FunctionDef's `param_defaults` DICT, which the
+    # shared walker `iter_nodes` does not descend: the two interpolated-literal
+    # passes the module statements get (fold the field-less one to its text,
+    # refuse the field-bearing one with the buffer sentence) never reached a
+    # default, so the emitter materialized the whole token the parser kept and
+    # `def f(x=f"n=7")` printed `f"n=7"` where CPython prints `n=7`, on both
+    # backends. The corpus writes none (`= f"` in a parameter list finds no row
+    # in this repository or the stdlib), which is why these are a correctness
+    # pair and not a sweep row. Both ride this group: the answered one must agree
+    # on the architecture it runs on and `run_case` refuses on both backends
+    # by construction.
+    ("both_arch_a_fieldless_fstring_parameter_default_folds_to_its_text",
+     "def f(x=f\"n=7\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=7]"),
+    ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
+     "def f(x=f\"n={5}\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
