@@ -89,7 +89,6 @@ IMPORTS, which is decidable from source, and a build would answer a different
 question at twenty minutes a sweep.
 """
 import argparse
-import functools
 import json
 import os
 import re
@@ -311,20 +310,6 @@ def rank(files, unmodelled=frozenset()):
         name: {"reach": sorted(set(v)), "alone": sorted(alone.get(name, []))}
         for name, v in reach.items()
     }
-
-
-@functools.lru_cache(maxsize=None)
-def default_rank() -> dict:
-    """`rank` over the DEFAULT corpus — the walk `main` reports on with no flags.
-
-    The corpus is the whole walk, not the files one sweep blocked on: `reach` is
-    "what in this tree's closure names the module", and a caller that ranks a
-    subset (the sweep's files for one module) gets a different number under the
-    same name. Cached per process, because one walk is the cost and every caller
-    of the default corpus wants the same answer; callers must not mutate it.
-    """
-    roots, _notes = SW.default_roots()
-    return rank(SW.find_source_files(roots))
 
 
 def main(argv=None) -> int:

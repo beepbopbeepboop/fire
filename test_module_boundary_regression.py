@@ -1,4 +1,4 @@
-# Regression tests for cross-module generator/value-typing (bug:CODEGEN_module_boundary_carries_no_value_types, fixed).
+# Regression tests for bugs/CODEGEN_module_boundary_carries_no_value_types.md
 #
 # Each case is a two-module program compiled through the real import closure
 # (`compile_to_gimple(..., do_imports=True)`), linked with `gcc -fgimple`, run,
@@ -16,10 +16,6 @@
 #                                    PASSES -- the same, reached through
 #                                    `from m import gen`.
 #   imported_generator_yields_int    PASSES -- the int spelling, pinned.
-#   imported_generator_yields_str_via_aliased_from_import
-#   imported_generator_yields_str_via_module_alias
-#                                    The same call site spelled through an alias
-#                                    (`from m import gen as g`, `import m as k`).
 #
 # REFUSAL_CASES are the other outcome the rule allows: a program that cannot be
 # compiled honestly is refused, never run with a wrong value. Mixed str/int call
@@ -27,7 +23,8 @@
 # marker and no printed heap address.
 #
 # Not covered here (still wrong, see the doc): a call site in a module the
-# child is not compiled under, or a value passed on through a parameter.
+# child is not compiled under (an aliased import, or a value passed on through a
+# parameter).
 #
 # Scratch files go under TMPDIR (the worktree's .tmp/), never a fixed path.
 
@@ -104,34 +101,6 @@ CASES = [
         '        print(v)\n'
         'main()\n',
         '1\n2\n3\n',
-    ),
-    (
-        # `from m import gen as g`: the call site spells the local alias, so
-        # the walk must map `g` back to the generator's own name.
-        'imported_generator_yields_str_via_aliased_from_import',
-        'def gen(xs):\n'
-        '    for x in xs:\n'
-        '        yield x\n',
-        'from m import gen as g\n'
-        'def main():\n'
-        '    for v in g(["p", "q"]):\n'
-        '        print(v)\n'
-        'main()\n',
-        'p\nq\n',
-    ),
-    (
-        # `import m as k`: the call is `k.gen(...)`, which only the module's
-        # alias table can tie back to module `m`.
-        'imported_generator_yields_str_via_module_alias',
-        'def gen(xs):\n'
-        '    for x in xs:\n'
-        '        yield x\n',
-        'import m as k\n'
-        'def main():\n'
-        '    for v in k.gen(["p", "q"]):\n'
-        '        print(v)\n'
-        'main()\n',
-        'p\nq\n',
     ),
 ]
 

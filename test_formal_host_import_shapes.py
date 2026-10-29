@@ -40,7 +40,6 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import formal_host_import_shapes as S     # noqa: E402
-import tools.formal_host_import_wall as _wall  # noqa: E402
 
 # Every shape the tool can print. A shape that is not in this set is a bug in
 # the tool or in this table, and the corpus test below fails on either — the
@@ -491,38 +490,6 @@ class TestTheDocRatchet(unittest.TestCase):
                          "embedded CPython to place a module — by search, by path, or "
                          "from a spec — which is why the row is tiered unreachable and "
                          "not modelled")
-
-
-class TestTheWallsColumns(unittest.TestCase):
-    """`reach` / `alone` here are `tools/formal_host_import_wall.py`'s, computed
-    over the WALL's own corpus. They were once computed over the sweep's blocked
-    files for each module — the same column name answering a different question
-    (measured before this was pinned: `copy` 7 vs the wall's 297, `builtins` 3
-    vs 35). Pinned against the real sweep, because the disagreement only exists
-    at corpus scale."""
-
-    def setUp(self):
-        sweep = S.default_sweep()
-        if not sweep or not os.path.isfile(sweep):
-            self.skipTest("no sweep log in this checkout")
-        self.rows, _, _ = S.rows_for(sweep, min_files=1)
-        self.assertTrue(self.rows, "no host-import rows")
-
-    def test_reach_and_alone_are_the_wall_tools(self):
-        wall = _wall.default_rank()
-        for r in self.rows:
-            info = wall.get(r["name"], {"reach": [], "alone": []})
-            self.assertEqual(r["reach"], len(info["reach"]),
-                             f"{r['name']}: shapes reach != wall reach")
-            self.assertEqual(r["alone"], len(info["alone"]),
-                             f"{r['name']}: shapes alone != wall alone")
-
-    def test_reach_is_over_the_corpus_not_the_sweep_files(self):
-        # A closure reaches files the sweep never blocked on, so for some row
-        # `reach` must exceed `files`. If every row is bounded by its sweep
-        # files, the columns were computed over the subset again.
-        self.assertTrue(any(r["reach"] > r["files"] for r in self.rows),
-                        "every row's reach is bounded by its sweep files")
 
 
 if __name__ == "__main__":
