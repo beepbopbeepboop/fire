@@ -2370,6 +2370,8 @@ def _cpp_expr(gen, e) -> str:
                     _br = f"((char *)({_br}))"
                 else:
                     _bl = f"((char *)({_bl}))"
+        if op == '/' and _cpp_is_int_operand(gen, e.left) and _cpp_is_int_operand(gen, e.right):
+            return f"((double)({_bl}) / (double)({_br}))"
         return f"({_bl} {op} {_br})"
     if isinstance(e, gimple_ctypes.CompareChain):
         links = []
