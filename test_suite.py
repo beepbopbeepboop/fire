@@ -1276,7 +1276,15 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
                      'coro-future-await': 17,
-                     'gimple-async-runner': 36,
+    # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
+    # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
+    # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch
+    # backend emits no companion .cpp, and the file (a C++20-path test) was
+    # never updated to pin MOJO_CORO=cpp the way test_taskgroup.py already
+    # did. With the pin (plus its two stale bool expectations `1` -> `True`,
+    # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
+    # gone, so a census still stating it would fail on the registry's own
+    # state.
                      'formal-x86-endtoend': 1,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
