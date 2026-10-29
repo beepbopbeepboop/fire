@@ -4115,6 +4115,9 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         _dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
         _dk = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', _dp)])
         gen._emit(f"  {result} = {_dk};")
+        gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                       [('MojoList *', result), ('char', gen._new_val('char', "'p'"))])
+        gen._maybe_kinds_vals.add(result)
         # NO `gen._elem_types[result]` here, and that is load-bearing rather
         # than an omission. This arm merges FOUR different containers into one
         # temp, and the element type is a property of WHICH ONE, so a record
