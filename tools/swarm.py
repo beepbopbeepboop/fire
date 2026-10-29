@@ -55,6 +55,10 @@ def task_name(doc):
     return ("bug-" + re.sub(r"[^a-z0-9]+", "-", doc.lower()))[:40].rstrip("-")
 
 
+def doc_path(doc):
+    return "bugs/%s.md" % doc
+
+
 def feed(target, tries, buffer=4):
     """Queue enough that every free slot has a task waiting: (target - running) + a small buffer."""
     live = sum(1 for t in C.load().values() if t["name"].startswith(PREFIXES) and C.state_of(t) == "running")
@@ -62,23 +66,26 @@ def feed(target, tries, buffer=4):
     st = load_state()
     queued = sum(1 for f in os.listdir(C.qdir()) if f.endswith(".json") and f.startswith(PREFIXES))
     held, made = held_claims(), 0
-    for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "*.md"))):
+    # bugs/ and bugs/hard/ (the hard ones keep their subdirectory in the key, so the claim cannot collide)
+    paths = sorted(glob.glob(os.path.join(C.MAIN, "bugs", "*.md")) + glob.glob(os.path.join(C.MAIN, "bugs", "hard", "*.md")))
+    for p in paths:
         if queued + made >= want:
             break
-        doc = os.path.basename(p)[:-3]
-        if SKIP.match(doc) or "bug:" + doc in held or st["fed"].get(doc, 0) >= tries:
+        rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
+        doc = rel[:-3]
+        if SKIP.match(os.path.basename(doc)) or "bug:" + os.path.basename(doc) in held or st["fed"].get(doc, 0) >= tries:
             continue
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
             name += "-%d" % int(time.time() % 10000)
-        task = ("Fix the bug in bugs/%s.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed "
+        task = ("Fix the bug in %s at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed "
                 "on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression "
                 "test that FAILS before your fix and passes after (next to the existing tests for that area), and run just "
                 "that test plus the one existing test file that covers the code you touched, each wrapped in python3 "
                 "tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on "
                 "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
-                "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc)
-        r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + doc,
+                "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc_path(doc))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + os.path.basename(doc),
                             "--model", C.MODEL, "--task", task], capture_output=True, text=True, cwd=C.MAIN)
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
         made += r.returncode == 0
