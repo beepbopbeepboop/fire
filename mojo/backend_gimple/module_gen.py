@@ -3076,6 +3076,68 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
 
 
 
+def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
+    """Refuse a class declared inside a function body when one of its methods
+    reads a name that belongs to that function's scope: a parameter, or a name
+    the function binds.
+
+    The hoist lifts such a class to module scope (`_gmi_hoist_nested_structs`),
+    and the lifted method is an ordinary module-level C function with no
+    environment threaded through from the enclosing frame. A read of an
+    enclosing local there falls through `emit_exprs`' unknown-identifier arm and
+    answers `(int64_t)0` with exit 0 and no diagnostic: `functools.cmp_to_key`'s
+    comparator is the real-world shape. Threading the environment is the full
+    fix, tracked in bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md.
+    Until it lands this stops the build and names the read, instead of answering
+    0.
+
+    Only the method's free reads count: its own parameters, its own bindings and
+    `self` are its scope, and a module-level name it reads is not refused. The
+    enclosing scope is over-approximated the way `_gmi_local_binding_names` is
+    (it includes bindings inside nested defs), so a name bound only in a nested
+    def can be refused. That is a loud refusal of a read that was already wrong,
+    never a silent change of a correct answer.
+    """
+    _encl_fns: list = []
+    for _rf_i in range(len(stmts or [])):
+        _rf = stmts[_rf_i]
+        if isinstance(_rf, FunctionDef):
+            _encl_fns.append(_rf)
+        elif isinstance(_rf, StructDef):
+            for _rfm in (_rf.methods or []):
+                if isinstance(_rfm, FunctionDef):
+                    _encl_fns.append(_rfm)
+    for _ef_i in range(len(_encl_fns)):
+        _ef = _encl_fns[_ef_i]
+        _ef_bound: set = set()
+        for _efp in range(len(_ef.params or [])):
+            _gmi_target_leaf_names(_ef.params[_efp][0], _ef_bound)
+        _gmi_local_binding_names(_ef.body, _ef_bound)
+        _ef_classes: list = []
+        _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
+        for _ec_i in range(len(_ef_classes)):
+            _ec = _ef_classes[_ec_i][0]
+            for _ecm in (_ec.methods or []):
+                if not isinstance(_ecm, FunctionDef):
+                    continue
+                _ecm_own: set = set()
+                _ecm_own.add('self')
+                for _ecp in range(len(_ecm.params or [])):
+                    _gmi_target_leaf_names(_ecm.params[_ecp][0], _ecm_own)
+                _gmi_local_binding_names(_ecm.body, _ecm_own)
+                for _er in _used_idents_node(_ecm.body):
+                    _ern = _as_str(_er)
+                    if _ern in _ef_bound and _ern not in _ecm_own:
+                        raise ValueError(
+                            f"method `{_as_str(_ecm.name)}` of class "
+                            f"`{_as_str(_ec.name)}` reads `{_ern}`, a parameter "
+                            f"or local of `{_as_str(_ef.name)}`, which declares "
+                            f"the class; a class declared inside a function "
+                            f"cannot reach its enclosing function's frame yet, "
+                            f"so the read would silently answer 0 (see "
+                            f"bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md)")
+
+
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3083,6 +3145,7 @@ def gen_module_impl(self, stmts):
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
+    _gmi_refuse_nested_class_enclosing_reads(stmts)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
