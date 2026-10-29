@@ -51,7 +51,7 @@ in `mojo/backend_gimple/module_gen.py`:
   a no-evidence type is replaced — plus the one this hop needs and the twins
   do not: **contrary call-site evidence vetoes it**. That veto is what keeps
   the chain honest, and it is the reason the property has no assertable
-  observable: see `bugs/CODEGEN_polymorphic_struct_param_degrades_to_a_pointer.md`.
+  observable: see the polymorphic-struct-receiver refusal (commit 4ef1d610c / test_regression_polymorphic_struct_param.py).
 
 Two regression tests, `gimple_struct_ptr_param_forwarded_through_two_free_
 functions` and `..._through_three_free_functions`, so the fixpoint's BOUND is
@@ -93,10 +93,10 @@ defect with a different mechanism and has its own doc:
   which are two assertions of the same arm on the two things it has to get
   right. The twin's own doc was deleted with its fix, so there is no path to
   repair here.
-* `bugs/CODEGEN_polymorphic_struct_param_degrades_to_a_pointer.md` — a
-  parameter called with two DIFFERENT structs has no representation, and the
-  correct unanimity refusal leaves it at `int64_t`, so both calls print a
-  pointer. Pre-existing, measured before and after this change.
+* CODEGEN_polymorphic_struct_param_degrades_to_a_pointer — a parameter called
+  with two DIFFERENT structs has no representation, and the correct unanimity
+  refusal leaves it at int64_t, so both calls print a pointer (fixed by refusal
+  at module_gen.py line ~10155, pinned by test_regression_polymorphic_struct_param.py).
 
 ## Summary
 

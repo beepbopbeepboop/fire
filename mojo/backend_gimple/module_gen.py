@@ -10184,6 +10184,21 @@ def gen_module_impl(self, stmts):
             # Not unanimous -> the parameter is genuinely polymorphic here and
             # nothing about it is provable; same refusal the scalar loop makes.
             if len(types) != 1:
+                # Non-unanimous receiver with all-struct-pointer observations is
+                # a polymorphic struct parameter — no single C signature exists.
+                # Refuse loudly rather than silently degrading to a boxed pointer.
+                _all_struct_ptr = True
+                for _t in types:
+                    _t_str = _gmi_as_str(_t)
+                    if not (_t_str.endswith(' *') and _t_str[:-2] in self.struct_field_types):
+                        _all_struct_ptr = False
+                        break
+                if _all_struct_ptr:
+                    _names = ', '.join(sorted(str(_t) for _t in types))
+                    raise RuntimeError(
+                        f"polymorphic struct parameter {pname!r} in {callee!r} "
+                        f"used as method receiver: types {_names} have no single "
+                        f"C signature; fall back to interpreted execution")
                 continue
             # `sorted(...)` + index, NOT `next(iter(...))`: iterating a
             # str-SET lowers to mojo_set_iter_val_int (0 for every string
