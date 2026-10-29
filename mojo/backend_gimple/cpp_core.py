@@ -1140,6 +1140,33 @@ def _cpp_reset_unit_state(gen):
 # miss, then an honest refusal, for a generator that really was compiled.
 
 
+def _cpp_refuse_str_key_subscript(gen, e):
+    """Refuse a str-KEYED subscript `obj[<str>]` that reached _cpp_expr's
+    generic (non-container) lowering.
+
+    A str index on a subject this emitter has no container type for is a
+    mapping lookup (`ep['me_key']` on a gdb.Value entry, `d['k']` on an
+    untyped parameter). Both generic subscript fall-throughs in _cpp_expr
+    would emit C that cannot compile: `mojo_char_at_str(obj, "k")` passes a
+    `const char *` where the int64_t index belongs, and `(obj)["k"]` is a raw
+    C++ subscript on a pointer. A str index on a string is a TypeError in
+    real Python, so there is no valid string reading to fall back to either.
+    The scalar model cannot represent the mapping, so refuse honestly; the
+    declared-MojoDict/-list branches above this call still handle a real
+    container. An index of unknown type (a plain untyped name) keeps the
+    int64_t default and is not refused, exactly as before.
+    """
+    self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+    ictype = gimple_exprtypes._infer_simple_expr_ctype(
+        e.index, gen._cpp_declared, self_fields, gen._async_api)
+    if ictype == 'char *' or isinstance(e.index, gimple_ctypes.StringLiteral):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "a str-keyed subscript (`obj[<str>]`) is not supported in a "
+            "compiled generator/coroutine body (the subject is not a "
+            "declared str or container, so the key is a mapping lookup this "
+            "scalar model cannot represent)")
+
+
 def _cpp_expr_static_ctype(gen, e):
     """Best-effort static C type of an expression in a coroutine body —
     the small intersection of shapes this emitter types reliably:
@@ -4374,6 +4401,7 @@ def _cpp_expr(gen, e) -> str:
                     "generator/coroutine body (subscript base resolves "
                     "to a function/special-form value, not a string or "
                     "container)")
+            _cpp_refuse_str_key_subscript(gen, e)
             return f"mojo_char_at_str((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
@@ -4399,6 +4427,7 @@ def _cpp_expr(gen, e) -> str:
                 and isinstance(e.obj.func, gimple_ctypes.MemberExpr)
                 and e.obj.func.member in ('partition', 'rpartition')):
             return f"mojo_list_get_str({_cpp_as('MojoList *', obj)}, (int64_t)({idx}))"
+        _cpp_refuse_str_key_subscript(gen, e)
         return f"({obj})[{idx}]"
     if isinstance(e, gimple_ctypes.AwaitExpr):
         # Step D (async-awaits-async composition): `await <call>` used
