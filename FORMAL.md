@@ -525,18 +525,19 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 | | arm64 | x86_64 |
 |---|---|---|
 | word-shaped entry points (`runtime_abi`) | 297 | 297 |
-| …of which the runtime dylib actually **exports** | 228 | 228 |
-| …reachable with no heap handle the formal path cannot obtain | **188** | **188** |
+| …of which the runtime dylib actually **exports** | 241 | 241 |
+| …reachable with no heap handle the formal path cannot obtain | **201** | **201** |
 
-So the honest statement of the surface is **188 word-shaped calls are callable
+So the honest statement of the surface is **201 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 285) of §2.2. The two gaps between the
-2026-10-23 census (284, below) and 188 are both deliberate and both named:
+was written, and not the 219 (now 297) of §2.2. The two gaps between the
+297 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
+both deliberate and both named:
 
-- **40 of the 228** the library exports take a `void *` parameter the
+- **40 of the 241** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 284** the dylib does not export at all, because
+- **56 of the 297** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
@@ -597,16 +598,18 @@ word-shaped ones return the unexported remainder to 56), and
 `mojo_str_first_codepoint` — the family-S `Codepoint.ord` helper, word-shaped
 like the eleven — added 1 to the word and exported rows at once (283 → 284,
 218 → 228, 178 → 188; the 40 heap-handle set still gains nothing). A reader
-who checks the arithmetic (`284 − 228 = 56`, `228 − 188 = 40`) is checking the
+who checks the arithmetic (`297 − 241 = 56`, `241 − 201 = 40`) is checking the
 two claims this table makes about WHY the surface stops where it does, not
 just the numbers.
 
 Re-censused 2026-10-24 (after the `mojo-reference2` merge added
-`int_normpath` to `fire_runtime.h`): the header row above is now 285 (the
-live `runtime_abi()` census, read off the headers on every run), while the
-exported/reachable rows (228/188) remain the 2026-10-23 dylib measurement —
-they are `runtime_abi() ∩ the dylib's export table`, and they move only when
-the dylib is rebuilt and `test_formal_runtime_link.py` re-measures them.
+`int_normpath` to `fire_runtime.h`): the header row above is the live
+`runtime_abi()` census, read off the headers on every run (285 then; 297
+since the 2026-10-27 gate fixups), while the exported/reachable rows are
+`runtime_abi() ∩ the dylib's export table`, and they move only when the
+dylib is rebuilt and `test_formal_runtime_link.py` re-measures them —
+re-measured 2026-10-28: 241 / 201 (228 / 188 at the 2026-10-23 measurement,
+and the 56 / 40 gaps did not move).
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
 and that last clause is the honest boundary: a call that *builds, links and
@@ -799,7 +802,7 @@ refusal replaced by an image that builds and computes the wrong number is the
 failure this whole programme is about.
 
 **The one thing that has NOT moved is the honest boundary between "callable"
-and "provable".** 188 calls build and run; none of them is yet a call a *proof*
+and "provable".** 201 calls build and run; none of them is yet a call a *proof*
 can follow, because `arm64_step`'s `BL` still has no callee (§3.1, phase 3). A
 number that conflated the two would be the more comfortable one and the less
 true one.
@@ -1264,8 +1267,8 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **284 of 697** entry points are word-in/word-out
-(§2.2) and **188** of them are callable from a formal image today (§6 phase 2),
+yet for any actual export. **297 of 719** entry points are word-in/word-out
+(§2.2) and **201** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
 exports a caller can actually reach today.
