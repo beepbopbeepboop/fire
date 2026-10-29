@@ -1083,11 +1083,11 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                     ofile = edited
                     defs = defs - clash   # clashing syms no longer exported here
                     # routine (not an error): the dedup log, not the screen
-                    with open(os.path.join(workdir, 'dedup.log'), 'a') as _dl:
+                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
                         _dl.write(f"localize {len(clash)} dup symbol(s) in {name} (e.g. {sorted(clash)[0]})\n")
                 else:
                     one = sorted(clash)[0]
-                    with open(os.path.join(workdir, 'dedup.log'), 'a') as _dl:
+                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
                         _dl.write(f"exclude {name} from dylib: symbol already defined ({one})\n")
                     excluded += 1
                     continue
