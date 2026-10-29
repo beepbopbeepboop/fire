@@ -325,3 +325,45 @@ The loop variable `v` is typed from the callee's yield element type. For
   `python3 test_module_boundary_regression.py` → `1/2 passed`, the failing case is
   `imported_generator_yields_str`.
 - Probe sources: `.tmp/probe2/{m.py,u.py}` (scratch, not committed).
+
+## Status (2026-10-29, work/bug-codegen-module-boundary-carries-no-v) — PARTIAL FIX (Shape 2, direct importers)
+
+Landed: the importer's call sites now type an imported generator's yield slot.
+`coro.lower(stmts, closure_stmts, module_name)` takes the statement lists of the
+modules already in the closure (`GimpleGen._closure_call_stmts`, root first, each
+imported module appended as it is compiled) and `_scan_callsite_param_kinds`
+counts two spellings of a call to THIS module's generator from them:
+`<module>.gen(...)` and a bare `gen(...)` bound by an un-aliased
+`from <module> import gen`. The evidence feeds the same unanimity/hole rule the
+module's own call sites feed, so the child's `value_ctype` becomes `char *` and
+the importer's consumer, which already dispatches through the child's published
+api, reads it. Measured: `m.gen(['p','q'])` and `from m import gen` print `p q`
+(was: addresses); `m.gen([1,2,3])` still prints `1 2 3`.
+
+Test: `test_module_boundary_regression.py` — 4/4 (was 1/2). Covering file
+`test_gimple_generator_runner.py` 263/263.
+
+Still open (measured, not fixed):
+
+* **Aliased import** (`from m import gen as g`, `import m as k; k.gen(...)`):
+  not counted. Next step: resolve the alias through the importer's
+  `name_alias_strs` / `import` table the same way `_from_bound_names` does.
+* **A value passed on through a parameter** (`import k; k.pass_through(["p","q"])`
+  where `pass_through` does `for v in m.gen(xs)`): the call site that matters
+  is one level further out. Needs the param-kind evidence of `pass_through` to
+  flow into `m.gen`'s argument, which is the transitive form of the same scan.
+* **Ordering**: a call site in a module that is compiled AFTER the child is not
+  visible to it. The closure is accumulated in compile order, not pre-parsed.
+  The A-full plan's step 1 (hoist the parse of the whole closure before the
+  import loop) is what closes this; it is not done.
+* **Mixed str/int call sites** of one generator still miscompile (in a single
+  module too): `bugs/CODEGEN_generator_mixed_element_call_sites_miscompile.md`.
+* **Shape 1** still has no regression pin beyond `module_qualified_str_param`,
+  which passes; the mechanism note above still stands unverified.
+
+Gate, for the integrator (NOT run here): `coro.py`, `gimple_codegen.py` and
+`emit_resolve.py` changed — a full `make gate` is owed (CLAUDE.md, "Before
+considering a compiled-path change done"). Watch `stdlib-dylib` `skip` count and
+`stdlib-syntax` `U`, and `bootstrap` because `coro.py` is itself compiled by the
+self-host (the new code uses only plain loops and set membership, like its
+neighbours, but has not been self-compiled).

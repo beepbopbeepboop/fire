@@ -1095,7 +1095,14 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
+                # The importers' call sites (`gen._closure_call_stmts`) are
+                # handed in so `<module_name>.<gen>(...)` types this module's
+                # generator slots; the module's own statements are appended
+                # for ITS imports, so a generator reached through a chain of
+                # imports sees every call site compiled before it.
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
+                    stmts, gen._closure_call_stmts, module_name)
+                temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
                     publish_a3_generators(temp_gen, _ss_meta)

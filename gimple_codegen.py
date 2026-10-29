@@ -2081,6 +2081,13 @@ class GimpleGen:
         # accessor plumbing for a `.py` sibling), and raised AttributeError.
         self._emitted_singletons: set = set()
         self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
+        # Statement lists of the modules already in this compilation's import
+        # closure, importers first (the root's, then each imported module's as
+        # it is compiled). A child module's coroutine lowering reads its call
+        # sites from here, so `<child>.<gen>(...)` in an importer can type the
+        # child generator's yield slot (see coro.lower). Shared down the chain
+        # the same way `_compiled_modules` is.
+        self._closure_call_stmts: list = []
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
         # module), keyed by PATH rather than module NAME — a real self-
@@ -6097,6 +6104,9 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
                     auto_gpu=auto_gpu)
+    # The root's own call sites are what an imported module's generators are
+    # typed by (see GimpleGen._closure_call_stmts).
+    gen._closure_call_stmts = [stmts]
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
