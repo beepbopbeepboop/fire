@@ -114,3 +114,9 @@ pays for once — `bugs/DOCS_merge_left_citations_of_the_docs_the_branches_
 deleted.md` records 289 bare citations of documents that were deleted, and 64 of
 the number it quoted were the tool's own inverted existence test reporting LIVE
 documents as dangling.
+--- PARTIAL PROGRESS 2026-10-29 ---
+Step 1 (merge columns) started: `tools/formal_host_import_shapes.py` now imports
+`_wall` and outputs `reach`/`alone` per row (verified by regression test
+`test_regression_two_host_import_rankings.py` and existing `test_formal_host_import_shapes.py`).
+Remaining: `suite.py` job merge (other lane), delete `test_formal_host_import_wall.py`,
+document consolidation (steps 4-5 in doc's exact next step).
