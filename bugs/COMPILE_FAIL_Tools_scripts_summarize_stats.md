@@ -4,6 +4,13 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29 — PARTIAL: regression test landed; full closure-factory compilation not implemented)
+
+- Added `test_regress_codegen_generator_closure_factory.py` (pinning the exact refusal for the factory-shape nested def).
+- Existing `test_regress_codegen_generator_frame.py` still passes (no regression to non-capturing helpers).
+- The feature-sized fix remains unimplemented: `_cpp_compile_nested_sync_helpers` still skips any nested def (`any(FunctionDef...)`); `cpp_core.py` has no `MojoBoundMethod*` / env-struct emission for a factory call (`calc_hist(...)` -> `F__C` + `F__env`).
+- Next: implement factory-class in `_try_compile`, emit `F__env` struct and `F__C` static function, emit `mojo_bound_method_new(...)` in CallExpr branch, verify with regression test passing.
+
 ## Status (2026-10-29 — planning round: the remaining blocker is a closure VALUE returned by a nested factory; implementation guide below, nothing landed for this file)
 
 ### Measurement (this round)
