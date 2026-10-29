@@ -320,7 +320,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             if k is None:
                 k = _literal_kind(val)
             if k is None and val is not None:
-                k = _yield_kind(val)          # BinaryOp / literal fallthrough
+                k = _yield_kind(val, env)     # BinaryOp / literal / str-method fallthrough
                 # A bare call to a same-module `def` that states its return
                 # type (`var v = compute()`), via the shared
                 # `_callee_return_kind` -- see that function for why this
@@ -499,6 +499,15 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     # are not.
     if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
         return _callee_return_kind(expr)
+    # A str METHOD CALL on a string receiver (`'ab'.upper()`, `t.lower()`,
+    # `s.replace(a, b).upper()`) is a string. The method set is the shared
+    # `_STR_RETURNING_METHODS` (the same table `module_shared` and
+    # `module_gen` consult), and the receiver must itself be a string kind,
+    # so `x.upper()` on an int or a user struct is not claimed here.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member in gimple_ctypes._STR_RETURNING_METHODS
+            and _yield_kind(expr.func.obj, env) == 'p'):
+        return 'p'
     if isinstance(expr, N.TernaryExpr):
         tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
         if tk == ek:
