@@ -8216,6 +8216,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
         if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
         elif len(arg_pairs) < 3:       arg_pairs.append(('char *', '0'))
+        if 'auto_gpu' in kwarg_dict:   arg_pairs.append(kwarg_dict['auto_gpu'])
+        elif len(arg_pairs) < 4:       arg_pairs.append(('int', '1'))
     if fname_raw == 'interpret_and_execute':
         if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
         elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
