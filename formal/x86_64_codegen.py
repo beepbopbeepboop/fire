@@ -12536,7 +12536,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"({[k for k, _ in e.kwargs]})")
             return list(e.args or []), []
         slots, dropped, err = M.bind_call_arguments(
-            name, fdef, e.args, e.kwargs)
+            name, fdef, e.args, e.kwargs, self._spread_mappings)
         if err is not None:
             raise CodegenError(err)
         return slots, dropped

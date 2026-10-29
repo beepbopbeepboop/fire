@@ -54401,7 +54401,8 @@ def function_param_shape(fn) -> ParamShape:
         vararg_at, kwarg_at, at_by_name)
 
 
-def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
+def bind_call_arguments(name: str, fn, args: list, kwargs: list,
+                        mappings=None) -> tuple:
     """`(slots, dropped, error)` — a call's arguments in positional form.
 
     THE one implementation of "which argument lands on which parameter", for
@@ -54464,7 +54465,7 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
     # source does not contain — measured) and put a mapping where a value
     # belonged.
     args, kwargs, spread_refusal = _unspread_keyword_mappings(
-        list(args or []), list(kwargs or []), f"call {name}()")
+        list(args or []), list(kwargs or []), f"call {name}()", mappings)
     if spread_refusal is not None:
         return None, [], spread_refusal
     slots: list = list(args or [])
