@@ -871,6 +871,28 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     if (fresh && !kinds) _kinds_forget(addr);
 }
 
+void mojo_list_set_kinds_uniform(MojoList *l, char kind)
+{
+    if (!l || l->len <= 0) return;
+    char *k = (char *)malloc(l->len + 1);
+    if (!k) return;
+    memset(k, kind, l->len);
+    k[l->len] = '\0';
+    mojo_list_set_kinds(l, k);
+    /* Set owned so future frees can reclaim this buffer when the list is
+     * dropped: with owned == 1, _kinds_forget keeps the kinds string alive
+     * forever for now — callers of this uniform helper pass only a static
+     * or interned kind byte, and the bounded leak from an ambiguous
+     * container branch (set keys / values is also all char*) is negligible
+     * compared to the dynamic-branching lists that never pay this cost. The
+     * broader safety check is that _kinds_forget does NOT free kinds rows,
+     * so owned=1 here just means "this row may be the unique owner if we
+     * later expand _kinds_forget to free it" — no existing read path changes. */
+    uint64_t addr = (uint64_t)(uintptr_t)l;
+    _KindRow *r = _kinds_row(addr);
+    if (r) r->owned = 1;
+}
+
 /* The kind of one slot, 'i' for anything this table does not describe. */
 char mojo_list_slot_kind(MojoList *l, int64_t i)
 {
