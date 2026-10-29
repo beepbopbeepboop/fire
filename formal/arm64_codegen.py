@@ -9294,6 +9294,82 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(ok)
         return ok
 
+    def _emit_float_to_int_range_trap(self) -> None:
+        """Trap if the double in V0 does not fit in an `Int64` after truncation.
+
+        The run-time half of the double→int decision, the twin of the build's
+        `float_to_int_refusal`: the same two constants
+        (`model.FLOAT_TO_INT_HI` / `FLOAT_TO_INT_LO`), the same inequality, and
+        the same status as the integer overflow trap, so a reader who has seen
+        an overflow stop does not learn a second way a program with no answer
+        leaves. The caller has already moved the word into V0 (the FCVTZS that
+        follows does the same thing), so the test compares V0 to the constants
+        in V1.
+
+        X1 and V1 are scratch: at this point in the type-constructor path the
+        only live value is the double being converted (X0, and now V0), the
+        rest of the function's values are frame slots, and the block ends in
+        an exit, so nothing is preserved — the convention the shared half of
+        `_emit_int_overflow_trap` states for its own scratch.
+
+        **A NaN is routed past the range checks before they run, and the route
+        is the one flag no range condition reads.** The encoder's spec sheet
+        (and `model.py`) print an UNORDERED FCMP as `NZCV = 0011`
+        (`C = 1, V = 1, Z = 0`), on the footing of which `GE` and `LE` both
+        read false for a NaN. Measured on this machine, an unordered compare
+        leaves `NZCV = 0100` (`C = 1, V = 0, Z = 0`) — the same pattern as
+        "greater" — so `B.ge` IS taken for a NaN, and the first measurement of
+        this helper stopped `Int(nan)` with an OverflowError where CPython and
+        the x86-64 half (`ucomisd` + `jae`, ordered-only) both give the
+        saturation `model.float_int_conversion_note` records. The pre-check is
+        `fcmp d0, d0`: a real value equals itself (`Z = 1`), a NaN is
+        unordered with itself (`Z = 0`), and `Z` is the one flag the
+        difference reads in — so `B.ne` carries a NaN straight to `ok`, past
+        both checks, into the FCVTZS that gives it the saturation answer.
+        After the pre-check every compare is ordered, where `GE` and `LE` are
+        exactly the two inequalities CPython's OverflowError is. CPython does
+        not answer a NaN either — it raises `ValueError` — but this block is
+        the OverflowError trap, the one stop this path has for a conversion
+        the target cannot signal, and spending it on a different error would
+        attribute the stop to a range a NaN does not have. The saturation is
+        the recorded divergence instead (`model.float_int_conversion_note`),
+        and each machine's hardware gives it its own: `FCVTZS` answers 0,
+        `CVTTSD2SI` answers `INT64_MIN`.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_dovf{tid}_t"
+        ok = f"{fn}_dovf{tid}_k"
+        # NaN pre-check, ordered (Z=1) for a real value and UNORDERED (Z=0)
+        # for a NaN; B.ne routes the NaN to the saturation conversion.
+        self.asm.emit(encode_fcmp_dn_dm(0, 0))
+        self.asm.emit(encode_b_cond("ne", 0))
+        self.asm.emit_label_rel(ok, here_offset=-4)
+        # x >= 2^63: GE over `x ? 2^63`, which CPython's OverflowError is.
+        # (Ordered-only: a NaN took the branch above, so GE cannot see the
+        # unordered pattern this machine leaves behind.)
+        self._emit_mov_imm("X1", M.float_literal_bits(M.FLOAT_TO_INT_HI))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self.asm.emit(encode_fcmp_dn_dm(0, 1))
+        self.asm.emit(encode_b_cond("ge", 0))
+        self.asm.emit_label_rel(trap, here_offset=-4)
+        # x <= -2^63 - 2048: LE over `x ? LO`, the same "truncation past
+        # INT64_MIN" test the CPython side states.
+        self._emit_mov_imm("X1", M.float_literal_bits(M.FLOAT_TO_INT_LO))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self.asm.emit(encode_fcmp_dn_dm(0, 1))
+        self.asm.emit(encode_b_cond("le", 0))
+        self.asm.emit_label_rel(trap, here_offset=-4)
+        # In range: skip the block. Without this branch an in-range value
+        # falls into the trap, which is how the first measurement of this
+        # helper answered `OverflowError` for 3.9.
+        self._emit_b_to(ok)
+        self.asm.label(trap)
+        self._emit_stop_diagnostic(M.float_to_int_trap_message())
+        self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+        self.asm.label(ok)
+
     def _emit_strcmp_flags(self, l, r) -> bool:
         """`l == r` on two STRINGS as `strcmp(l, r) == 0`. True if it emitted.
 
@@ -10446,7 +10522,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
             direction, why = M.float_conversion_lowering(
                 name, self._expr_str_kind(operands[0]),
-                f"{name}({M.spelled(operands[0])})")
+                f"{name}({M.spelled(operands[0])})",
+                value=M.float_literal_value(operands[0]))
             if why is not None:
                 raise CodegenError(why)
             if direction is not None:
@@ -10505,11 +10582,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `Int(x)` over a double: FCVTZS, which truncates TOWARD ZERO, and
             # that is CPython's rule (`int(2.9)` is 2, `int(-2.9)` is -2).  A
             # plain `MOV` of the bits would be the exponent field as an
-            # integer; `model.float_int_conversion_note` records the one input
-            # where this differs from CPython — a NaN or an infinity, where the
-            # hardware saturates and CPython raises — and why no static check
-            # can tell them apart.
+            # integer. The range the truncation must fit is checked BEFORE the
+            # conversion — `_emit_float_to_int_range_trap` stops with
+            # `INT_OVERFLOW_TRAP_STATUS` where CPython raises `OverflowError`,
+            # and the build already refused the literals for the same reason;
+            # `model.float_int_conversion_note` records the one input the
+            # check cannot take (a NaN) and what happens to it.
             self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+            self._emit_float_to_int_range_trap()
             self.asm.emit(encode_fcvtzs_xn_dn(0, 0))
             info = M.INT_TYPE_CTORS[name]
         width, signed = info

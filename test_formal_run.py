@@ -9127,6 +9127,112 @@ BOTH_ARCH_CASES = [
      "    var q = Two(4, 9)\n"
      "    printf(\"%d\", p.v * 100 + q.a * 10 + q.b)\n"
      "    return 0\n", 0, "349"),
+    # ── a default EXPRESSION, and the f-string the walker never reached it ──
+    #
+    # A parameter default sits in a FunctionDef's `param_defaults` DICT, which the
+    # shared walker `iter_nodes` does not descend: the two interpolated-literal
+    # passes the module statements get (fold the field-less one to its text,
+    # refuse the field-bearing one with the buffer sentence) never reached a
+    # default, so the emitter materialized the whole token the parser kept and
+    # `def f(x=f"n=7")` printed `f"n=7"` where CPython prints `n=7`, on both
+    # backends. The corpus writes none (`= f"` in a parameter list finds no row
+    # in this repository or the stdlib), which is why these are a correctness
+    # pair and not a sweep row. Both ride this group: the answered one must agree
+    # on the architecture it runs on and `run_case` refuses on both backends
+    # by construction.
+    ("both_arch_a_fieldless_fstring_parameter_default_folds_to_its_text",
+     "def f(x=f\"n=7\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=7]"),
+    ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
+     "def f(x=f\"n={5}\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
+    # ── a double at the `Int` conversion, where the two machines once
+    #    answered with two different programs ──────────────────────────────────
+    #
+    # The run-time half of the double→int decision the literal rows in
+    # `FLOAT_REFUSALS` state: a double the build cannot read (bound to a name
+    # rather than spelled at the conversion) is checked against the same two
+    # constants at run time and stops with the integer overflow's status —
+    # `model.float_to_int_refusal` and `model.float_to_int_trap_message` are
+    # the two halves of one decision, and these rows are the two machines'
+    # agreement about it. The marker before the conversion keeps each trap row
+    # about the conversion rather than about startup. Measured on both
+    # architectures before the fix, exit 0: `Int(1e300)` bound to a name
+    # printed `9223372036854775807` on arm64 and `-9223372036854775808` on
+    # x86-64 — the two saturations, one each, and the divergence the trap
+    # takes off the table.
+    ("both_arch_a_double_past_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var x = 1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(x))\n"
+     "    return 0\n", 1, "converting"),
+    # …and the LOWER direction, the same trap from the side whose boundary is
+    # not the range's own minimum: `-1e300` is a double the build can read
+    # (`model.float_literal_value` reads the `UnaryOp`), but bound to a name it
+    # is a value only the run-time test can see, and past `FLOAT_TO_INT_LO`
+    # (`-2**63 - 2048`, the largest double whose truncation does not fit
+    # below the range) it stops.
+    ("both_arch_a_double_below_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var y = -1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(y))\n"
+     "    return 0\n", 1, "converting"),
+    # An INFINITY is the other double CPython's `int()` refuses with an
+    # `OverflowError`, and the same trap takes it: it is past
+    # `FLOAT_TO_INT_HI` in exactly the way `2**63` is. Reached by overflow
+    # rather than a literal, because `1.0 / 0.0` is a program CPython does not
+    # run (a `ZeroDivisionError`), and this path now agrees.
+    ("both_arch_an_infinity_does_not_fit_in_an_int64_either",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(w))\n"
+     "    return 0\n", 1, "converting"),
+    # THE BOUNDARIES the trap must NOT take: the largest double below `2**63`
+    # is `2**63 - 2048` (binary64's spacing there is 2048) and it is IN range,
+    # and `-2**63`'s truncation IS `INT64_MIN`, which fits. A range test one
+    # step too wide traps these; the in-range `B`/`JMP` skip in the helper is
+    # what keeps them out, and a test that missed it answered `OverflowError`
+    # for 3.9 on the first measurement. `Int(3.9)` is the truncation-toward-
+    # zero row: 3, not 4, and not `-1`.
+    ("both_arch_the_int64_edges_of_a_double_convert_exactly",
+     "def main() -> Int:\n"
+     "    var x = 9223372036854774784.0\n"
+     "    printf(\"a=%d \", Int(x))\n"
+     "    var b = -9223372036854775808.0\n"
+     "    printf(\"b=%d \", Int(b))\n"
+     "    printf(\"c=%d\", Int(3.9))\n"
+     "    return 0\n", 0, "a=9223372036854774784 b=-9223372036854775808 c=3"),
+    # …and a NaN is NOT a range trap, on either machine: both comparisons the
+    # range test is built from are unordered for one, and CPython's `ValueError`
+    # for `int(nan)` is a different error than the `OverflowError` this trap is,
+    # so the trap the range test states must not fire for it. The assertion is
+    # the one both machines can make — it does not stop — and the answer each
+    # prints is its OWN hardware's saturation (measured: `FCVTZS` converts a
+    # NaN to 0, `CVTTSD2SI` to `INT64_MIN`), which `model.float_int_
+    # conversion_note` records rather than a row that would have to carry two
+    # answers in one. Before the arm64 NaN pre-check this row was red: an
+    # unordered FCMP on this machine leaves `C = 1, V = 0` — the "greater"
+    # pattern — so the `B.ge` of the upper test was taken for a NaN and the
+    # program stopped with an OverflowError.
+    ("both_arch_a_nan_is_not_a_range_trap",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    var z = w * 0.0\n"
+     "    printf(\"n=%d\", Int(z))\n"
+     "    return 0\n", 0, "n="),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -19824,7 +19930,37 @@ FLOAT_REFUSALS = [
     # from `PRINTF_NUMBER_CONVERSIONS` — a blob does have an address, and
     # Darwin's `%p` renders it. Neither is asserted to build here because a
     # `%s` of a container is a different (unfixed) shape and `%p`'s output is an
-    # address that is not stable to compare; the row above is the control.
+    # ── A double past the `Int64` range, at the `Int` conversion ─────────────
+    #
+    # The other half of the double value model, one row per direction, on BOTH
+    # machines: the build can read a literal, and a literal whose truncated
+    # value does not fit in an `Int64` is a program CPython raises
+    # `OverflowError` for, while the hardware would answer the same source with
+    # two different programs — `FCVTZS` clamping at `9223372036854775807` and
+    # `CVTTSD2SI` at `-9223372036854775808` — which is the divergence this
+    # refusal closes at the place it is decidable. Measured on both
+    # architectures before `model.float_to_int_refusal`: `Int(1e300)` printed
+    # `9223372036854775807` on arm64 and `-9223372036854775808` on x86-64,
+    # exit 0 (the bug doc that recorded it,
+    # `FORMAL_int_of_an_out_of_range_double_saturates_the_other_way_on_each_
+    # backend`, is deleted with its fix; these rows are the record).
+    #
+    # The needle is the FIT clause rather than a value, because the value the
+    # message states is the spelled operand and a value needle would assert a
+    # spelling rather than a decision.
+    ("float_to_int_a_double_literal_past_the_range_is_refused",
+     "def main() -> Int:\n"
+     "    return Int(1e300)\n",
+     "refuse:does not fit in an Int64", None),
+    # …and the LOWER edge, which is a different double, not a sign flip: a
+    # double cannot name a value between `-2**63` and `-2**63 - 2048` (binary64's
+    # spacing there is 2048), and `-2**63` itself FITS — its truncation is
+    # `INT64_MIN`. A rule that tested the sign rather than the value would take
+    # one of the two rows and miss the other's arithmetic.
+    ("float_to_int_a_negative_double_literal_past_the_range_is_refused",
+     "def main() -> Int:\n"
+     "    return Int(-1e300)\n",
+     "refuse:does not fit in an Int64", None),
 ]
 
 # The CONTAINER family, the other half of the same "the conversion and the
