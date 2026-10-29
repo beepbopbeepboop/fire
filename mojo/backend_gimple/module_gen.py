@@ -8694,7 +8694,15 @@ def gen_module_impl(self, stmts):
         pname = _as_str(pname)
         d = self._param_elem_types.setdefault(callee, {})
         if pname in d and d[pname] != (e, ne):
-            d[pname] = (None, None)   # conflicting call sites → unknown
+            old_e, old_ne = d[pname]
+            if old_e == e and old_e is not None and e is not None and old_ne != ne:
+                # Same container element type but nested kind disagrees:
+                # keep the container (honest) and drop the nested kind (ambiguous),
+                # so consumers can take the boxed/heterogeneous route instead
+                # of falling through to the int64_t default.
+                d[pname] = (e, None)
+            else:
+                d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
 
