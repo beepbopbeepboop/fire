@@ -6,6 +6,56 @@ OPEN. The dylib builds (`built ... from 249 module(s)`), but 130 modules are dro
 and every drop is the same symbol. The drop is only a stopgap; the underlying naming is a correctness risk, not just
 noise. Found 2026-10-29 while sorting the dylib's screen output.
 
+### 2026-10-29 planning round (no code landed)
+
+**Measured.** The real `dlsym` body is type-dependent, not just a name clash: `std/sys/_libc.mojo:344-352`
+(`mojo/stdlib/std/sys/_libc.mojo` in the modular checkout, lines 344-352) is `result = external_call["dlsym", type_of(result)](handle, name)`,
+so the C return type of each specialization comes from `result_type`. A copy emitted once under a shared name with `T`
+erased returns the wrong pointer type for every caller that is not the first module. So the fix must produce a
+per-specialization body, not only a unique name and `static` linkage.
+
+**Compiler facts (read, not run):**
+- Ordinary generic function calls are emitted once per module with the type parameter erased. The C name comes from
+  `_func_csym` (`mojo/backend_gimple/emit_funcs.py` ~2600) = safe name + `_overload_suffix` (~2166), which hashes the
+  PARAMETER types only. Type arguments never enter the name, so `dlsym[NoneType]` and `dlsym[_EnvpType]` both get `_dlsym`
+  when their parameter types match (`dlsym`'s parameters are untyped/`_CPointer`-typed, so the suffix is empty).
+- Per-instantiation elaboration exists but is narrow. `mojo/backend_gimple/elab_intu.py` `run` (~3220) and `seed` (~3240)
+  materialize a function root only when its return annotation names an unbuildable struct
+  (`_fn_returns_unbuildable_struct`). A plain generic function such as `dlsym` is never elaborated, so it is never
+  given a per-T body.
+- The injective naming already exists: `monomorphize.mangle` (`monomorphize.py:190`) is `name_<fields of type args>`, and
+  `_materialize` (`elab_intu.py:3130`) names every instantiation it creates with it.
+
+**Decision needed (controller).** Option A (recommended): extend the elaboration seed so EVERY generic function
+instantiation with type arguments, bracketed or inferred from an `out`/argument, is materialized through
+`monomorphize_source` and named with `monomorphize.mangle`. Two modules then produce two distinct symbols, each with its
+own body, and the dedup stopgap is no longer needed for these. Option B: keep erased bodies and only make copies
+`static`. Rejected: B is wrong code for `dlsym`, because the bodies differ. A is a large change touching every
+generic-function call site, so it needs the full gate.
+
+**Implementation plan for Option A (exact places):**
+1. `elab_intu.py` `seed` (~3240): also enqueue `kind == 'fn'` roots whose `_callee_kind` is `fn` and whose template
+   (`elaborate.type_param_names`) is non-empty, with args from `_concrete_args` (bracketed) or `_infer_fn_args` (~412,
+   inferred). Keep the `_MAX_INSTANTIATIONS` bound.
+2. `_materialize` (~3130) already produces `mangled` for the fn kind; keep it. `work.alias[key] = mangled` (~3290) is the
+   call-site rewrite map; confirm `_rewrite_callees` (~3528) rewrites bare calls to the alias, not only bracketed ones.
+3. Emit side: the `.o` route must not also emit the bare-name copy (`_intu_func_args`, read in `run`'s contract).
+4. Dylib: an instantiation used by one module stays file-local (`static`, by `_localize_symbols` or emit-time `static`), so
+   the `exclude` path disappears; a cross-module instantiation gets the unique `mangle` name and is exported once.
+
+**Tests that prove it:**
+- `test_link_mode.py`: two modules, each calling `dlsym`-shaped generic (a type parameter that changes the return type
+  through `type_of(result)`), with different specializations; `fire build` and run; assert each caller gets its own
+  specialization's value and the program matches CPython. Also the cross-module weak-stub repro in
+  `bugs/CODEGEN_cross_module_call_to_generic_function_binds_weak_stub.md`.
+- `build_stdlib_dylib.py` re-run (integrator, full gate): `dedup.log` has no `exclude` lines; module count 379, not 249.
+
+**Blocking the next round:** Option A is not a quick round. It needs the controller's choice (A vs B) and the full gate.
+Next round can start on step 1 once A is confirmed.
+
+Separately found while scoping: `bugs/CODEGEN_cross_module_call_to_generic_function_binds_weak_stub.md` (a bare call to a
+generic function binds the weak stub in link mode).
+
 ## Measured
 
 `python3 build_stdlib_dylib.py -o …` with `MOJO_DEDUP_LOG` set (the dedup log is now kept, see the commit that added it):
