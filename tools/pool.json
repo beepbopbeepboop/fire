@@ -20,10 +20,10 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 2,
+      "count": 3,
       "kind": "claude",
-      "recover_hours": 25.49,
-      "note": "Paid Claude tokens (headless claude -p). Two workers. Goal: the week from 78% to 100% before Friday 11:00 local; a limit bans it until that reset."
+      "recover_hours": 4.23,
+      "note": "Paid Claude tokens (headless claude -p). Three workers. Goal: the 5-hour block from 10% to 100% before 13:49 local; a limit bans it until the 13:50 reset. (Weekly reset Friday 11:00 is the next wall after that.)"
     },
     {
       "name": "opencode-paid",
