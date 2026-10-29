@@ -2342,6 +2342,12 @@ def _cpp_expr(gen, e) -> str:
         # divisor goes through the runtime's checked-divisor helper. Only an
         # INTEGER divisor is wrapped — a floating-point `/` by zero is inf
         # in C++, and wrapping it would truncate the double to int64_t.
+        # Integer `%` on two integers floors toward the divisor's sign as
+        # Python's does (C's truncates): the same `__mojo_floormod` the plain
+        # GIMPLE tail uses (emit_exprs.py), which also does the zero check.
+        if (op == '%' and _cpp_is_int_operand(gen, e.left)
+                and _cpp_is_int_operand(gen, e.right)):
+            return f"__mojo_floormod((int64_t)({_bl}), (int64_t)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
         if op in ('==', '!=', '<', '<=', '>', '>='):

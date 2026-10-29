@@ -2171,6 +2171,15 @@ static inline int64_t __mojo_floordiv(int64_t a, int64_t b) {
     return q - (a % b != 0 && (a ^ b) < 0);
 }
 
+/* Lowered integer `%` with Python's floor semantics: the result takes the
+ * divisor's sign, where C's `%` truncates toward zero. Signed operands only;
+ * an unsigned `%` is already floored. */
+static inline int64_t __mojo_floormod(int64_t a, int64_t b) {
+    b = mojo_int_divisor(b);
+    int64_t r = a % b;
+    return r + (r != 0 && (r ^ b) < 0) * b;
+}
+
 /* ── Python exception type sentinels (bootstrap) ────────────────────────
  * Used as integer tokens when registering exception types in interpreter scope. */
 #define Exception          1001

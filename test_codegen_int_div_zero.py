@@ -41,10 +41,10 @@ def test_zero_divisor_raises_in_plain_function():
     assert out == 'caught floordiv\ncaught div\ncaught mod', repr(out)
 
 def test_nonzero_integer_division_unchanged():
-    # Nonzero divisors must still divide as before. `7 / 2` and `-7 % 2` are
-    # left out on purpose: this compiler's int `/` truncates where Python's is
-    # a float, and its `%` truncates where Python's floors — separate defects,
-    # not part of the zero-divisor check (see bugs/CODEGEN_int_mod_negative_truncates.md).
+    # Nonzero divisors must still divide as before. `7 / 2` is left out on
+    # purpose: this compiler's int `/` truncates where Python's is a float — a
+    # separate defect (typing, not a sign fix-up), not part of the zero-divisor
+    # check.
     src = ('def main():\n'
            '    a = 7\n'
            '    b = 2\n'
@@ -53,6 +53,39 @@ def test_nonzero_integer_division_unchanged():
     out, rc = run_jit(src)
     assert rc == 0, out
     assert out == '3 1 -4 4', repr(out)
+
+def test_integer_modulo_floors_toward_divisor_sign():
+    # Python's int `%` takes the divisor's sign (floor), where C's truncates.
+    # The plain `%` lowering must correct a nonzero remainder whose sign
+    # differs from the divisor's, for both `%` and `%=`.
+    src = ('def main():\n'
+           '    n = -7\n'
+           '    p = 7\n'
+           '    q = -2\n'
+           '    e = -8\n'
+           '    t = 3\n'
+           '    print(n % 2, p % q, n % q, e % t, p % 2)\n'
+           '    m = -7\n'
+           '    m %= 2\n'
+           '    print(m)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '1 -1 -1 1 1\n1', repr(out)
+
+def test_integer_modulo_floors_in_generator_body():
+    # The same `%` inside a compiled generator (the `*, start=[]` shape that
+    # gets a C++20 coroutine unit) takes the coroutine emitter's lowering in
+    # cpp_core.py, which must floor exactly as the plain GIMPLE path does.
+    src = ('def g(*, start=[]):\n'
+           '    n = -7\n'
+           '    yield n % 2\n'
+           '    yield 7 % -2\n'
+           'def main():\n'
+           '    for v in g():\n'
+           '        print(v)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '1\n-1', repr(out)
 
 def test_bare_zero_division_statement_in_generator():
     # test_frame.py's `g`: a bare `1/0` expression statement inside a try in a
@@ -73,5 +106,7 @@ def test_bare_zero_division_statement_in_generator():
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
+    test_integer_modulo_floors_toward_divisor_sign()
+    test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()
     print("OK")

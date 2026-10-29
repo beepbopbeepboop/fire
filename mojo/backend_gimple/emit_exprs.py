@@ -4745,11 +4745,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # — a divisor is already of res_type). Gated on the scalar integer ctypes:
     # a floating-point `/` or `%` never reaches here (its lowering returned
     # above), and a pointer operand is not an arithmetic divisor.
-    if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
-        _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
-        rv = _chk if res_type == 'int64_t' else gen._new_val(res_type, f'({res_type}){_chk}')
-    t = gen._new_temp(res_type)
-    gen._emit(f"  {t} = {lv} {c_op} {rv};")
+    # Signed integer `%` floors toward the divisor's sign, as Python's does;
+    # C's truncates (`-7 % 2` is -1 in C, 1 in Python). `__mojo_floormod`
+    # (runtime/fire_runtime.h) makes that correction and runs the same
+    # zero-divisor check, so it takes the place of the checked-divisor
+    # lowering below for this shape. Unsigned `%` is already floored.
+    if (c_op == '%' and res_type in gimple_ctypes._SCALAR_INT_TYPES
+            and res_type != '_Bool' and not res_type.startswith('uint')):
+        t = gen._new_val(res_type, f"({res_type}) __mojo_floormod ({lv}, {rv})")
+    else:
+        if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
+            _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
+            rv = _chk if res_type == 'int64_t' else gen._new_val(res_type, f'({res_type}){_chk}')
+        t = gen._new_temp(res_type)
+        gen._emit(f"  {t} = {lv} {c_op} {rv};")
     # `lv {c_op} rv` on two values already PROVEN to be integers is another
     # integer: the `_int_word_vals` producer this closes is `d[base + 1]` /
     # `d[i * 2]` / `d[n >> 3]`, whose results were fresh temps nothing had
