@@ -2178,9 +2178,8 @@ test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
      desc='closure capture through a transitive import')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
      deps=['preflight'],
-     expect='36 failing: the gimple async runner, an area with no gate '
-            'coverage until now',
-     desc='36 failing: the gimple async runner, an area with no gate coverage until now')
+     desc='compiled-path async/await runner (C++20 escape hatch; the file '
+          'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
      expect='17 failing: `await` on a Future in the coroutine runtime',
@@ -4479,10 +4478,20 @@ BUCKETS = {
     # async-with-lock-guard, nested-async-generic and async-runtime-scaffold are
     # green and their `expect=` markers are gone (a marked-but-passing test is
     # reported as a FAILURE, so leaving them would have been the anti-rot firing).
-    # The remaining four keep their markers, and their counts were re-measured
+    # The remaining three keep their markers, and their counts were re-measured
     # against the run on the same day.
     #
-    # The four `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # A fourth, `gimple-async-runner`, dropped its marker on 2026-10-28: the
+    # §5.5 cutover's red was the file's own, not the backend's — its C++20
+    # build helper asked `compile_to_gimple_with_cpp` for a companion .cpp
+    # that the now-default stack-switch backend never emits, so all 36
+    # buildable cases died at build ("expected a non-empty generated .cpp").
+    # It now pins `MOJO_CORO=cpp` the way its same-harness sibling
+    # test_taskgroup.py already does, its two stale bool expectations `1`
+    # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
+    # cases pass (re-measured 41 s / 0.1 GB, below).
+    #
+    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
     # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
@@ -4492,7 +4501,7 @@ BUCKETS = {
     #
     # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
-    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing  (expect=)
+    #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
     #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
     #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
