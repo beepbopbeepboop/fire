@@ -1,5 +1,105 @@
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
+## Status 2026-10-29 — the build now stops at a CLASS-PATTERN refusal BEFORE the `var_decl` error; planning guide (round type 3)
+
+### Measurement (this tree, HEAD `33f0a49b0`)
+
+Copied `Python-3.14.6/Tools/cases_generator/` to `.tmp/ca/` and ran
+`python3 fire.py build .tmp/ca/cases_generator/analyzer.py` under
+`tools/memslot.py --gb 8`: **exit 1**, a single codegen refusal, not a gcc error:
+
+```
+line 959: <module>: a `case` pattern is a CLASS PATTERN (`case Point(x=0, y=1):`) ...
+  The pattern spelled `parser.OpName(...)` is not a value this path can compare ...
+```
+
+The refusal is raised by `_gen_stmt_MatchStmt` (`mojo/backend_gimple/emit_stmts.py`)
+through `formal/model.py`'s `match_pattern_kind` → `MATCH_REFUSED_KINDS` (`"class pattern"`,
+`model.py:5114`). So the `var_decl` error below is **not reached** on the current tree.
+
+Scope of the gap in this one file: 10 class-pattern arms (`analyzer.py` lines 956,
+1136–1161 of the source; `case parser.InstDef(name):` at 1136 is a POSITIONAL
+sub-pattern, which needs `__match_args__` on `parser.InstDef`).
+
+**Reachability probe (scratch copy only, not committed):** with the 8 class arms
+replaced by `case _ if False:`, the build reaches codegen and fails with exactly the
+two families this doc has always named:
+
+```
+analyzer.py:194:10: error: expected expression before '(' token        (Family B)
+analyzer.py:721:1:  error: non-trivial conversion in 'var_decl'        (Family A)
+```
+
+So Family A is still underneath, unchanged. The class-pattern refusal is the FIRST
+blocker, and it is what must go first.
+
+### Second defect found on the same path (interpreter, silently wrong)
+
+`myinterpreter.py` `execute_MatchStmt` (line 4583) evaluates the class pattern as an
+expression and compares with `==`, so `case Op():` CONSTRUCTS `Op()` rather than testing
+the subject's type. A zero-arg class silently matches the wrong thing; a class with a
+required `__init__` argument raises `TypeError: __init__() missing required argument`.
+Filed separately as `bugs/CODEGEN_match_class_pattern.md`.
+
+### Decision (taken; no reader input needed)
+
+Implement class patterns with CPython's semantics on both paths, rather than
+spelling the analyzer differently. Reasons: (a) `case Cls():` is the idiomatic
+spelling in the file that must compile, and this compiler exists to compile real
+CPython source; (b) rewriting the source would hide the refusal, not fix it, and
+CLAUDE.md forbids special-casing an input. Scope of the decision:
+- `case C():` → `isinstance(subject, C)`.
+- `case C(p1, ...)` → `isinstance` AND each positional sub-pattern checked against
+  `C.__match_args__[i]` (CPython's rule: positional needs `__match_args__`; a class
+  without it raises at runtime, so the compiler must refuse THAT shape with the
+  CPython message, not guess). Keyword sub-patterns `C(x=0)` stay refused for now
+  (the refusal text already exists and is correct).
+
+### Plan (exact files, ordering)
+
+1. **`formal/model.py`** — `match_pattern_kind` (line 5124) returns a new kind
+   `"class pattern (type test)"` for `C()` and for `C(positional-capture-only)`
+   whose class is known to define `__match_args__`; everything else keeps
+   `"class pattern"` in `MATCH_REFUSED_KINDS` (5114). Remove the matching
+   refusal branch ONLY for the new kind. Formal lane rule (FORMAL.md §11.3): the
+   structure first — the new kind is a statement with its `sorry`-free isinstance
+   lowering wired in the generator; if a proof leaf is needed, it is a named sorry.
+2. **`mojo/backend_gimple/emit_stmts.py` `_gen_stmt_MatchStmt`** — for the new
+   kind, the arm condition is `_lower_builtin_isinstance`'s result on
+   `subj_ref` and the class (reuse, do not re-implement: `emit_calls.py:2739`
+   already routes `isinstance` to `gen._lower_builtin_isinstance`). Positional
+   captures bind the `__match_args__` attribute of the subject, lowered like an
+   attribute read after the isinstance guard (short-circuit `&&`, so the attribute
+   read never runs on a non-instance).
+3. **`myinterpreter.py` `execute_MatchStmt`** (4583) — the same two shapes via
+   `isinstance` and `getattr(subject, '__match_args__')`; the TypeError for a
+   class without `__match_args__` uses CPython's message. Keyword sub-patterns
+   still raise the existing refusal.
+4. Re-run the probe on the UNMODIFIED analyzer copy (no `if False` rewrite): the
+   build must now reach `var_decl`. That is the stopping point for THIS plan;
+   Family A is the next round.
+
+### Tests (to be added with the change)
+
+- New `test_match_class_pattern.py` next to `test_python_source_mut_capture.py`:
+  fixtures for `case C():` true/false, `case C(x)` with a `__match_args__`
+  class, an unmatched subject, and a non-instance subject (`case C():` on an int).
+  Expected output taken from CPython 3.14. Interpreter (`fire.py run`) and compiled
+  (`fire.py build`) must both match it. FAILS before (interpreter constructs,
+  compiler refuses), PASSES after.
+- The `case C(x)` positional check must include a class WITHOUT `__match_args__`
+  and assert the CPython TypeError, so the refusal path is pinned, not silent.
+
+### What this round did NOT do
+
+No code change. The Family A `var_decl` fix (the list-element typing of `tkn`
+against `stmt.contents`' `list[lx.Token]`, the family this doc has always named)
+is not attempted: it is blocked on steps 1–3 above, and a wrong element-type guess
+silently reinterprets a pointer as a string. Stale citation noted, not fixed here: the Family B paragraph above
+cites a same-bare-name `Parser` collision doc that has no file under `bugs/`
+(symptom: `fire_compiler_Parser___init__` arity 2 vs 3). It should be rewritten to name
+that symptom, which is a follow-up for whoever next touches Family B.
+
 ## Status 2026-10-01 — the `var_decl` error below is STILL this file's own; but its `194: expected expression before '('` sibling is NOT, and belongs to a same-bare-name STRUCT collision
 
 Fresh `python3 fire.py build .tmp/ca/cases_generator/analyzer.py` (sources
