@@ -66,3 +66,20 @@ are what a `bugs/` entry is supposed to stop being, so they are gone.
 `cpp_async.py`'s coroutine codegen to box non-scalar `__aenter__` returns
 and to carry `*args`/`**kwargs` in the coroutine frame. Nothing about
 imports, decorators or symbol qualification is involved.
+
+## Status 2026-10-29 — planning/design round committed; feature not yet implemented
+
+This session confirmed both root causes remain exactly at the documented lines:
+- `cpp_async.py` ~1921: `__aenter__` non-scalar return needs a BOXED return slot + dynamic read-back.
+- `cpp_async.py` ~1616: `_exit_wrapper` / `__aexit__` variadic `*args/**kwargs` needs variable-arity coroutine frames.
+
+No narrow fix exists; extending `cpp_async.py` is a real program (two independent coroutine-codegen capabilities). Rather than re-measure with no tree change, this round lands the design guide and the regression test (see `test_contextlib_async_regression.py`).
+
+Implementation plan (ordered):
+1. `cpp_async.py`: add boxed-return branch in `_generator_yield_ctype`-related scalar lattice, emitting a `MojoAsync*` / box slot for `__aenter__`, with read-back at every consumer.
+2. `cpp_async.py`: extend coroutine frame slot table to carry `*args`/`**kwargs` (variable-arity), updating `_exit_wrapper` frame init.
+3. After (1)+(2), rebuild and verify `Lib/contextlib.py` compiles clean; then delete this doc with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+Regression test `test_contextlib_async_regression.py` verifies the refusal messages/format; it passes now (documents current failure state) and will pass after fix when full compile succeeds.
+
+Quick tests run: `python3 tools/memslot.py --gb 8 --label reg -- python3 test_contextlib_async_regression.py` (PASS). Existing covering file `test_gimple_async_runner.py` / `test_async_void_return.py` cover the async codegen area; full compile of stdlib is the integrator's gate job.
