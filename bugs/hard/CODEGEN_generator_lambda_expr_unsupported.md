@@ -753,9 +753,9 @@ longer hits ANY `LambdaExpr`/bound-method refusal — `MOJO_DEBUG=1` +
 `compile_to_gimple_with_cpp` against the real file shows the
 `LambdaExpr` refusal is gone; `_genops` now fails for a completely
 different, independent reason (a tuple-valued `yield`, tracked
-separately — see `bugs/CODEGEN_generator_function_Lib_pickletools.md`'s
-own 2026-08-20 update). This doc's OWN scope (the `LambdaExpr` gap
-itself) is fully closed for occurrence #1.
+separately — tracked by the mixed-arity tuple-valued `yield` fix and
+bytes-slice inference fix (both fixed on master). This doc's OWN scope
+(the `LambdaExpr` gap itself) is fully closed for occurrence #1.
 
 **Still open** — NOT closed for confirmed occurrence #2
 (`Tools/c-analyzer/c_common/fsutil.py`'s `iter_files`):
@@ -782,9 +782,9 @@ modulo the separate args/kwargs-forwarding gap.
 ## Status (added 2026-08-07, investigated, NOT attempted — feature-sized)
 
 This doc was referenced (as a dangling cross-reference — "referenced
-elsewhere... but never actually written") by
-`bugs/CODEGEN_generator_function_Lib_pickletools.md` and by task #140's
-own doc (`COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`). Written
+elsewhere... but never actually written") by the
+fixed compile blockers for pickletools.py (mixed-arity tuple yields and
+bytes-slice inference) and by task #140's own doc (`COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`). Written
 now since it meets this project's own "recurs ≥2 times" bar for a
 dedicated hard-bug doc: two independent confirmed real occurrences (see
 below), same root cause both times.
