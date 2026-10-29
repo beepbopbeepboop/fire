@@ -5,6 +5,100 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-29 — planning round: re-measured, sites located, guide for the next round; no code change)
+
+**Re-measured on this tree**, from the minimal repro (`.tmp`-scratch copy of the
+doc's own `deco(f) -> 99`, `@deco def step`, `print(step)` / `print(step(7))`):
+
+| | result |
+|---|---|
+| CPython 3.14.7 (doc) | `99`, then `TypeError: 'int' object is not callable` |
+| `python3 fire.py run` | `99`, then `Error: 'int' object is not callable`, exit 1 — **matches CPython; interpreter half stays fixed** |
+| `gimple_codegen.compile_to_gimple` (C emitted, not linked this round) | `print(step)` → `_t2 = (void *)_funcptr_step_9f63a2;` → `mojo_sprintf_ptr(...)` — **defect 2 stays fixed**. `print(step(7))` → `_t5 = step_9f63a2 (_t6);` where `_t6 = (int64_t)7` — **defect 3 is still there**: the call resolves the bare name to the UNDECORATED C symbol `step_9f63a2`, and `deco_9f63a2` is never called. |
+
+Defect 3's emitted call is the bug. Its runtime answer (`1` where CPython
+raises) was measured on 2026-10-02 and was not re-linked this round, so
+treat that number as inherited and re-check it when the fix lands.
+
+**Where the three defects live (the sites a next round edits, all measured):**
+
+- Decorator is stored and never applied on the GIMPLE path. Only
+  `staticmethod`/`classmethod`/`export`/`gpu`-family names are read by name
+  anywhere: `mojo/backend_gimple/module_gen.py:7020` (`'export'`),
+  `:7154-7156` (`'staticmethod'`/`'classmethod'`), `device_select.py:183-213`
+  (`_decorator_names`, the one place a call-shaped decorator is normalised).
+  Nothing turns `FunctionDef.decorators` into a rebinding.
+- Module-scope value read: `mojo/backend_gimple/emit_exprs.py:454`
+  `_lower_IdentExpr`. Its function-value arms are the BUILTIN_VALUE_MAP
+  branch (~`:575-584`, which sets `_func_value_names`, i.e. defect 2's fix),
+  then `_callable_value_symbol` (~`:612-628`), then `bare_global_read_plan`
+  (~`:637`) for `_<mod>_globals.<name>`. A module-scope decorated name would
+  go through the last of these, so the rebinding can reuse the global-field
+  path rather than a new one.
+- Bare-name call resolution: `mojo/backend_gimple/emit_funcs.py:2592`
+  `_func_csym` (mangled-key mirror, `_effective_param_types`,
+  `_overload_suffix`), used at the definition (`emit_funcs.py:625`) and at
+  the call sites `cpp_core.py:4034` and `emit_calls.py:7883-7920`. The
+  address-of arm is `cpp_core.py:1838`. **Every one of these resolves a bare
+  name to a function symbol without asking whether the name was rebound.**
+
+**Decisions the next round needs (with the readings):**
+
+1. *Rebinding model.* Recommended: a decorated module-level `def f` keeps its
+   C symbol `f_<csym>` as the undecorated body, and additionally emits a
+   module-scope variable `f` (a `_<mod>_globals` field, as for any module
+   `var`) initialised to `deco(f)` in source order. Call sites for a name
+   that is a rebound global read the variable and call through it
+   (`mojo_fnptr_call_N` / `MojoBoundMethod *` already exist for a
+   callable value). Alternative: rewrite the call site to `deco`'s result
+   at compile time. Rejected — it cannot represent a decorator that returns a
+   different callable on each call, and it duplicates the `_lower_IdentExpr`
+   closure-value path.
+2. *Defect 1 — the decorator's own parameter.* Currently typed `int64_t`
+   because the decoration is never a call site. Once step 1 emits
+   `deco(f)` as a call, the scalar observation pass sees a `FunctionDef` as
+   argument. **Measure before choosing:** the ordering hazard in
+   `CODEGEN_string_arg_type_lost_across_forwarding_hop.md` says the
+   observation pass runs before parameter refinement, so the decorator's
+   parameter may need the function-value type passed in explicitly, not
+   inferred.
+3. *Refusal (the cheap, independent partial fix).* `step` rebound to a
+   decoration whose inferred return is a scalar (`int64_t`/`char *`/`double`
+   …), then CALLED with `step(...)`, is currently silently wrong. Refusing
+   it at compile time is a real behaviour change and is safe on its own. It is
+   NOT a refusal of decorated `def`s in general (the 426-definition stdlib
+   measurement above rules that out). It can land BEFORE step 1, as a partial
+   fix: its test is a compile-refusal assertion in `test_gimple.py`.
+
+**Implementation plan (ordering, for the next round):**
+
+- (a) *Partial fix, lands first:* the refusal in step 3 above. Add the check
+  where the module-scope `FunctionDef` is registered (`module_gen.py`, near
+  the `_local_def_nodes` / `_direct_toplevel_names` build at `:3461`/`:3529`)
+  and raise the existing "unsupported" compile error. Test:
+  `test_gimple.py::decorated_scalar_rebind_called_is_refused` — compile the
+  repro, assert the error. Fails before, passes after.
+- (b) *Rebinding model:* emit the module-scope field and its
+  source-order `deco(f)` initialisation (`module_gen.py`, module-global
+  init emission); make `_func_csym`'s callers check a `rebound_globals` set
+  first (`emit_funcs.py:2592`). Test: `test_gimple.py` shape test that the
+  call site of `step` reads `_<mod>_globals.step` (NOT `step_<csym>`), plus
+  the interp oracle `interporacle` case already registered by the interpreter
+  half — the two must agree on `99`/`TypeError`.
+- (c) *Defect 1:* type the decorator's parameter from the new call site, per
+  decision 2. Test: the repro's `deco` parameter is not `int64_t` in the
+  emitted C for a decorator that takes a function.
+- (d) *Runtime check:* link and run the repro through `driver.compile_program`
+  (not the single-TU path) to confirm `TypeError`-equivalent output, since
+  CLAUDE.md says link-mode-only module bugs are invisible to the inline path.
+
+**The gate for this change is `make gate`, once, by the integrator** — the
+change touches `module_gen.py` and `emit_funcs.py`, which are on the
+compiled-path list in CLAUDE.md.
+
+Not landed this round. No code change; the planning round's output is this
+entry. The doc stays open.
+
 ## Status (2026-10-02, later — defect 2 is FIXED; the feature is not, and the remaining call-site defect is unchanged)
 
 Defect 2 below — the `sprintf("%d", (void *)ptr)` — is closed, and the entry
