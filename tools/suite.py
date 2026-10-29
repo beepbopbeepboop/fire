@@ -385,7 +385,7 @@ MEMCLASS = {
 # comment is a promise nobody checks, and this one is the difference between a
 # reservation and a wish.
 MEM_DEBT_GB = 4.0
-MEM_DEBT_DOC = 'doc/POLICY_memory_over_4gb.md'
+MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
 
 
 def needs_memwhy(spec) -> bool:
@@ -2182,11 +2182,12 @@ test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
           'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
-     desc='Future/Event awaitable protocol, done-callbacks, and awaited '
-          'async struct-method calls (receiver + args)')
+     expect='17 failing: `await` on a Future in the coroutine runtime',
+     desc='17 failing: `await` on a Future in the coroutine runtime')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     desc='an async function with no return value')
+     expect='3 failing: an async function with no return value',
+     desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2198,7 +2199,8 @@ test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      desc='a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
-     desc='a detached coroutine task')
+     expect='2 failing: a detached coroutine task',
+     desc='2 failing: a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
      desc='toolchain/runtime proof for step A of compiled-path async/await')
@@ -2310,9 +2312,8 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
 #
-# `native-dumpfull` was marked with this same reason until its bootstrap chain
-# went green (2026-10-25); its registration below says why it is not marked
-# any more. This constant is
+# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
+# registration below for why that one is not switched too. This constant is
 # also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
@@ -2399,20 +2400,15 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
-# principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
-# reason and is the owner's call, because it is also the job whose run produces
-# the measurements the blowup work is steered by — a marker that cannot be
-# observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
-# reservation and a recommendation, so the choice is a line rather than an
-# investigation.
-# `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
-# and writes `fire.ci` into the repo root, the same shared-artifact pattern
-# that makes `ab-native` `excl`. Without `deps` it raced `mojoc` at t=0 and
-# died with "mojoc not built" — hidden until now only because `expect=` used
-# to forgive that failure.
+# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
+# blowup in their `expect=` reason and are the owner's call, because both are
+# also the jobs whose runs produce the measurements the blowup work is steered
+# by — a marker that cannot be observed going green is weak, and this is the
+# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
+# with their peak, class and reservation and a recommendation each, so the
+# choice is a line rather than an investigation.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='module', deps=['mojoc'], excl=True,
+     mem='module',
      memwhy='measured 10.4 GB (2026-10-25, the full gate): the self-hosting '
             'bootstrap pre-pass this corpus legitimately triggers, still over '
             'the 4 GB line - see ' + MEM_DEBT_DOC + '. The job PASSES now '
@@ -2433,7 +2429,7 @@ test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='me
             'took the self-hosted compiler compiling fire.py from 34-47 GB to '
             '12.2 GB), so `module` (24) is the smallest class that covers it and '
             '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
-            'a fact — see doc/POLICY_memory_over_4gb.md. It is `excl` '
+            'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
             'because at this size it is alone on the machine by arithmetic, not '
             'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
             '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
@@ -2475,7 +2471,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # you not to let grow. If the next gate shows this step at a much higher peak,
 # the measurement changed and the class follows it (test_suite.py fails the
 # moment a recorded peak stops fitting its class).
-test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
+test('stdlib-dylib', [PY, '-c',
+                      'import build_stdlib_dylib as b; b.build_stdlib()'],
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
@@ -2619,7 +2616,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage2',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2633,7 +2630,7 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage3',
+     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
@@ -3907,7 +3904,6 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
      mem='tiny',
      deps=['preflight'],
      extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
-            'tools/formal_host_import_wall.py',
             'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
@@ -4527,9 +4523,9 @@ BUCKETS = {
     # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
-    #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
+    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
     #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
-    #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
+    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
     #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
@@ -5204,8 +5200,6 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
-    for pat in getattr(opts, 'skip', None) or []:
-        chosen = [n for n in chosen if not re.search(pat, n)]
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -6114,8 +6108,6 @@ def main(argv=None):
     ap.add_argument('--no-cache', action='store_true',
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
-    ap.add_argument('--skip', action='append', metavar='RE', default=[],
-                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')

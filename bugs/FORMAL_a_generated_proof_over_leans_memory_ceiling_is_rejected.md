@@ -249,7 +249,7 @@ Three things follow, and they are the whole of what is now known:
 2. **The ceiling is not too small.** With `-M` lifted the same file crosses
    **8 GB of RSS** and is killed. Raising `LEAN_MEMORY_MB`
    (`formal/lean.py`) converts a loud rejection into the memory debt
-   `doc/POLICY_memory_over_4gb.md` is about. The doc's option 1 was
+   `bugs/PERF_memory_over_4gb_is_a_bug.md` is about. The doc's option 1 was
    the wrong lever and this is the measurement that says so.
 3. **The memory is `native_decide` and `bv_decide`, in the theorem body.**
    The universal theorem's body — everything after the record — carries 16

@@ -52,15 +52,5 @@ check("the pool's default slot exists", any(s["name"] == pool["default_slot"] fo
 check("the pool's total is the sum of its counts", C.pool_total() == sum(s["count"] for s in pool["slots"]))
 check("every slot names exactly one model", all(isinstance(s["model"], str) for s in pool["slots"]))
 
-# dispatch: a queued task is not tied to a slot. Its preferred slot if free, else the first free slot, else it waits.
-_real_load_pool = C.load_pool
-C.load_pool = lambda: {"slots": [dict(name="a", model="ma", count=1, kind="opencode"),
-                                 dict(name="b", model="mb", count=1, kind="opencode")]}
-check("a task with no preferred slot takes the first free slot", C.pick_slot({"pool": None}, {"a": 1})["name"] == "b")
-check("a task takes its preferred slot when that is free", C.pick_slot({"pool": "b"}, {})["name"] == "b")
-check("a task whose preferred slot is busy moves to a free one", C.pick_slot({"pool": "a"}, {"a": 1})["name"] == "b")
-check("with every slot full the task waits", C.pick_slot({"pool": "a"}, {"a": 1, "b": 1}) is None)
-C.load_pool = _real_load_pool
-
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)

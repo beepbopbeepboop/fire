@@ -133,7 +133,6 @@ typedef struct { void *fn; void *self; int64_t n_fixed; int64_t kind; int64_t ha
 MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
                                  int64_t has_env);
 int mojo_is_vararg_fn(void *p);
-int mojo_is_callable_word(int64_t v);
 /* Packing entry points. `kw` is the call site's keyword arguments already
  * packed into a MojoDict (NULL when the call site passed none); it is
  * IGNORED unless the callee declares `**kwargs`, so an ordinary call site
@@ -567,12 +566,6 @@ void mojo_cleanup_push_list_strs(void *p);
 /* A closure's bound method and its environment are one allocation unit; this
  * is the unwind thunk that frees both (see mojo_closure_free). */
 void mojo_cleanup_push_closure(void *p);
-/* A class-attribute cell global (see emit_methods._cattr_restore_begin): `slot`
- * is the address of the global and `saved` the cell pointer it held on entry
- * to the function. Unwinding past this thunk writes `saved` back, so a caller
- * whose own class-name reads go through the global gets its cell back even
- * when the exception is caught by a function that never restores it. */
-void mojo_cleanup_push_cattr(void **slot, void *saved);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -678,14 +671,6 @@ MojoList *mojo_str_chars(char *s);
  * `list(5)` printed `[]` and a loop body silently never ran). CPython names
  * the offending type here and this cannot — see the definition. */
 MojoList *mojo_iter_boxed_list(int64_t v);
-MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
-/* Compiled-generator signatures (filled by each unit's constructor) and the
- * live-handle table behind a dynamic call; see the definitions. */
-void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy, int vkind, int np,
-                           const char *const *names, int first_kwonly, const int64_t *defaults,
-                           const unsigned char *has_default);
-MojoList *mojo_iter_gen_handle(int64_t w);
-int64_t mojo_gen_default_word(void *start, int64_t idx);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
@@ -704,7 +689,6 @@ int mojo_is_tuple(MojoList *l);
  * `mojo_list_inherit_kinds` is what every list->list copy calls, so
  * `list(t)` / `t[:]` / `t + t` of a heterogeneous list stay describable. */
 void        mojo_list_set_kinds(MojoList *l, const char *kinds);
-void        mojo_list_set_kinds_uniform(MojoList *l, char kind);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
@@ -772,16 +756,6 @@ int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
 int         mojo_is_boxed(int64_t v);
 double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
-/* A double that must travel in an int64_t slot beside integers (see
- * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
- * is the word. mojo_repr_boxed / mojo_box_double read it back. */
-int64_t     mojo_box_from_double(double v);
-/* The result of `+`, `-` or `*` where one operand is a float-possible
- * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
- * answer and `dres` the double answer, both already computed. Returns a fresh
- * double box holding `dres` when either raw operand word is a double box, and
- * `ires` otherwise, so the caller never allocates on the integer path. */
-int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float
@@ -889,8 +863,6 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
-char       *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop);
-int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop, char *needle);
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
  * value, decided by the value itself. See the definition. */
 int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
@@ -1530,11 +1502,6 @@ void        mojo_raise_index_error(char *detail);
 /* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
  * raiser, same mechanism and same tag derivation as the five above. */
 void        mojo_raise_not_implemented(char *detail);
-/* Raises a real, catchable ZeroDivisionError ("ZeroDivisionError: division by
- * zero") — the same mechanism and tag derivation as the raisers above. Reached
- * only through mojo_int_divisor below, which every integer `/`, `%` and `//`
- * lowering routes its divisor through. */
-void        mojo_raise_zero_division(void);
 /* The codegen's half of that decision, for the ONE case where a silent answer
  * is the wrong one: a call on a module this compile never compiled
  * (`import argparse` + `argparse.ArgumentParser(...)`). That used to answer
@@ -1614,11 +1581,6 @@ char       *mojo_dict_pop_bytes_str(MojoDict *d, MojoBytes *key, char *dflt);
 double      mojo_dict_pop_bytes_double(MojoDict *d, MojoBytes *key, double dflt);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
-/* Call a function value with a packed `MojoList *` of positional arguments and a
- * `MojoDict *` of keywords (either may be NULL); see the definition. */
-int64_t   mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw);
-MojoList *mojo_args_extend_word(MojoList *dst, int64_t src);
-MojoDict *mojo_kwargs_merge_word(MojoDict *dst, int64_t src);
 
 /* Dict iterator — advance, then read key/value via accessor calls.
  * Walks in insertion order (via `order`, from mojo_dict_order_indices()),
@@ -1929,7 +1891,6 @@ char *mojo_cstr_repeat(char *s, int64_t n);
 
 /* Additional Python builtins */
 int64_t mojo_len(int obj);
-int64_t mojo_len_word(int64_t v);   /* len() of a word of unknown kind */
 void *mojo_range(int64_t start, int64_t stop);
 void *mojo_range3(int64_t start, int64_t stop, int64_t step);
 void *mojo_enumerate(void *iterable);
@@ -2182,30 +2143,10 @@ static inline int64_t _Bool_select(int64_t cond, int64_t a, int64_t b) {
 }
 
 /* ── Integer arithmetic helpers ──────────────────────────────────────────
- * Every integer `/`, `%` and `//` divides by the value this returns for its
- * divisor: a zero divisor RAISES ZeroDivisionError (catchable, like Python)
- * instead of reaching the C division, which on arm64 silently answers 0. The
- * raise longjmps out, so the nonzero return is the only value that reaches
- * the division. */
-static inline int64_t mojo_int_divisor(int64_t b) {
-    if (b == 0) mojo_raise_zero_division();
-    return b;
-}
-
-/* Lowered floor-division for use in __GIMPLE code. */
+ * Lowered floor-division for use in __GIMPLE code.                      */
 static inline int64_t __mojo_floordiv(int64_t a, int64_t b) {
-    b = mojo_int_divisor(b);
     int64_t q = a / b;
     return q - (a % b != 0 && (a ^ b) < 0);
-}
-
-/* Lowered integer `%` with Python's floor semantics: the result takes the
- * divisor's sign, where C's `%` truncates toward zero. Signed operands only;
- * an unsigned `%` is already floored. */
-static inline int64_t __mojo_floormod(int64_t a, int64_t b) {
-    b = mojo_int_divisor(b);
-    int64_t r = a % b;
-    return r + (r != 0 && (r ^ b) < 0) * b;
 }
 
 /* ── Python exception type sentinels (bootstrap) ────────────────────────
@@ -2297,10 +2238,6 @@ int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*
 MojoList *int64_t_path_split(char *path);              /* os.path.split(path) -> [head, tail] */
 MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(path) -> [drive, tail] */
 MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
-MojoList *mojo_os_walk(char *top);                      /* os.walk(top) -> list[(str, list, list)] */
-int64_t   mojo_os_walk_w(int64_t top);                  /* the same, as a callable VALUE (int64_t ABI) */
-MojoList *mojo_glob(char *pattern);                     /* glob.glob/iglob(pattern) -> list[str] */
-int64_t   mojo_glob_w(int64_t pattern);                 /* the same, as a callable VALUE */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 

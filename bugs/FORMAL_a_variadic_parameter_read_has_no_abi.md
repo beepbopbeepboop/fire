@@ -219,7 +219,7 @@ The emitters and the Lean model must move together, and `lib/ProofLib.lean` is t
 27 MB `ProofLib.olean` every proof-checking path links against: `formal/lean.py`'s own measured
 table records that build at **112 s wall and a 7.82 GB peak**, which does not fit the 8 GB a
 light worker is given here, and this repository's standing rule is that anything over 3-4 GB is a
-bug rather than a fact (`doc/POLICY_memory_over_4gb.md`). `formal/lean.py::run_lean` is
+bug rather than a fact (`bugs/PERF_memory_over_4gb_is_a_bug.md`). `formal/lean.py::run_lean` is
 not to be launched by this class of worker at all. Landing the runtime half alone would leave
 every existing proof RED on any variadic function, silently — which is the honest intermediate
 state a document should describe and not a state a commit should create.

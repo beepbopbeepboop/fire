@@ -211,7 +211,7 @@ def _walk(node):
 
     Deliberately NOT a generator, and the reason is the same one
     `mojo/middle/coro.py`'s identically-named `_walk` gives (see its
-    docstring, and commit e8a7135b8):
+    docstring, and bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md):
     a `yield`/`yield from` function compiles to a real stack-switching
     coroutine in this codegen, and the A3 runtime cannot have a
     `mojo_raise()` longjmp across one. That is a liveness hazard, but the

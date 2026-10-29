@@ -34,7 +34,7 @@ Run: `python3 fire.py build gs2.mojo -o gs2 && ./gs2`
 
 ## Related
 
-A variant that calls `x.byte_length()` before the return builds and then fails at **link**: `Undefined symbols: "_Span_byte_length", referenced from: _get_sign_… `. That is the imported-generic "calls nothing defines" class: see commit 13677510f. The repro above avoids it on purpose.
+A variant that calls `x.byte_length()` before the return builds and then fails at **link**: `Undefined symbols: "_Span_byte_length", referenced from: _get_sign_… `. That is the imported-generic "calls nothing defines" class: see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`. The repro above avoids it on purpose.
 
 ## Root cause (found 2026-10-28)
 

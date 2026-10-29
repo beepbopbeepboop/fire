@@ -479,10 +479,6 @@ def _quick_type(gen, node) -> str:
         # callee return-type correction.
         if fname in gen._generator_api:
             return 'MojoGenerator *'
-        # A nested generator reading enclosing names (keyed by its enclosing
-        # def, like the nested async closure -- see _nested_generator_api).
-        if (getattr(gen, '_local_inference_func', None), fname) in gen._nested_generator_api:
-            return 'MojoGenerator *'
         # Same construction-shape rule for a generator reached through an
         # ALIASED/qualified cross-module import (`from a import walk as
         # walk_a`): the binding table records exactly the names THIS module
@@ -1254,8 +1250,8 @@ def _infer_return_elem_type(gen, body, func_def=None,
     # element inference depending on module processing order.
     _saved = (gen.var_types, gen._elem_types, gen._dict_val_types,
               gen._actual_types, getattr(gen, '_prepass_struct', None))
-    # Phase 4 (the `_walk_ast` re-scan bug,
-    # closed): the per-call seed used to be built by iterating the
+    # Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    # rescan.md): the per-call seed used to be built by iterating the
     # ENTIRE tree-shared `func_return_types` dict one setdefault at a
     # time — O(|func_return_types|) interpreted work on EVERY call, and
     # Pass 2c calls this once per function per fixpoint iteration per
@@ -1441,29 +1437,6 @@ def _is_confident_scalar(gen, value) -> bool:
 
 
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
-    # A call through a local lambda is answered from the same table the
-    # return-type inference reads (see `_lambda_call_ret_table`): `r = f()`
-    # with `f = lambda: False` is `_Bool`, not the `int64_t` an unknown callee
-    # defaults to. Scoped to this one body, and the table it replaces is put
-    # back when it is done.
-    from mojo.middle.infra_infer import _lambda_call_ret_table
-    _scratch_mark: int = gen._scan_scratch_top
-    _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
-    gen._lambda_call_ret_types = _lambda_call_ret_table(gen, func.body or [])
-    # The def whose locals are being typed: a call to one of its nested
-    # generators (`it = g(2)`, `_nested_generator_api`) is a generator handle
-    # only in that scope. Scoped to this body, like the table above.
-    _saved_lif = getattr(gen, '_local_inference_func', None)
-    gen._local_inference_func = _as_str(func.name)
-    try:
-        return _infer_local_var_types_core(gen, func)
-    finally:
-        gen._lambda_call_ret_types = _saved_lr
-        gen._local_inference_func = _saved_lif
-        gen._scan_scratch_top = _scratch_mark
-
-
-def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
     """Infer local variable types from all assignments in function body.
 
     Scans all assignments to determine the variable's actual type needs.
@@ -1812,8 +1785,8 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
 def _calls_in_stmts(gen, stmts, out):
     """Collect every CallExpr reachable from a statement list.
 
-    Phase 4 (the `_walk_ast` re-scan bug,
-    closed): the traversal is a pure function of each top-level
+    Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    rescan.md): the traversal is a pure function of each top-level
     statement's subtree (`_collect_calls` reads no mutable gen state —
     its only gen call, `_fstring_sub_exprs`, re-parses the literal's own
     text from scratch), and every consumer of the collected list only
@@ -2119,7 +2092,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
     `int64_t`, `var it = empty[Int]()` types `it` as a boxed integer, and
     `next(it)` has no receiver type to dispatch the iterator protocol
     through — the refusal in `emit_calls.py::_lower_call` (see
-    the user-iterator next() bug (doc deleted in db724c4d6)).
+    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
 
     Nothing here INFER anything new: it is the already-shipped materializer
     applied at the one further site that needed it, and an annotation naming

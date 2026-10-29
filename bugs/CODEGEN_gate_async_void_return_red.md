@@ -2,7 +2,7 @@
 
 ## Status
 
-OPEN. Found in the full `make gate` run on the `get_sign` String-argument fix (`974d0e538`, landed 2026-10-28 with the gate red). The failure is not confirmed to come from that fix: `mojoc` is red on master as well (the imported-function trailing-default drop, which made `mojoc`'s `compile_to_gimple` call three-argument; fixed on `work/bug-codegen-imported-function-default-ar`), and the other jobs are not compared against master yet.
+OPEN. Found in the full `make gate` run on the `get_sign` String-argument fix (`974d0e538`, landed 2026-10-28 with the gate red). The failure is not confirmed to come from that fix: `mojoc` is red on master as well (see `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`), and the other jobs are not compared against master yet.
 
 ## Gate output (first lines)
 
