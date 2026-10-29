@@ -39,7 +39,7 @@ blocker, and it is what must go first.
 expression and compares with `==`, so `case Op():` CONSTRUCTS `Op()` rather than testing
 the subject's type. A zero-arg class silently matches the wrong thing; a class with a
 required `__init__` argument raises `TypeError: __init__() missing required argument`.
-Filed separately as `bugs/CODEGEN_match_class_pattern.md`.
+The interpreter evaluates `case C()` as a constructor and compares by `==`; the compiled path refuses class patterns by name — the two front ends disagree about what the pattern means.
 
 ### Decision (taken; no reader input needed)
 
