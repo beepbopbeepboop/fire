@@ -72,5 +72,21 @@ class StaleVerdictRows(unittest.TestCase):
              ('keeps', 'lean-rejected'), ('varies', 'proved')])
 
 
+    def test_deleted_bug_doc_specific_citations_rewritten(self):
+        import dangling_doc_refs as d
+        _, by_doc, by_file = d.find()
+        # The two citations this bug named must be rewritten by symptom,
+        # not by deleted doc path (see the deleted bug doc for context).
+        gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
+                 'every_amount_above_8.md'),
+                ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
+                 'amount_above_8.md')}
+        still = [f'{f}: {n}' for f, n in sorted(gone)
+                 if any(n == d for _, d in by_file.get(f, ()))]
+        self.assertEqual(still, [],
+                         f'still cited by deleted doc path: {still}; '
+                         'rewrite by symptom (commit or doc name)')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -5427,9 +5427,9 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     listed is indistinguishable from an open one to whoever reads the queue
     next. It has a cost nobody was measuring, though, and the first instance
     found was a test file's module docstring sending a reader to a file that is
-    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
-    the write-up, rewritten after the walk turned out to be a hundred times
-    bigger than the two places it named.
+    not there. A deleted bug doc (rewritten after the walk turned out
+    to be a hundred times bigger than the two places it named) is the
+    write-up for this check.
 
     So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
     the walk rather than about the corpus, which is the only shape that can
