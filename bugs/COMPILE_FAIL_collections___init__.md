@@ -696,3 +696,14 @@ related to `Counter.__init__`'s `*args, **kwds` signature or its
 `class Counter(dict):` (subclassing a BUILTIN type, not a user struct —
 possibly the same general class of gap as `OrderedDict.__new__`'s `dict.
 __new__(cls)` above).
+
+## Status (2026-10-29 — work/bug-compile-fail-collections-init — PARTIAL, feature gap still open)
+
+Verified fresh: 3-arg `type('T', (tuple,), ns)` lowers to `mojo_type(_t1,_t2,_t7)`
+(3 args to a 1-arg runtime `int mojo_type(int obj)` at runtime/fire_runtime.c:8601),
+so the compile fails with "too many arguments to function 'mojo_type'; expected 1, have 3".
+Regression pin `test_regress_collections_type_3arg.py` passes (catches the expected failure).
+Real fix needs: (1) runtime 3-arg `mojo_type` (or new `mojo_type_3`) that creates a
+new struct/class from name/bases/namespace; (2) lowering verification that the
+emitted C uses the right symbol. This is feature-sized, not a narrow codegen fix.
+Doc kept open; no `git rm`.
