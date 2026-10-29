@@ -1150,6 +1150,56 @@ def main():
 main()
 """, "the static scan could not type at all")
 
+    # A parameter's ELEMENTS reach the yield through a for-loop target, not the
+    # parameter itself. The two call sites disagree (a str list and an int
+    # list), so `xs` is in `_CALLSITE_PARAM_CONFLICTS`; `for x in xs: yield x`
+    # yields `x`, which `_ambiguous_yielded_params` did not map back to `xs`,
+    # so the generator was NOT refused, the yield slot took the int64_t
+    # default, and the str printed as its heap address: `4297813824` where
+    # CPython prints `p`, exit 0. Measured before the fix. The honest outcome
+    # is a refusal.
+    test_generator_refused("generator_loop_target_over_conflicted_param_is_ambiguous", """\
+def gen(xs):
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", "do not all pass the same statically-known type")
+
+    # The `enumerate` sibling, and the control that keeps the fix narrow: only
+    # the ELEMENT slot of `enumerate(xs)` aliases `xs`. Yielding the index
+    # never reads the list, so the same conflicted call sites must still
+    # compile, and must print exactly what CPython prints. Refusing this
+    # would be over-refusal of a correct program.
+    test_generator_matches_cpython("generator_enumerate_index_over_conflicted_param_still_compiles", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""")
+
     # The CONTROL for both rows above, and the reason the fix is not "refuse
     # every generator with an unannotated parameter": the same generator
     # called with explicit, individually-typed arguments still resolves, and
