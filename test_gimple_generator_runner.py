@@ -1965,6 +1965,38 @@ def main():
 """, "unpack call argument is not supported")
 
 
+def run_nested_generator_capture_tests():
+    # A generator defined INSIDE another def that reads one of that def's
+    # parameters or locals. The coroutine path has no capture model for a
+    # generator frame, so the body used to name the enclosing variable at
+    # file scope and g++ failed on the generated .cpp ("'name' was not
+    # declared in this scope"). Now an honest refusal naming the variables.
+    # The f-string case is the one that matters for c-analyzer's
+    # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
+    # the f-string as one raw literal.
+    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
+def build_section(name: String, n: Int):
+    def render():
+        yield f'{name}:'
+        for i in range(n):
+            yield 'row'
+    return render
+
+
+def main():
+    render = build_section('x', 2)
+    for x in render():
+        print(x)
+""", "variable(s) n, name")
+    test_generator_refused("nested_generator_reads_enclosing_local_refused", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+    return g
+""", "variable(s) total")
+
+
 def run_tests():
     run_callable_param_tests()
     run_lambda_capture_tests()
@@ -1974,6 +2006,7 @@ def run_tests():
     run_next_method_tests()
     run_next_return_position_tests()
     run_module_global_generator_tests()
+    run_nested_generator_capture_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning

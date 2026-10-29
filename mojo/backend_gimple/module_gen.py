@@ -73,6 +73,7 @@ import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_calls as _gmi_emit_calls
+import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.funcs_shared import param_default_pairs
@@ -3350,6 +3351,9 @@ def gen_module_impl(self, stmts):
         if isinstance(n, FunctionDef):
             if n.is_generator: _generator_fns[id(n)] = n
             if n.is_async: _async_fns[id(n)] = n
+    # Nested generators that read an enclosing def's variables: refused by
+    # _gen_cpp_generator_unit (see cpp_async._nested_generator_captures).
+    self._nested_gen_captures = _gca._nested_generator_captures(stmts)
     # The node ids of every FunctionDef that is a STRUCT METHOD. The
     # free-function generator loops below iterate `_generator_fns` (built
     # from `_walk_ast`, so it necessarily includes methods) and must not
