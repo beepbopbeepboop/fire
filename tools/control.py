@@ -480,9 +480,15 @@ def pick_model(preferred, busy=None):
 
 
 def limit_hit(t):
+    """True only when the worker's own error lines say so: an `Error:` line from the model/provider. A worker that
+    READ a file mentioning a rate limit or a quota is not limited (2026-10-28: a read of coro.py marked OpenRouter's
+    free router dead for a day)."""
     lp = os.path.join(t["worktree"], "work.log")
-    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]) if os.path.exists(lp) else ""
-    return bool(LIMIT_ERR.search(tail))
+    if not os.path.exists(lp):
+        return False
+    lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
+    errs = [l for l in lines if re.match(r"\s*Error:", l)]
+    return any(LIMIT_ERR.search(l) for l in errs)
 
 
 def dead_on_arrival(t):
