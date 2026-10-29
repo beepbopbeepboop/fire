@@ -4969,6 +4969,8 @@ class GimpleGen:
         return gst._gen_stmt_IfStmt(self, node)
     def _gen_stmt_DelStmt(self, node):
         return gst._gen_stmt_DelStmt(self, node)
+    def _gen_stmt_StructDef(self, node):
+        return gst._gen_stmt_StructDef(self, node)
     def _gen_stmt_MatchStmt(self, node):
         return gst._gen_stmt_MatchStmt(self, node)
     def _gen_stmt_WhileStmt(self, node):

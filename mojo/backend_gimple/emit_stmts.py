@@ -200,6 +200,8 @@ def gen_stmt(gen, node):
         gen._gen_stmt_MatchStmt(node)
     elif isinstance(node, gimple_ctypes.DelStmt):
         gen._gen_stmt_DelStmt(node)
+    elif isinstance(node, gimple_ctypes.StructDef):
+        gen._gen_stmt_StructDef(node)
     else:
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
         gen._emit(f"  /* TODO: {node_kind} */")
@@ -3131,6 +3133,51 @@ def _gen_stmt_IfStmt(gen, node):
         # (GIMPLE rejects a label with no predecessors) and let the
         # caller's own `_last_was_terminal` handling suppress dead code.
         gen._last_was_terminal = True
+
+
+def _gen_stmt_StructDef(gen, node):
+    """A `class` statement, reached only when it sits inside a function body
+    (a module-level StructDef is emitted by gen_module, never through
+    gen_stmt). The class body runs when the statement executes, so each
+    class-level attribute is stored into its `_classattr_` global HERE, as
+    `ClassName.attr = <value>`, evaluated in the function's own scope.
+
+    Without this the statement lowered to the `/* TODO: StructDef */`
+    no-op and the global was never assigned: a class attribute whose value
+    names an enclosing local (`def f(version=5): class A: __version__ =
+    version`) read 0 at exit 0. module_gen seeds the global at module scope
+    only for literal values, which that scope can evaluate; a non-literal
+    value is left to this store.
+
+    The registry decides WHICH attributes are class attributes
+    (`gen._class_attrs[node.name]`, filled by module_gen), so the
+    classification is not repeated here. Only attributes that carry a value
+    are stored: a no-initializer container field has its default seeded by
+    the allocator, and must not be overwritten with a missing value.
+
+    Semantics kept deliberately narrow: one global per class, so an
+    instance built in one call and read after a later call of the same
+    function sees the later call's value. Each call's own reads right after
+    its `class` statement are correct.
+    """
+    cattrs = gen._class_attrs.get(node.name)
+    if not cattrs:
+        return
+    for field in node.fields:
+        if isinstance(field, gimple_ctypes.AssignStmt) \
+                and isinstance(field.target, gimple_ctypes.IdentExpr):
+            aname = field.target.name
+        elif isinstance(field, gimple_ctypes.VarDecl) and field.value is not None:
+            aname = field.name
+        else:
+            continue
+        if aname not in cattrs:
+            continue
+        gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
+            target=gimple_ctypes.MemberExpr(
+                obj=gimple_ctypes.IdentExpr(name=node.name, line=node.line),
+                member=aname, line=node.line),
+            value=field.value, line=node.line))
 
 
 def _gen_stmt_DelStmt(gen, node):

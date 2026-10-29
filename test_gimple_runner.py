@@ -12439,3 +12439,22 @@ def mk(n: int):
 def main():
     print(mk(10))
 """, "11\n")
+
+
+def test_nested_class_attr_reads_enclosing_local_regression():
+    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+    A class-level attribute whose value names an enclosing function's local
+    was lowered as a `class` statement no-op, so the attribute stayed 0 at
+    exit 0. The class statement must store the value when it executes. Each
+    call reads its own value right after its `class` statement, so the two
+    calls must each print their own argument."""
+    test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
+def tag(version: int):
+    class Tag():
+        __version__ = version
+    return Tag().__version__
+
+def main():
+    print(tag(5))
+    print(tag(7))
+""", "5\n7\n")
