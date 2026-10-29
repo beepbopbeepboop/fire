@@ -3394,6 +3394,19 @@ def _declares_its_own_scope(s) -> bool:
 
 # ── lowering ───────────────────────────────────────────────────────────
 
+def _dotted_name(expr) -> str | None:
+    """`a.b.c` as the string 'a.b.c' for a plain name or attribute chain, or
+    None for anything else (a call, a subscript, ...)."""
+    if isinstance(expr, N.IdentExpr):
+        return _cm_as_str(expr.name)
+    if isinstance(expr, N.MemberExpr):
+        _base = _dotted_name(expr.obj)
+        if _base is None:
+            return None
+        return _base + '.' + _cm_as_str(expr.member)
+    return None
+
+
 def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     """Static yield-C-kind of a call ARGUMENT expression, or None when it
     can't be told purely syntactically. Literals, a unary +/- of a literal,
@@ -3444,7 +3457,8 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _scan_callsite_param_kinds(stmts: list) -> None:
+def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
+                               module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
     `_CALLSITE_PARAM_CONFLICTS` (the same, minus the resolvable cases) and
     `_PLAIN_CALLSITE_PARAM_KINDS` (ordinary `def`s) from a whole-module scan
@@ -3624,8 +3638,49 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
             seen[_n] = {}
         _collect()
 
-    def _collect():
-        for s in stmts:
+    # The bare names that the closure module currently being walked binds to
+    # THIS module's generators with an un-aliased `from <module_name> import g`.
+    # A bare `g(...)` counts only when the walk's own module made that import,
+    # so a same-named `g` from any other module is never mistaken for it.
+    _bound_here: set = set()
+
+    def _visit_closure_call(node, caller_env):
+        # A call from ANOTHER module of the import closure, counted in two
+        # spellings only: `<this module>.<generator>(...)` and a bare
+        # `<generator>(...)` bound by `from <this module> import <generator>`.
+        # Both name this module's generator without any other table, so they
+        # cannot collide with a same-named generator elsewhere. An aliased
+        # import is not counted, and neither is a call through a value; those
+        # stay holes, as they always were.
+        fn = node.func
+        if isinstance(fn, N.MemberExpr):
+            _hit = (fn.member in gen_names and module_name is not None
+                    and _dotted_name(fn.obj) == module_name)
+        elif isinstance(fn, N.IdentExpr):
+            _hit = _cm_as_str(fn.name) in _bound_here
+        else:
+            _hit = False
+        if _hit:
+            _visit_call(node, caller_env)
+
+    def _from_bound_names(src):
+        names = set()
+        if module_name is None:
+            return names
+        for s in src:
+            if not isinstance(s, N.FromImportStmt) or getattr(s, 'wildcard', False):
+                continue
+            if _cm_as_str(s.module) != module_name:
+                continue
+            for _fp in (getattr(s, 'name_alias_strs', None) or []):
+                _rn = gimple_ctypes._fi_name(_fp)
+                _ra = gimple_ctypes._fi_alias(_fp)
+                if not _ra and _rn in gen_names:
+                    names.add(_rn)
+        return names
+
+    def _collect_from(src, visit):
+        for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
                 fns.append((s, None))
@@ -3649,12 +3704,19 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
                 cenv = _static_env(fn, sdef)
                 for n in _walk(fn):
                     if isinstance(n, N.CallExpr):
-                        _visit_call(n, cenv)
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
                 for n in _walk(s):
                     if isinstance(n, N.CallExpr):
-                        _visit_call(n, None)
+                        visit(n, None)
+
+    def _collect():
+        _collect_from(stmts, _visit_call)
+        for _cs in closure_stmts:
+            _bound_here.clear()
+            _bound_here.update(_from_bound_names(_cs))
+            _collect_from(_cs, _visit_closure_call)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must
@@ -3741,10 +3803,18 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
     _classify()
 
 
-def lower(stmts: list) -> tuple[list, list]:
+def lower(stmts: list, closure_stmts=(),
+          module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
         {'name', 'base', 'params' (list of C types), 'value_ctype',
          'body_name', 'nargs'}
+
+    `closure_stmts` is the statement list of every OTHER module already in
+    the import closure (its importers, in compile order), and `module_name`
+    is this module's name as the importers spell it. Together they let a
+    `<module_name>.<gen>(args)` call made from there type the generator's
+    parameters, and so its yield slot -- see `_scan_callsite_param_kinds`.
+    Without them an imported generator only ever sees its own module's calls.
     """
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
@@ -3799,7 +3869,7 @@ def lower(stmts: list) -> tuple[list, list]:
     # Before `_scan_callsite_param_kinds`, which reaches the table through
     # `_argkind` to type a call argument that is itself a call.
     _scan_func_ret_kinds(stmts)
-    _scan_callsite_param_kinds(stmts)
+    _scan_callsite_param_kinds(stmts, closure_stmts, module_name)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _scan_unthreadable_nested_async_gens(stmts)
     _prop_names = _seed_prop_names(stmts)

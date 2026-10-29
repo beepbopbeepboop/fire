@@ -7,10 +7,20 @@
 # Status of the cases (2026-10-29, measured on this tree):
 #   module_qualified_str_param       PASSES -- `m.f('abcd')` types as char *
 #                                    across the boundary; pinned so it stays so.
-#   imported_generator_yields_str    FAILS  -- the importer's loop variable
-#                                    over `m.gen(['p', 'q'])` is untyped, so the
-#                                    yielded `char *` prints as its address.
-#                                    This is the live wrong answer; see the doc.
+#   imported_generator_yields_str    PASSES -- the importer's `m.gen(['p', 'q'])`
+#                                    call site types the child generator's yield
+#                                    slot (coro.lower's closure call sites).
+#                                    Failed before that change: the yielded
+#                                    `char *` printed as its address.
+#   imported_generator_yields_str_via_from_import
+#                                    PASSES -- the same, reached through
+#                                    `from m import gen`.
+#   imported_generator_yields_int    PASSES -- the int spelling, pinned.
+#
+# Not covered here (still wrong, see the doc): a call site in a module the
+# child is not compiled under (an aliased import, or a value passed on through a
+# parameter), and mixed str/int call sites of one generator (also wrong in a
+# single module; bugs/CODEGEN_generator_mixed_element_call_sites_miscompile.md).
 #
 # Scratch files go under TMPDIR (the worktree's .tmp/), never a fixed path.
 
@@ -58,6 +68,34 @@ CASES = [
         '        print(v)\n'
         'main()\n',
         'p\nq\n',
+    ),
+    (
+        # The same generator reached through `from m import gen`: the importer
+        # binds the bare name, and the call site is still the only evidence.
+        'imported_generator_yields_str_via_from_import',
+        'def gen(xs):\n'
+        '    for x in xs:\n'
+        '        yield x\n',
+        'from m import gen\n'
+        'def main():\n'
+        '    for v in gen(["p", "q"]):\n'
+        '        print(v)\n'
+        'main()\n',
+        'p\nq\n',
+    ),
+    (
+        # The int spelling of the same shape: already right before the fix,
+        # pinned so the new call-site typing cannot turn it into a pointer.
+        'imported_generator_yields_int',
+        'def gen(xs):\n'
+        '    for x in xs:\n'
+        '        yield x\n',
+        'import m\n'
+        'def main():\n'
+        '    for v in m.gen([1, 2, 3]):\n'
+        '        print(v)\n'
+        'main()\n',
+        '1\n2\n3\n',
     ),
 ]
 
