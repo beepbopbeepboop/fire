@@ -12365,6 +12365,17 @@ print(list_str('ab'))
 print([*'ab'])
 """, "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
 
+    test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
+import sys
+import sys as s
+import os as o
+import signal as g
+print(sys.platform == 'linux' or sys.platform == 'darwin')
+print(s.platform == sys.platform)
+print(o.sep == '/' or o.sep == '\\\\')
+print(g.SIGTERM > 0)
+""", "True\nTrue\nTrue\nTrue\n")
+
     _parser_struct_and_symbols()
 
 
