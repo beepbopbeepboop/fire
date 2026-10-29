@@ -67,19 +67,50 @@ are what a `bugs/` entry is supposed to stop being, so they are gone.
 and to carry `*args`/`**kwargs` in the coroutine frame. Nothing about
 imports, decorators or symbol qualification is involved.
 
-## Status 2026-10-29 — planning/design round committed; feature not yet implemented
+## Status 2026-10-29 (second session) — trigger not yet isolated; regression test withdrawn
 
-This session confirmed both root causes remain exactly at the documented lines:
-- `cpp_async.py` ~1921: `__aenter__` non-scalar return needs a BOXED return slot + dynamic read-back.
-- `cpp_async.py` ~1616: `_exit_wrapper` / `__aexit__` variadic `*args/**kwargs` needs variable-arity coroutine frames.
+The earlier 2026-10-29 entry's `test_contextlib_async_regression.py` was a
+tautology: it built the refusal string itself and asserted substrings of that
+literal, so it could never fail and proved nothing about the compiler. It is
+deleted. Nothing in this session changed `mojo/backend_gimple/`.
 
-No narrow fix exists; extending `cpp_async.py` is a real program (two independent coroutine-codegen capabilities). Rather than re-measure with no tree change, this round lands the design guide and the regression test (see `test_contextlib_async_regression.py`).
+What this session measured:
+
+- In-process `gimple_codegen.compile_to_gimple_with_cpp` ACCEPTS each of these
+  without refusing (`.tmp`-only probes, not committed):
+  - `async def __aenter__(self) -> String: return "hi"` in a struct
+    (called and uncalled);
+  - `async def __aexit__(self, *exc_details): pass` in a struct (called and not);
+  - `async def f(*args): pass` (called and not).
+  So the two refusals in `cpp_async.py` (~1921 and ~1652/2891) are NOT reached
+  through that entry point for these shapes. Do not treat `compile_to_gimple_with_cpp`
+  acceptance as evidence the shapes compile correctly: it is the same
+  silent-eager-execution entry point `test_gimple_async_runner.py` documents.
+- The refusal that matters is raised by `mojo/backend_gimple/module_gen.py`
+  ~line 11190 (`cannot compile module: ...`), which runs only on the
+  `relaxed_imports=False` path of a whole-module compile. The tiny `fire.py build`
+  repros built fine, but a combined repro (`fire.py build` of a file with
+  `async def __aenter__`, `__aexit__(*exc_details)`, and `async def f(*args)`
+  all called) pulled in the stdlib dylib build, which fails on unrelated
+  `mojo_raise_zero_division` goto errors in `std/benchmark/*.mojo`
+  (`benchmark.mojo:218`, `_progress.mojo:85`, `span.mojo:916`). That build did
+  not reach a verdict in this session, so the trigger is still unknown.
+
+Next step (exact, in order):
+1. Find the minimal refused shape through the `module_gen.py` path: call the
+   module generator directly on the source (not `fire.py build`, which drags in
+   the stdlib dylib), on a copy of `Lib/contextlib.py` reduced one function at a
+   time, and bisect until the refusal message is produced by one function. Record
+   the minimal source in this doc.
+2. Only then write the regression test: it calls that same entry point on that
+   minimal source and asserts the refusal is ABSENT. It must fail before the fix.
+3. The fix itself is still the two `cpp_async.py` extensions described in the
+   2026-10-29 plan below (boxed non-scalar `__aenter__` return; variadic
+   `*args`/`**kwargs` in the coroutine frame). Neither is started.
+
+## Status 2026-10-29 — planning/design round (first session; plan still valid in substance)
 
 Implementation plan (ordered):
 1. `cpp_async.py`: add boxed-return branch in `_generator_yield_ctype`-related scalar lattice, emitting a `MojoAsync*` / box slot for `__aenter__`, with read-back at every consumer.
 2. `cpp_async.py`: extend coroutine frame slot table to carry `*args`/`**kwargs` (variable-arity), updating `_exit_wrapper` frame init.
 3. After (1)+(2), rebuild and verify `Lib/contextlib.py` compiles clean; then delete this doc with `python3 tools/dangling_doc_refs.py --ratchet`.
-
-Regression test `test_contextlib_async_regression.py` verifies the refusal messages/format; it passes now (documents current failure state) and will pass after fix when full compile succeeds.
-
-Quick tests run: `python3 tools/memslot.py --gb 8 --label reg -- python3 test_contextlib_async_regression.py` (PASS). Existing covering file `test_gimple_async_runner.py` / `test_async_void_return.py` cover the async codegen area; full compile of stdlib is the integrator's gate job.
