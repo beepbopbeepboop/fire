@@ -356,8 +356,10 @@ Still open (measured, not fixed):
   visible to it. The closure is accumulated in compile order, not pre-parsed.
   The A-full plan's step 1 (hoist the parse of the whole closure before the
   import loop) is what closes this; it is not done.
-* **Mixed str/int call sites** of one generator still miscompile (in a single
-  module too): `bugs/CODEGEN_generator_mixed_element_call_sites_miscompile.md`.
+* **Mixed str/int call sites** of one generator used to miscompile (the str
+  printed as its heap address, in a single module too). They are now refused
+  by the ambiguity rule, and the cross-module spelling is pinned as a refusal
+  in `test_module_boundary_regression.py`'s `REFUSAL_CASES`.
 * **Shape 1** still has no regression pin beyond `module_qualified_str_param`,
   which passes; the mechanism note above still stands unverified.
 

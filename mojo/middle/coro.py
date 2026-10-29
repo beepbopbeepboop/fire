@@ -1348,13 +1348,41 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     if struct_name is not None and params and params[0][0] in ('self', 'cls'):
         params = params[1:]
     names = {p[0] for p in params}
+    # A `for` loop over a conflicted parameter yields that parameter's
+    # ELEMENTS: `for x in xs: yield x` reads `xs` through the loop target `x`,
+    # so a yield of `x` is a yield of `xs` for this rule. Without this the
+    # target was invisible, the conflict on `xs` never reached the yield slot,
+    # and `gen(["p"])` beside `gen([1])` printed the str as its address
+    # (mixed str/int call sites of one generator). `enumerate(xs)` is the one
+    # loop whose target is not all element: its FIRST slot is the index, so
+    # only the second slot aliases `xs`.
+    via: dict = {}
+    for n in _walk(fn):
+        if not isinstance(n, N.ForStmt):
+            continue
+        it = n.iterable
+        if (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name == 'enumerate' and len(it.args) == 1):
+            it = it.args[0]
+            tnames = for_target_names(n.target)
+            if len(tnames) == 2:
+                tnames = tnames[1:]
+        else:
+            tnames = for_target_names(n.target)
+        if isinstance(it, N.IdentExpr) and it.name in bad and it.name in names:
+            for t in tnames:
+                via[t] = it.name
     out = set()
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
         for ident in _walk(n.value):
-            if isinstance(ident, N.IdentExpr) and ident.name in bad and ident.name in names:
+            if not isinstance(ident, N.IdentExpr):
+                continue
+            if ident.name in bad and ident.name in names:
                 out.add(ident.name)
+            elif ident.name in via:
+                out.add(via[ident.name])
     return out
 
 

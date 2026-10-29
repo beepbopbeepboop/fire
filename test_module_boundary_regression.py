@@ -17,14 +17,19 @@
 #                                    `from m import gen`.
 #   imported_generator_yields_int    PASSES -- the int spelling, pinned.
 #
+# REFUSAL_CASES are the other outcome the rule allows: a program that cannot be
+# compiled honestly is refused, never run with a wrong value. Mixed str/int call
+# sites of one generator are one of those; their stdout must carry the refusal
+# marker and no printed heap address.
+#
 # Not covered here (still wrong, see the doc): a call site in a module the
 # child is not compiled under (an aliased import, or a value passed on through a
-# parameter), and mixed str/int call sites of one generator (also wrong in a
-# single module; bugs/CODEGEN_generator_mixed_element_call_sites_miscompile.md).
+# parameter).
 #
 # Scratch files go under TMPDIR (the worktree's .tmp/), never a fixed path.
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,6 +104,27 @@ CASES = [
     ),
 ]
 
+# (name, m.py, u.py, marker) -- the stdout must contain `marker`, the refusal
+# text the compiled module emits for a generator it skipped. Mixed call sites
+# of one generator are NOT a value the compiler can type: before the loop-target
+# fix this printed the str's heap address (`4331220848`) at exit 0.
+REFUSAL_CASES = [
+    (
+        'imported_generator_mixed_str_int_call_sites_refused',
+        'def gen(xs):\n'
+        '    for x in xs:\n'
+        '        yield x\n',
+        'import m\n'
+        'def main():\n'
+        '    for v in m.gen(["p", "q"]):\n'
+        '        print(v)\n'
+        '    for w in m.gen([1, 2]):\n'
+        '        print(w)\n'
+        'main()\n',
+        'unavailable in compiled mode',
+    ),
+]
+
 
 def build_and_run(name, m_src, u_src):
     """Compile u.py (importing m.py) to an executable and return its stdout."""
@@ -143,7 +169,15 @@ def main():
         else:
             print(f'FAIL {name}: expected {expected!r}, got {got!r}')
             failed.append(name)
-    print(f'{len(CASES) - len(failed)}/{len(CASES)} passed')
+    for name, m_src, u_src, marker in REFUSAL_CASES:
+        got = build_and_run(name, m_src, u_src)
+        if marker in got and not re.search(r'^\d{6,}$', got, re.M):
+            print(f'PASS {name}')
+        else:
+            print(f'FAIL {name}: expected a refusal containing {marker!r}, got {got!r}')
+            failed.append(name)
+    total = len(CASES) + len(REFUSAL_CASES)
+    print(f'{total - len(failed)}/{total} passed')
     return 1 if failed else 0
 
 
